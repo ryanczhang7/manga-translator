@@ -1,0 +1,25 @@
+name: boundaries
+
+# Defence in depth. The phase-guard hook enforces the RED/GREEN lock at write
+# time inside a Claude Code session; this checks the same invariants on the diff,
+# where the hook was never in the loop - a human commit, another tool, a
+# force-push.
+
+on:
+  pull_request:
+
+jobs:
+  boundaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # The checkout here is a detached merge commit, so the script takes the
+      # story from GITHUB_HEAD_REF (set by Actions) and recomputes the gate tree
+      # hash at the PR head rather than at the merge.
+      - name: Check agent boundaries and story hygiene
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/check-boundaries.sh origin/${{ github.base_ref }}

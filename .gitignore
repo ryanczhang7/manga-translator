@@ -1,0 +1,71 @@
+# Harness runtime state — machine-local, never committed
+.claude/state/*
+!.claude/state/.gitkeep
+!.claude/state/README.md
+
+# Personal Claude Code settings
+.claude/settings.local.json
+
+# Local MCP config derived from the example
+.mcp.json
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# --- Ecosystem dependency and build output ---------------------------------
+# Installed or generated, never authored. The bootstrap story should add
+# anything specific to the chosen stack; these are the common ones, present up
+# front so that a `pnpm install` or `uv sync` before bootstrap does not bury you
+# in untracked files.
+#
+# This list is also what the phase lock consults: a path git ignores classifies
+# as `ignored` rather than `source`, and is writable in every phase. So when a
+# tool starts writing somewhere new, add it here in the phase you find it -
+# see rules.md.
+
+# Node
+node_modules/
+.pnpm-store/
+.next/
+.svelte-kit/
+.turbo/
+.vitest/
+playwright-report/
+test-results/
+.playwright/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+*.egg-info/
+
+# Rust
+target/
+
+# Godot
+.godot/
+*.import
+
+# Build output and coverage
+dist/
+build/
+out/
+coverage/
+htmlcov/
+.coverage

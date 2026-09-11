@@ -1,0 +1,18 @@
+# The upstream harness version this tree was taken from. One ISO date on the
+# first non-comment line, bumped by every round that changes the harness.
+#
+# It exists because a vendored copy cannot be dated from the outside: it carries
+# the consuming project's git history, not this repository's. Two field reports
+# in a row arrived reporting defects that had been fixed upstream for weeks, and
+# neither could say which harness it had measured - so every finding had to be
+# re-verified by hand before it could be called already-fixed.
+#
+#   bash scripts/doctor.sh          prints it, so it lands in every environment
+#                                   record and every story that quotes one
+#   scripts/check-boundaries.sh     refuses an upstream harness change that does
+#                                   not bump it
+#
+# A field report against this harness states the version it measured. An
+# unstamped copy predates stamping, which makes it older than every version
+# listed here.
+2026-09-11

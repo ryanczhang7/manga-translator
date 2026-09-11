@@ -1,0 +1,23 @@
+# The harness is shell. A CRLF line ending in a .sh file breaks the shebang on
+# Linux and inside CI, so line endings are pinned here rather than left to each
+# machine's core.autocrlf setting.
+
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.conf text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# Windows-only helpers, if a project ever adds them
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+
+# Common binaries, so git never tries to normalise them
+*.png  binary
+*.jpg  binary
+*.webp binary
+*.woff2 binary
+*.pdf  binary

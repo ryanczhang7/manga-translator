@@ -1,0 +1,29 @@
+# Deployment is deliberately not wired up.
+#
+# Agents can write Terraform, Kubernetes manifests and deploy workflows, but
+# they cannot safely run them: a deploy is irreversible, and the harness has no
+# way to verify the blast radius. You pull this trigger.
+#
+# To use: rename to deploy.yml, fill in your target, and add the secrets.
+#
+# name: deploy
+#
+# on:
+#   push:
+#     branches: [main]
+#   workflow_dispatch:
+#
+# jobs:
+#   deploy:
+#     runs-on: ubuntu-latest
+#     environment: production      # require an approval gate here
+#     steps:
+#       - uses: actions/checkout@v5
+#
+#       - name: Build
+#         run: bash scripts/gates.sh --gate build
+#
+#       - name: Deploy
+#         run: echo "your target here - fly deploy, kubectl apply, aws ecs update-service, ..."
+#         env:
+#           DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}

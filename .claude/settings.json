@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+
+  "permissions": {
+    "allow": [
+      "Bash(bash scripts/gates.sh:*)",
+      "Bash(bash scripts/doctor.sh:*)",
+      "Bash(bash scripts/phase.sh:*)",
+      "Bash(bash scripts/task.sh:*)",
+      "Bash(bash scripts/new-story.sh:*)",
+      "Bash(bash scripts/check-boundaries.sh:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)",
+      "Bash(git add:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git ls-files:*)",
+      "Read(//**)",
+      "Grep",
+      "Glob"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/secrets/**)",
+      "Write(./.claude/state/current-story.env)",
+      "Edit(./.claude/state/current-story.env)",
+      "MultiEdit(./.claude/state/current-story.env)",
+      "Write(./.claude/state/last-gate-run)",
+      "Edit(./.claude/state/last-gate-run)",
+      "MultiEdit(./.claude/state/last-gate-run)"
+    ]
+  },
+
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/phase-guard.sh\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/inject-state.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/gate-reminder.sh\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  },
+
+  "statusLine": {
+    "type": "command",
+    "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/statusline.sh\""
+  }
+}

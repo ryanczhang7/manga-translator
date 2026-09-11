@@ -1,0 +1,50 @@
+name: gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The harness itself needs nothing but bash. Add the toolchain your
+      # project.conf gate commands actually invoke - the bootstrap story should
+      # add the setup step for the chosen stack here.
+      #
+      # - uses: actions/setup-python@v5
+      #   with: { python-version: "3.12" }
+      # - uses: astral-sh/setup-uv@v5
+      #
+      # - uses: pnpm/action-setup@v4
+      # - uses: actions/setup-node@v4
+      #   with: { node-version: "22", cache: pnpm }
+
+      # The harness's own tests. They need nothing but bash and git, and they
+      # guard the machinery every other check in this workflow depends on: the
+      # phase lock, the path classifier, the quote-aware command parsing.
+      - name: Harness self-test
+        run: bash scripts/selftest.sh
+
+      - name: Show configured gates
+        run: bash scripts/gates.sh --list
+
+      # Catches a gate whose command was emptied, whose cwd was moved away, or
+      # whose evidence line was dropped - none of which the gate run itself can
+      # report, because a gate that no longer does anything still exits 0.
+      - name: Audit the gate manifest
+        run: bash scripts/gates.sh --audit
+
+      - name: Run gates
+        run: bash scripts/gates.sh
+
+      - name: Upload gate logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-logs
+          path: .claude/state/gate-logs/
+          if-no-files-found: ignore
