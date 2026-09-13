@@ -7,21 +7,44 @@ on:
 
 jobs:
   gates:
-    runs-on: ubuntu-latest
+    # windows-latest, not ubuntu-latest. Decided by the user on 2026-09-12 and
+    # recorded as PO-3 in docs/backlog/stories/MT-001.md: the `build` gate is
+    # PyInstaller, and on Linux it would freeze an ELF - a required gate
+    # verifying an artefact this product never ships. docs/wiki/stack.md §7 (the
+    # Microsoft Store Python alias) is also only exercised on the platform it
+    # describes. Costs 2x GitHub minutes; accepted.
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        # Every harness script is bash. Without this the runner would use pwsh
+        # and each step would have to spell out `bash ...` anyway.
+        shell: bash
+
+    env:
+      # Every gate command begins `uv run`, which installs the locked
+      # environment on first use - so there is deliberately NO separate
+      # `uv sync` step. That is not laziness: `.claude/tests/ci-local.test.sh`
+      # derives ci-local.sh's step list from the `run:` lines in this file, and
+      # a project-level install step there would run inside the bare fixtures
+      # the harness self-test builds. Keeping the workflow to harness scripts
+      # keeps that check honest.
+      #
+      # UV_FROZEN is what a `uv sync --frozen` step would have bought, and more:
+      # it applies to EVERY `uv run` in the job, so a `uv.lock` that does not
+      # match `pyproject.toml` fails here instead of being silently re-resolved
+      # on the runner.
+      UV_FROZEN: "1"
+
     steps:
       - uses: actions/checkout@v5
 
-      # The harness itself needs nothing but bash. Add the toolchain your
-      # project.conf gate commands actually invoke - the bootstrap story should
-      # add the setup step for the chosen stack here.
-      #
-      # - uses: actions/setup-python@v5
-      #   with: { python-version: "3.12" }
-      # - uses: astral-sh/setup-uv@v5
-      #
-      # - uses: pnpm/action-setup@v4
-      # - uses: actions/setup-node@v4
-      #   with: { node-version: "22", cache: pnpm }
+      # The interpreter comes from `.python-version` and uv.lock, not from a
+      # setup-python step: uv manages the interpreter as well as the venv, which
+      # is the whole reason the stack chose it (stack.md §3).
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
 
       # The harness's own tests. They need nothing but bash and git, and they
       # guard the machinery every other check in this workflow depends on: the

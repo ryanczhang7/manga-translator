@@ -1,14 +1,37 @@
 # Stack — manga translator
 
-> **Unverified.** Nothing in this file has been executed. Every version and
-> every command below is researched, not verified. The bootstrap story must run
-> each gate command, observe it fail on purpose, correct anything that has
-> moved, and update both this file and `.claude/harness/project.conf`.
+> **Verified in part, on 2026-09-12, by story MT-001 (bootstrap), on the
+> development machine** (Windows 11 Home 10.0.26200, Ryzen 5 7600X, RTX 5070,
+> uv 0.12.13, CPython 3.12.14).
+>
+> **What was verified:** every version in §3 *Runtime and packaging* and
+> *Development tooling* is now what `uv.lock` actually locked, not a candidate.
+> All nine gate commands in §6 were executed; the `format`, `lint`, `typecheck`,
+> `unit`, `coverage`, `coverage-core` and `build` gates passed against the
+> walking skeleton, `integration` collects nothing yet and is waived, and
+> `mutation` is waived. Every `evidence` line matched real output. The three
+> `floor` lines were set from that run. `bash scripts/task.sh dev` opened a Qt
+> window. **Two** commands in §6 were changed against what this document
+> originally researched, both by MT-001 and both recorded in §6: the
+> `ruff-sees-src` discovery line was **wrong** and is corrected, and the `lint`
+> **gate command** now carries that same reach assertion, because MT-001's GATES
+> phase measured the gate passing with `Contracts: 1 kept` while `ruff` had
+> checked none of this project's source. See the notes in §6.
+>
+> **What is still unverified, and where it is owned:** the whole of §3 *Local
+> inference* and *Cloud translation*. **No inference runtime and no `anthropic`
+> client is pinned at all** — MT-001's sizing rule forbids adding a dependency
+> nothing imports, and the ONNX-versus-PyTorch question is MT-002's to settle.
+> The model trio, the CUDA execution provider and the cost model are named in
+> this file and installed nowhere. Do not read a version in those two tables as
+> a fact.
 
 *Written by `/plan-product` on 2026-09-12 from `docs/wiki/product-brief.md`.
 Planned by **lead-po on Claude Opus 5 (`claude-opus-5`)**, no session override.
 The design system in `docs/wiki/design/**` was produced by **lead-designer on
-Claude Opus 5 (`claude-opus-5`)**, dispatched by lead-po.*
+Claude Opus 5 (`claude-opus-5`)**, dispatched by lead-po.
+Corrected against a real install by **lead-po on Claude Opus 5
+(`claude-opus-5`)** during MT-001 on 2026-09-12.*
 
 Companion documents: `docs/wiki/architecture.md` (components, data, decisions),
 `docs/wiki/design/**` (tokens, components, accessibility floor).
@@ -41,18 +64,23 @@ profile is written alongside it:
 
 ## 3. Languages, frameworks, libraries
 
-Versions below are **candidates**, not verified pins. The bootstrap story
-resolves each one and rewrites this table with what `uv` actually locked.
+**Two kinds of row live in this section and they are not equally true.**
+*Runtime and packaging* and *Development tooling* below are **locked**: the
+version column is what `uv.lock` holds, read out of the lockfile on 2026-09-12
+by MT-001. *Local inference*, *Models* and *Cloud translation* are still
+**candidates and are installed nowhere** — nothing in `pyproject.toml` names
+them. MT-002 settles the inference trio; the `anthropic` client arrives with the
+story that first calls it.
 
 ### Runtime and packaging
 
-| Thing | Candidate version | Why — tied to a constraint |
-|---|---|---|
-| Python | 3.12.x (pinned with `uv python pin 3.12`) | The ML and Qt wheel ecosystem is Python. 3.12 rather than 3.13 because `onnxruntime` and `PySide6` wheel availability has historically lagged a release behind, and this project cannot afford a "no wheel for your Python" stall on the machine it must install cleanly on. |
-| `uv` | 0.8.x | Single self-contained binary; manages the interpreter *and* the venv, so the user installs one thing. Also the only reliable way to invoke Python on Windows from bash — see §7. |
-| PySide6 | 6.8.x (Qt 6.8 LTS) | The "photo editor, not a dashboard" workspace is a `QGraphicsView`/`QGraphicsScene` with pan, zoom and overlay items — a solved problem in Qt and a from-scratch project in most alternatives. LGPL, so redistributable in an installer without a commercial Qt licence. |
-| PyInstaller | 6.x | Produces a one-folder Windows build carrying the interpreter, the venv and the `.onnx` weights. This is the *only* thing that satisfies "must not require the user to manage Python environments, model weights or GPU setup by hand". |
-| Inno Setup (or PyInstaller one-folder + a zip) | 6.x | Turns the PyInstaller output into a double-clickable installer. Deferred to the packaging story; not a build-gate dependency. |
+| Thing | Locked version | Candidate at planning | Why — tied to a constraint |
+|---|---|---|---|
+| Python | **3.12.14** (`.python-version` pins `3.12`; `requires-python = "==3.12.*"`) | 3.12.x | The ML and Qt wheel ecosystem is Python. 3.12 rather than 3.13 because `onnxruntime` and `PySide6` wheel availability has historically lagged a release behind, and this project cannot afford a "no wheel for your Python" stall on the machine it must install cleanly on. |
+| `uv` | **0.12.13** | 0.8.x | Single self-contained binary; manages the interpreter *and* the venv, so the user installs one thing. Also the only reliable way to invoke Python on Windows from bash — see §7. The candidate was four minor versions stale; `winget` installed 0.12.13 and nothing depended on the difference. |
+| PySide6 | **6.9.3** (`pyside6-essentials`, `pyside6-addons`, `shiboken6` all 6.9.3) | 6.8.x (Qt 6.8 LTS) | The "photo editor, not a dashboard" workspace is a `QGraphicsView`/`QGraphicsScene` with pan, zoom and overlay items — a solved problem in Qt and a from-scratch project in most alternatives. LGPL, so redistributable in an installer without a commercial Qt licence. **Not the 6.8 LTS the plan named**: `>=6.8,<6.10` resolved to 6.9.3. Qt 6.9 is not an LTS line. If LTS turns out to matter for the installer story, pin it there and say why — nothing measured so far needs it. |
+| PyInstaller | **6.22.3** (+ `pyinstaller-hooks-contrib` 2026.7) | 6.x | Produces a one-folder Windows build carrying the interpreter, the venv and the `.onnx` weights. This is the *only* thing that satisfies "must not require the user to manage Python environments, model weights or GPU setup by hand". **Measured 2026-09-12:** 34 s and a 111 MB `dist/mangatl/` with PySide6 alone and no weights. |
+| Inno Setup (or PyInstaller one-folder + a zip) | *not installed* | 6.x | Turns the PyInstaller output into a double-clickable installer. Deferred to MT-024; not a build-gate dependency. |
 
 ### Local inference
 
@@ -91,16 +119,22 @@ spike decides it before any story depends on it.
 
 ### Development tooling
 
-| Thing | Candidate version | Role |
-|---|---|---|
-| `pytest` | 8.3.x | Test runner. |
-| `pytest-cov` | 6.x | Coverage gate. |
-| `pytest-qt` | 4.4.x | Drives Qt widgets in tests. Runs under `QT_QPA_PLATFORM=offscreen`, so the GUI is testable on CI with no display. |
-| `hypothesis` | 6.x | Property tests for reading order, line breaking and the round-trip of the project store — each is an invariant that is easier to state than to enumerate. |
-| `ruff` | 0.12.x | Linter **and** formatter. One tool, one config block. |
-| `mypy` | 1.11.x | Type checker. `mypy` over `pyright` because `pyright` needs Node, and this stack has deliberately chosen not to have a second toolchain. |
-| `import-linter` | 2.x | **Architectural boundary gate.** `ui` may import everything; nothing may import `ui`; `domain` imports nothing of ours. `architecture.md` §3 states the contracts. This rule is a gate and must be probed like one. |
-| `mutmut` | 3.x | Optional mutation gate. |
+Locked by `uv.lock` on 2026-09-12 and read out of it, not out of a terminal.
+Every one of these is installed; the candidate column is kept so that a version
+that moved a long way is visible rather than quietly overwritten.
+
+| Thing | Locked version | Candidate at planning | Role |
+|---|---|---|---|
+| `pytest` | **8.4.2** | 8.3.x | Test runner. |
+| `pytest-cov` | **7.1.0** | 6.x | Coverage gate. A major version ahead of the candidate; nothing in the two coverage gate commands needed changing. |
+| `pytest-qt` | **4.5.0** | 4.4.x | Drives Qt widgets in tests. |
+| `pytest-env` | **1.2.0** | *not named at planning* | Sets `QT_QPA_PLATFORM=offscreen` from `[tool.pytest.ini_options]`, so `uv run pytest` by hand behaves like the gate. The plan required that behaviour without naming the plugin that provides it. |
+| `coverage` | **7.16.0** | *transitive* | The engine under `pytest-cov`; named here because the `cov-domain` discovery line invokes `uv run coverage` directly. |
+| `hypothesis` | **6.168.0** | 6.x | Property tests for reading order, line breaking and the round-trip of the project store. Installed, unused at MT-001. |
+| `ruff` | **0.16.7** | 0.12.x | Linter **and** formatter. Four minor versions ahead of the candidate and **it behaves differently**: 0.16 formats Python code blocks inside Markdown, so `ruff format .` reported 115 files (17 Python, 98 Markdown under `.claude/` and `docs/`). `pyproject.toml` now carries `extend-exclude = [".claude", "docs", "fixtures", "*.md"]` so the formatter stays inside this project's own code. See §6 and MT-001 PO-4. |
+| `mypy` | **1.20.2** | 1.11.x | Type checker, `strict = true`, with `ignore_missing_imports` narrowed to `PySide6.*` and nothing of ours. |
+| `import-linter` | **2.15** (with `grimp` 3.17) | 2.x | **Architectural boundary gate.** `architecture.md` §3 states five contracts; **one** is configured at MT-001 (*"Nothing imports `ui`"*) purely so the `lint` gate's evidence line has something to assert. MT-003 writes the other four, probes all five, and must raise `floor | lint` from 1 to 5. |
+| `mutmut` | *not installed* | 3.x | Optional mutation gate, waived in `project.conf`. |
 
 ## 4. Layout
 
@@ -331,7 +365,7 @@ Proposed `project.conf` content. Every command goes through `uv run` — see §7
 
 ```
 gate | format        | optional | . | uv run ruff format --check .
-gate | lint          | required | . | uv run ruff check . && uv run lint-imports
+gate | lint          | required | . | uv run ruff check . && uv run ruff check --no-cache --show-files . | grep -qE "src.mangatl.*[.]py" && uv run lint-imports
 gate | typecheck     | required | . | uv run mypy src
 gate | unit          | required | . | uv run pytest -q tests/core tests/ui
 gate | coverage      | required | . | uv run pytest -q tests/core tests/ui --cov=src/mangatl --cov-report=term-missing --cov-fail-under=90
@@ -362,25 +396,69 @@ evidence | build         | Building EXE from|completed successfully
 ```
 
 ```
-floor | unit          | <set by bootstrap from the first real run>
-floor | coverage      | <same number>
-floor | lint          | <number of import-linter contracts>
+floor | unit          | 12
+floor | coverage      | 12
+floor | coverage-core | 7
+floor | lint          | 1
+floor | typecheck     | 14
 ```
 
-**One honest gap, flagged for the bootstrap story.** The `lint` evidence regex
-asserts that *import-linter* did work. It does **not** assert that `ruff` saw
-any files: `ruff check` on an empty tree prints `All checks passed!` and exits
-0, which is the canonical vacuous pass. `ruff` has no reliable clean-run file
-count on stdout. So the bootstrap story must close this with a `discovery`
-line, not by hoping:
+**Set by MT-001 on 2026-09-12 from the first real run**, and two lines longer
+than this document proposed: `coverage-core` and `typecheck` are required gates
+holding real numbers, and a floor is the only thing that notices a suite or a
+`mypy` target quietly shrinking. **`floor | lint | 1` is a placeholder with an
+owner** — it counts import-linter contracts, MT-001 configures one, and
+`architecture.md` §3 states five. **MT-003 raises it to 5.** Left at 1, four
+contracts could be deleted and the gate would still pass.
+
+**The `ruff` liveness gap — closed, and not the way this document proposed.**
+The `lint` evidence regex asserts that *import-linter* did work. It does **not**
+assert that `ruff` saw any files: `ruff check` on an empty tree prints
+`All checks passed!` and exits 0, which is the canonical vacuous pass. The
+proposed close was:
 
 ```
 discovery | ruff-sees-src | . | uv run ruff check --no-cache -v . 2>&1 | grep -qE "[Cc]hecked [1-9][0-9]* files"
 ```
 
-If `-v` does not produce that line in the installed `ruff`, find one that does
-(`--statistics`, `--output-format=json | wc -l`, or a deliberately-failing
-canary rule) — **do not delete the requirement.** Record what worked here.
+**Measured on 2026-09-12 against the installed ruff 0.16.7: that line never
+matches, and would have sat red in `doctor.sh` forever.** `-v` emits one
+`Included path via 'include'` DEBUG line *per file* and no total; `--statistics`
+prints nothing at all on a clean run. What does work is the resolved file list
+itself, which is the same assertion said differently and does not depend on a
+summary line surviving a ruff release:
+
+```
+discovery | ruff-sees-src | . | uv run ruff check --no-cache --show-files . | grep -qE "src.mangatl.*[.]py"
+```
+
+Observed: 14 files under `src/mangatl`. **The requirement was not deleted.**
+
+**Settled by MT-001's GATES phase on 2026-09-12, and the gap was real.** What the
+paragraph above warned of was measured rather than reasoned: a `discovery` line is
+run by `doctor.sh`, never by the gates, so the `lint` *gate* still passed
+vacuously when `ruff` could not see `src/`. With `src` added to ruff's
+`extend-exclude` and `src/` itself left on disk, the then-current gate command
+exited **0** printing `All checks passed!` and `Contracts: 1 kept, 0 broken` —
+satisfying the evidence regex *and* the floor of 1 — while ruff checked none of
+this project's source.
+
+So the assertion moved into the gate command as well, and `floor | lint | 1` and
+the `evidence` line are unchanged:
+
+```
+gate | lint | required | . | uv run ruff check . && uv run ruff check --no-cache --show-files . | grep -qE "src.mangatl.*[.]py" && uv run lint-imports
+```
+
+The `ruff-sees-src` discovery line is **kept** — `doctor.sh` is where a human or
+an agent finds out *why* the gate is failing, and it costs nothing. The gate now
+fails under the mutation that used to pass it; the pasted probe is in MT-001's
+`## Deferred verifications` §5 and the decision is PO-6. One caution for whoever
+touches this next: with `src/` moved out of the tree entirely, `ruff check .`
+exits 1 for an unrelated reason — `mangatl` stops resolving as first-party, so
+isort re-classifies it *in the test files* and I001 fires. That failure is a
+coincidence of this layout, not the reach assertion doing its job; suppress I001
+and ruff is green. Do not read it as evidence that the gate is watching `src/`.
 
 ### Discovery lines
 
@@ -391,6 +469,13 @@ discovery | cov-domain  | . | uv run coverage report --include="src/mangatl/doma
 discovery | ruff-sees-src | . | (as above)
 discovery | providers   | . | uv run python -c "import onnxruntime as o; print(o.get_available_providers())" | grep -qE "CUDA|Dml|CPU"
 ```
+
+**Status on 2026-09-12 (MT-001).** `core-tests`, `ui-tests`, `cov-domain`
+and the corrected `ruff-sees-src` all pass. **`providers` does not, and is
+expected not to**: no inference runtime is pinned, because MT-001 may not
+choose between `onnxruntime` and `torch`+`cu128` and MT-002 is the spike that
+does. The line is kept rather than deleted so the check exists the moment the
+dependency does; `doctor.sh` reports it MISSING until then. MT-001 PO-2.
 
 `cov-domain` exists because `--cov=src/mangatl/domain` resolving to nothing is
 satisfied silently, and `coverage-core` is the gate holding the 100% bar.
@@ -440,10 +525,18 @@ not widen this pattern to cover an inference error.
 ### `waiver`
 
 ```
-waiver | mutation | mutmut is not configured until MT-019; stack.md §6
+waiver | mutation    | mutmut is not installed and not configured until the suite is real; stack.md §6
+waiver | integration | tests/integration/ is empty until MT-002; pytest exits 5 with "no tests ran"
 ```
 
-Remove it in the story that configures `mutmut`.
+**The `integration` waiver was added by MT-001**, which measured what this
+document did not predict: `uv run pytest -q tests/integration -m "gpu or
+network"` over an empty directory exits **5**, not 0. Without a waiver the
+gate would WARN on every run from here to MT-002, and the next agent would
+learn that WARNs are ignorable. **MT-002 writes the first real-model smoke
+test and removes this line.**
+
+Remove the `mutation` one in the story that configures `mutmut`.
 
 ## 7. The Windows Python trap — read this before writing a gate command
 

@@ -5,10 +5,17 @@ verify it. Written by `/setup-environment` on 2026-09-12 against
 `docs/wiki/stack.md` and the `python-uv-pyside6` stack profile.*
 
 **Status: done on the development machine, 2026-09-12.** `uv` 0.12.13 and
-CPython 3.12.14 are installed and `scripts/doctor.sh` reports the project
-toolchain `ok`. The five remaining `MISSING` lines are *test discovery* checks
-for directories the bootstrap story MT-001 has not created yet; they are correct
-before bootstrap and are not something to fix here.
+CPython 3.12.14 are installed, and **since MT-001 landed the project itself is
+installed too** — `uv sync --all-extras` resolves 35 packages against a committed
+`uv.lock`. `scripts/doctor.sh` reports the project toolchain `ok` and four of
+five *test discovery* checks passing.
+
+**The fifth, `providers`, reports `MISSING` and is expected to.** It runs
+`uv run python -c "import onnxruntime ..."`, and **no inference runtime is
+pinned**: MT-001's sizing rule forbids adding a dependency nothing imports, and
+the ONNX-versus-PyTorch question belongs to the MT-002 spike. The check is kept
+rather than deleted so that it exists the moment the dependency does. **MT-002
+owns turning it green.** Recorded as PO-2 in `docs/backlog/stories/MT-001.md`.
 
 Everything the gates need beyond `uv` is installed *by* `uv`, into the project.
 Nothing else goes on the system.
@@ -77,10 +84,10 @@ installed by:
 uv sync --all-extras
 ```
 
-…which is the `install` task (`bash scripts/task.sh install`). **It will fail
-today, and that is expected**: there is no `pyproject.toml` or `uv.lock` yet.
-Those are written by the bootstrap story, MT-001. Run `uv sync` after MT-001,
-not before.
+…which is the `install` task (`bash scripts/task.sh install`). **Since MT-001 it
+works**: `pyproject.toml` and a committed `uv.lock` exist, and the sync resolves
+35 packages and installs the project itself in editable form. Measured
+2026-09-12: 25 s cold, under a second warm.
 
 ## 4. Verify
 
@@ -110,10 +117,11 @@ Then the harness's own check, which is the real gate:
 bash scripts/doctor.sh
 ```
 
-→ every line under *Project toolchain* reads `ok`. The lines under *Test
-discovery* will still read `MISSING` until MT-001 creates `tests/core`,
-`tests/ui` and `src/mangatl` — that is correct before bootstrap and is not
-something to fix here.
+→ every line under *Project toolchain* reads `ok`. Since MT-001, four of the five
+*Test discovery* lines read `ok` too. The fifth, `providers`, reads `MISSING`
+and is **expected to until MT-002** — see the status note at the top of this
+file. Do not "fix" it by installing an inference runtime; choosing one is the
+spike's decision.
 
 ```bash
 bash scripts/gates.sh --list
@@ -196,6 +204,28 @@ Note the location, which is not where the winget docs suggest: this install put
 than dropping a shim in `AppData\Local\Microsoft\WinGet\Links`. That directory
 does not exist on this machine. Do not hard-code either path anywhere; use
 `uv` from `PATH`.
+
+**Measured again on 2026-09-12 during MT-001, and this is the shape it takes in
+an agent session.** The persisted user `PATH` was already correct —
+
+```
+$ powershell -NoProfile -Command "(Get-ItemProperty HKCU:\Environment -Name Path).Path -split ';' | ? { $_ -like '*uv*' }"
+C:\Users\ryanc\AppData\Local\Microsoft\WinGet\Packages\astral-sh.uv_Microsoft.Winget.Source_8wekyb3d8bbwe
+```
+
+— while every shell the session spawned still had the pre-install environment,
+so `uv --version` said `command not found` and `doctor.sh` said `MISSING uv`. The
+registry is the ground truth; a running session's environment is a snapshot of
+when it started. **The fix is to restart the session.** The stop-gap MT-001 used
+was prefixing each command with
+
+```bash
+export PATH="/c/Users/ryanc/AppData/Local/Microsoft/WinGet/Packages/astral-sh.uv_Microsoft.Winget.Source_8wekyb3d8bbwe:$PATH"
+```
+
+which works because child processes inherit it — but it is a stop-gap for one
+stale session and not a thing to write into a script. Nothing in the repository
+hard-codes that path.
 
 ### `uv python install` reports an error that is not one
 
