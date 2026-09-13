@@ -746,6 +746,22 @@ from that set** — every measurement above was re-run against `011–015.jpg`.
 
 ## Licence risk — needs a decision that is not mine
 
+> **PARTLY SUPERSEDED by MT-030, 2026-09-12. Read
+> `docs/wiki/audits/MT-030-detector-licence.md` before acting on this section.**
+> The GPL-3.0 half of this stands and is unresolved. **The Manga109-s half is
+> void:** Manga109-**s** is the 87-volume subset published expressly for
+> commercial use and its terms permit commercial use of models trained on it,
+> subject to attribution — the academic-only restriction belongs to the full
+> Manga109, and this README names the subset. MT-030 quotes the published terms
+> and records an independent re-fetch. **The model identity in `## Decided`
+> above is unchanged**: MT-030 found no permissively-licensed replacement that
+> clears its pinned floor, so the incumbent stands and the choice between
+> shipping GPL-3.0 knowingly and commissioning a detector is open with the user.
+>
+> *A pointer, not a rewrite. The measurements below are this story's evidence and
+> are left exactly as recorded; what was wrong was an interpretation of a
+> dataset's terms, and it is corrected where a reader will hit it.*
+
 **The detector is the problem.** `dmMaze/comic-text-detector` is **GPL-3.0**
 [MEASURED — GitHub API and the `LICENSE` file]. The ONNX re-upload
 `mayocream/comic-text-detector-onnx` declares `apache-2.0` [WEB], but that is a
