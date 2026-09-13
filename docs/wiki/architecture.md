@@ -93,6 +93,18 @@ pass over stories whose artifact nothing exercised — the failure mode
 
 1. **Layered.** `ui` → `pipeline` → (`detect`, `ocr`, `translate`, `clean`,
    `typeset`, `bench`) → `store` → `domain`. Imports go down only.
+   **The six stage packages are *independent of each other*, not merely
+   co-layered** — decided by the user 2026-09-13 during MT-003, because this
+   clause was silent on it and `import-linter` cannot be configured without an
+   answer (`|` for independent siblings, `:` for siblings that may import each
+   other; MT-003 uses `|`). Three reasons: `pipeline` is the orchestrator, and
+   stages calling each other directly makes that layer decorative; rule 5
+   confines `onnxruntime` to `detect`/`ocr`/`clean`, and that confinement leaks
+   transitively the moment `typeset` or `bench` may import `detect`; and the
+   `coverage-core` gate demands 100% coverage of `domain`, `typeset` and
+   `bench`, which is unreachable if `bench` can pull in a stage that loads ONNX.
+   A later story that genuinely needs a stage-to-stage import amends this
+   deliberately — that is what the gate is for.
 2. **`domain` is independent.** It may import the standard library and nothing
    else of ours — and not `numpy`, `PIL`, `PySide6`, `onnxruntime` or
    `anthropic`.
