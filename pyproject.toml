@@ -113,17 +113,54 @@ exclude_also = [
 ]
 
 # --- import-linter -----------------------------------------------------------
-# ONE contract here, deliberately. architecture.md §3 states five; MT-003 writes
-# the other four and probes all five in both absolute and relative import form.
-# This one exists because the `lint` gate's evidence line is
-# `Contracts: [1-9][0-9]* kept` - with no contract at all, lint-imports proves
-# nothing and the gate is theatre. See MT-001 PO-1.
+# The five contracts of architecture.md §3, written by MT-003. The `lint` gate
+# runs `lint-imports` and its evidence line is `Contracts: [1-9][0-9]* kept`,
+# floored at 5 in .claude/harness/project.conf - so a contract quietly
+# disappearing fails the gate rather than passing it silently.
+#
+# `include_external_packages` is mandatory: contracts 2, 4 and 5 forbid external
+# modules, and without it import-linter raises rather than reporting a vacuous
+# `kept` (MT-003 P1/P10).
 [tool.importlinter]
 root_packages = ["mangatl"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Imports go down the layers only"
+type = "layers"
+# The six stage packages are INDEPENDENT siblings - `|`, not `:`. `pipeline` is
+# the orchestrator; a stage importing a stage would make that a fiction, would
+# leak the onnxruntime confinement below transitively, and would put a stage in
+# the 100%-coverage set of `coverage-core`. MT-003 P8, architecture.md §3.
+layers = [
+    "mangatl.ui",
+    "mangatl.pipeline",
+    "mangatl.detect | mangatl.ocr | mangatl.translate | mangatl.clean | mangatl.typeset | mangatl.bench",
+    "mangatl.store",
+    "mangatl.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "domain is independent"
+type = "forbidden"
+source_modules = ["mangatl.domain"]
+# `mangatl.*` is what §3 literally says - "nothing else of ours" - and it covers
+# a package a future story adds. MT-003 P9.
+forbidden_modules = [
+    "mangatl.*",
+    "numpy",
+    "PIL",
+    "PySide6",
+    "onnxruntime",
+    "anthropic",
+]
 
 [[tool.importlinter.contracts]]
 name = "Nothing imports ui"
 type = "forbidden"
+# `mangatl.app` is deliberately absent: the entry point's whole job is to open
+# the window, and a contract forbidding that breaks `scripts/task.sh dev`.
+# "Nothing imports ui" means nothing BELOW the entry point. MT-003 P2.
 source_modules = [
     "mangatl.domain",
     "mangatl.store",
@@ -136,3 +173,35 @@ source_modules = [
     "mangatl.bench",
 ]
 forbidden_modules = ["mangatl.ui"]
+
+[[tool.importlinter.contracts]]
+name = "Only translate imports anthropic"
+type = "forbidden"
+source_modules = [
+    "mangatl.app",
+    "mangatl.domain",
+    "mangatl.store",
+    "mangatl.detect",
+    "mangatl.ocr",
+    "mangatl.clean",
+    "mangatl.typeset",
+    "mangatl.pipeline",
+    "mangatl.bench",
+    "mangatl.ui",
+]
+forbidden_modules = ["anthropic"]
+
+[[tool.importlinter.contracts]]
+name = "Only detect, ocr and clean import onnxruntime"
+type = "forbidden"
+source_modules = [
+    "mangatl.app",
+    "mangatl.domain",
+    "mangatl.store",
+    "mangatl.translate",
+    "mangatl.typeset",
+    "mangatl.pipeline",
+    "mangatl.bench",
+    "mangatl.ui",
+]
+forbidden_modules = ["onnxruntime"]
