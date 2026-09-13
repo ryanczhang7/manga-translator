@@ -2,7 +2,7 @@
 id: EPIC-01
 title: Foundations — a real toolchain, real gates, and a model runtime we trust
 status: todo
-stories: [MT-001, MT-002, MT-003, MT-031, MT-032]
+stories: [MT-001, MT-002, MT-003, MT-031, MT-032, MT-033]
 ---
 
 ## Goal
@@ -39,6 +39,17 @@ actually installed and ran.
   decision document, not code.
 - **MT-003** — chore: the five `import-linter` contracts from
   `architecture.md` §3, each probed in both absolute and relative import form.
+- **MT-031** — chore: the phase guard's command extractors read prose as paths
+  and, worse, miss a real operand behind a trailing redirect or a capture group.
+- **MT-032** — chore: harness state survives two things running in one working
+  tree.
+- **MT-033** — chore: `mv` removes its source operand and the guard never judges
+  it, so a frozen file can leave its path; `git mv` is unrecognised entirely.
+
+**MT-031, MT-032 and MT-033 are not clauses of `## Done when`.** They were filed into this
+epic after MT-003 closed it, because MT-001 built the machinery they correct and
+this is the toolchain epic. The done-when above was discharged by MT-001, MT-002
+and MT-003 and is not reopened by any of them — see the note at the end of this file.
 
 ## Deliberately not in this epic
 

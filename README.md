@@ -179,7 +179,12 @@ operator, a regex fragment or a leftover backquote — is treated as
 inconclusive rather than as a violation: it is logged to
 `.claude/state/phase-guard-declined.log` and allowed, because a guard that
 cannot say what it is looking at is guessing, and every denial that turns out
-to be a guess makes the real ones easier to ignore. When no story is active the
+to be a guess makes the real ones easier to ignore. The same file carries the
+opposite finding, marked `no-candidate`: a command that names a write-capable
+tool and yet hands the guard no operand at all — `find src -name '*.ts' | xargs
+rm` writes a path the shell never spelled out — is allowed too, and said so,
+because *allowed* and *never examined* are different facts and the log is the
+only place they part. When no story is active the
 lock is off entirely: it protects a cycle in flight, it is not a general
 permission system.
 
