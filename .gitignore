@@ -70,3 +70,7 @@ out/
 coverage/
 htmlcov/
 .coverage
+
+# Spike scratch — throwaway probe code and sample scans. Never committed.
+# MT-002 introduced this; see docs/backlog/stories/MT-002.md.
+spikes/
