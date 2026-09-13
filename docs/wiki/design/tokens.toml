@@ -1,0 +1,378 @@
+# Design tokens — machine-readable source of truth.
+#
+# THIS FILE IS THE SOURCE. docs/wiki/design/tokens.md explains and justifies it;
+# if the two disagree, this file wins for values and tokens.md wins for reasons.
+#
+# Format: TOML, because Python 3.12 reads it with stdlib `tomllib` (no new
+# dependency), it carries comments (JSON does not), and it is diffable.
+#
+# Consumers (see tokens.md § "Generated artefacts"):
+#   1. src/.../theme/theme.qss        generated from theme.qss.in, placeholders @{dotted.name}
+#   2. src/.../theme/tokens_gen.py    generated constants, SCREAMING_SNAKE + TOKENS dict,
+#                                     plus HC_PALETTE_ROLE and HC_OVERRIDE (see [hc] below)
+#   3. the placeholder template, copied verbatim into the package, so the
+#      running app can re-render the sheet against a High Contrast palette
+#   4. the High Contrast override template, appended to (3) only under HC
+# QSS cannot style QGraphicsItems, so every overlay token below is consumed by
+# Python paint code, never by the stylesheet. That is why (1) and (2) exist.
+# A contrast theme's colours are only known at RUNTIME. That is why (3) and (4)
+# exist: the default sheet stays static and committed, and the HC sheet is
+# composed when the app starts. tokens.md §12, high-contrast.md §2.
+#
+# Token name grammar: ^[a-z][a-z0-9]*(\.[a-z0-9][a-z0-9-]*)*$
+# Python constant name: dotted path uppercased, "." and "-" -> "_".
+#   color.text.on-accent -> COLOR_TEXT_ON_ACCENT
+#
+# Units: integers are device-independent pixels at 100% scaling unless the table
+# says otherwise; Qt applies the display scale factor. Durations are milliseconds.
+# Colours are "#RRGGBB", or "#RRGGBBAA" where alpha is intentional.
+
+[meta]
+schema = 1
+theme = "dark"          # v1 ships exactly one theme; see tokens.md § Theme
+version = "1.0.0"
+
+# ---------------------------------------------------------------------------
+# Chrome neutrals. RULE: every value under color.surface, color.border and
+# color.text is achromatic (R == G == B). A colour cast in the chrome tints the
+# user's reading of a greyscale scan. This rule is assertable; see
+# accessibility.md A-11.
+# ---------------------------------------------------------------------------
+
+[color.surface]
+base     = "#1C1C1C"    # window / chrome ground
+raised   = "#262626"    # panels: translation column, run panel, page strip
+sunken   = "#141414"    # inset wells
+overlay  = "#2E2E2E"    # menus, popovers, dialogs
+hover    = "#303030"    # row / control hover ground
+pressed  = "#3A3A3A"
+disabled = "#212121"
+selected = "#17425C"    # the one chromatic surface: selected row ground
+
+[color.canvas]
+surround  = "#5F5F5F"   # the mat behind the page. NOT part of the surface ramp.
+page-edge = "#0B0B0B"   # 1px line round the page pixmap, so a white page has an edge
+frame     = "#7A7A7A"   # 1px line where the mat meets chrome
+
+[color.border]
+subtle      = "#333333" # decorative separation only
+default     = "#4A4A4A" # structural separation, panel edges
+interactive = "#7A7A7A" # boundary of any interactive control; >= 3:1 floor
+focus       = "#FFFFFF"
+
+[color.text]
+primary    = "#EDEDED"
+secondary  = "#B4B4B4"
+muted      = "#949494"
+disabled   = "#737373"
+on-accent  = "#06202B"
+on-danger  = "#2B0A0A"
+on-warning = "#2B1F05"
+on-success = "#062012"
+
+[color.accent]
+base    = "#4CC2FF"
+hover   = "#7AD3FF"
+pressed = "#2FA8E8"
+subtle  = "#17425C"
+
+[color.status]
+danger  = "#FF7A7A"
+warning = "#FFC14D"
+success = "#6FD08C"
+
+[color.focus]
+ring = "#FFFFFF"
+halo = "#0B0B0B"
+
+# ---------------------------------------------------------------------------
+# Overlay — painted on top of the manga art by QGraphicsItems.
+# Contrast guarantee (accessibility.md A-06): every marker is stroked TWICE —
+# a dark halo, then a light core centred on the same path. Over light art the
+# halo carries contrast; over dark art the core does. Neither alone can clear
+# 3:1 against both #000 and #FFF; the pair always does.
+# ---------------------------------------------------------------------------
+
+[overlay]
+halo = "#0B0B0B"
+
+[overlay.bubble]
+idle     = "#D6DCE2"
+hover    = "#A8E4FF"
+selected = "#4CC2FF"
+error    = "#FF7A7A"
+
+[overlay.fill]
+hover    = "#4CC2FF1A"  # 10%
+selected = "#4CC2FF2E"  # 18%
+error    = "#FF7A7A2E"  # 18%
+
+# Stroke widths are DEVICE pixels: the pens are cosmetic (QPen.setCosmetic(True)),
+# so a marker keeps the same visual weight at 25% zoom and at 400%.
+[overlay.stroke]
+core-idle     = 2
+core-hover    = 2
+core-selected = 3
+core-error    = 3
+halo          = 2       # added on each side of the core
+
+[overlay.dim]
+opacity = 0.55          # applied to non-selected markers while something is selected
+
+[overlay.badge]
+size        = 18        # diameter of the ordinal badge
+gap         = 4         # clearance from the region outline
+leader-width = 2        # leader line from selected badge toward the list edge
+
+# ---------------------------------------------------------------------------
+# Type. family.ui is a Windows system font — never redistributed, so no licence
+# question. family.mono is used for every figure the user might compare or
+# copy (cost, page counts, elapsed) because tabular digits stop numbers dancing.
+# ---------------------------------------------------------------------------
+
+[type.family]
+ui   = "Segoe UI Variable Text, Segoe UI, sans-serif"
+mono = "Consolas, Courier New, monospace"
+
+[type.display]      # empty-state headline only
+size = 20
+line = 26
+weight = 600
+family = "ui"
+
+[type.title]        # panel headings, dialog titles
+size = 16
+line = 22
+weight = 600
+family = "ui"
+
+[type.body]
+size = 13
+line = 19
+weight = 400
+family = "ui"
+
+[type.body-strong]
+size = 13
+line = 19
+weight = 600
+family = "ui"
+
+[type.editor]       # the translation line: read closely, for hours
+size = 15
+line = 22
+weight = 400
+family = "ui"
+
+[type.caption]
+size = 11
+line = 16
+weight = 400
+family = "ui"
+
+[type.numeric]      # cost readout, counters, elapsed
+size = 13
+line = 19
+weight = 400
+family = "mono"
+
+[type.numeric-lead] # the headline cost figure
+size = 18
+line = 24
+weight = 600
+family = "mono"
+
+# ---------------------------------------------------------------------------
+# Rhythm
+# ---------------------------------------------------------------------------
+
+[space]
+s0  = 0
+s1  = 4
+s2  = 8
+s3  = 12
+s4  = 16
+s6  = 24
+s8  = 32
+s12 = 48
+
+[radius]
+sm   = 4
+md   = 6
+pill = 999
+
+[border-width]
+hairline = 1
+emphasis = 2
+
+# ---------------------------------------------------------------------------
+# Elevation. QSS has no box-shadow and QGraphicsDropShadowEffect is a real cost
+# next to a QGraphicsView. Elevation is expressed as surface step + border.
+# ---------------------------------------------------------------------------
+
+[elevation.e0]
+surface = "color.surface.base"
+border  = "none"
+
+[elevation.e1]
+surface = "color.surface.raised"
+border  = "color.border.subtle"
+
+[elevation.e2]
+surface = "color.surface.overlay"
+border  = "color.border.default"
+# e2 MAY additionally carry one QGraphicsDropShadowEffect: blur 24, y-offset 4,
+# colour #00000073. At most one on screen at a time (top-level popups only).
+
+[focus]
+width  = 2
+offset = 2
+halo   = 1              # dark halo outside the ring, for rings drawn over art
+
+# ---------------------------------------------------------------------------
+# Motion. Durations become 0 when the platform animation preference is off;
+# see accessibility.md A-09.
+# ---------------------------------------------------------------------------
+
+[motion.duration]
+fast = 120
+base = 180
+slow = 280
+
+[motion.easing]
+standard   = "OutCubic"     # QEasingCurve type name
+emphasized = "OutQuint"
+linear     = "Linear"
+
+# ---------------------------------------------------------------------------
+# Typeset — the lettering baked into the OUTPUT pages. Not chrome.
+# The font decision and its licence are in typeset-font.md.
+# Sizes here are in PAGE pixels, at the scan's own resolution.
+# ---------------------------------------------------------------------------
+
+[typeset.font]
+family    = "Shantell Sans"
+licence   = "OFL-1.1"
+version   = "1.011"
+regular   = "ShantellSans-Regular"
+italic    = "ShantellSans-Italic"
+bold      = "ShantellSans-Bold"
+bold-italic = "ShantellSans-BoldItalic"
+
+[typeset]
+align          = "center"        # horizontal and vertical, in the bubble's inscribed area
+line-height    = 1.08
+size-min       = 14              # page px; below this, flag the bubble as overflow
+size-max       = 42              # page px
+size-step      = 1
+padding-ratio  = 0.12            # of the bubble's short axis
+hyphenate      = false
+max-lines      = 0               # 0 = unbounded; the fit loop is bounded by size-min
+
+# ---------------------------------------------------------------------------
+# Windows High Contrast.
+#
+# Added 2026-09-12 by lead-designer on Claude Opus 5 (claude-opus-5), dispatched
+# by lead-po on Claude Opus 5 (claude-opus-5), when the user decided that a
+# Windows contrast theme is SUPPORTED rather than detected and declined. See
+# accessibility.md A-15 for the floor and high-contrast.md for the reasoning.
+#
+# THESE ARE NOT TOKENS. [hc], [hc.map] and [hc.override] are metadata ABOUT the
+# tokens above. The generator must exclude every key under [hc] from the token
+# set, from TOKENS, and from the orphan report — an [hc.map] key is a reference
+# to a token, not a declaration of one.
+#
+# [hc.map] must be TOTAL over the colour tokens: a colour token with no entry
+# here is a GENERATION FAILURE, not a default. That is what stops "High Contrast
+# support" decaying silently the next time somebody adds a colour.
+# ---------------------------------------------------------------------------
+
+[hc]
+# The only palette roles the app may use. Windows guarantees the PAIRS
+# (WindowText on Window, HighlightedText on Highlight), not the cross products,
+# so the app restricts itself to two pairs plus one disabled foreground and
+# every combination it can produce is one the OS has promised.
+# accessibility.md A-15.2.
+roles = ["Window", "WindowText", "Highlight", "HighlightedText", "DisabledText"]
+
+# A token mapped to this sentinel keeps its authored value in EVERY mode.
+static-sentinel = "@static"
+
+[hc.map]
+# --- surfaces: the seven-step ramp collapses to one ground; elevation and
+# --- hover are carried by borders instead. high-contrast.md §5.
+"color.surface.base"     = "Window"
+"color.surface.raised"   = "Window"
+"color.surface.sunken"   = "Window"
+"color.surface.overlay"  = "Window"
+"color.surface.hover"    = "Window"
+"color.surface.pressed"  = "Window"
+"color.surface.disabled" = "Window"
+"color.surface.selected" = "Highlight"
+
+# --- canvas: the mat and the page edge are exempt (they are a viewing
+# --- condition and a boundary against artwork, not chrome). The frame is the
+# --- one HC colour painted against the non-HC mat; A-15.9 checks it at runtime.
+"color.canvas.surround"  = "@static"
+"color.canvas.page-edge" = "@static"
+"color.canvas.frame"     = "WindowText"
+
+# --- borders: subtle was decorative-only and is PROMOTED to structural under
+# --- HC, because it is now the only thing separating two panels.
+"color.border.subtle"      = "WindowText"
+"color.border.default"     = "WindowText"
+"color.border.interactive" = "WindowText"
+"color.border.focus"       = "WindowText"
+
+# --- text: three weights collapse to one. Hierarchy survives in the type scale,
+# --- which HC does not touch. on-* are foregrounds for a filled status ground,
+# --- which under HC is WindowText — so their text is Window, the pair inverted.
+"color.text.primary"    = "WindowText"
+"color.text.secondary"  = "WindowText"
+"color.text.muted"      = "WindowText"
+"color.text.disabled"   = "DisabledText"
+"color.text.on-accent"  = "HighlightedText"
+"color.text.on-danger"  = "Window"
+"color.text.on-warning" = "Window"
+"color.text.on-success" = "Window"
+
+# --- accent: selection is a ground inversion under HC.
+"color.accent.base"    = "Highlight"
+"color.accent.hover"   = "Highlight"
+"color.accent.pressed" = "Highlight"
+"color.accent.subtle"  = "Highlight"
+
+# --- status: three hues become one. The GLYPH does all the work; A-10 already
+# --- guarantees one exists, and A-15.7 requires they differ by silhouette.
+"color.status.danger"  = "WindowText"
+"color.status.warning" = "WindowText"
+"color.status.success" = "WindowText"
+
+# --- focus: ring and halo become the two halves of the guaranteed pair, so
+# --- wherever the ring falls one of the two shows — the two-stroke idea, free.
+"color.focus.ring" = "WindowText"
+"color.focus.halo" = "Window"
+
+# --- overlay: EVERY overlay colour is exempt. It is painted onto the user's
+# --- scan, which a contrast theme cannot reach, so the contrast problem is
+# --- identical in both modes and the two-stroke pair of A-06 already solves it
+# --- against both extremes of the artwork — which no single HC colour can.
+# --- accessibility.md A-15.5, tokens.md §5, high-contrast.md §7.
+"overlay.halo"            = "@static"
+"overlay.bubble.idle"     = "@static"
+"overlay.bubble.hover"    = "@static"
+"overlay.bubble.selected" = "@static"
+"overlay.bubble.error"    = "@static"
+"overlay.fill.hover"      = "@static"
+"overlay.fill.selected"   = "@static"
+"overlay.fill.error"      = "@static"
+
+[hc.override]
+# Non-colour tokens whose VALUE changes under HC. Keys must name an existing
+# token; an override naming nothing is a generation failure.
+#
+# Dimming non-selected markers is the one place the app deliberately reduces
+# contrast, and a contrast theme is a request not to. The link survives on
+# stroke width, region fill and the filled ordinal badge — and the ordinal, not
+# colour, is the primary carrier (components.md §4.2). accessibility.md A-15.6.
+"overlay.dim.opacity" = 1.0

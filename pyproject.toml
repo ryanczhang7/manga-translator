@@ -1,0 +1,138 @@
+# The single configuration file for this project: dependencies, and the config
+# for ruff, mypy, pytest, coverage and import-linter. docs/wiki/stack.md §4 says
+# one place, and this is it. Do not add dotfiles for these tools.
+
+[project]
+name = "mangatl"
+version = "0.1.0"
+description = "Local-first Japanese manga chapter translator"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+readme = "README.md"
+
+# Runtime dependencies are added by the story that first imports one. PySide6 is
+# here because MT-001's own walking skeleton (src/mangatl/app.py, the ui test and
+# the build gate) imports it. numpy, Pillow, opencv-python-headless, fonttools
+# and anthropic are named in stack.md §3 and are NOT here yet: an unused
+# dependency slows every `uv sync` and every PyInstaller freeze, and the sizing
+# rule in MT-001 is explicit that project-specific things arrive with a failing
+# test in front of them. No inference runtime is pinned at all - MT-002 decides
+# ONNX Runtime versus torch+cu128 and adds it.
+dependencies = [
+    "PySide6>=6.8,<6.10",
+]
+
+[project.scripts]
+mangatl = "mangatl.app:main"
+
+[dependency-groups]
+# Synced by default by `uv sync`; every gate command depends on this group.
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-cov>=6,<8",
+    "pytest-qt>=4.4,<5",
+    "pytest-env>=1.1,<2",
+    "hypothesis>=6,<7",
+    "ruff>=0.12",
+    "mypy>=1.11,<2",
+    "import-linter>=2,<3",
+    "pyinstaller>=6,<7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mangatl"]
+
+# --- ruff: linter AND formatter ---------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+# MEASURED 2026-09-12, ruff 0.16.7: `ruff format .` reported **115 files**, not
+# 17. ruff now formats Python code blocks inside **Markdown**, and 98 of those
+# were `.claude/**/*.md` and `docs/**/*.md` - the vendored harness and the wiki.
+# Left alone, `uv run ruff format .` rewrites harness documentation, which
+# check-boundaries.sh refuses without a VERSION bump, and the `format` gate
+# starts failing on prose nobody in this project owns. Scope ruff to this
+# project's own code, and keep Markdown out of it entirely so the count is
+# stable. See MT-001 PO-4.
+extend-exclude = [".claude", "docs", "fixtures", "*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may shadow builtins and use bare asserts; neither is a production smell.
+"tests/**" = ["B011"]
+
+# --- mypy --------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["mangatl"]
+strict = true
+warn_unreachable = true
+
+# PySide6 ships partial stubs; its dynamic Qt metaobject layer is not typed to
+# mypy's satisfaction and never will be. Narrow to the third-party package,
+# never to our own code.
+[[tool.mypy.overrides]]
+module = ["PySide6.*"]
+ignore_missing_imports = true
+
+# --- pytest ------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+markers = [
+    "gpu: needs a real GPU and real .onnx weights; never runs on CI",
+    "network: calls a paid API over the network; never runs on CI",
+]
+# Set here and not only in the gate command, so that an agent typing
+# `uv run pytest` by hand gets the same behaviour as the gate. stack.md §7.
+env = [
+    "QT_QPA_PLATFORM=offscreen",
+]
+
+# --- coverage ----------------------------------------------------------------
+# The thresholds live in the GATE COMMANDS (--cov-fail-under), not here, so the
+# number is visible where it is enforced. MT-001 contract.
+[tool.coverage.run]
+branch = true
+source = ["src/mangatl"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    # The console-script guard. It is one line of dispatch with no behaviour of
+    # its own; `mangatl.app:main` is what the entry point and the tests call.
+    "if __name__ == .__main__.:",
+]
+
+# --- import-linter -----------------------------------------------------------
+# ONE contract here, deliberately. architecture.md §3 states five; MT-003 writes
+# the other four and probes all five in both absolute and relative import form.
+# This one exists because the `lint` gate's evidence line is
+# `Contracts: [1-9][0-9]* kept` - with no contract at all, lint-imports proves
+# nothing and the gate is theatre. See MT-001 PO-1.
+[tool.importlinter]
+root_packages = ["mangatl"]
+
+[[tool.importlinter.contracts]]
+name = "Nothing imports ui"
+type = "forbidden"
+source_modules = [
+    "mangatl.domain",
+    "mangatl.store",
+    "mangatl.detect",
+    "mangatl.ocr",
+    "mangatl.translate",
+    "mangatl.clean",
+    "mangatl.typeset",
+    "mangatl.pipeline",
+    "mangatl.bench",
+]
+forbidden_modules = ["mangatl.ui"]

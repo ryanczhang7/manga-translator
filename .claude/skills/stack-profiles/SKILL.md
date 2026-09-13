@@ -14,6 +14,7 @@ commands are, where tests live, and what the bootstrap story must produce.
 | Profile | For | File |
 |---|---|---|
 | `python-uv` | Python services, CLIs, data work | `reference/python-uv.md` |
+| `python-uv-pyside6` | Windows desktop Python + Qt GUI + local ONNX inference (addendum to `python-uv`) | `reference/python-uv-pyside6.md` |
 | `node-typescript` | React, Node APIs, anything on pnpm | `reference/node-typescript.md` |
 | `rust-cargo` | Rust binaries, libraries, WASM | `reference/rust-cargo.md` |
 | `godot` | 2D/3D games and interactive tools in Godot 4 | `reference/godot.md` |
