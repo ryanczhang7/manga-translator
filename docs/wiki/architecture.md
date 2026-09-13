@@ -336,6 +336,61 @@ reading it. A round-trip test proves the application self-consistent, not the
 file sufficient, and that distinction has to be recorded somewhere a test can
 cite.
 
+**D13 — Ship the GPL-3.0 detector knowingly, conveying weights and not code.**
+**Decided by the user on 2026-09-13**, on the evidence in
+`docs/wiki/audits/MT-030-detector-licence.md`. MT-030 measured nine candidate
+detectors and found no permissively-licensed alternative with an ONNX export
+that cleared its pinned floor — the incumbent's peak IoU against the reference
+mask is 0.71–0.75 against the best permissive candidate's 0.45, a gap that does
+not close at any threshold. So the choice was between shipping GPL-3.0 and
+commissioning a detector, and it is not a technical choice. The product ships.
+
+*This is a recorded product decision, not legal advice. The obligations below
+are an engineer's reading of the licence texts quoted in MT-030's audit; a
+distributed commercial product may warrant counsel, and nothing here substitutes
+for it.*
+
+**What the application actually conveys, which is the load-bearing distinction.**
+Not `dmMaze/comic-text-detector`'s source. MT-002 already forbade reusing it —
+*"the pre-processing and post-processing in it must be re-derived test-first"* —
+so the installer contains the trained **weights** (`comic-text-detector.onnx`,
+SHA-256 `1a86ace7…`) plus first-party code written against MT-007's own contract.
+Whether trained weights are a derivative work of the GPL'd training code is
+genuinely unsettled, and this decision does not pretend to settle it. It
+minimises the exposure instead: **no GPL-licensed source file enters the image,
+and the detector stays behind the `detect` adapter boundary** (§2), so the
+question never widens from "we distribute a weights file" to "we distribute a
+combined work".
+
+*Lost:* the option of treating the detector as a swappable commodity. Two
+things now depend on this specific model and are recorded so a later swap is
+costed rather than assumed — MT-007 AC-6 is built on the box-head/mask split,
+and MT-019's `seg ∩ accepted boxes` construction needs the box head. **No
+permissive candidate has a box head at all** (MT-030 E4, confirmed against every
+candidate's graph outputs), so replacing the detector is a design change, not a
+substitution.
+
+**The obligations this creates. MT-024 owns all of them.**
+
+| # | Obligation | Source |
+|---|---|---|
+| O-1 | Convey the full GPL-3.0 licence text with the installer | GPL-3.0 §4 |
+| O-2 | Identify the GPL-3.0 component, its upstream, and its version or hash | GPL-3.0 §4–5 |
+| O-3 | Offer **corresponding source** for the GPL-3.0 component — a written offer, or a URL to the upstream repository at the revision used | GPL-3.0 §6 |
+| O-4 | State clearly that the Manga109-s dataset was used, since the detector is a pre-trained model within its terms | Manga109-s, condition 2 |
+| O-5 | Keep the notices accurate when a model changes — a manifest entry without a notice entry is a defect | this decision |
+
+O-4 is the one that is *only* attribution. O-1 through O-3 are copyleft
+obligations and are not discharged by an attribution line; that distinction is
+recorded because it is easy to collapse the two into "add a credits screen".
+
+**What this decision does not decide.** Whether *other* bundled weights carry
+obligations of their own. MT-002 flagged the LaMa checkpoint's provenance as
+**traced at repository-metadata level only**, and inpainting checkpoints in that
+lineage are sometimes distributed under non-commercial terms. That is unresolved
+and is a separate question from this one; MT-024 must not read D13 as clearing
+it.
+
 ## 8. Deployment shape
 
 There is none, in the server sense. The deliverable is a Windows installer:
