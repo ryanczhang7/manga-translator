@@ -2,7 +2,7 @@
 id: EPIC-03
 title: Reading the page — what is text, in what order, and what does it say
 status: todo
-stories: [MT-007, MT-008, MT-009, MT-010]
+stories: [MT-030, MT-007, MT-008, MT-009, MT-010]
 ---
 
 ## Goal
@@ -31,6 +31,9 @@ column appears as a region of its own.
 
 ## Stories
 
+- **MT-030** — spike: is there a permissively-licensed comic text detector with
+  an ONNX export, or do we ship GPL-3.0 knowingly? Filed out of MT-002's licence
+  escalation. Output is a decision document; MT-007 depends on it.
 - **MT-007** — text-region detection: page image in, masked regions out.
 - **MT-008** — furigana: a thin ruby column adjacent to a main column is merged
   into it, and two genuinely separate small bubbles are not.

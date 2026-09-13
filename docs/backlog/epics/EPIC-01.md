@@ -48,3 +48,27 @@ project-specific gets its own RED→GREEN story afterwards. MT-003 is here rathe
 than in bootstrap because the contracts need a package layout to point at, and
 because a gate deserves its own probes rather than being the tenth item on a
 scaffold list.
+
+## Note on the last done-when clause — confirmed by the user 2026-09-12
+
+*"`docs/wiki/stack.md` has been corrected against what actually installed and
+ran"* is satisfied by **MT-001 plus MT-002**, on a qualified reading the user
+approved before MT-002 reached REVIEW (MT-002 `## Notes`, PO-2).
+
+MT-001 corrected §3 *Runtime and packaging* and *Development tooling* against
+`uv.lock` — those rows are **locked**. MT-002 corrected §3 *Local inference* and
+*Models* against a real install and three real forward passes, but in an
+isolated, gitignored environment at `spikes/MT-002/.venv`, because MT-002 PO-1
+keeps the inference dependency out of `pyproject.toml` and `uv.lock` until
+MT-007 — the first story that imports it. Those rows are therefore **measured in
+a spike, not locked**, and §3 names them as a distinct third state rather than
+folding them into the locked tables.
+
+That distinction is deliberate: §3's opening line is *"Two kinds of row live in
+this section and they are not equally true"*, and collapsing a spike measurement
+into a locked fact is precisely what that sentence exists to prevent.
+
+*Cloud translation* in §3 remains unverified and is out of this epic; it arrives
+with the story that first calls the API.
+
+**So EPIC-01 closes after MT-003**, with no clause outstanding.
