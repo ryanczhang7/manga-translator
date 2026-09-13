@@ -215,6 +215,39 @@ run on a machine without a CUDA toolkit.
 *Lost:* `torch` + `cu128`. It is the **named fallback** if MT-002's spike finds
 the ONNX exports unusable on Blackwell — a bigger installer, but a working one.
 
+> **D3 CORRECTED by MT-002 on 2026-09-12. The conclusion stands; the rationale
+> above does not, and is kept only so the correction is legible.**
+> See `docs/wiki/audits/MT-002-model-runtime.md`.
+>
+> **Upheld:** all three ONNX exports run on the RTX 5070's CUDA execution
+> provider. The `torch` + `cu128` fallback is **not needed** and should not be
+> added. That is the part later stories may take on trust.
+>
+> **Void — the size argument.** D3 rejected `torch` for being "~2.5 GB". A
+> *working* CUDA execution provider measures **1,798 MiB** of runtime on the
+> development machine (218 MiB `onnxruntime-gpu` + 1,580 MiB of `nvidia-*` cu13
+> and cuDNN 9 wheels), plus 728 MiB of weights — **≈2.47 GiB**. The installer
+> saving that justified this decision is largely not there.
+>
+> **Overstated — "runs on a machine without a CUDA toolkit".** True that no CUDA
+> *toolkit* is needed. False that it works out of the box: bare
+> `onnxruntime-gpu` fell through to CPU, and so did `onnxruntime-gpu[cuda,cudnn]`,
+> until `ort.preload_dlls(cuda=True, cudnn=True, msvc=True)` was called. Without
+> that one line the provider fails **without raising** while
+> `get_available_providers()` still advertises CUDA — 578 ms versus 23 ms on the
+> same model, independently reproduced by the orchestrator (MT-002 PO-3).
+>
+> **Overstated — "ORT's provider chain (CUDA → DirectML → CPU)".** That is not a
+> single install. `onnxruntime-directml` conflicts with `onnxruntime-gpu` and its
+> latest cp312 build is 1.17.3, well behind the 1.30.0 that CUDA needs. The chain
+> is a *packaging* choice between wheels, not a runtime fallback within one.
+>
+> **The honest reason to prefer ONNX Runtime, measured rather than assumed:** one
+> codebase degrades to any DX12 GPU or to no GPU at all, and the CUDA-less
+> install is a ~15 MB wheel rather than a different framework. Size was never the
+> reason. **Whether to ship the 1.75 GB of CUDA at all is an open product
+> question** — see MT-024 and MT-002's escalations.
+
 **D4 — Local detection, OCR and inpainting; cloud translation only.**
 Full reasoning in `stack.md` §5/O3. In short: the downstream consumers need
 masks and polygons, an LLM returns neither well, and local OCR keeps the page

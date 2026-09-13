@@ -18,13 +18,22 @@
 > phase measured the gate passing with `Contracts: 1 kept` while `ruff` had
 > checked none of this project's source. See the notes in §6.
 >
-> **What is still unverified, and where it is owned:** the whole of §3 *Local
-> inference* and *Cloud translation*. **No inference runtime and no `anthropic`
-> client is pinned at all** — MT-001's sizing rule forbids adding a dependency
-> nothing imports, and the ONNX-versus-PyTorch question is MT-002's to settle.
-> The model trio, the CUDA execution provider and the cost model are named in
-> this file and installed nowhere. Do not read a version in those two tables as
-> a fact.
+> **Verified further on 2026-09-12 by story MT-002 (spike):** §3 *Local
+> inference* and *Models* are no longer guesses. Every version and every model
+> file in them was installed and run on this machine, and the ONNX-versus-PyTorch
+> question is settled in ONNX Runtime's favour — see
+> `docs/wiki/audits/MT-002-model-runtime.md`. Two things the plan had wrong are
+> corrected in place there and in §3: `onnxruntime-gpu` needs an explicit
+> `preload_dlls()` call or it silently runs on CPU, and D3's installer-size
+> rationale does not survive measurement.
+>
+> **What is still unverified, and where it is owned:** §3 *Cloud translation* in
+> full, and the *installed-nowhere* status of *Local inference*. **No inference
+> runtime and no `anthropic` client is pinned at all** — MT-001's sizing rule
+> forbids adding a dependency nothing imports, so MT-002 deliberately did not add
+> one (PO-1); **MT-007** adds the inference lines and the `anthropic` client
+> arrives with the story that first calls it. The cost model remains an estimate.
+> Do not read a version in the *Cloud translation* table as a fact.
 
 *Written by `/plan-product` on 2026-09-12 from `docs/wiki/product-brief.md`.
 Planned by **lead-po on Claude Opus 5 (`claude-opus-5`)**, no session override.
@@ -84,30 +93,55 @@ story that first calls it.
 
 ### Local inference
 
-| Thing | Candidate version | Why |
-|---|---|---|
-| `onnxruntime-gpu` | 1.22.x (CUDA EP) | Detection, OCR and inpainting run locally (decision O3, §5). ONNX Runtime rather than PyTorch because a CUDA-enabled `torch` wheel is ~2.5 GB and would dominate the installer, and because ORT's provider chain gives a **CUDA → DirectML → CPU** fallback, which is what makes "no GPU setup by hand" true on a machine that is not the developer's. |
-| `onnxruntime-directml` | 1.22.x | The fallback that needs no CUDA toolkit at all — any DX12 GPU. Carries the "it installs and runs" promise when CUDA does not resolve. |
-| `numpy` | 2.1.x | Tensor pre/post-processing. |
-| `Pillow` | 11.x | Image decode/encode, page I/O, output baking. |
-| `opencv-python-headless` | 4.11.x | Mask morphology, connected components, region merging for the detector's raw output. **Headless** deliberately: the GUI is Qt, and `opencv-python` (non-headless) drags in a second, conflicting Qt. |
-| `fonttools` | 4.5x.x | Real glyph metrics for the typesetter's line-breaking and fitting. Measuring text by character count is how machine typesetting looks like machine typesetting. |
+> **VERIFIED on the development machine on 2026-09-12 by MT-002** (spike;
+> `docs/wiki/audits/MT-002-model-runtime.md`). All three models load and run on
+> the **CUDA execution provider** on the RTX 5070 (sm_120). **Still installed
+> nowhere** — PO-1 keeps MT-002 document-only, and MT-007 is the story that adds
+> these lines to `pyproject.toml`. The candidate column is kept, as everywhere in
+> this section, so that a version that moved is visible rather than quietly
+> overwritten.
+>
+> **Read the audit before depending on a number here.** Its `## Decided` section
+> may be taken on trust; every measurement is in `## Evidence` and is to be
+> re-verified by the story that depends on it.
+
+| Thing | Measured 2026-09-12 (MT-002) | Candidate at planning | Why |
+|---|---|---|---|
+| `onnxruntime-gpu` | **1.30.0**, CUDA EP confirmed in use | 1.22.x (CUDA EP) | Detection, OCR and inpainting run locally (decision O3, §5). **Two corrections from MT-002.** (1) The extra is required — `onnxruntime-gpu[cuda,cudnn]`, and it pulls **cu13**, not cu12; 1.30 is built against CUDA 13. (2) **`ort.preload_dlls(cuda=True, cudnn=True, msvc=True)` must be called before the first session or the CUDA provider silently fails to CPU** while still being advertised by `get_available_providers()`. This is application code, not configuration. See audit E2. |
+| `onnxruntime-directml` | **not installed, not run** | 1.22.x | Latest cp312 wheel is **1.17.3** (PyPI, read not run), four minor versions behind, and it **conflicts** with `onnxruntime-gpu` — both provide the `onnxruntime` module. So "CUDA → DirectML → CPU" is **not one install with a provider chain**; it is two mutually exclusive installs. MT-024 owns the consequence. See audit E8. |
+| `numpy` | **2.5.3** | 2.1.x | Tensor pre/post-processing. |
+| `Pillow` | **12.3.0** | 11.x | Image decode/encode, page I/O, output baking. |
+| `opencv-python-headless` | **5.0.0.93** | 4.11.x | Mask morphology, connected components, region merging for the detector's raw output. **Headless** deliberately: the GUI is Qt, and `opencv-python` (non-headless) drags in a second, conflicting Qt. |
+| `fonttools` | *not exercised by MT-002* | 4.5x.x | Real glyph metrics for the typesetter's line-breaking and fitting. Measuring text by character count is how machine typesetting looks like machine typesetting. |
+
+**The installer-size argument in D3 did not survive measurement.** `architecture.md`
+D3 rejected `torch` for being "~2.5 GB". Measured, the working CUDA path costs
+**1,798 MiB of runtime** (`onnxruntime` 218 MiB + `nvidia-*` cu13/cuDNN 1,580 MiB)
+**plus 728 MiB of weights ≈ 2.47 GiB**. D3's *conclusion* still holds — ONNX
+Runtime is the right choice — but for a different reason: a CUDA-less install is a
+15 MB wheel and the same code runs on DirectML or CPU. D3's recorded rationale
+should be corrected; that is an architecture edit and MT-002 did not make it.
 
 **Models** (weights, not libraries — versions are file hashes, pinned in the
 model manifest, not in `pyproject.toml`):
 
-| Role | Candidate | Note |
-|---|---|---|
-| Text-region detection | a comic/manga text detector exported to ONNX (the `comic-text-detector` lineage ships one) | Must emit per-region masks, not just boxes — the inpainter needs the mask. |
-| Japanese manga OCR | `manga-ocr` (ViT encoder + GPT-2 decoder), exported to ONNX via `optimum` | Chosen specifically for O6: trained on manga crops, handles **vertical** text natively, and trained to ignore furigana. See §5, O6. |
-| Inpainting | LaMa, ONNX export (the IOPaint / lama-cleaner lineage ships one) | Reconstructs bubble interiors including screentone and hatching. |
+| Role | Settled 2026-09-12 (MT-002) | Candidate at planning | Note |
+|---|---|---|---|
+| Text-region detection | `mayocream/comic-text-detector-onnx` → `comic-text-detector.onnx`, 90 MiB | a comic/manga text detector exported to ONNX (the `comic-text-detector` lineage ships one) | Emits both a `seg` mask and YOLO boxes. **They disagree**: the box head does not fire on art-integrated SFX but the mask covers them, so MT-019 must inpaint `seg ∩ accepted boxes`, never the raw mask. **Licence risk — GPL-3.0 upstream, partly trained on Manga109-s; needs a user decision before EPIC-03 ships.** Audit E6, E7. |
+| Japanese manga OCR | `onnx-community/manga-ocr-base-ONNX` (encoder 328 MiB + decoder 112 MiB) + vocab from `kha-white/manga-ocr-base` | `manga-ocr` (ViT encoder + GPT-2 decoder), exported to ONNX via `optimum` | Chosen for O6, and **O6 is confirmed**: a crop of 醜鬼 with ruby しゅうき read back as 醜鬼, ruby dropped. 10/12 exact on the upstream author's own ground-truth set (greedy decode; the reference uses 4 beams, so that is a lower bound). **It hallucinates confident Japanese on text-free crops** — the detector alone decides what is text. Audit E5. |
+| Inpainting | `Carve/LaMa-ONNX` → **`lama_fp32.onnx`**, 198 MiB | LaMa, ONNX export (the IOPaint / lama-cleaner lineage ships one) | **Not `lama.onnx`** — that build fails to load in onnxruntime 1.30. Fixed **512×512** input, so a page must be tiled; seams are unmeasured and MT-019 owns them. Reconstructs screentone at 93% of the original high-frequency energy. Audit E3, E7. |
 
-**This trio is the largest single risk in the plan** and the reason MT-002 is a
-spike: the claim "usable ONNX exports of all three exist and run on an RTX 5070
-(Blackwell, sm_120) under `onnxruntime-gpu`" is researched, not verified. The
-named fallback, if the spike fails, is `torch` + `torchvision` on the `cu128`
-index (Blackwell needs CUDA 12.8+), at the cost of a much larger installer. The
-spike decides it before any story depends on it.
+Exact URLs, **SHA-256 for every file**, and licences are in the audit's
+`## Decided`. Bundle total **728.2 MiB** measured.
+
+**This trio was the largest single risk in the plan, and MT-002 retired it.** The
+claim "usable ONNX exports of all three exist and run on an RTX 5070 (Blackwell,
+sm_120) under `onnxruntime-gpu`" is now **verified on the development machine**:
+detector 25.8 ms/page, OCR 26.7 ms/crop, LaMa 105 ms/512² tile, all on
+`CUDAExecutionProvider`, cross-checked at 22×, 6× and 15× the CPU-forced
+latency on the same machine. **The `torch` + `cu128` fallback is not needed and
+should not be added.** What replaced the risk is a smaller one — the GPL-3.0
+detector licence, and 1.75 GB of CUDA runtime — both recorded in the audit.
 
 ### Cloud translation
 
