@@ -96,6 +96,17 @@ remaining options are:
 **That choice is not technical and the spike may not make it** (story PO-3). The
 evidence for each is below; the decision is put to the user.
 
+> **ANSWERED 2026-09-13 by the user: option 1 — ship the incumbent and accept
+> the GPL-3.0 obligations.** Recorded as `docs/wiki/architecture.md` **D13**,
+> which also states what the application conveys (the trained weights, not
+> upstream's source, since MT-002 forbids reusing it) and enumerates the five
+> resulting obligations as MT-024's. The rest of this document is unchanged and
+> remains the evidence the decision was taken on — **including the caveats**:
+> the reference mask is the incumbent author's own published output, and tiled
+> inference for the fixed-1024² docTR graphs was never tried. Neither weakens
+> the decision, but a future reader asking "was the alternative really that much
+> worse?" should read *What was not checked* before answering.
+
 ### The premise has changed, and this is the most consequential finding
 
 `stack.md` line 130, MT-002's `## Licence risk` and MT-030's own `## Context` all
