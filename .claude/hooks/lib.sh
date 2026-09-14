@@ -275,6 +275,25 @@ mutate_targets() {
 # extractors found nothing to judge" from "there was nothing to find" - see
 # phase-guard.sh and MT-031 AC-8.)
 #
+# A candidate line is the bare target, OR the target, a TAB, and the ROLE the
+# operand played in its command (MT-033 C-5, AC-6): a denial on the source of an
+# `mv` has to be legible as such rather than reading like a denial on the
+# destination. Only `cp` and `mv` operands carry a role; every other candidate -
+# redirects, `rm`, `touch`, `tee`, `sed -i` - is emitted bare, because its role
+# is not ambiguous and inventing one for it is churn.
+#
+# The role is a SUFFIX, not a prefix, and that is load-bearing. phase-guard.sh
+# filters candidates with `grep -vE '^\s*$|^-|\*|^/dev/'` and every one of those
+# anchors assumes the line STARTS with the path; a leading role would silently
+# turn `^-` off, and an option must never become a candidate. The caller splits
+# the line on the tab BEFORE resolve_vars and before the `$EXEMPT` membership
+# test, which compares the candidate for exact equality against the resolved
+# `scripts/mutate.sh` FILE argument - a role left on the string there would
+# silently un-exempt the one diagnostic the harness itself requires in RED.
+# A TAB is safe as the separator: the scanner splits tokens on literal tabs and
+# readword() stops at one, so no emitted token can contain one, while a tab
+# inside a quoted span is already \007 at this point.
+#
 # This replaces five greps whose last stage was `awk '{print $NF}'`. The last
 # word of a match is not an operand. It is the redirect target when the command
 # ends in one - `sed -i EXPR src/main.ts > /dev/null` yielded /dev/null, which
@@ -298,9 +317,18 @@ mutate_targets() {
 #   sed, in-place only  every positional, minus the first when no
 #                       -e/--expression/-f/--file supplied the script
 #   tee, rm, touch      every non-option argument
-#   cp, mv              the LAST non-option argument - the destination. With
+#   cp                  the LAST non-option argument - the destination. With
 #                       three arguments `cp a b c` reads b; judging every
 #                       operand would be a false positive, not a fix.
+#   mv                  EVERY non-option argument (MT-033 C-3): the last
+#                       because it is created, the rest because they are
+#                       REMOVED. `mv f1 f2 d/` leaves neither f1 nor f2 where
+#                       it was, while `cp g1 g2 e/` leaves both - measured, GNU
+#                       coreutils 8.32. That asymmetry is the whole reason this
+#                       row and the `cp` row above are not one row: the guard
+#                       used to judge the operand `mv` creates and say nothing
+#                       about the ones it destroys, so a frozen file could
+#                       leave its path in any phase.
 #   > >> >|             the word that follows it
 #   < <<                a READ. `xargs touch < list` names no write target.
 #
@@ -316,13 +344,85 @@ write_candidates() {
       return (w == "sed" || w == "tee" || w == "cp" || w == "mv" || w == "rm" || w == "touch")
     }
     function emit(t) { if (t != "") OUT = OUT t "\n" }
+    # A target and the role it played, tab-separated. See the header: the role
+    # is a suffix so that the candidate filter in phase-guard.sh keeps anchoring
+    # on the path.
+    function emitr(t, r) { if (t != "") OUT = OUT t "\t" r "\n" }
     function allops(   k) {
       for (k = 1; k <= na; k++) if (substr(A[k], 1, 1) != "-") emit(A[k])
     }
-    function lastop(   k, last) {
+    function lastop(r,   k, last) {
       last = ""
       for (k = 1; k <= na; k++) if (substr(A[k], 1, 1) != "-") last = A[k]
-      emit(last)
+      emitr(last, r)
+    }
+    # Every non-option operand of an `mv`, each labelled by the role it plays.
+    #
+    # Without a target-directory option the roles follow POSITION: the final
+    # positional is created, the rest are removed. The role tracks position
+    # because that is what the denial has to say - the same token is a source in
+    # `mv X d/` and a destination in `mv a b X`.
+    #
+    # `-t DIR` / `--target-directory DIR` INVERTS that (MT-033 PO-8, R-6/R-7):
+    # DIR is the destination and EVERY positional is a source, whatever its
+    # position. Measured, GNU coreutils 8.32 - each of these leaves the
+    # positional gone from the cwd and present in DIR:
+    #
+    #   mv -t dest/ f1     mv -td2/ f2     mv --target-directory=d3 f3
+    #   mv --target-directory d4 f4        mv -ft d5/ f5     mv -ftd6/ f6
+    #
+    # So the argument of the option has to be READ, not merely skipped: three of
+    # those six spellings glue or attach it, and while the parser dropped every
+    # `-` token whole, `mv -tsrc/ docs/notes.md` was an entirely unjudged write
+    # INTO src/. Reading it is why this is a scan like sedops() and not a
+    # one-line position test. The option TOKEN itself must still never become a
+    # candidate - `mv -f`, `mv -v` and `cp -t` are asserted against that.
+    #
+    # `cp -t` is deliberately NOT given the same treatment: PO-8 amended PO-3
+    # for `mv -t` only, because only `mv -t` regressed, and
+    # `cp -t src/ docs/notes.md` is pinned permissive by two assertions. It is a
+    # real hole, with `install`, `ln -f`, `rsync` and `dd`, and it is a story of
+    # its own. So is `--target=DIR`: GNU getopt_long takes any unambiguous
+    # abbreviation (measured: `mv --target=d8 f8` moves f8 into d8), and pinning
+    # every abbreviation has no criterion behind it - see MT-033 R-7.
+    function mvops(   k, j, a, rest, ch, dir, hasdir, skip, np, M) {
+      hasdir = 0; skip = 0; np = 0; dir = ""
+      for (k = 1; k <= na; k++) {
+        a = A[k]
+        if (skip) { skip = 0; continue }        # consumed as the -t argument
+        if (substr(a, 1, 2) == "--") {
+          if (a == "--target-directory") {
+            hasdir = 1
+            if (k < na) { dir = A[k + 1]; skip = 1 }
+          } else if (substr(a, 1, 19) == "--target-directory=") {
+            hasdir = 1; dir = substr(a, 20)
+          }
+          continue
+        }
+        if (substr(a, 1, 1) == "-") {
+          rest = substr(a, 2)
+          for (j = 1; j <= length(rest); j++) {
+            ch = substr(rest, j, 1)
+            # -t takes an argument, so everything after it in the bundle IS
+            # that argument rather than more flags: -tDIR and -ftDIR, like
+            # the -i.bak of sedops above.
+            if (ch == "t") {
+              hasdir = 1
+              if (j == length(rest)) { if (k < na) { dir = A[k + 1]; skip = 1 } }
+              else dir = substr(rest, j + 1)
+              break
+            }
+          }
+          continue
+        }
+        np++; M[np] = a
+      }
+      if (hasdir) {
+        emitr(dir, R_MV_DST)
+        for (k = 1; k <= np; k++) emitr(M[k], R_MV_SRC)
+        return
+      }
+      for (k = 1; k <= np; k++) emitr(M[k], (k == np ? R_MV_DST : R_MV_SRC))
     }
     function sedops(   k, j, a, rest, ch, inplace, hasscript, skip, np) {
       inplace = 0; hasscript = 0; skip = 0; np = 0
@@ -358,7 +458,8 @@ write_candidates() {
     }
     function flushcmd() {
       if (cmd == "sed") sedops()
-      else if (cmd == "cp" || cmd == "mv") { FLAG = 1; lastop() }
+      else if (cmd == "cp") { FLAG = 1; lastop(R_CP_DST) }
+      else if (cmd == "mv") { FLAG = 1; mvops() }
       else if (cmd != "") { FLAG = 1; allops() }
       cmd = ""; na = 0
     }
@@ -383,7 +484,14 @@ write_candidates() {
       }
       return w
     }
-    BEGIN { Q = sprintf("%c", 39); OUT = ""; FLAG = 0 }
+    # The role vocabulary, MT-033 C-5. These three strings are the only ones any
+    # assertion accepts and they are reproduced verbatim in the denial.
+    BEGIN {
+      Q = sprintf("%c", 39); OUT = ""; FLAG = 0
+      R_MV_SRC = "source of mv (removed by the move)"
+      R_MV_DST = "destination of mv"
+      R_CP_DST = "destination of cp"
+    }
     { S = (NR > 1 ? S "\n" $0 : $0) }
     END {
       n = length(S); i = 1; tok = ""; q = ""; cmd = ""; na = 0
