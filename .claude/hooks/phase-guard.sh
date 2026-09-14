@@ -19,22 +19,35 @@ HOOK_INPUT="$(cat)"
 
 load_state
 [ "$PHASE" = "IDLE" ] && exit 0
+# The separator write_candidates puts between a target and its role. Written as
+# an escape rather than as a literal tab so that an editor or a patch stripping
+# trailing whitespace cannot quietly turn it into a space - and with $'' rather
+# than $(printf) because this runs on every hook invocation and the 15 s
+# PreToolUse budget is spent on forks, not on parsing.
+TAB=$'\t'
 [ -f "$HARNESS_DIR/paths.conf" ] || exit 0
 
 TOOL="$(json_get_string tool_name || true)"
 
+# check_path <path> [role]   The optional role is MT-033 AC-6: which operand of
+# the command the refused token was. It becomes ONE line, immediately after
+# `path:` and never before or inside it - `path:` keeps its exact spelling,
+# indent and position because 99 assertions match `path:     <p>` followed by a
+# space or end of string. Empty for every candidate whose role is not ambiguous.
 check_path() {
-  local raw="$1" rel cat
+  local raw="$1" role="${2:-}" rel cat operand=""
   [ -z "$raw" ] && return 0
   rel="$(to_rel "$raw")"
   [ -z "$rel" ] && return 0
   cat="$(classify "$rel")"
+  [ -n "$role" ] && operand="
+  operand:  $role"
   if ! phase_allows "$cat"; then
     deny "BLOCKED by the harness phase lock.
 
   story:    ${STORY_ID:-unknown}
   phase:    $PHASE
-  path:     $rel
+  path:     $rel$operand
   category: $cat
 
 $(phase_message)
@@ -115,6 +128,12 @@ case "$TOOL" in
     PARSED="$(write_candidates "$MASKED" 2>/dev/null)"
     WRITE_CMD="${PARSED%%$'\n'*}"
     CANDIDATES=""
+    # A candidate line may carry a tab-separated role (MT-033 C-5). Every anchor
+    # below still judges the PATH, because the role is a suffix: `^-` keeps an
+    # option out (it is the load-bearing one - `mv -f`, `mv -v` and `cp -t` are
+    # asserted), `^/dev/` short-circuits the commonest redirect in the repo, and
+    # `\*` drops a glob. The role strings contain no quote, no `*` and no tab, so
+    # `tr -d` and `sort -u` see them as inert trailing text.
     case "$PARSED" in
       *$'\n'*) CANDIDATES="$(
         printf '%s\n' "${PARSED#*$'\n'}" \
@@ -154,7 +173,19 @@ $(resolve_vars "$m" "$ASSIGNMENTS")"
     # candidates rather than blocking them - fail open.
     CWD_PREFIX=""; CWD_KNOWN=1
     CWD_PREFIX="$(command_cwd "$MASKED")" || CWD_KNOWN=0
-    while IFS= read -r target; do
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      # A candidate is `TARGET` or `TARGET<TAB>ROLE` (MT-033 C-5, AC-6). Split
+      # FIRST: everything below - resolve_vars, the $EXEMPT membership test,
+      # path_is_implausible, the unmask, check_path - is about the path alone,
+      # and $EXEMPT in particular is an exact string comparison against the
+      # resolved mutate.sh FILE argument, which a role left on the string would
+      # silently stop matching. Neither a target nor a role can contain a tab.
+      role=""
+      target="$line"
+      case "$line" in
+        *"$TAB"*) target="${line%%"$TAB"*}"; role="${line#*"$TAB"}" ;;
+      esac
       [ -z "$target" ] && continue
       # Resolved before it is judged, so that `"$F"` is either a real path or an
       # honest decline. Still masked at this point, so a value carrying a quoted
@@ -173,10 +204,10 @@ $target"*) continue ;; esac
       # cannot say what it is looking at does not block. Fail open, as ever.
       case "$target" in *$'\n'*) continue ;; esac
       if path_is_absolute "$target"; then
-        check_path "$target"
+        check_path "$target" "$role"
       elif [ "$CWD_KNOWN" = 1 ]; then
         target="$(normalize_rel "${CWD_PREFIX:+$CWD_PREFIX/}$target")" || continue
-        check_path "$target"
+        check_path "$target" "$role"
       fi
     done <<< "$CANDIDATES"
     ;;
