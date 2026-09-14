@@ -394,4 +394,366 @@ assert_allowed "$FIX" 'echo x > src/main.ts' 'writing source with no story'
 r="$(guard "$FIX" Write file_path src/main.ts)"
 assert_eq "Write tool with no story" "" "$r"
 
+# ===========================================================================
+# MT-031: the extractors must read an OPERAND, not the last word.
+#
+# Two defects in the five extractors at .claude/hooks/phase-guard.sh:91-95,
+# with five measured symptoms - two false positives and THREE bypasses that let
+# a write to a frozen source file through during RED:
+#
+#   (a) a command NAME matches inside a masked span, so prose in a quoted
+#       argument or a heredoc body is read as an invocation;
+#   (b) `awk '{print $NF}'` takes the LAST WORD of the match - which is the
+#       redirect target when the command has a trailing redirect, and a
+#       fragment of the sed script when the match is truncated by `(`.
+#
+# Every assertion below names the reported PATH, never merely "it was blocked":
+# a guard that refuses `sed -i 's|a|b|' src/main.ts` because it thinks the path
+# is `s` is right by accident, and that accident is the defect.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+describe "MT-031 AC-1: prose in quoted data is not a command invocation"
+set_phase "$FIX" RED
+
+# The A/B pair from the field report: two `--dry-run --allow-empty` commits
+# differing only in whether the message mentions the in-place editor. NEITHER
+# WRITES ANYTHING, in any phase. Variant A is allowed today; variant B blocks
+# on `path: sed -i hard-BLOCKED with its own expression reported as the`.
+#
+# The cases below deliberately do NOT reuse that one sentence. The contract
+# being restored is CLAUDE.md's "quoted arguments and heredoc bodies are data,
+# not syntax", and a fix that special-cases an observed phrase satisfies a
+# single-sentence test while leaving the contract false. So: arbitrary prose,
+# several unrelated sentences, and every one of the six command names.
+assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
+a real in-place edit hard-BLOCKED with its own expression reported as the
+EOF' 'variant A: the same shape, without the phrase'
+
+assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
+Never reach for sed -i on a file the phase has frozen.
+EOF' 'heredoc prose naming the in-place flag'
+
+assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
+The reviewer asked why sed -i was mentioned in the handoff at all.
+A second paragraph, so the body is more than one line.
+EOF' 'a two-paragraph heredoc naming the in-place flag'
+
+assert_allowed "$FIX" 'git commit --dry-run --allow-empty -m "do not reach for sed -i here"' \
+  'a quoted argument naming the in-place flag'
+
+# Defect (a) with NO mask character inside the match, so it cannot be fixed by
+# widening a character class alone: `\bsed\b` matches the `sed` in `sed-i`, and
+# `$NF` then reports a fragment of an English sentence as the path. Blocked
+# today on `sed-i` and on `sed-i, ever`.
+assert_allowed "$FIX" 'git commit --dry-run --allow-empty -m "sed-i"' \
+  'a hyphenated mention with no whitespace to mask'
+assert_allowed "$FIX" 'git commit --dry-run --allow-empty -m "never sed-i, ever"' \
+  'a hyphenated mention inside a sentence'
+
+# The other five command names, in prose. These are ALLOWED TODAY - the
+# `tee`, `cp|mv` and `rm|touch` extractors require `[[:space:]]+` after the
+# name, and a masked space is \006, which is not [[:space:]]. They are
+# regression guards on a rewrite that replaces those classes, and they are
+# earned by the mutation in DV-5.
+assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
+We should cp the audit notes into the wiki before review.
+EOF' 'heredoc prose naming cp'
+assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
+Do not rm the gate logs while a story is open.
+EOF' 'heredoc prose naming rm'
+assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
+The plan was to mv the fixture helpers into a shared file.
+EOF' 'heredoc prose naming mv'
+assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
+Nothing in this change should touch the frozen tests at all.
+EOF' 'heredoc prose naming touch'
+assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
+We tee the gate output so the log survives a crash.
+EOF' 'heredoc prose naming tee'
+assert_allowed "$FIX" 'git commit --dry-run --allow-empty -m "we cp docs into the wiki by hand"' \
+  'a quoted argument naming cp'
+
+# ---------------------------------------------------------------------------
+describe "MT-031 AC-1b: the same defect through a write the phase PERMITS"
+set_phase "$FIX" RED
+
+# docs is writable in RED, so this command is entirely legitimate. Today it is
+# hard-BLOCKED on `path: sed -i expression as the path argument. False
+# positive, so` with `category: source`.
+#
+# BOTH halves are required. The softer exit of this defect is a decline, and a
+# fix that turns the block into a decline has moved the noise rather than
+# removed it - so the decline log must stay empty too.
+rm -f "$FIX/.claude/state/phase-guard-declined.log"
+assert_allowed "$FIX" 'cat >> docs/notes.md <<'"'"'EOF'"'"'
+The guard took the sed -i expression as the path argument. False positive, so
+it declined and logged it.
+EOF' 'a permitted docs append whose prose names the in-place flag'
+assert_eq "and nothing is appended to the decline log" "" \
+  "$(cat "$FIX/.claude/state/phase-guard-declined.log" 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+describe "MT-031 AC-2 and C-3: a real in-place edit is blocked on its operand"
+set_phase "$FIX" RED
+
+# ALL OF THESE PASS TODAY (regression guards, earned by DV-1). They are the
+# criterion that stops AC-1 being satisfied by deleting the `sed -i` heuristic:
+# delete it and every assertion in this block goes red.
+#
+# The option spellings are C-3's pin, checked against real sed: with a bare
+# script argument the files are every positional after it; with -e, --expression
+# or -f there is no positional script, so every positional is a file.
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts"          src/main.ts 'sed -i on frozen source'
+assert_blocked "$FIX" "sed -i.bak 's/a/b/' src/main.ts"      src/main.ts 'sed -i.bak on frozen source'
+assert_blocked "$FIX" "sed --in-place 's/a/b/' src/main.ts"  src/main.ts 'sed --in-place on frozen source'
+assert_blocked "$FIX" "sed -i -e 's/a/b/' src/main.ts"       src/main.ts 'sed -i -e EXPR'
+assert_blocked "$FIX" 'sed -i --expression=s/a/b/ src/main.ts' src/main.ts 'sed -i --expression=EXPR'
+assert_blocked "$FIX" 'sed -i -f script.sed src/main.ts'     src/main.ts 'sed -i -f SCRIPTFILE'
+
+# C-3: EVERY operand, not the last one. `sed -i EXPR a b` writes both a and b -
+# measured against real sed - so a frozen operand followed by a permitted one
+# is a fourth bypass, and it is not in the story's symptom list: today
+# `sed -i 's/a/b/' src/main.ts docs/notes.md` is ALLOWED, because `$NF` is the
+# permitted file. The reverse order blocks, which is how it stayed hidden.
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts docs/notes.md" src/main.ts \
+  'a frozen operand followed by a permitted one'
+assert_blocked "$FIX" "sed -i 's/a/b/' docs/notes.md src/main.ts" src/main.ts \
+  'a permitted operand followed by a frozen one'
+assert_blocked "$FIX" "sed -i -e 's/a/b/' src/main.ts docs/notes.md" src/main.ts \
+  'the -e form, frozen operand first'
+assert_blocked "$FIX" 'rm src/main.ts docs/notes.md' src/main.ts \
+  'rm with a frozen operand followed by a permitted one'
+
+# ---------------------------------------------------------------------------
+describe "MT-031 C-3: cp and mv judge the destination, not every operand"
+set_phase "$FIX" RED
+
+# ALL OF THESE PASS TODAY (regression guards, earned by re-running DV-4's M2 -
+# see `## Regressions` R-1). They exist because the block above pins the
+# OPPOSITE rule for `sed` and `rm` - every operand - and nothing pinned this
+# half: `cp a b c` copies a AND b into c, so `b` is a READ and only the last
+# argument is written. C-3's table says so, PO-11 measured it and told GREEN
+# not to "fix" it, and GREEN's own scepticism list repeats it - three claims,
+# zero assertions. Every cp/mv case in this suite had exactly two operands, so
+# a guard that judged EVERY cp operand passed the whole suite untouched: at
+# GATES the mutation `361s/lastop()/allops()/` on .claude/hooks/lib.sh, which
+# is exactly that change, reddened 0 assertions where 1 was predicted. The two
+# `assert_allowed` cases below are what it has to catch now.
+#
+# The trap being closed is a precision failure, not a strictness one. MT-031
+# exists to make the guard precise; `cp a b c` is the one place the fix
+# deliberately declines to block, and an unpinned precision claim is what the
+# next rewrite breaks silently.
+assert_allowed "$FIX" 'cp docs/notes.md src/main.ts docs/other.md' \
+  'cp with three arguments: the frozen file in the middle is a READ'
+assert_allowed "$FIX" 'mv docs/notes.md src/main.ts docs/other.md' \
+  'mv with three arguments: the frozen file in the middle is a READ'
+
+# The controls, aimed at the other way the two cases above could pass: the
+# guard having stopped looking at cp/mv altogether, which would make them
+# allowed for no reason at all. Two operands must still block on the
+# destination, and so must three when the destination is the frozen one - so
+# what is pinned is the POSITION of the operand, not the mere presence of a
+# frozen path somewhere in the command.
+assert_blocked "$FIX" 'cp docs/notes.md src/main.ts'               src/main.ts \
+  'control: two-operand cp onto frozen source still blocks'
+assert_blocked "$FIX" 'mv docs/notes.md src/main.ts'               src/main.ts \
+  'control: two-operand mv onto frozen source still blocks'
+assert_blocked "$FIX" 'cp docs/notes.md docs/other.md src/main.ts' src/main.ts \
+  'control: three-operand cp whose DESTINATION is frozen still blocks'
+assert_blocked "$FIX" 'mv docs/notes.md docs/other.md src/main.ts' src/main.ts \
+  'control: three-operand mv whose DESTINATION is frozen still blocks'
+
+# ---------------------------------------------------------------------------
+describe "MT-031 AC-3: a metacharacter in the expression changes nothing"
+set_phase "$FIX" RED
+
+# The first five pass today. `(` `)` reports `s` - right by accident, on a
+# fragment of the script - and `!` together with `(` `)` is ALLOWED OUTRIGHT,
+# which is the plainest of the three bypasses: no redirect, no variable, just
+# a capture group, which is the most ordinary thing a sed script contains.
+assert_blocked "$FIX" "sed -i 's|a|b|' src/main.ts"             src/main.ts 'a pipe in the expression'
+assert_blocked "$FIX" "sed -i 's/a/b&c/' src/main.ts"           src/main.ts 'an ampersand in the replacement'
+assert_blocked "$FIX" "sed -i 's/a;b/c/' src/main.ts"           src/main.ts 'a semicolon in the expression'
+assert_blocked "$FIX" "sed -i 's/a<b>c/d/' src/main.ts"         src/main.ts 'angle brackets in the expression'
+assert_blocked "$FIX" "sed -i '/x/!s/a/b/' src/main.ts"         src/main.ts 'a negated address'
+assert_blocked "$FIX" "sed -i 's/\\(a\\)/b/' src/main.ts"         src/main.ts 'a capture group'
+assert_blocked "$FIX" "sed -i '/x/!s/\\(a\\)/b/' src/main.ts"     src/main.ts 'a negated address AND a capture group'
+assert_blocked "$FIX" "sed -i '/x/!s/\\(a\\)|b;c<d>e&f/g/' src/main.ts" src/main.ts 'every one of them at once'
+
+# The same defect seen from the false-positive side: a capture group in an
+# expression against a path the phase PERMITS. Today this is blocked on `s`,
+# so a legitimate docs edit is refused as `source`.
+assert_allowed "$FIX" "sed -i 's/\\(a\\)/b/' docs/notes.md" \
+  'a capture group in an expression writing docs'
+
+# ---------------------------------------------------------------------------
+describe "MT-031 AC-4: a target outside the repository root is nobody's business"
+set_phase "$FIX" RED
+
+# ALL FOUR PASS TODAY (regression guards, earned by DV-2). The scratchpad this
+# harness tells agents to use is outside the tree, and a probe script written
+# there is not the lock's business in any phase.
+assert_allowed "$FIX" "sed -i 's/a/b/' /tmp/claude/scratch/sib.py" \
+  'an MSYS absolute path outside the repository'
+assert_allowed "$FIX" "sed -i 's/a/b/' 'C:/Users/x/AppData/Local/Temp/claude/sib.py'" \
+  'a quoted C:/ path outside the repository'
+assert_allowed "$FIX" 'sed -i '"'"'s/a/b/'"'"' "C:\Users\x\AppData\Local\Temp\claude\sib.py"' \
+  'a double-quoted C:\ path outside the repository'
+# `.py`, not `.md`: `../outside.md` classifies as `docs`, so it is permitted for
+# a second reason and the case asserts nothing about being outside the tree.
+# DV-2b found that by failing to redden it.
+assert_allowed "$FIX" "sed -i 's/a/b/' ../outside.py" \
+  'a relative climb out of the tree'
+
+# ---------------------------------------------------------------------------
+describe "MT-031 AC-5: Symptom B, reproduced - the expression is scanned, not the operand"
+set_phase "$FIX" RED
+
+# Filed as "observed once, does not currently reproduce" after ten variants.
+# It reproduces deterministically against this fixture, in RED and in PLANNED
+# alike, on the verbatim expression from the field report - which answers the
+# story's open question: the active PHASE does not interact with candidate
+# extraction at all.
+#
+# The trigger is Symptom D's, not a fourth mechanism: `(` in `min(` terminates
+# the extractor's character class INSIDE the script, `$NF` returns the
+# truncated fragment `s|        if a.ndim == 4 and min` - one field, because
+# the spaces inside the quotes are masked - and that fragment carries an
+# alphanumeric and no paren, so path_is_implausible believes it and the guard
+# blocks on it.
+B_EXPR="sed -i 's|        if a.ndim == 4 and min(a.shape[1], a.shape[3]) <= 8 ...|...|'"
+assert_allowed "$FIX" "$B_EXPR /tmp/claude/scratch/sib.py" \
+  'the field report verbatim, against a scratchpad path'
+assert_blocked "$FIX" "$B_EXPR src/main.ts" src/main.ts \
+  'the same expression against a frozen source file'
+
+# ---------------------------------------------------------------------------
+describe "MT-031 AC-6: a trailing redirect does not hide the operand"
+set_phase "$FIX" RED
+
+# The bypass. Two commands differing by one space: the control blocks, and
+# `> /dev/null` is ALLOWED - the guard sees nothing, and a real source file in
+# place of the probe's nonexistent one would have been edited during RED.
+#
+# The unspaced and `2>` forms block TODAY, but on the redirect rather than the
+# file, so they must fail here on the reported path - a fix that preserves the
+# accident while leaving the hole open does not pass. And the last two rows
+# redirect to a path the phase PERMITS, which is a more ordinary thing to write
+# than /dev/null and bypasses the guard identically: special-casing /dev/null
+# closes nothing.
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts"                 src/main.ts 'control: no redirect'
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts > /dev/null"     src/main.ts 'a spaced redirect to /dev/null'
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts >/dev/null"      src/main.ts 'an unspaced redirect to /dev/null'
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts 2>/dev/null"     src/main.ts 'a stderr redirect'
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts > docs/log.txt"  src/main.ts 'a redirect to a path the phase permits'
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts >> docs/log.txt" src/main.ts 'an appending redirect to a permitted path'
+
+# ---------------------------------------------------------------------------
+describe "MT-031 AC-7: every write-capable extractor, not only sed"
+set_phase "$FIX" RED
+
+# Three fail today and three pass. All six stay here: a rewrite of the
+# extractor block is exactly what breaks the three that work, and the three
+# that work are earned by the mutations in DV-3.
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts > /dev/null" src/main.ts 'sed -i with a trailing redirect'
+assert_blocked "$FIX" 'cp docs/notes.md src/main.ts > /dev/null' src/main.ts 'cp with a trailing redirect'
+assert_blocked "$FIX" 'mv docs/notes.md src/main.ts > /dev/null' src/main.ts 'mv with a trailing redirect'
+assert_blocked "$FIX" 'rm src/main.ts > /dev/null'               src/main.ts 'rm with a trailing redirect'
+assert_blocked "$FIX" 'touch src/new.ts > /dev/null'             src/new.ts  'touch with a trailing redirect'
+assert_blocked "$FIX" 'echo x | tee src/main.ts > /dev/null'     src/main.ts 'tee with a trailing redirect'
+
+# And the same six against a redirect the phase permits, so that no fix can
+# pass this block by filtering /dev/null.
+assert_blocked "$FIX" 'cp docs/notes.md src/main.ts > docs/log.txt' src/main.ts 'cp with a redirect to a permitted path'
+assert_blocked "$FIX" 'mv docs/notes.md src/main.ts > docs/log.txt' src/main.ts 'mv with a redirect to a permitted path'
+assert_blocked "$FIX" 'rm src/main.ts >> docs/log.txt'              src/main.ts 'rm with an appending redirect'
+
+# tee's immunity comes from `[[:space:]]` in its terminating class, not from the
+# `>` the class also excludes - so the unspaced form is where that `>` earns its
+# place. Both pass today; DV-3(ii) and DV-3(iii) are aimed at exactly these two.
+assert_blocked "$FIX" 'echo x | tee src/main.ts>/dev/null'    src/main.ts 'tee with an unspaced redirect'
+assert_blocked "$FIX" 'echo x | tee -a src/main.ts>/dev/null' src/main.ts 'tee -a with an unspaced redirect'
+
+# ---------------------------------------------------------------------------
+describe "MT-031 AC-8: a zero-candidate write leaves a trace"
+set_phase "$FIX" RED
+
+# What made Symptom C invisible: after the bypass the decline log was empty,
+# and after a permitted `echo x > docs/notes.md` it was also empty. The two
+# outcomes - "the extractors found nothing to judge" and "they found candidates
+# and every one was permitted" - were indistinguishable from outside.
+#
+# The discrimination this suite demands, and the shape RED chose for it (C-4,
+# amended): a single line in .claude/state/phase-guard-declined.log carrying
+# the marker `no-candidate`, the story, the phase and enough of the command to
+# act on - and logged ONLY when one of the six write-capable command names
+# appears at a real token boundary and no candidate survived. A redirect
+# operator alone does not trigger it, because `cmd > /dev/null` is ubiquitous
+# and its target is filtered on purpose; `git diff > /dev/null` must stay
+# silent.
+MT031_LOG="$FIX/.claude/state/phase-guard-declined.log"
+mt031_log_of() { rm -f "$MT031_LOG"; guard_bash "$FIX" "$1" >/dev/null; cat "$MT031_LOG" 2>/dev/null; }
+
+# POSITIVE. A write command whose operands the guard cannot see: `rm` at a real
+# token boundary, no operand in the command string at all, zero candidates,
+# ALLOWED - and it would delete source in RED. The operand parse cannot close
+# this one, which is the whole reason a trace is wanted.
+assert_allowed "$FIX" "find src -name '*.ts' | xargs rm" 'operands arriving from a pipe are unknowable'
+mt031_l="$(mt031_log_of "find src -name '*.ts' | xargs rm")"
+assert_contains "a write command with no visible operand is traced" 'no-candidate' "$mt031_l"
+assert_contains "the trace names the story"                         'T-1'          "$mt031_l"
+assert_contains "the trace names the phase"                         'RED'          "$mt031_l"
+assert_contains "the trace quotes the command, so the log is actionable" 'xargs rm' "$mt031_l"
+assert_eq "the trace is one line, not a transcript" 1 "$(printf '%s' "$mt031_l" | grep -c .)"
+
+# Same shape through an input redirect, which is a READ of the list and gives
+# the guard no operand either. It must stay allowed (C-5) AND be traced:
+# "allowed" and "unexamined" are different facts and the log is where they part.
+assert_allowed "$FIX" 'xargs touch < list' 'an input redirect is still a read'
+assert_contains "an input-redirect operand list is traced too" 'no-candidate' \
+  "$(mt031_log_of 'xargs touch < list')"
+
+# NEGATIVE CONTROLS. Without these the log becomes a line per command and this
+# criterion has bought nothing.
+assert_eq "a candidate that was found and PERMITTED is not a zero-candidate trace" "" \
+  "$(mt031_log_of 'echo x > docs/notes.md')"
+assert_eq "a candidate that was found and DENIED is not one either" "" \
+  "$(mt031_log_of 'echo x > src/main.ts')"
+assert_eq "a read-only cat logs nothing" "" "$(mt031_log_of 'cat src/main.ts')"
+assert_eq "a read-only grep logs nothing" "" "$(mt031_log_of 'grep -rn export src/')"
+assert_eq "a read-only git diff logs nothing" "" "$(mt031_log_of 'git diff -- src/main.ts')"
+assert_eq "a bare redirect to /dev/null is not a write-capable command" "" \
+  "$(mt031_log_of 'git diff > /dev/null')"
+
+# And the trace is distinguishable from the OTHER thing this log carries. An
+# unresolvable candidate is a declined parse, not an absent one, and one event
+# gets one line.
+mt031_l="$(mt031_log_of "sed -i 's/a/b/' \"\$EXPORTED_ELSEWHERE\"")"
+assert_contains "an unresolvable candidate still logs as an implausible target" \
+  'implausible target' "$mt031_l"
+assert_eq "and is not ALSO reported as a zero-candidate command" 0 \
+  "$(printf '%s' "$mt031_l" | grep -c 'no-candidate')"
+
+# Note on the Symptom C command, deliberately not asserted here: once AC-6 is
+# satisfied, `sed -i 's/a/b/' src/main.ts > /dev/null` yields a candidate and
+# is BLOCKED, so it is no longer a zero-candidate command and must not be
+# traced. It is covered by AC-6 above, which is the stronger outcome.
+
+# ---------------------------------------------------------------------------
+describe "MT-031 C-5: the harness's own idioms must keep working"
+set_phase "$FIX" RED
+
+# Measured allowed today. A rewrite of the extractor block is the single most
+# likely thing to break them, and three are idioms the harness itself pushes
+# agents towards.
+assert_allowed "$FIX" "sed -i 's/a/b/' docs/notes.md" 'sed -i on docs in RED'
+assert_allowed "$FIX" 'sed -i "s|^a/$|a/\nb/|" .gitignore' 'sed -i on .gitignore in RED'
+assert_allowed "$FIX" "bash scripts/mutate.sh src/main.ts 's/a/b/' -- true" \
+  'the mutate.sh FILE exemption'
+assert_allowed "$FIX" 'grep -n "sed -i" docs/notes.md' 'grepping docs for the flag'
+assert_allowed "$FIX" "sed -i 's/a/b/' docs/notes.md > /dev/null" \
+  'sed -i on docs with a trailing redirect'
+
 summary "phase-guard"

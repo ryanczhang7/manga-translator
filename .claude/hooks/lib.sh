@@ -267,6 +267,164 @@ mutate_targets() {
     | tr -d '"'"'"
 }
 
+# --- Write targets in a command string ---------------------------------------
+#
+# write_candidates <masked-command>   One write target per line, preceded by a
+# single verdict line: `W` when the command names a write-capable command at a
+# REAL token boundary, `-` when it does not. (The verdict is what tells "the
+# extractors found nothing to judge" from "there was nothing to find" - see
+# phase-guard.sh and MT-031 AC-8.)
+#
+# This replaces five greps whose last stage was `awk '{print $NF}'`. The last
+# word of a match is not an operand. It is the redirect target when the command
+# ends in one - `sed -i EXPR src/main.ts > /dev/null` yielded /dev/null, which
+# the candidate filter then dropped, so a source file was writable during RED.
+# It is a fragment of a sed script when `(` truncated the match inside the
+# expression. And it is the wrong file whenever a command takes more than one
+# operand: `sed -i EXPR frozen.ts permitted.md` writes both and only the last
+# was judged. Five symptoms, four bypasses, one cause.
+#
+# The input is mask_shell_quotes output, so every operator and every space
+# inside a quoted span or a heredoc body is already a control character in
+# \001-\010. That is what makes a boundary "real": this scanner splits only on
+# LITERAL whitespace and on literal | & ; ( ) < >, so prose mentioning `sed -i`
+# is one token and can never be a command name. Widening a character class does
+# not do that - `\bsed\b` matches the `sed` in the unmasked token `sed-i`, so
+# `git commit -m "sed-i"` was blocked on a path of `sed-i` with no mask
+# character anywhere in the match.
+#
+# Per-command operand semantics (MT-031 C-3, measured against real sed):
+#
+#   sed, in-place only  every positional, minus the first when no
+#                       -e/--expression/-f/--file supplied the script
+#   tee, rm, touch      every non-option argument
+#   cp, mv              the LAST non-option argument - the destination. With
+#                       three arguments `cp a b c` reads b; judging every
+#                       operand would be a false positive, not a fix.
+#   > >> >|             the word that follows it
+#   < <<                a READ. `xargs touch < list` names no write target.
+#
+# An IO number glued to a redirect (`2>`) is a file descriptor, not an operand:
+# it used to be reported as the path `2>/dev/null`, which is a block for the
+# wrong reason and would have survived a narrower fix.
+#
+# Nothing here consults the filesystem: `sed -i -f script.sed src/main.ts` must
+# judge src/main.ts whether or not script.sed exists.
+write_candidates() {
+  printf '%s' "$1" | awk '
+    function isname(w) {
+      return (w == "sed" || w == "tee" || w == "cp" || w == "mv" || w == "rm" || w == "touch")
+    }
+    function emit(t) { if (t != "") OUT = OUT t "\n" }
+    function allops(   k) {
+      for (k = 1; k <= na; k++) if (substr(A[k], 1, 1) != "-") emit(A[k])
+    }
+    function lastop(   k, last) {
+      last = ""
+      for (k = 1; k <= na; k++) if (substr(A[k], 1, 1) != "-") last = A[k]
+      emit(last)
+    }
+    function sedops(   k, j, a, rest, ch, inplace, hasscript, skip, np) {
+      inplace = 0; hasscript = 0; skip = 0; np = 0
+      for (k = 1; k <= na; k++) {
+        a = A[k]
+        if (skip) { skip = 0; continue }
+        if (substr(a, 1, 2) == "--") {
+          if (a == "--in-place" || substr(a, 1, 11) == "--in-place=") inplace = 1
+          else if (a == "--expression" || a == "--file") { hasscript = 1; skip = 1 }
+          else if (substr(a, 1, 13) == "--expression=" || substr(a, 1, 7) == "--file=") hasscript = 1
+          continue
+        }
+        if (substr(a, 1, 1) == "-" && length(a) > 1) {
+          rest = substr(a, 2)
+          for (j = 1; j <= length(rest); j++) {
+            ch = substr(rest, j, 1)
+            # -i takes an OPTIONAL suffix, so everything after it is the
+            # backup extension rather than more flags: -i.bak, not -i -. -b -a -k.
+            if (ch == "i") { inplace = 1; break }
+            if (ch == "e" || ch == "f") {
+              hasscript = 1
+              if (j == length(rest)) skip = 1
+              break
+            }
+          }
+          continue
+        }
+        np++; P[np] = a
+      }
+      if (!inplace) return
+      FLAG = 1
+      for (k = (hasscript ? 1 : 2); k <= np; k++) emit(P[k])
+    }
+    function flushcmd() {
+      if (cmd == "sed") sedops()
+      else if (cmd == "cp" || cmd == "mv") { FLAG = 1; lastop() }
+      else if (cmd != "") { FLAG = 1; allops() }
+      cmd = ""; na = 0
+    }
+    function endtok() {
+      if (tok == "") return
+      if (isname(tok)) { flushcmd(); cmd = tok }
+      else if (cmd != "") { na++; A[na] = tok }
+      tok = ""
+    }
+    # The word a redirect operator points at. Quote-aware, because a redirect
+    # target may be quoted, and stops at every real operator so that `>&2`
+    # yields nothing rather than swallowing the next command.
+    function readword(   w, ch, q) {
+      w = ""; q = ""
+      while (i <= n) {
+        ch = substr(S, i, 1)
+        if (ch == "\n") break
+        if (q != "") { w = w ch; if (ch == q) q = ""; i++; continue }
+        if (ch == "\"" || ch == Q) { q = ch; w = w ch; i++; continue }
+        if (index(" \t\n|&;()<>", ch) > 0) break
+        w = w ch; i++
+      }
+      return w
+    }
+    BEGIN { Q = sprintf("%c", 39); OUT = ""; FLAG = 0 }
+    { S = (NR > 1 ? S "\n" $0 : $0) }
+    END {
+      n = length(S); i = 1; tok = ""; q = ""; cmd = ""; na = 0
+      while (i <= n) {
+        c = substr(S, i, 1)
+        # A LITERAL newline is always a command boundary and never inside a
+        # quote: the masker emits \010 for a newline that a quote spans. So it
+        # also closes a span this scanner only thinks is open - a comment or a
+        # heredoc body carries its apostrophes through masking unchanged
+        # (`# it` + `s fine`), and without this line the redirect on the NEXT
+        # line is swallowed as quoted data and a real write to source goes
+        # unjudged.
+        if (c == "\n") { q = ""; endtok(); flushcmd(); i++; continue }
+        # A quoted span is one token whatever is inside it. The masker leaves
+        # the quote characters themselves in place, which is what lets the
+        # scanner see the span without re-parsing the shell.
+        if (q != "") { tok = tok c; if (c == q) q = ""; i++; continue }
+        if (c == "\"" || c == Q) { q = c; tok = tok c; i++; continue }
+        if (c == " " || c == "\t") { endtok(); i++; continue }
+        if (c == ";" || c == "|" || c == "&" || c == "(" || c == ")") {
+          endtok(); flushcmd(); i++; continue
+        }
+        if (c == ">" || c == "<") {
+          if (tok ~ /^[0-9]+$/) tok = ""     # an IO number, not an operand
+          endtok()
+          i++
+          if (substr(S, i, 1) == c) i++                                  # >> <<
+          else if (c == ">" && substr(S, i, 1) == "|") i++               # >|
+          if (c == "<" && substr(S, i, 1) == "-") i++                    # <<-
+          while (i <= n && (substr(S, i, 1) == " " || substr(S, i, 1) == "\t")) i++
+          w = readword()
+          if (c == ">") emit(w)
+          continue
+        }
+        tok = tok c; i++
+      }
+      endtok(); flushcmd()
+      printf "%s\n%s", (FLAG ? "W" : "-"), OUT
+    }'
+}
+
 # --- Paths ------------------------------------------------------------------
 
 # lower <text>   Lower-cased with tr, not with the bash 4 case-conversion

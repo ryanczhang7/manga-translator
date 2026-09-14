@@ -57,6 +57,26 @@ decline() {
   return 0
 }
 
+# no_candidate <command>   The other half of the same trace, and the one that
+# was missing: a command that NAMES a write-capable tool and yet yields no
+# target the guard can judge. `find src -name '*.ts' | xargs rm` deletes source
+# in RED and no operand parse can see it - the shell has not written the path
+# down. So the guard allows it, as it must, and says so here.
+#
+# Same file as decline(), deliberately: .claude/state/README.md and
+# .claude/settings.json agree on the state files that exist, and
+# .claude/tests/settings.test.sh checks that agreement in both directions. One
+# event gets one line, and the two markers are distinct - a DECLINED candidate
+# is a parse the guard could not believe, not an absent one.
+no_candidate() {
+  local frag="${1//$'\n'/ }"
+  frag="${frag//$'\t'/ }"
+  printf 'no-candidate %s in %s: no write target parsed from: %s\n' \
+    "${STORY_ID:-none}" "$PHASE" "${frag:0:200}" \
+    >> "$HARNESS_ROOT/.claude/state/phase-guard-declined.log" 2>/dev/null || true
+  return 0
+}
+
 case "$TOOL" in
   Write|Edit|MultiEdit|NotebookEdit)
     check_path "$(json_get_string file_path || true)"
@@ -85,15 +105,33 @@ case "$TOOL" in
     # used to yield `a.ts)`, which the guard declined as unreadable - a hole
     # in the shape of a subshell. `>|` is a redirect too. And `<` ends the
     # rm/touch operand list, because `xargs touch < list` reads `list`.
-    CANDIDATES="$(
-      {
-        printf '%s\n' "$MASKED" | grep -oE '>(>|\|)?[[:space:]]*[^|&;><()[:space:]]+'  | sed -E 's/^>(>|\|)?[[:space:]]*//'
-        printf '%s\n' "$MASKED" | grep -oE '\btee\b([[:space:]]+-a)?[[:space:]]+[^|&;><()[:space:]]+' | awk '{print $NF}'
-        printf '%s\n' "$MASKED" | grep -oE '\bsed\b[^|&;()]*-i[^|&;()]*'              | awk '{print $NF}'
-        printf '%s\n' "$MASKED" | grep -oE '\b(cp|mv)\b[[:space:]]+[^|&;()]+'         | awk '{print $NF}'
-        printf '%s\n' "$MASKED" | grep -oE '\b(rm|touch)\b[[:space:]]+[^|&;<>()]+'    | tr ' ' '\n' | grep -vE '^(rm|touch|-.*)$'
-      } 2>/dev/null | tr -d '"'"'" | grep -vE '^\s*$|^-|\*|^/dev/' | sort -u
-    )"
+    #
+    # The five greps that used to live here read the LAST WORD of a match, not
+    # an operand, which is four bypasses and two false positives in one line of
+    # awk - see write_candidates in lib.sh and MT-031. One pass over the command
+    # string now, rather than five: this hook runs on every Bash, Write, Edit,
+    # MultiEdit and NotebookEdit call, under a 15 s PreToolUse timeout, and a
+    # hook that times out fails OPEN, which is the lock silently off.
+    PARSED="$(write_candidates "$MASKED" 2>/dev/null)"
+    WRITE_CMD="${PARSED%%$'\n'*}"
+    CANDIDATES=""
+    case "$PARSED" in
+      *$'\n'*) CANDIDATES="$(
+        printf '%s\n' "${PARSED#*$'\n'}" \
+          | tr -d '"'"'" | grep -vE '^\s*$|^-|\*|^/dev/' | sort -u
+      )" ;;
+    esac
+    # AC-8. A write-capable command whose operands the guard cannot see -
+    # `find src -name '*.ts' | xargs rm`, `xargs touch < list` - is ALLOWED and
+    # unexamined, and those are different facts. Until this line they were
+    # indistinguishable from outside, which is how the redirect bypass stayed
+    # invisible: after it the log was empty, and after a permitted write the log
+    # was empty too. A redirect operator alone does not count - `cmd >
+    # /dev/null` is ubiquitous and its target is dropped on purpose, so tracing
+    # it would drown the file this trace exists to make readable.
+    if [ -z "$CANDIDATES" ] && [ "$WRITE_CMD" = "W" ]; then
+      no_candidate "$CMD"
+    fi
     # `$` is no longer filtered out here. It was, silently, which made the ONE
     # recipe the harness pushes an agent towards in RED - mutate the production
     # file, watch the corrected test fail, revert - pass unchecked. A candidate
