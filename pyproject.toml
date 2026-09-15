@@ -20,6 +20,12 @@ readme = "README.md"
 # ONNX Runtime versus torch+cu128 and adds it.
 dependencies = [
     "PySide6>=6.8,<6.10",
+    # Added by MT-004 (PO-1): `store/intake.py` decodes page scans to read their
+    # pixel dimensions and to reject an undecodable scan. `Image.open()` alone is
+    # not enough - it accepts a header-valid, body-corrupt PNG and reports a
+    # confident size for it - so the reader calls `img.load()`. Pillow ships
+    # `py.typed`, so no mypy override is needed or wanted.
+    "Pillow>=11,<14",
 ]
 
 [project.scripts]
