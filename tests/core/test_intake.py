@@ -18,6 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
 
 

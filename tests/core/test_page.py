@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+
 from mangatl.domain.page import PAGE_SUFFIXES, Chapter, Page, natural_key, order_filenames
 
 # -- PAGE_SUFFIXES: pinned exactly, per `## Contract` -------------------------
