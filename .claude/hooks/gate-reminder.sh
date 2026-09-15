@@ -38,7 +38,37 @@ json_is_true stop_hook_active && exit 0
 load_state
 case "$PHASE" in GREEN|GATES) ;; *) exit 0 ;; esac
 
+# --- whose story is this, anyway? --------------------------------------------
+# `.claude/state/current-story.env` names one story for the whole tree, and this
+# hook reads it with no notion of which session is asking. Measured, a session on
+# an unrelated branch was returned {"decision":"block"} and told to gate a story
+# belonging to someone else's: a hard stop caused by another session's state, in
+# a tree where two things running at once is the ordinary shape of the harness -
+# an orchestrator that dispatches a subagent and then runs a script is two things
+# in one tree.
+#
+# So the block narrows rather than disappears. On the story's own branch every
+# block below is exactly as it was; on another branch the same text is said
+# instead of enforced, naming both branches so the reader can tell whose
+# obligation it is. Detection, not a lock: nothing here serialises anything.
+#
+# The branch comes from the state file, which `phase.sh set` writes from the
+# story's frontmatter, so the two agree - and this hook has to run in trees where
+# the story file is not there to read. Either side empty (a detached HEAD, a
+# state file older than `phase.sh set`) means we cannot tell whose session this
+# is, so it fails open and behaves exactly as before.
+CHECKOUT_BRANCH="$(git -C "$HARNESS_ROOT" branch --show-current 2>/dev/null || printf '')"
+OTHER_SESSION=0
+if [ -n "$CHECKOUT_BRANCH" ] && [ -n "${BRANCH:-}" ] && [ "$CHECKOUT_BRANCH" != "$BRANCH" ]; then
+  OTHER_SESSION=1
+fi
+
 block() {
+  if [ "$OTHER_SESSION" = 1 ]; then
+    warn "$1
+
+Said rather than enforced: this checkout is on '${CHECKOUT_BRANCH}', and story ${STORY_ID} belongs on '${BRANCH}'. The harness keeps one active story per working tree, so that obligation is probably someone else's - another session, or the agent that dispatched you. If it is yours, check out '${BRANCH}' before running the gates, because gates.sh will refuse to record a run made from this branch."
+  fi
   printf '{"decision":"block","reason":"%s"}\n' "$(json_escape "$1")"
   exit 0
 }

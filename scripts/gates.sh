@@ -36,7 +36,18 @@
 # so out loud. A --fast run is never recorded: it is not a full run.
 #
 # A full run writes its own summary into the story's ## Gate results, stamped
-# with the commit and a hash of the code it ran against. Nobody pastes it.
+# with the commit and a hash of the code it ran against. Nobody pastes it - and
+# it goes into the story only when the checkout is that story's branch, because
+# `.claude/state/current-story.env` names one story for the whole tree rather
+# than for the caller. On a mismatch the run still happens and still exits on
+# its own verdict; only the recording is refused, and it says so.
+#
+# Two things running in one tree is the ordinary shape of this harness, not an
+# exotic configuration: an orchestrator that dispatches a subagent and then runs
+# a script is two of them. So this script notices rather than locks - it also
+# fingerprints project.conf before and after the gates and fails if the manifest
+# moved under the run, because a floor read at start-up printed beside a count
+# observed afterwards is a pairing that never existed.
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -111,6 +122,35 @@ while IFS= read -r line; do
 " ;;
   esac
 done < "$CONF"
+
+# --- the manifest must not change under the run -----------------------------
+# Every table above was read ONCE, here, and the gate commands run afterwards.
+# Anything that edits project.conf in between - a subagent mid-write, a second
+# session, a script the orchestrator ran next - produces a summary whose numbers
+# are each real and whose PAIRING never existed: `PASS lint (0s, observed 5,
+# floor 1)` printed as a clean pass while the file on disk already said
+# `floor | lint | 5`. That was observed, on a --fast run, and nothing caught it:
+# a --fast run is never recorded, so nothing downstream ever compares it to
+# anything. Its only consumer is whoever reads the summary and decides the phase
+# is healthy.
+#
+# The fix is detection, not a lock. The harness's concurrency is a fact of how
+# it is used - an orchestrator that dispatches a subagent and then runs a script
+# is two things in one tree - and a lock it can deadlock against its own
+# subagent is worse than the race. So: fingerprint the file here, fingerprint it
+# again just before the summary, and if they differ say so instead of printing a
+# pairing that was never true.
+#
+# Scope is project.conf and nothing else. "The files a gate reads" is the tree
+# hash's job; widening it here would fire on every ordinary edit during a long
+# build, and a new non-zero exit from this script is a new way for CI to fail.
+#
+# cksum, not sha1sum: coreutils everywhere, including the shells this harness
+# runs in on Windows. The redirection is written after 2>/dev/null so that a
+# conf deleted mid-run reports `unreadable` - which differs from any checksum,
+# so a deletion is a change - instead of a bare shell error.
+conf_fingerprint() { cksum 2>/dev/null < "$CONF" || printf 'unreadable'; }
+CONF_AT_PARSE="$(conf_fingerprint)"
 
 # --- BLOCKED: the environment would not let the gate run --------------------
 # A gate's result used to be a boolean derived from an exit code, and there is a
@@ -612,7 +652,38 @@ if [ -n "$COVERS" ] && [ -n "$STORY" ] && [ -f "$STORY_FILE" ]; then
   fi
 fi
 
+# --- did the manifest move under us? ----------------------------------------
+# Fingerprinted again, immediately before the summary that pairs the tables read
+# at start-up with the work the gates did afterwards. A difference means those
+# two halves describe different files, so the pairing is unsound - and this is
+# FAIL rather than WARN because it is the failure with no backstop: a --fast run
+# is never recorded, nothing downstream compares it, and a WARN would leave
+# `gates.sh && next-thing` proceeding on a summary this script has just said it
+# cannot vouch for. Appended to `results` and counted in `fails` like any other
+# verdict, which is deliberate: that lands it INSIDE the summary block - so the
+# exit status, the RESULT=fail stamp, the "N required gate(s) failed" line and
+# --fast's own caveats all follow without a separate early exit that would take
+# them with it. Runs in every mode that runs a gate command, --fast included,
+# because --fast is the mode this was reported on. --list and --audit run no
+# gate command and have already exited above.
+CONF_CHANGED=0
+if [ "$(conf_fingerprint)" != "$CONF_AT_PARSE" ]; then
+  CONF_CHANGED=1
+  results="$results\nFAIL         config: .claude/harness/project.conf changed while the gates were running"
+  fails=$((fails+1))
+fi
+
 printf '\n--- gate summary ---%b\n' "$results"
+if [ "$CONF_CHANGED" = 1 ]; then
+  printf '\nThe evidence, floor, waiver and slow tables above were read from\n'
+  printf '.claude/harness/project.conf before the gates ran, and the file on disk is no\n'
+  printf 'longer the file that was read. Each number above is real on its own, but the\n'
+  printf 'pairings in this summary may not correspond to any single state of that file -\n'
+  printf 'a floor read at start-up can be printed beside an observation counted after it\n'
+  printf 'changed, which is a pass that never existed. This is not a verdict on the code.\n'
+  printf 'Find what is writing the manifest - another session, a subagent, a script - and\n'
+  printf 'run the gates again on a tree nothing else is editing.\n'
+fi
 [ -n "$changes_note" ] && printf '\nchanges: %s\n' "$changes_note"
 if [ "$chwarn" -gt 0 ]; then
   printf '\n%d changed source path(s) match no covers line. Either the manifest is missing\n' "$chwarn"
@@ -682,8 +753,38 @@ else
   elif [ ! -f "$STORY_FILE" ]; then
     printf '\n(not recorded: no story file at docs/backlog/stories/%s.md)\n' "$STORY"
   else
-    record_in_story "$STORY_FILE" "$result" "$(printf '%b' "$results")"
-    printf '\nrecorded in docs/backlog/stories/%s.md (## Gate results)\n' "$STORY"
+    # `.claude/state/current-story.env` names one story for the whole tree, not
+    # for the caller, so a second session - or a script run from the wrong
+    # context - used to stamp ## Gate results into a story it was not working
+    # on. `phase.sh set` already refuses exactly this mismatch; this agrees with
+    # it. The run itself was valid: it is the RECORDING that is misdirected, so
+    # the verdict, the exit status and the machine-local stamp above are all
+    # left alone - the Stop hook reads that stamp, and suppressing it would make
+    # the hook claim the gates had never run.
+    #
+    # Compared against the STORY FILE's frontmatter, the same pair phase.sh
+    # compares, so `--story <id>` is not an override: naming the story
+    # explicitly still names a story that belongs on a branch.
+    #
+    # `git branch --show-current` is empty on a detached HEAD, and a story may
+    # carry no branch: either way there is nothing to disagree with, so fail
+    # open and record, as the harness does everywhere it cannot tell. (phase.sh
+    # reads `rev-parse --abbrev-ref HEAD`, which prints the literal `HEAD` when
+    # detached and so refuses there; the divergence is deliberate - phase.sh is
+    # granting a state transition, this is filing a record.)
+    checkout_branch="$(git -C "$ROOT" branch --show-current 2>/dev/null || printf '')"
+    story_branch="$(frontmatter_value "$STORY_FILE" branch)"
+    if [ -n "$checkout_branch" ] && [ -n "$story_branch" ] \
+       && [ "$checkout_branch" != "$story_branch" ]; then
+      printf "\n(not recorded: the checkout is on '%s' but story %s belongs on '%s')\n" \
+        "$checkout_branch" "$STORY" "$story_branch"
+      printf 'The gates above ran and their verdict stands; only the recording is refused,\n'
+      printf 'because ## Gate results would have landed in a story this checkout is not\n'
+      printf 'working on. Check out %s and run the gates again to record them.\n' "$story_branch"
+    else
+      record_in_story "$STORY_FILE" "$result" "$(printf '%b' "$results")"
+      printf '\nrecorded in docs/backlog/stories/%s.md (## Gate results)\n' "$STORY"
+    fi
   fi
 fi
 

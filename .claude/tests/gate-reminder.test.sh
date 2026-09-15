@@ -32,6 +32,17 @@ trap 'rm -rf "$FIX"' EXIT
 STAMP="$FIX/.claude/state/last-gate-run"
 STATE="$FIX/.claude/state/current-story.env"
 
+# The fixture's state file has always said `BRANCH=story/T-1-fixture` (set_phase,
+# in _lib.sh) while `git init` left the checkout on `master`. Nothing read that
+# mismatch, so it meant nothing. MT-032 C-5 makes the hook warn instead of
+# blocking when the checkout is not the story's branch - which would have turned
+# every block below into a warn for a reason none of them is about. So align the
+# fixture with the state it already claims. This is a fixture correction, not a
+# weakening: these cases are about the gate obligation, and they now assert it
+# under a precondition that is legal. The mismatch has its own describe block at
+# the end of the file.
+git -C "$FIX" checkout -q -B story/T-1-fixture 2>/dev/null
+
 # hook [stop_hook_active]   Runs the real hook and echoes its raw output.
 hook() {
   printf '{"stop_hook_active":%s}' "${1:-false}" \
@@ -283,5 +294,50 @@ set_phase "$FIX" GREEN
 rm -f "$STAMP"
 r="$(stop true)"
 assert_eq "stop_hook_active suppresses even the block" "" "$r"
+
+# --- whose story is this, anyway? --------------------------------------------
+describe "a session on another branch is told, not stopped"
+
+# MT-032 AC-4 / F-3. `.claude/state/current-story.env` is global to the tree: it
+# names one story for everything running in it, and the hook reads it with no
+# notion of which session is asking. Measured before this story, a session on
+# another branch doing something entirely unrelated was returned
+# {"decision":"block"} and told to gate T-1, a story belonging to
+# story/T-1-fixture. A hard stop caused by another session's state is not
+# cosmetic - it is a session that cannot finish - so the hook now says whose
+# story it is and lets go.
+#
+# Both sources of "the story's branch" agree here on purpose: the state file
+# says BRANCH=story/T-1-fixture and the story file's frontmatter says
+# `branch: story/T-1-fixture`. Which one the hook reads is the implementer's
+# choice; these assertions hold either way.
+story "$FIX" T-1 GREEN </dev/null
+
+git -C "$FIX" checkout -q -B unrelated-session 2>/dev/null
+set_phase "$FIX" GREEN
+rm -f "$STAMP"
+assert_warns "a session on another branch is not blocked" "story/T-1-fixture"
+w="$(warned)"
+assert_contains "and the message names the branch it is actually on" "unrelated-session" "$w"
+
+# DV-4, and the reason it exists: C-5 must NARROW the hook, not switch it off.
+# A session ON the story's branch, in GREEN, with no gate run at all, is still
+# stopped - exactly as it was before this story.
+git -C "$FIX" checkout -q -B story/T-1-fixture 2>/dev/null
+set_phase "$FIX" GREEN
+rm -f "$STAMP"
+assert_blocks "the story's own branch is still stopped" "has not been run"
+
+# The same pair for the partial-run path, so that what changed is the branch
+# test rather than one code path that happened to be looked at.
+git -C "$FIX" checkout -q -B unrelated-session 2>/dev/null
+set_phase "$FIX" GATES
+stamp_run pass no
+assert_warns "a partial run in GATES, on another branch" "story/T-1-fixture"
+
+git -C "$FIX" checkout -q -B story/T-1-fixture 2>/dev/null
+set_phase "$FIX" GATES
+stamp_run pass no
+assert_blocks "a partial run in GATES, on the story's branch" "partial"
 
 summary "gate-reminder"

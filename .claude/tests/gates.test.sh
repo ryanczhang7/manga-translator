@@ -186,9 +186,20 @@ EOF
 set_phase "$FIX" GATES
 out="$(gates --fast)"
 assert_contains "a fast run is never recorded" "not recorded in the story" "$out"
+# The story's frontmatter says `branch: story/T-1-fixture` and `git init` left
+# this fixture on `master`. Nothing read that mismatch until MT-032 AC-3, which
+# refuses to record a gate run into a story the checkout does not belong to - so
+# the precondition for "a full run records" has to be a legal one. Be on the
+# story's branch for this assertion and come back afterwards; the same technique
+# the `covers` block below uses. The assertion itself is unchanged: it is the
+# only coverage that recording works at all.
+_here="$(git -C "$FIX" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+git -C "$FIX" checkout -q -b story/T-1-fixture 2>/dev/null
 out="$(gates)"
 assert_contains "a full run still is"          "recorded in docs/backlog/stories/T-1.md" "$out"
 assert_contains "and points at CI's other script" "check-boundaries.sh" "$out"
+git -C "$FIX" checkout -q "$_here" 2>/dev/null
+git -C "$FIX" branch -q -D story/T-1-fixture 2>/dev/null
 set_phase "$FIX" ""
 
 # With nothing marked slow, --fast is a full run in everything but the record,
@@ -486,5 +497,199 @@ gates --fast >/dev/null
 assert_contains "--fast records FULL=no"      "FULL=no"  "$(cat "$FIX/.claude/state/last-gate-run")"
 gates --gate unit >/dev/null
 assert_contains "--gate records FULL=no"      "FULL=no"  "$(cat "$FIX/.claude/state/last-gate-run")"
+
+# ---------------------------------------------------------------------------
+describe "the manifest must not change under the run"
+
+# MT-032 AC-1 and AC-2 / F-1, the failure in this story with no backstop.
+# gates.sh parses project.conf into its evidence/floor/waiver/slow tables ONCE
+# at start-up and runs the gate commands afterwards. Anything that edits the
+# file in between produces a summary whose numbers are each real and whose
+# PAIRING never existed - `PASS lint (0s, observed 5, floor 1)` printed as a
+# clean pass while the file on disk says `floor | lint | 5`. It was reported off
+# a --fast run, which is never recorded, so nothing downstream ever compares it
+# to anything: its only consumer is whoever reads the summary and decides the
+# phase is healthy.
+#
+# The race is made deterministic with no sleeps and no second process by letting
+# the fixture's own gate command do the editing. That is the same interleaving
+# with the timing taken out, and it is why this is testable at all.
+set_phase "$FIX" ""
+
+conf_edits_itself() {
+  write_conf "$FIX" <<'EOF'
+gate     | lint | required | . | printf 'Contracts: 5 kept\n'; printf 'floor    | lint | 5\n' >> .claude/harness/project.conf
+evidence | lint | Contracts: [1-9][0-9]* kept
+floor    | lint | 1
+EOF
+}
+
+conf_edits_itself
+out="$(gates)"; rc=$?
+assert_contains "a full run says the manifest changed under it" \
+  "config: .claude/harness/project.conf changed while the gates were running" "$out"
+assert_contains "and it is a FAIL, not a footnote under a pass" \
+  "FAIL         config:" "$out"
+assert_contains "and says the summary's pairings may be of no single state" \
+  "may not correspond to any single state" "$out"
+assert_eq "and the run exits non-zero" "1" "$rc"
+case "$out" in
+  *"All required gates passed"*) _bad "and does not call it a pass" "it passed anyway: $out" ;;
+  *) _ok "and does not call it a pass" ;;
+esac
+
+# F-1 was OBSERVED on a --fast run. A check that only ran in full mode would fix
+# nothing that was actually reported.
+conf_edits_itself
+out="$(gates --fast)"; rc=$?
+assert_contains "--fast catches it too" \
+  "config: .claude/harness/project.conf changed while the gates were running" "$out"
+assert_eq "and --fast exits non-zero as well" "1" "$rc"
+
+# MT-032 AC-5, asserted where it can actually regress: these two lines live in
+# the same summary/record block the new failure path lands in, so a check that
+# exits early takes them with it.
+assert_contains "the subset caveat survives the new failure path" \
+  "This is a subset, not a verdict. The full run before REVIEW is what judges the story." "$out"
+assert_contains "and so does the not-recorded line" \
+  "(not recorded in the story: a partial run is not evidence of anything)" "$out"
+
+# A run that was already failing must still report it. The manifest changing is
+# a fact about the whole summary, not an alternative to the gates' own verdict.
+write_conf "$FIX" <<'EOF'
+gate     | lint | required | . | printf 'Contracts: 5 kept\n'; printf 'floor    | lint | 5\n' >> .claude/harness/project.conf
+gate     | unit | required | . | printf 'Tests  2 failed, 45 passed (47)\n'; exit 1
+evidence | lint | Contracts: [1-9][0-9]* kept
+evidence | unit | Tests +[1-9][0-9]* passed
+floor    | lint | 1
+EOF
+out="$(gates)"; rc=$?
+assert_contains "an already-failing run still reports the manifest change" \
+  "config: .claude/harness/project.conf changed while the gates were running" "$out"
+assert_contains "and still reports the gate that failed" "FAIL         unit" "$out"
+assert_eq "and still exits 1" "1" "$rc"
+
+describe "and it does not fire on a run that changed nothing"
+
+# DV-2, the false-positive control, and the one that matters: a check that fired
+# on every run would satisfy every assertion above and be worth nothing. Nothing
+# here touches project.conf after gates.sh has read it, and both modes must stay
+# green - including on CI, where these are the only runs that ever happen.
+write_conf "$FIX" <<'EOF'
+gate     | lint | required | . | printf 'Contracts: 5 kept\n'
+evidence | lint | Contracts: [1-9][0-9]* kept
+floor    | lint | 1
+EOF
+out="$(gates)"; rc=$?
+assert_contains "an ordinary full run passes" "All required gates passed" "$out"
+assert_eq "and exits 0"                       "0" "$rc"
+case "$out" in
+  *"project.conf changed"*) _bad "an ordinary full run is not accused" "it fired anyway: $out" ;;
+  *) _ok "an ordinary full run is not accused" ;;
+esac
+
+out="$(gates --fast)"; rc=$?
+assert_contains "an ordinary --fast run passes" "All required gates passed" "$out"
+assert_eq "and --fast exits 0"                  "0" "$rc"
+case "$out" in
+  *"project.conf changed"*) _bad "an ordinary --fast run is not accused" "it fired anyway: $out" ;;
+  *) _ok "an ordinary --fast run is not accused" ;;
+esac
+
+# ---------------------------------------------------------------------------
+describe "--fast says, in full, that it is not a verdict"
+
+# MT-032 AC-5. Both strings verbatim, on an ordinary --fast run, so that a later
+# edit to the summary block cannot quietly drop or reword either. The existing
+# assertions above match only the first half of each sentence.
+write_conf "$FIX" <<'EOF'
+gate     | unit  | required | . | printf 'Tests  47 passed (47)\n'
+gate     | build | required | . | printf 'Bundled 3 targets\n'
+evidence | unit  | Tests +[1-9][0-9]* passed
+evidence | build | Bundled [1-9][0-9]* targets
+slow     | build | a release bundle; RED has no use for it
+EOF
+out="$(gates --fast)"
+assert_contains "the caveat, verbatim" \
+  "This is a subset, not a verdict. The full run before REVIEW is what judges the story." "$out"
+assert_contains "the not-recorded line, verbatim" \
+  "(not recorded in the story: a partial run is not evidence of anything)" "$out"
+
+# ---------------------------------------------------------------------------
+describe "a gate record goes into the story whose branch you are on"
+
+# MT-032 AC-3 / F-2. `.claude/state/current-story.env` is global to the tree
+# rather than to the caller, so a second session - or a script run from the
+# wrong context - stamps `## Gate results` into a story it is not working on.
+# `phase.sh set` already refuses exactly this mismatch; gates.sh did not, and
+# the two should agree. The run itself was valid: it is the RECORDING that is
+# misdirected, so the verdict, the exit status and the machine-local stamp are
+# all left alone.
+gate_blocks() { grep -c 'written by bash scripts/gates.sh' "$FIX/docs/backlog/stories/T-1.md"; }
+
+write_conf "$FIX" <<'EOF'
+gate     | unit | required | . | printf 'Tests  47 passed (47)\n'
+evidence | unit | Tests +[1-9][0-9]* passed
+EOF
+git -C "$FIX" checkout -q -B unrelated-session 2>/dev/null
+story "$FIX" T-1 GATES </dev/null
+set_phase "$FIX" GATES
+rm -f "$FIX/.claude/state/last-gate-run"
+out="$(gates)"; rc=$?
+assert_contains "the record is refused, naming both branches" \
+  "not recorded: the checkout is on 'unrelated-session' but story T-1 belongs on 'story/T-1-fixture'" "$out"
+assert_eq "and nothing is written into the story"   "0" "$(gate_blocks)"
+assert_eq "and the gates' own exit status is untouched" "0" "$rc"
+assert_contains "and their verdict still printed"   "All required gates passed" "$out"
+# C-4: the stamp is machine-local and it is what the Stop hook reads. Suppressing
+# it would make the hook claim the gates had never run.
+# The needle carries the following line, not just the field: `RESULT=pass` alone
+# is a prefix of anything starting `RESULT=pass`, and a probe that renamed the
+# value to `passok` walked straight through it.
+assert_contains "the machine-local stamp is still written" $'RESULT=pass\nWHEN=' \
+  "$(cat "$FIX/.claude/state/last-gate-run")"
+assert_contains "and still says it was a full run"         "FULL=yes" \
+  "$(cat "$FIX/.claude/state/last-gate-run")"
+
+# A failing run on the wrong branch is still a failing run.
+write_conf "$FIX" <<'EOF'
+gate     | unit | required | . | printf 'Tests  2 failed, 45 passed (47)\n'; exit 1
+evidence | unit | Tests +[1-9][0-9]* passed
+EOF
+story "$FIX" T-1 GATES </dev/null
+out="$(gates)"; rc=$?
+assert_eq "a failing run on the wrong branch still exits 1" "1" "$rc"
+assert_eq "and still writes nothing into the story"         "0" "$(gate_blocks)"
+
+# --story names the story explicitly. It is not an override: the comparison is
+# against that story's own frontmatter, so it is refused too.
+write_conf "$FIX" <<'EOF'
+gate     | unit | required | . | printf 'Tests  47 passed (47)\n'
+evidence | unit | Tests +[1-9][0-9]* passed
+EOF
+story "$FIX" T-1 GATES </dev/null
+set_phase "$FIX" ""
+out="$(gates --story T-1)"
+assert_contains "--story is not an override" \
+  "not recorded: the checkout is on 'unrelated-session' but story T-1 belongs on 'story/T-1-fixture'" "$out"
+assert_eq "and it writes nothing either" "0" "$(gate_blocks)"
+
+# Fail open where it cannot tell, as the harness does everywhere else: a
+# detached HEAD has no branch to compare, and must not be refused.
+story "$FIX" T-1 GATES </dev/null
+set_phase "$FIX" GATES
+git -C "$FIX" checkout -q --detach 2>/dev/null
+out="$(gates)"
+assert_contains "a detached HEAD is not refused" "recorded in docs/backlog/stories/T-1.md" "$out"
+assert_eq "and the record is in the story"       "1" "$(gate_blocks)"
+
+# The control for the refusal: on the story's own branch it records, as it
+# always has.
+story "$FIX" T-1 GATES </dev/null
+git -C "$FIX" checkout -q -B story/T-1-fixture 2>/dev/null
+out="$(gates)"
+assert_contains "the story's own branch records" "recorded in docs/backlog/stories/T-1.md" "$out"
+assert_eq "and the block is in the story"        "1" "$(gate_blocks)"
+set_phase "$FIX" ""
 
 summary "gates"
