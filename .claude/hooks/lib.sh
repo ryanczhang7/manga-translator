@@ -701,10 +701,41 @@ command_cwd() {
 # rather than one per rule in paths.conf - which, at ninety-odd rules, cost
 # whole seconds per checked path on Windows and made the guard feel like a
 # hang.
+#
+# The trailing-slash retry (MT-034 C-3). Every paths.conf glob for a directory
+# carries a `/` - `docs/**`, `**/tests/**`, `scripts/**` - so a BARE directory
+# name matches none of them and takes the `source` default, which is the right
+# default for a file about to be authored and the wrong one for a directory.
+# `normalize_rel` strips the slash the author actually typed, so `mv x docs/`
+# arrives here as `docs`. So: when the bare form matches no rule, the same path
+# is judged again with a single `/` appended, and the slashed form's rule wins
+# if there is one.
+#
+# Three things about that, each of which a test pins:
+#
+#   * It is RULE-driven, never child-driven. No paths.conf glob begins `src/`,
+#     so no retry can invent a category for `src`, and `classify src` stays
+#     `source` - which is correct, because `src` is not a category directory.
+#   * The order is rules on the bare form -> rules on the slashed form ->
+#     is_ignored -> source, so an explicit rule still beats .gitignore (`dist`
+#     is vendor, not ignored).
+#   * Both spellings go into ONE classify_stdin process, so the retry costs no
+#     extra fork. classify runs once per candidate under a 15 s PreToolUse
+#     budget, and a hook that times out fails OPEN.
+#
+# "No rule matched" is read off the `source` answer because paths.conf has no
+# rule whose category IS `source`; the default is the only way to get one. A
+# path that already ends in `/` is its own slashed form and is not retried.
+# Nothing here consults the filesystem (C-5): a bare `fixtures` classifies the
+# same whether or not the directory exists.
 classify() {
-  local rel="$1" cat
+  local rel="$1" cat probe=""
   [ -z "$rel" ] && { printf 'outside'; return; }
-  cat="$(printf '%s\n' "$rel" | classify_stdin | awk -F'\t' 'NR == 1 { print $1 }')"
+  case "$rel" in */) ;; *) probe="$rel/" ;; esac
+  cat="$(printf '%s\n%s\n' "$rel" "$probe" | classify_stdin | awk -F'\t' '
+    NR == 1                  { c = $1 }
+    NR == 2 && c == "source" { c = $1 }
+    END                      { print c }')"
   [ -z "$cat" ] && cat=source
   [ "$cat" = "source" ] && is_ignored "$rel" && cat=ignored
   printf '%s' "$cat"
