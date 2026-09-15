@@ -70,6 +70,24 @@ extend-exclude = [".claude", "docs", "fixtures", "*.md"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.isort]
+# MEASURED 2026-09-15 (MT-005 PO-9, and again in GREEN before this line was
+# written): ruff's first-party detection is a question about the FILESYSTEM, so
+# `mangatl.store.project` reads as third-party for exactly as long as
+# `src/mangatl/store/project.py` does not exist. A test written in RED against a
+# module GREEN has not created yet therefore gets I001 demanding its `mangatl.*`
+# imports be split into a separate block - and the demand REVERSES the moment
+# the module lands, so no single import layout is clean in both phases. Tests
+# are frozen in GREEN and in GATES, so the reflow is illegal in the only phases
+# that could notice. Naming the package here makes the classification a fact of
+# the config instead of a fact of the working tree. MT-004 paid for this with a
+# return to RED; MT-005 paid one config line.
+#
+# It cannot mask real disorder: the setting decides which BLOCK a name belongs
+# in, not whether the blocks are sorted. Probed in MT-005 `## Gate probes` by
+# scrambling a real first-party import block, which still fails I001 under it.
+known-first-party = ["mangatl"]
+
 [tool.ruff.lint.per-file-ignores]
 # Tests may shadow builtins and use bare asserts; neither is a production smell.
 "tests/**" = ["B011"]
