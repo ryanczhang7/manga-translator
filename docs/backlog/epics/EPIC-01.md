@@ -2,7 +2,7 @@
 id: EPIC-01
 title: Foundations — a real toolchain, real gates, and a model runtime we trust
 status: todo
-stories: [MT-001, MT-002, MT-003, MT-031, MT-032, MT-033]
+stories: [MT-001, MT-002, MT-003, MT-031, MT-032, MT-033, MT-034]
 ---
 
 ## Goal
@@ -45,8 +45,11 @@ actually installed and ran.
   tree.
 - **MT-033** — chore: `mv` removes its source operand and the guard never judges
   it, so a frozen file can leave its path; `git mv` is unrecognised entirely.
+- **MT-034** — chore: a bare directory name classifies `source`, so `cp x docs/`
+  is refused in a phase that permits `docs`, and `cp x tests/` is permitted in
+  GREEN, which freezes tests.
 
-**MT-031, MT-032 and MT-033 are not clauses of `## Done when`.** They were filed into this
+**MT-031, MT-032, MT-033 and MT-034 are not clauses of `## Done when`.** They were filed into this
 epic after MT-003 closed it, because MT-001 built the machinery they correct and
 this is the toolchain epic. The done-when above was discharged by MT-001, MT-002
 and MT-003 and is not reopened by any of them — see the note at the end of this file.
