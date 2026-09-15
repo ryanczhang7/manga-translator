@@ -69,6 +69,152 @@ assert_eq "a tracked source file" "source" "$(classify "src/main.ts")"
 assert_eq "an unknown new path" "source" "$(classify "src/brand-new.ts")"
 
 # ---------------------------------------------------------------------------
+describe "MT-034 AC-4: a bare directory that is NOT a category directory stays source"
+
+# THE TRAP, and the reason C-3 chose a rule-driven retry over anything that
+# looks at a directory's children. `src` is not a category directory: no
+# paths.conf glob begins `src/`, so no retry can invent a category for it, and
+# `classify src` -> `source` is CORRECT. A fix that resolves a bare directory to
+# whatever its children classify as, or that stops defaulting to `source` at
+# all, satisfies AC-1 and breaks every line below.
+#
+# ALL SIX PASS ON ARRIVAL. They are earned by DV-1's mirror probe, run in RED
+# against the unfixed tree and pasted into MT-034 `## Regressions`:
+#
+#   bash scripts/mutate.sh .claude/hooks/lib.sh 's/c = "source"/c = "docs"/' \
+#     -- bash scripts/selftest.sh lib
+#
+# which is the cheapest wrong fix - stop defaulting to source - and takes all
+# six red. The count is deliberate: AC-4 says "6 red on AC-4", so this block
+# holds exactly six assertions and nothing else.
+for case in \
+  "src=source" \
+  "src/=source" \
+  "src/mangatl=source" \
+  "src/mangatl/ui=source" \
+  "packaging=source" \
+  "src/brand-new.ts=source" \
+  ; do
+  assert_eq "AC-4: classify ${case%%=*}" "${case#*=}" "$(classify "${case%%=*}")"
+done
+
+# ---------------------------------------------------------------------------
+describe "MT-034 AC-1/AC-3 and C-3: a bare directory name takes its directory's category"
+
+# RED ON ARRIVAL: every one of these is `source` today. Every paths.conf glob
+# for a directory carries a `/` - `docs/**`, `**/tests/**`, `scripts/**` - so a
+# BARE directory name matches none of them and falls to the classifier's
+# restrictive default; and the trailing slash the author actually typed does not
+# survive `normalize_rel`, which skips the empty last segment.
+#
+# The categories below are READ OUT OF C-3's measured table and are not
+# re-derived here. C-8 makes AC-1..AC-5 settled: the table is the oracle.
+for case in \
+  "docs=docs" \
+  "tests=test" \
+  "scripts=harness" \
+  ".claude=harness" \
+  ".github=harness" \
+  "src/tests=test" \
+  "src/test=test" \
+  "src/__tests__=test" \
+  "src/spec=test" \
+  ; do
+  assert_eq "AC-1/AC-3: classify ${case%%=*}" "${case#*=}" "$(classify "${case%%=*}")"
+done
+
+# The same directory, two spellings, one answer. This is `## Context`
+# direction 3 seen at the classifier rather than at the guard: `to_rel` KEEPS a
+# trailing slash and `normalize_rel` STRIPS it, so one write gets two verdicts
+# depending on whether the author wrote an absolute or a relative path. The
+# assertion is deliberately written as an equality between two classify calls
+# rather than against a literal, because what it pins is agreement.
+#
+# RED ON ARRIVAL: today the slashed form matches the glob and the bare form does
+# not, so these are `docs` vs `source`, `test` vs `source`, and so on.
+for d in docs tests scripts .claude; do
+  assert_eq "the two spellings of $d agree" "$(classify "$d/")" "$(classify "$d")"
+done
+
+# ---------------------------------------------------------------------------
+describe "MT-034 AC-5: a directory that does not exist on disk is still classifiable"
+
+# `fixtures/` is classified `test` by paths.conf and exists in neither this
+# repository nor the fixture. classify consults `git check-ignore` but never the
+# filesystem (C-5, and MT-031 pinned it in write_candidates' header), because the
+# guard judges a token in a command string rather than an inode - most of the
+# paths it judges are about to be created.
+#
+# RED ON ARRIVAL for the category; the identity control below passes on arrival.
+assert_eq "AC-5: classify fixtures, which does not exist" "test" "$(classify "fixtures")"
+
+# DV-4, RED's own deferred verification: the same classification run twice in one
+# fixture repository, once before `mkdir fixtures` and once after. The two
+# answers must match EXACTLY. A fix that stats the path fails this; today both
+# answers are `source` and after C-3 both are `test`, and in either world the
+# assertion is about identity, not about the value.
+#
+# PASSES ON ARRIVAL (source == source). It is earned by its pair: the assertion
+# directly above fixes the value, so "identical" cannot be satisfied by a
+# classifier that always answers `source`.
+_dv4_before="$(classify "fixtures")"
+_dv4_fix="$(make_fixture)"
+mkdir -p "$_dv4_fix/fixtures"
+printf 'page\n' > "$_dv4_fix/fixtures/page.png"
+_dv4_root="$HARNESS_ROOT"; _dv4_dir="$HARNESS_DIR"
+HARNESS_ROOT="$_dv4_fix"; HARNESS_DIR="$_dv4_fix/.claude/harness"
+_dv4_after="$(classify "fixtures")"
+HARNESS_ROOT="$_dv4_root"; HARNESS_DIR="$_dv4_dir"
+rm -rf "$_dv4_fix"
+assert_eq "DV-4: creating the directory does not change the answer" "$_dv4_before" "$_dv4_after"
+
+# ---------------------------------------------------------------------------
+describe "MT-034 C-3 ordering: a rule still beats .gitignore, and nested paths do not move"
+
+# C-3 pins the order: rules on the bare form -> rules on the slashed form ->
+# git check-ignore -> source. `dist` is BOTH matched by a paths.conf vendor twin
+# rule and covered by the fixture's .gitignore, so it is the one path whose
+# answer says which of the two ran first. A retry inserted after is_ignored, or
+# an is_ignored moved in front of the rules, turns it `ignored`.
+#
+# PASSES ON ARRIVAL. Earned together with `.vitest` and `playwright-report`
+# above, which are the opposite case - ignored, matched by no rule either way -
+# so the pair is what makes the precedence specific rather than accidental.
+assert_eq "a vendor directory the project also gitignores" "vendor" "$(classify "dist")"
+
+# C-3's "the parent glob already supplies the slash" rows: a path that already
+# matches must not be retried, and must not move.
+assert_eq "a nested docs directory"  "docs" "$(classify "docs/backlog")"
+assert_eq "a nested tests directory" "test" "$(classify "tests/core")"
+
+# ---------------------------------------------------------------------------
+describe "MT-034 AC-6 and C-7: the fix lands in classify, not in classify_stdin"
+
+# AC-6 is the blast-radius criterion, and this is its surface stated as a unit
+# assertion. `classify_stdin` is what gate_tree_hash, check-boundaries.sh:97 and
+# gates.sh:621 all read; a fix written as bare-directory twin globs in
+# paths.conf - the option C-3 REJECTS - would land here, and would change what a
+# recorded gate hash means. classify() adds the retry and the git lookup on top;
+# classify_stdin keeps the plain paths.conf default.
+#
+# PASSES ON ARRIVAL, and it is the assertion that forbids the rejected design
+# rather than merely describing the chosen one. Earned by a probe run in RED and
+# pasted into MT-034 `## Regressions`:
+#
+#   bash scripts/mutate.sh .claude/harness/paths.conf \
+#     's|^docs | docs/\*\*$|docs | docs|' -- bash scripts/selftest.sh lib
+#
+# which is exactly the twin-rule fix, and takes this assertion red.
+assert_eq "classify_stdin still gives a bare directory name the source default" \
+  "source docs
+source tests
+source scripts
+source fixtures
+source .claude
+source .github" \
+  "$(printf 'docs\ntests\nscripts\nfixtures\n.claude\n.github\n' | classify_stdin | tr '\t' ' ')"
+
+# ---------------------------------------------------------------------------
 describe "to_rel"
 
 assert_eq "a relative path"        "src/main.ts" "$(to_rel "src/main.ts")"

@@ -1286,4 +1286,175 @@ set_phase "$FIX" RED
 assert_allowed "$FIX" 'cp -t src/ docs/notes.md' \
   'cp -t writing into a frozen directory stays permitted (PO-3/PO-8, out of scope)'
 
+# ---------------------------------------------------------------------------
+# MT-034: a directory-shaped path is classified, not guessed at
+#
+# Every paths.conf glob for a directory carries a `/`, so a BARE directory name
+# matches none of them and takes classify()'s restrictive `source` default - and
+# the trailing slash an agent actually types is stripped by normalize_rel before
+# classify ever sees it. It fails in both directions from one cause, and only
+# one of them was known before this story:
+#
+#   * a FALSE POSITIVE - `cp docs/notes.md docs/` refused in REVIEW, a phase in
+#     which docs is explicitly writable, on a command that writes only into
+#     docs. That is the denial most likely to teach an agent that denials are
+#     noise, which is the instinct law 5 of CLAUDE.md exists to suppress.
+#   * a BYPASS - `rm -rf tests/` PERMITTED in GREEN, the phase whose whole job
+#     is freezing the test tree. `rm -rf tests/main.test.ts` is refused; the
+#     shorter command is not.
+#
+# assert_blocked_as below is new, because AC-1, AC-3 and AC-3b all name a
+# CATEGORY as well as a path, and _lib.sh's assert_blocked reads only `path:`.
+# Without the category half, "block tests/ for any reason" satisfies AC-3 -
+# including a fix that classified it `vendor`, or one that left it `source` and
+# changed what GREEN permits, which is out of scope item 8.
+
+# assert_blocked_as <fixture> <command> <expected path> <expected category> [label]
+#   Blocked, on that path, AND reported as that category. One assertion, so that
+#   AC-3's four commands are four assertions and DV-1's predicted count is
+#   checkable. The path half repeats assert_blocked's matching exactly - a
+#   trailing space or end-of-string - because the denial text is the same text
+#   and 79 assertions already depend on that spelling.
+assert_blocked_as() {
+  local r; r="$(guard_bash "$1" "$2")"
+  if [ -z "$r" ]; then
+    _bad "blocks: ${5:-$2}" "not blocked at all"
+    return
+  fi
+  case "$r" in
+    *"path:     $3 "*|*"path:     $3") ;;
+    *) _bad "blocks: ${5:-$2}" "blocked, but on the wrong path (wanted '$3'): $r"; return ;;
+  esac
+  case "$r" in
+    *"category: $4"*) _ok "blocks: ${5:-$2}" ;;
+    *) _bad "blocks: ${5:-$2}" "blocked on '$3' but with the wrong category (wanted '$4'): $r" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+describe "MT-034 AC-1: a directory-shaped path in a category the phase PERMITS"
+set_phase "$FIX" REVIEW
+
+# RED ON ARRIVAL: all four are BLOCKED today, on a path of `docs` and a category
+# of `source`. Measured on main at b1583d5 through a git worktree and on the
+# _lib.sh fixture; reproduced in RED before these were written.
+assert_allowed "$FIX" 'cp docs/notes.md docs/' \
+  'cp into docs/ during REVIEW, where docs is writable'
+assert_allowed "$FIX" 'mv docs/notes.md docs/' \
+  'mv into docs/ during REVIEW'
+assert_allowed "$FIX" 'rm -rf docs/' \
+  'rm -rf docs/ during REVIEW'
+assert_allowed "$FIX" 'touch docs/' \
+  'touch docs/ during REVIEW'
+
+# The same criterion in the other phase that has a writable directory the guard
+# currently refuses. RED permits `test`, and today a Test Developer cannot copy
+# a file into the very tree the phase exists to let them write - it is refused
+# on `tests`, category `source`. BOTH RED ON ARRIVAL.
+set_phase "$FIX" RED
+assert_allowed "$FIX" 'cp docs/notes.md tests/' \
+  'cp into tests/ during RED, where test is writable'
+assert_allowed "$FIX" 'rm -rf docs/' \
+  'rm -rf docs/ during RED, where docs is writable'
+
+# Direction 3, at the guard: the same write, two spellings, two verdicts. The
+# absolute branch of check_path reaches classify through to_rel, which KEEPS the
+# trailing slash; the relative branch goes through normalize_rel, which strips
+# it. The absolute spelling is ALLOWED today and must stay allowed; the relative
+# one above is refused today and must become allowed. What this pair pins is
+# that the two agree.
+#
+# PASSES ON ARRIVAL, and it is earned by its partner above: a fix that made the
+# two spellings agree by refusing BOTH would take that one red.
+set_phase "$FIX" REVIEW
+assert_allowed "$FIX" "cp docs/notes.md $FIX/docs/" \
+  'the absolute spelling of the same permitted write'
+
+# AC-1's control, verbatim: the criterion must not be satisfiable by making the
+# guard quieter. BOTH PASS ON ARRIVAL. `src` is not a category directory and no
+# paths.conf glob begins `src/`, so no retry can invent a category for it - see
+# AC-4 in lib.test.sh, which is where that is asserted at the unit level.
+assert_blocked_as "$FIX" 'cp docs/notes.md src/' src source \
+  'cp into src/ stays refused in REVIEW'
+assert_blocked_as "$FIX" 'cp docs/notes.md src/sub/' src/sub source \
+  'cp one level inside src/ stays refused in REVIEW'
+
+# ---------------------------------------------------------------------------
+describe "MT-034 AC-2: mv into a permitted directory is judged on the operand it REMOVES"
+set_phase "$FIX" RED
+
+# RED ON ARRIVAL, and this is MT-033 AC-1 finally landing on the command shape
+# MT-033 could not reach. Today `mv src/main.ts docs/` is blocked on `docs` -
+# the WRONG operand, in a category RED permits, with the role line calling it a
+# destination. The frozen file leaving its path is not mentioned at all.
+#
+# Once `docs` classifies `docs`, the destination candidate is permitted and the
+# denial falls where it belongs: on `src/main.ts`, the source, removed by the
+# move. The role string is MT-033 C-5's vocabulary verbatim (C-8: mechanical,
+# pin exactly).
+assert_blocked_as "$FIX" 'mv src/main.ts docs/' src/main.ts source \
+  'mv of a frozen file into docs/ is refused on the file, not on docs'
+assert_role "$FIX" 'mv src/main.ts docs/' \
+  'operand:  source of mv (removed by the move)' \
+  'and the denial calls it the source of the mv, not a destination'
+
+# ---------------------------------------------------------------------------
+describe "MT-034 AC-3 and AC-3b: GREEN freezes the test tree however the path is spelled"
+set_phase "$FIX" GREEN
+
+# ALL FOUR ALLOWED TODAY. `tests` classifies `source`, GREEN permits `source`,
+# and so a write into the frozen test tree is permitted when the destination is
+# named at the top level and refused one directory down. That is law 2 with a
+# hole in it, reachable by a command SHORTER than the one that is caught.
+#
+# AC-3b - `rm -rf tests/` - is listed as its own criterion because it is the one
+# instance whose consequence is unrecoverable: GREEN is precisely the phase in
+# which an agent has a motive to make a failing test stop failing, and
+# `rm -rf tests/main.test.ts` is refused while `rm -rf tests/` is not.
+#
+# Exactly four assertions, because AC-4's control predicts "4 red on AC-3".
+assert_blocked_as "$FIX" 'cp docs/notes.md tests/' tests test \
+  'cp into the frozen test tree during GREEN'
+assert_blocked_as "$FIX" 'mv docs/notes.md tests/' tests test \
+  'mv into the frozen test tree during GREEN'
+assert_blocked_as "$FIX" 'touch tests/' tests test \
+  'touch of the frozen test tree during GREEN'
+assert_blocked_as "$FIX" 'rm -rf tests/' tests test \
+  'AC-3b: rm -rf of the whole frozen test tree during GREEN'
+
+# AC-3's control: the one-level-deeper form is blocked today and must stay
+# blocked, and so must the named file. BOTH PASS ON ARRIVAL - they are what
+# stops AC-3 being satisfied by widening the guard rather than by classifying
+# the path, and what would go red if a fix reached green by changing which
+# categories GREEN permits (out of scope item 8).
+assert_blocked_as "$FIX" 'cp docs/notes.md tests/sub/' tests/sub test \
+  'cp one level inside the frozen test tree stays refused'
+assert_blocked_as "$FIX" 'rm -rf tests/main.test.ts' tests/main.test.ts test \
+  'rm of a named frozen test stays refused'
+
+# The mirror of AC-3b in the other direction, and AC-4's trap at the guard: a
+# bare `src` must keep taking the restrictive default. BOTH PASS ON ARRIVAL;
+# they go red under the same mutation that earns AC-4 - stop defaulting to
+# source, and RED starts permitting the deletion of the whole source tree.
+set_phase "$FIX" RED
+assert_blocked_as "$FIX" 'rm -rf src/' src source \
+  'rm -rf of the whole frozen source tree during RED stays refused'
+assert_blocked_as "$FIX" 'touch src/' src source \
+  'touch of the frozen source tree during RED stays refused'
+
+# ---------------------------------------------------------------------------
+describe "MT-034 C-6: what the directory rule must not start refusing"
+
+# Already correct, measured, and listed in C-6 so that a fix cannot buy AC-1 by
+# refusing more. BOTH PASS ON ARRIVAL. The other four C-6 rows - `rm -rf
+# .vitest`, `rm -rf node_modules`, the mutate.sh FILE exemption and
+# `git commit -m` prose - are already asserted above by MT-031 and MT-033 and
+# are not duplicated here.
+set_phase "$FIX" REVIEW
+assert_allowed "$FIX" 'mv docs/notes.md docs/sub/' \
+  'mv into a nested docs directory during REVIEW'
+set_phase "$FIX" RED
+assert_allowed "$FIX" 'cp docs/notes.md docs/backlog/' \
+  'cp into docs/backlog/ during RED'
+
 summary "phase-guard"
