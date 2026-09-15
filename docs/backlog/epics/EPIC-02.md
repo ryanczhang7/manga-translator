@@ -39,7 +39,28 @@ and replacing one input scan invalidates only that page.
 - **MT-005** — the project store: create, reopen, resume, and per-page
   invalidation on content change.
 - **MT-006** — the pipeline: stages run per page, a typed progress event stream
-  comes out, and the sibling output folder is written atomically per page.
+  comes out, the sibling output folder is written atomically per page, and a
+  headless CLI entry point makes the three stories above something the user can
+  actually run.
+
+## Amendment, 2026-09-15 — the done-when had no entry point
+
+Caught by the PLANNED → RED check on MT-006. The goal and the done-when above
+both promise that *"the user points the app at a folder"*, but MT-004, MT-005
+and MT-006 as written build only library code: `src/mangatl/app.py` opens a
+`MainWindow` and takes no path, and MT-006's own `## Out of scope` defers the
+wiring to **MT-015**, which is in `EPIC-05`. So this epic could not satisfy its
+own done-when, and would have closed green over a skeleton that does not walk.
+
+Put to the user before MT-006 left PLANNED, and decided by them: **MT-006 gains
+a headless CLI entry point** (`mangatl-run <folder>`), recorded as that story's
+**AC-10** and **PO-1**. A CLI rather than a window, because it satisfies MT-006's
+AC-9 headless boundary instead of fighting it and takes nothing from MT-015's
+workspace scope.
+
+Unchanged by this: *"killing the process halfway and starting again resumes"* is
+delivered by MT-006's AC-4 composed with AC-5, and MT-006's PO-6 requires a test
+of the composition rather than of each half alone.
 
 ## Deliberately not in this epic
 

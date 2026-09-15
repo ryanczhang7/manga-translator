@@ -161,12 +161,18 @@ def test_domain_imports_nothing_of_ours_and_no_third_party_library() -> None:
 
 
 def test_nothing_below_the_entry_point_imports_ui() -> None:
+    # `mangatl.cli` was added to this list by MT-006 (`## Contract` PO-5). It is
+    # the contract that earns its place there: it turns "the CLI is headless"
+    # from a claim a test makes into a fact the `lint` gate checks, and AC-9's
+    # boundary is the whole reason MT-006's entry point is a CLI and not a
+    # window. `mangatl.app` stays out, for the reason the test below gives.
     contract = _contract(UI)
     assert contract.get("type") == "forbidden"
     assert _modules(contract, "forbidden_modules") == ["mangatl.ui"]
     assert _modules(contract, "source_modules") == [
         "mangatl.bench",
         "mangatl.clean",
+        "mangatl.cli",
         "mangatl.detect",
         "mangatl.domain",
         "mangatl.ocr",
@@ -193,6 +199,7 @@ def test_only_translate_may_import_anthropic() -> None:
         "mangatl.app",
         "mangatl.bench",
         "mangatl.clean",
+        "mangatl.cli",
         "mangatl.detect",
         "mangatl.domain",
         "mangatl.ocr",
@@ -210,6 +217,7 @@ def test_only_detect_ocr_and_clean_may_import_onnxruntime() -> None:
     assert _modules(contract, "source_modules") == [
         "mangatl.app",
         "mangatl.bench",
+        "mangatl.cli",
         "mangatl.domain",
         "mangatl.pipeline",
         "mangatl.store",
