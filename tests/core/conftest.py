@@ -166,3 +166,24 @@ def _one_bit_png(width: int, height: int, rects: Sequence[tuple[int, int, int, i
 def one_bit_png() -> Callable[..., bytes]:
     """A builder: `one_bit_png(width, height, [(x0, y0, x1, y1), ...])`."""
     return _one_bit_png
+
+
+# -- MT-009: one page-sized mask, built once per session -----------------------
+#
+# MEASURED 2026-09-16 (RED, this machine, uv run python): `_one_bit_png` above
+# is a per-pixel Python loop, so a page-sized mask with every pixel set costs
+# **281 ms** and one with a single 8x8 rect costs **7 ms**. MT-009's AC-5 is a
+# `hypothesis` property over up to eight regions at 100 examples; encoding a
+# mask per example would cost seconds to minutes under the coverage gate's
+# instrumentation. Reading order never looks at `mask` - it is geometry only -
+# so one shared page-sized constant is both cheap and faithful to MT-007 C-7
+# ("PNG-encoded 1-bit, page-sized"). Session scope, not module scope, so the
+# hypothesis health check for function-scoped fixtures never applies.
+#
+# The page is 1125x1600, the size of every scan under `spikes/MT-002/pages/`.
+
+
+@pytest.fixture(scope="session")
+def page_mask() -> bytes:
+    """A 1125x1600 1-bit PNG with one small rect set. Built once per session."""
+    return _one_bit_png(1125, 1600, [(0, 0, 8, 8)])

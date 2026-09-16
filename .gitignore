@@ -50,6 +50,11 @@ venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+# hypothesis's example database. Generated, machine-local, and load-bearing in a
+# way that makes committing it actively harmful: a cached counterexample replays
+# instantly, so a property that catches a bug only sometimes looks like one that
+# catches it every time. Added by MT-009 RED after that exact confusion.
+.hypothesis/
 .mypy_cache/
 .ruff_cache/
 .tox/

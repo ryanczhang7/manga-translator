@@ -1,0 +1,33 @@
+{
+  "source": "spikes/MT-002/pages/011.jpg",
+  "page_size": [1125, 1600],
+  "layout": "unusual",
+  "layout_reason": "The bottom tier is a two-column panel grid with text in both columns: one tall right-hand panel (x 555-1120) beside a left-hand column of two stacked panels (x 5-545). Reading it needs the panel borders - regions 7 and 8 sit lower on the page than 5 and 6 yet precede them, because they are inside the right-hand panel. architecture.md D10 says v1 does not segment panels, so this page is excluded from AC-6 scoring.",
+  "boxes": [
+    [798, 8, 1032, 198],
+    [18, 182, 282, 472],
+    [188, 688, 428, 908],
+    [2, 792, 312, 1048],
+    [888, 1092, 1045, 1330],
+    [430, 1098, 528, 1302],
+    [85, 1100, 232, 1345],
+    [700, 1440, 745, 1520],
+    [575, 1368, 665, 1560],
+    [482, 1418, 502, 1462],
+    [85, 1390, 330, 1575]
+  ],
+  "labels": [
+    "魔都（ここ）は",
+    "僕達の世界",
+    "現世と繋がった以上人が迷い込むのは仕方ないけど…",
+    "魔都で我が物顔をしている人間が許せなかった",
+    "それで人を滅ぼそうと神が現れたの？",
+    "ところが逆に",
+    "三柱の神が討たれた…",
+    "そう",
+    "神罰をあててやろうと",
+    "…",
+    "仕掛けてくる気は無さそうね本当に対話が目的か"
+  ],
+  "reading_order": [0, 1, 2, 3, 4, 7, 8, 5, 6, 9, 10]
+}
