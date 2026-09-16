@@ -35,8 +35,15 @@ column appears as a region of its own.
   an ONNX export, or do we ship GPL-3.0 knowingly? Filed out of MT-002's licence
   escalation. Output is a decision document; MT-007 depends on it.
 - **MT-007** — text-region detection: page image in, masked regions out.
-- **MT-008** — furigana: a thin ruby column adjacent to a main column is merged
-  into it, and two genuinely separate small bubbles are not.
+- **MT-008** — column merging: adjacent columns of one text block become one
+  region, and two genuinely separate bubbles do not. **Retargeted in PLANNED on
+  2026-09-16** (MT-008 PO-1, user-approved): it was written as furigana merging,
+  but measurement against MT-007's shipped detector found all four ruby columns
+  in the corpus already absorbed by its dilation, while 7 of 25 boxes split a
+  single utterance into per-column regions — the same phantom-bubble harm, a
+  different cause. Furigana folds in as a special case of the column rule, and
+  MT-008's AC-8 pins the absorption as a standing regression guard on the real
+  detector so this epic's ruby clause stays attached to a test.
 - **MT-009** — reading order: right-to-left, top-to-bottom, band-swept, as a
   pure function on geometry.
 - **MT-010** — OCR: vertical Japanese in a region crop becomes text, without a

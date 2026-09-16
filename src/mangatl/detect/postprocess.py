@@ -65,6 +65,7 @@ __all__ = [
     "NMS_IOU",
     "LetterboxTransform",
     "decode_boxes",
+    "integer_boxes",
     "letterbox",
     "probability_to_page",
     "regions_from_detection",
@@ -279,7 +280,7 @@ def regions_from_detection(
             f" {(height, width)} for page_size (width, height) = {(width, height)}"
         )
 
-    fences = _integer_boxes(boxes, width, height)
+    fences = integer_boxes(boxes, width, height)
     fence = np.zeros((height, width), dtype=bool)
     for x0, y0, x1, y1 in fences:
         fence[y0:y1, x0:x1] = True
@@ -309,10 +310,15 @@ def regions_from_detection(
     return [region for _y0, _x0, region in sorted(found, key=lambda entry: entry[:2])]
 
 
-def _integer_boxes(
+def integer_boxes(
     boxes: NDArray[np.float32], width: int, height: int
 ) -> list[tuple[int, int, int, int]]:
-    """Accepted boxes as half-open integer pixel ranges, clipped to the page."""
+    """Accepted boxes as half-open integer pixel ranges, clipped to the page.
+
+    Public because `detect.columns.merge_columns` fences on exactly these
+    rectangles (MT-008 C-1), and a plain tuple of `int` is what keeps `numpy`
+    out of that signature.
+    """
     rows = np.asarray(boxes, dtype=np.float64).reshape(-1, 6)
     return [
         (
