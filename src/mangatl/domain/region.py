@@ -51,6 +51,13 @@ class RawRegion:
     mask: bytes
     confidence: float
     kind: Literal["bubble", "box"]
+    #: Which regions of the sequence handed to `detect.columns.merge_columns`
+    #: this one absorbed, ascending; `()` when it absorbed nothing (MT-008 C-2).
+    #: Indices rather than identifiers, because regions have no database
+    #: identity until they are written and the merge is computed before the
+    #: write. It is **last** so that MT-007's positional construction sites keep
+    #: working, and it has a default so that they need not mention it at all.
+    merged_from: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if len(self.polygon) < 4 or self.polygon[0] != self.polygon[-1]:
@@ -73,3 +80,19 @@ class RawRegion:
             )
         if self.kind not in _KINDS:
             raise ValueError(f"kind must be one of {_KINDS}; got {self.kind!r}")
+        if any(not isinstance(index, int) for index in self.merged_from):
+            raise ValueError(
+                "merged_from indices must be ints - a numpy.int32 is not an int and"
+                " json.dumps refuses it, and this field is JSON on its way to the"
+                f" store; got {self.merged_from!r}"
+            )
+        if any(index < 0 for index in self.merged_from):
+            raise ValueError(
+                "merged_from indices are positions in the sequence that was merged, so"
+                f" none of them is negative; got {self.merged_from!r}"
+            )
+        if len(set(self.merged_from)) != len(self.merged_from):
+            raise ValueError(
+                "merged_from indices must be distinct - a region absorbed twice means"
+                f" the merge walked one input twice; got {self.merged_from!r}"
+            )

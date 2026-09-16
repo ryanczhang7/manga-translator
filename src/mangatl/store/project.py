@@ -121,17 +121,26 @@ _INSERT_CHAPTER = (
 # without it (measured by MT-005, including against a key on the wrong columns).
 # `INSERT OR REPLACE` is the form that must NOT be used: it deletes the row, and
 # the live `ON DELETE CASCADE` takes the region's translated `line` with it.
-# `merged_from` is left out of the statement entirely, so a re-detection cannot
-# clear a merge MT-008 recorded.
+# `merged_from` is in BOTH clauses (MT-008 C-6/PO-2). MT-007's comment here said
+# it was left out so that a re-detection could not clear a merge MT-008 had
+# recorded; that anticipated merging as a later pass over stored rows, and it is
+# not one. The pipeline order is detect -> merge -> write, so `write_regions`
+# only ever receives already-merged regions and `reading_index` is an index over
+# them. A re-detection therefore produces a fresh merge set, and omitting the
+# field from the `DO UPDATE` would preserve the previous one against regions
+# that no longer exist.
 _UPSERT_REGION = (
-    "INSERT INTO region (page_id, reading_index, polygon, mask_blob, kind, confidence)"
-    " VALUES (?, ?, ?, ?, ?, ?)"
+    "INSERT INTO region (page_id, reading_index, polygon, mask_blob, kind, confidence,"
+    " merged_from)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?)"
     " ON CONFLICT (page_id, reading_index) DO UPDATE SET"
     " polygon = excluded.polygon, mask_blob = excluded.mask_blob,"
-    " kind = excluded.kind, confidence = excluded.confidence"
+    " kind = excluded.kind, confidence = excluded.confidence,"
+    " merged_from = excluded.merged_from"
 )
 _SELECT_REGIONS = (
-    "SELECT region.polygon, region.mask_blob, region.kind, region.confidence"
+    "SELECT region.polygon, region.mask_blob, region.kind, region.confidence,"
+    " region.merged_from"
     " FROM region JOIN page ON page.id = region.page_id"
     " WHERE page.ordinal = ? ORDER BY region.reading_index"
 )
@@ -344,9 +353,13 @@ class Project:
            `transaction()`'s non-reentrancy guard then refuses a caller that had
            already opened one.
 
-        `merged_from` stays NULL: furigana merging is MT-008's. Following
-        `page_status`'s precedent, there is deliberately no branch for an ordinal
-        that does not exist.
+        `merged_from` is written as JSON, and as SQL **NULL** for a region that
+        absorbed nothing rather than as `"[]"` (MT-008 C-6): MT-007's
+        `test_region_store.py` pins the NULL through a plain sqlite view, and
+        `read_regions` maps both NULL and JSON back to a tuple, so every row
+        MT-005 and MT-007 wrote still loads. Following `page_status`'s
+        precedent, there is deliberately no branch for an ordinal that does not
+        exist.
         """
         with self.transaction() as cursor:
             page_id = cursor.execute(
@@ -362,6 +375,7 @@ class Project:
                         region.mask,
                         region.kind,
                         region.confidence,
+                        json.dumps(list(region.merged_from)) if region.merged_from else None,
                     ),
                 )
             cursor.execute(
@@ -384,8 +398,14 @@ class Project:
                 mask=bytes(mask_blob),
                 confidence=float(confidence),
                 kind=cast(Literal["bubble", "box"], str(kind)),
+                # NULL is "absorbed nothing", which is both what this story
+                # writes for an unmerged region and what every row written
+                # before it carries.
+                merged_from=()
+                if merged_from is None
+                else tuple(int(index) for index in json.loads(str(merged_from))),
             )
-            for polygon, mask_blob, kind, confidence in self._connection.execute(
+            for polygon, mask_blob, kind, confidence, merged_from in self._connection.execute(
                 _SELECT_REGIONS, (page_ordinal,)
             )
         )
