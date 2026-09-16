@@ -56,6 +56,7 @@ from mangatl.store.intake import read_chapter
 from mangatl.store.schema import DDL
 
 __all__ = [
+    "PAGE_DONE",
     "PAGE_PENDING",
     "PAGE_STALE",
     "SCHEMA_VERSION",
@@ -81,6 +82,15 @@ PAGE_PENDING: str = "pending"
 #: stale" means nothing if the mark lives in memory. MT-006 adds more values,
 #: which is why `schema.py` puts no `CHECK` on the column.
 PAGE_STALE: str = "stale"
+
+#: `page.status` once every stage of a run has completed for that page. Added by
+#: MT-006, which is the case `PAGE_STALE`'s note above anticipated: the column's
+#: vocabulary belongs to the store, so a magic `"done"` in an `UPDATE` inside
+#: `pipeline` would put half of it somewhere else. Written by the *runner* after
+#: a page's stages have all completed (`architecture.md` §5), and read by every
+#: stage's `is_done` - which is what makes a killed run resume rather than
+#: restart.
+PAGE_DONE: str = "done"
 
 _DB_NAME = "project.db"
 _PROJECT_SUFFIX = ".mtproj"
@@ -272,7 +282,8 @@ class Project:
         return _read_pages(self._connection)
 
     def page_status(self, ordinal: int) -> str:
-        """`page.status` for one page: `PAGE_PENDING` or `PAGE_STALE` today.
+        """`page.status` for one page: `PAGE_PENDING`, `PAGE_STALE` or
+        `PAGE_DONE`.
 
         Progress through a run is the *store's* business, not the domain's - a
         `Page` describes a scan, so it carries no status and this reads it

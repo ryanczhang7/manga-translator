@@ -30,6 +30,11 @@ dependencies = [
 
 [project.scripts]
 mangatl = "mangatl.app:main"
+# Added by MT-006 (PO-1/PO-5): the headless entry point. `mangatl` above opens
+# the window and is untouched - MT-015 still owns it. Tests call
+# `mangatl.cli.main([...])` in process; a test that shelled out to this name
+# would be testing the installer.
+mangatl-run = "mangatl.cli:main"
 
 [dependency-groups]
 # Synced by default by `uv sync`; every gate command depends on this group.
@@ -185,7 +190,11 @@ type = "forbidden"
 # `mangatl.app` is deliberately absent: the entry point's whole job is to open
 # the window, and a contract forbidding that breaks `scripts/task.sh dev`.
 # "Nothing imports ui" means nothing BELOW the entry point. MT-003 P2.
+# `mangatl.cli` is the opposite kind of entry point and belongs here: MT-006's
+# AC-9/AC-10 make it headless, and this contract is what turns that from a claim
+# a test makes into a fact the `lint` gate checks (MT-006 PO-5).
 source_modules = [
+    "mangatl.cli",
     "mangatl.domain",
     "mangatl.store",
     "mangatl.detect",
@@ -203,6 +212,7 @@ name = "Only translate imports anthropic"
 type = "forbidden"
 source_modules = [
     "mangatl.app",
+    "mangatl.cli",
     "mangatl.domain",
     "mangatl.store",
     "mangatl.detect",
@@ -220,6 +230,7 @@ name = "Only detect, ocr and clean import onnxruntime"
 type = "forbidden"
 source_modules = [
     "mangatl.app",
+    "mangatl.cli",
     "mangatl.domain",
     "mangatl.store",
     "mangatl.translate",
