@@ -2,7 +2,7 @@
 id: EPIC-03
 title: Reading the page — what is text, in what order, and what does it say
 status: todo
-stories: [MT-030, MT-007, MT-008, MT-009, MT-010]
+stories: [MT-030, MT-007, MT-008, MT-009, MT-035, MT-010]
 ---
 
 ## Goal
@@ -46,6 +46,16 @@ column appears as a region of its own.
   detector so this epic's ruby clause stays attached to a test.
 - **MT-009** — reading order: right-to-left, top-to-bottom, band-swept, as a
   pure function on geometry.
+- **MT-035** — the assembly. MT-007, MT-008 and MT-009 each shipped a correct
+  pure function that no pipeline invokes, so this epic's done-when sentence —
+  *"the **pipeline** produces regions ... in reading order"* — was true of no
+  code. Filed out of MT-009 PO-4. It composes the detect chain in
+  `detect/page.py` and adds the `DetectStage` that reads the page, orders the
+  regions and writes them to the store. Depends on MT-009; **not** on MT-010,
+  which is a sibling rather than a predecessor (MT-035 `## Notes`, "Ordering
+  against MT-010"). It establishes the injected-collaborator pattern the OCR
+  stage will follow, which matters because MT-010 delivers OCR *logic* and this
+  epic will need an OCR stage after it in the same way.
 - **MT-010** — OCR: vertical Japanese in a region crop becomes text, without a
   deskew step that would break it.
 
