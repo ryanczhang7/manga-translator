@@ -1,0 +1,25 @@
+{
+  "name": "clean-bubbles",
+  "provenance": "Authored by hand by the Test Developer (claude-opus-5) for MT-007 RED on 2026-09-15. Wholly synthetic: no pixel of it comes from a scan, so it is redistributable (MT-007 C-9).",
+  "purpose": "AC-1 and AC-4. Three well-separated blobs, each covered by an accepted box of EXACTLY the blob's rectangle, so that the fence of C-4 step 7 clips the dilation straight back and every mask is pixel-exact at any dilation setting.",
+  "page_size": [320, 240],
+  "background": 0.0,
+  "paint": [
+    {"id": "B1-left", "rect": [40, 40, 70, 90], "value": 1.0, "note": "left half of B1"},
+    {"id": "B1-right", "rect": [70, 40, 100, 90], "value": 0.6, "note": "right half of B1: makes the MEAN over B1 exactly 0.8 while the MAX is exactly 1.0, so C-7's mean-not-max is observable"},
+    {"id": "B2", "rect": [180, 30, 260, 80], "value": 1.0},
+    {"id": "B3", "rect": [120, 150, 200, 210], "value": 0.9}
+  ],
+  "boxes": [
+    {"for": "B1", "rect": [40, 40, 100, 90], "conf": 0.90, "cls": 1},
+    {"for": "B2", "rect": [180, 30, 260, 80], "conf": 0.80, "cls": 0},
+    {"for": "B3", "rect": [120, 150, 200, 210], "conf": 0.95, "cls": 1}
+  ],
+  "sfx_rects": [],
+  "notes": [
+    "Areas: B1 60x50 = 3000, B2 80x50 = 4000, B3 80x60 = 4800. All three are far above any plausible MIN_REGION_AREA_PX.",
+    "Emission order by (bbox y0, bbox x0) is B2 (y=30), B1 (y=40), B3 (y=150) - which is neither the order the boxes are listed in nor left-to-right, so the ordering rule is observable rather than accidental.",
+    "B1 and B2 are 80px apart and B3 is 60px below B1, so 2 iterations of a 7x7 kernel (6px) could not merge them even with the fence removed.",
+    "cls 1 = bubble, cls 0 = box - measured in MT-007 RED, see the story's amendment A-4."
+  ]
+}

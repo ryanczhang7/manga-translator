@@ -45,13 +45,16 @@ may hold hours of edits.
 
 from __future__ import annotations
 
+import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal, cast
 
 from mangatl.domain.page import Chapter, Page
+from mangatl.domain.region import RawRegion
 from mangatl.store.intake import read_chapter
 from mangatl.store.schema import DDL
 
@@ -111,6 +114,28 @@ _INSERT_CHAPTER = (
     # them - is visible in the statement and not only in a comment.
     " VALUES (?, ?, ?, ?, NULL, NULL, NULL)"
 )
+# The upsert MT-007 A-11 requires, and the one form of it that is safe. It
+# depends on `UNIQUE (page_id, reading_index)` being declared over exactly these
+# two columns: `ON CONFLICT (page_id, reading_index)` raises `OperationalError:
+# ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint`
+# without it (measured by MT-005, including against a key on the wrong columns).
+# `INSERT OR REPLACE` is the form that must NOT be used: it deletes the row, and
+# the live `ON DELETE CASCADE` takes the region's translated `line` with it.
+# `merged_from` is left out of the statement entirely, so a re-detection cannot
+# clear a merge MT-008 recorded.
+_UPSERT_REGION = (
+    "INSERT INTO region (page_id, reading_index, polygon, mask_blob, kind, confidence)"
+    " VALUES (?, ?, ?, ?, ?, ?)"
+    " ON CONFLICT (page_id, reading_index) DO UPDATE SET"
+    " polygon = excluded.polygon, mask_blob = excluded.mask_blob,"
+    " kind = excluded.kind, confidence = excluded.confidence"
+)
+_SELECT_REGIONS = (
+    "SELECT region.polygon, region.mask_blob, region.kind, region.confidence"
+    " FROM region JOIN page ON page.id = region.page_id"
+    " WHERE page.ordinal = ? ORDER BY region.reading_index"
+)
+
 _INSERT_PAGE = (
     "INSERT INTO page (chapter_id, ordinal, filename, width, height, sha256, status)"
     " VALUES (?, ?, ?, ?, ?, ?, ?)"
@@ -295,6 +320,75 @@ class Project:
             "SELECT status FROM page WHERE ordinal = ?", (ordinal,)
         ).fetchone()
         return str(row[0])
+
+    def write_regions(self, page_ordinal: int, regions: Sequence[RawRegion]) -> None:
+        """Replace one page's regions with `regions`, in the order handed over.
+
+        A **page-level replace**, not an append (MT-007 amendment A-11), and four
+        things about it are load-bearing:
+
+        1. `reading_index` is the region's position in `regions`, 0 upwards.
+           Nothing here sorts: reading order is MT-009's and for Japanese it runs
+           right to left, so a store that invented one would be inventing the
+           wrong one. What arrives is `postprocess`'s emission order.
+        2. The write **upserts** on `(page_id, reading_index)` - `ON CONFLICT ...
+           DO UPDATE`, never `INSERT OR REPLACE`. MT-005 measured that `OR
+           REPLACE` deletes the row and the live `ON DELETE CASCADE` takes its
+           `line` with it, so a second run of detection would silently destroy
+           every translation on the page with no row count to show it.
+        3. Rows at or past `len(regions)` are **deleted**, so a re-run that finds
+           fewer regions leaves no stragglers for MT-009 to read.
+           `write_regions(n, ())` therefore clears the page, which is the honest
+           answer for a page the detector now finds nothing on.
+        4. It opens its own `transaction()`, so it is atomic on its own - and
+           `transaction()`'s non-reentrancy guard then refuses a caller that had
+           already opened one.
+
+        `merged_from` stays NULL: furigana merging is MT-008's. Following
+        `page_status`'s precedent, there is deliberately no branch for an ordinal
+        that does not exist.
+        """
+        with self.transaction() as cursor:
+            page_id = cursor.execute(
+                "SELECT id FROM page WHERE ordinal = ?", (page_ordinal,)
+            ).fetchone()[0]
+            for reading_index, region in enumerate(regions):
+                cursor.execute(
+                    _UPSERT_REGION,
+                    (
+                        page_id,
+                        reading_index,
+                        json.dumps([list(vertex) for vertex in region.polygon]),
+                        region.mask,
+                        region.kind,
+                        region.confidence,
+                    ),
+                )
+            cursor.execute(
+                "DELETE FROM region WHERE page_id = ? AND reading_index >= ?",
+                (page_id, len(regions)),
+            )
+
+    def read_regions(self, page_ordinal: int) -> tuple[RawRegion, ...]:
+        """One page's regions, ordered by `reading_index`; empty if there are
+        none.
+
+        `ORDER BY` is explicit for the reason `_SELECT_PAGES` gives: rowid order
+        agrees with `reading_index` only until something rewrites a page, and a
+        SELECT without one is nondeterministic by contract even when it happens
+        to come back sorted.
+        """
+        return tuple(
+            RawRegion(
+                polygon=tuple((int(x), int(y)) for x, y in json.loads(str(polygon))),
+                mask=bytes(mask_blob),
+                confidence=float(confidence),
+                kind=cast(Literal["bubble", "box"], str(kind)),
+            )
+            for polygon, mask_blob, kind, confidence in self._connection.execute(
+                _SELECT_REGIONS, (page_ordinal,)
+            )
+        )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Cursor]:

@@ -1,0 +1,31 @@
+{
+  "name": "sfx",
+  "provenance": "Authored by hand by the Test Developer (claude-opus-5) for MT-007 RED on 2026-09-15. Wholly synthetic. Its geometry is modelled on the real finding MT-030 E6 / MT-007 PO-1 measured on spikes/MT-002/pages/012.jpg - a probability map that covers art-integrated SFX while the box head covers 0.000 of it - but no pixel of it comes from that scan.",
+  "purpose": "AC-6. A boxed text blob; a second boxed text blob whose box edge touches an annotated SFX rectangle and sits 4px from the SFX blob, i.e. INSIDE dilation range; and two unboxed SFX blobs. A screentone field at 0.25 covers the whole right-hand band, so a low threshold floods the SFX area and only the box fence keeps it out.",
+  "page_size": [320, 240],
+  "background": 0.0,
+  "paint": [
+    {"id": "screentone", "rect": [150, 20, 300, 140], "value": 0.25, "note": "the screentone a low threshold bleeds into; covers both S1's annotated rectangle and T2's box"},
+    {"id": "T1", "rect": [40, 40, 120, 120], "value": 1.0, "note": "boxed text, far from any SFX"},
+    {"id": "T2", "rect": [160, 40, 196, 100], "value": 1.0, "note": "boxed text whose box's exclusive right edge is S1's annotated rectangle's left edge"},
+    {"id": "S1", "rect": [200, 40, 260, 100], "value": 1.0, "note": "SFX blob, covered by NO box"},
+    {"id": "S2", "rect": [45, 175, 105, 215], "value": 1.0, "note": "second SFX blob, covered by NO box"}
+  ],
+  "boxes": [
+    {"for": "T1", "rect": [40, 40, 120, 120], "conf": 0.92, "cls": 1},
+    {"for": "T2", "rect": [160, 40, 196, 100], "conf": 0.88, "cls": 1}
+  ],
+  "sfx_rects": [
+    {"id": "S1", "rect": [196, 36, 264, 104], "note": "68x68 = 4624 px. Begins exactly at T2's box's exclusive right edge, so no accepted box overlaps it by a single pixel, while 2 iterations of a 7x7 kernel from T2's mask reach x=201 - six columns inside it - unless C-4 intersects with the boxes AGAIN after dilating."},
+    {"id": "S2", "rect": [40, 170, 110, 220], "note": "70x50 = 3500 px. Far from every box; the second area that makes 'no region overlaps ANY pixel of the annotated SFX area' plural rather than a single geometry."}
+  ],
+  "control_boxes": [
+    {"for": "S1", "rect": [200, 40, 260, 100], "conf": 0.75, "cls": 1, "note": "AC-6's named control. Added to `boxes` it must produce a region covering exactly 3600 px of S1's annotated rectangle."}
+  ],
+  "notes": [
+    "S1's blob is 60x60 = 3600 px and the control box is exactly the same rectangle, so the control's region is 3600 px at EVERY threshold <= 1.0 and EVERY dilation: the blob fills the box, dilation grows it, and the second intersection clips it straight back.",
+    "S2's blob is 60x40 = 2400 px inside a 3500 px annotated rectangle.",
+    "No box in `boxes` intersects any annotated SFX rectangle, so AC-6 is satisfiable by construction; `control_boxes` is what makes that fact falsifiable rather than vacuous.",
+    "Measured in RED against the real page (MT-007 handoff): removing the second intersection leaves SFX pixels at 0 on 012.jpg, because no accepted box there is within 6px of an annotated rectangle. This fixture is what makes D-2 dischargeable at all."
+  ]
+}

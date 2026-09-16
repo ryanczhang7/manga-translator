@@ -26,6 +26,18 @@ dependencies = [
     # confident size for it - so the reader calls `img.load()`. Pillow ships
     # `py.typed`, so no mypy override is needed or wanted.
     "Pillow>=11,<14",
+    # Added by MT-007, the first story that imports any of them. The four lines
+    # are transcribed from `docs/wiki/audits/MT-002-model-runtime.md` §Decided,
+    # which is the only part of that audit later stories may take on trust.
+    #
+    # `onnxruntime-gpu[cuda,cudnn]` and NOT bare `onnxruntime-gpu`: MT-002 E2
+    # measured that the bare wheel loads no CUDA provider on this machine and
+    # falls back to CPU **without raising**, while `get_available_providers()`
+    # goes on advertising CUDA. The extras pull the NVIDIA CUDA/cuDNN wheels
+    # that `ort.preload_dlls()` then loads (see `detect/session.py`).
+    "onnxruntime-gpu[cuda,cudnn]==1.30.0",
+    "numpy>=2.1,<3",
+    "opencv-python-headless>=4.11",
 ]
 
 [project.scripts]
@@ -110,6 +122,16 @@ warn_unreachable = true
 # never to our own code.
 [[tool.mypy.overrides]]
 module = ["PySide6.*"]
+ignore_missing_imports = true
+
+# onnxruntime 1.30.0 ships no `py.typed` marker (checked on the installed wheel,
+# MT-007), so `import onnxruntime` is `import-untyped` under --strict. Narrowed
+# to the one third-party package, exactly as PySide6 above: `detect.session` is
+# the only module that imports it, and everything it hands on -
+# `RawDetectorOutput`, `DetectorSession` - is typed here. opencv is deliberately
+# absent: opencv-python-headless does ship stubs and type-checks clean.
+[[tool.mypy.overrides]]
+module = ["onnxruntime.*"]
 ignore_missing_imports = true
 
 # --- pytest ------------------------------------------------------------------
