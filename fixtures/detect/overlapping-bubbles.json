@@ -1,0 +1,22 @@
+{
+  "name": "overlapping-bubbles",
+  "provenance": "Authored by hand by the Test Developer (claude-opus-5) for MT-007 RED on 2026-09-15. Wholly synthetic.",
+  "purpose": "AC-3. Two components whose BOUNDING BOXES overlap - B's lies wholly inside A's - while not one pixel is shared. Pixel-level overlap between two components is impossible by definition (it would be one component), so this is what 'two components whose masks overlap' can mean.",
+  "page_size": [320, 240],
+  "background": 0.0,
+  "paint": [
+    {"id": "A-top", "rect": [20, 20, 140, 44], "value": 1.0, "note": "top bar of the L"},
+    {"id": "A-left", "rect": [20, 44, 44, 140], "value": 1.0, "note": "left bar of the L, contiguous with A-top"},
+    {"id": "B", "rect": [60, 60, 120, 120], "value": 1.0, "note": "sits in the L's notch, 16px clear of both arms"}
+  ],
+  "boxes": [
+    {"for": "A and B together", "rect": [10, 10, 150, 150], "conf": 0.90, "cls": 1}
+  ],
+  "sfx_rects": [],
+  "notes": [
+    "A = 120x24 + 24x96 = 2880 + 2304 = 5184 px. B = 60x60 = 3600 px.",
+    "A's bbox is [20,20,140,140]; B's bbox is [60,60,120,120] and lies wholly inside it.",
+    "The 16px clearance survives 2 iterations of a 7x7 kernel: each grows by 6px, closing 12px of the 16px gap, so the two stay separate components at the shipped dilation.",
+    "ONE box covers both, so 'two regions' is a claim about connected components rather than about the box count."
+  ]
+}

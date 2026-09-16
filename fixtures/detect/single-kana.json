@@ -1,0 +1,20 @@
+{
+  "name": "single-kana",
+  "provenance": "Authored by hand by the Test Developer (claude-opus-5) for MT-007 RED on 2026-09-15. Wholly synthetic.",
+  "purpose": "AC-2 and C-6. This is the fixture that pins MIN_REGION_AREA_PX: a single-kana bubble of 252 px that MUST survive, and a 4 px speckle INSIDE an accepted box that must not. The speckle is inside a box on purpose - a speckle outside the fence is discarded by the box intersection and would test nothing about the floor.",
+  "page_size": [320, 240],
+  "background": 0.0,
+  "paint": [
+    {"id": "kana", "rect": [150, 110, 164, 128], "value": 1.0, "note": "14x18 = 252 px: one kana in a small bubble"},
+    {"id": "speckle", "rect": [60, 60, 62, 62], "value": 1.0, "note": "2x2 = 4 px of screentone noise"}
+  ],
+  "boxes": [
+    {"for": "kana", "rect": [146, 106, 168, 132], "conf": 0.71, "cls": 1},
+    {"for": "speckle", "rect": [50, 50, 80, 80], "conf": 0.62, "cls": 1, "note": "an accepted box that happens to contain nothing but speckle"}
+  ],
+  "sfx_rects": [],
+  "notes": [
+    "The pair brackets the constant: 4 < MIN_REGION_AREA_PX <= 252. Upstream's 20 sits inside that bracket, and so does C-6's measured p10 of 44.",
+    "It also discriminates WHERE the floor is applied. Dilated by 2 iterations of a 7x7 kernel the 4 px speckle becomes 14x14 = 196 px and, fenced by its 30x30 box, survives any floor below 196 - so a floor applied AFTER dilation emits a region for 4 px of noise, which is what AC-2 forbids. See the story's amendment A-7."
+  ]
+}

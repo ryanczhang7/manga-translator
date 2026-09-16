@@ -1,4 +1,7 @@
-"""Fixture bytes shared by MT-004's page-intake tests.
+"""Fixture bytes shared by MT-004's page-intake tests, and by MT-007's.
+
+MT-007 appended `one_bit_png` at the foot of this file; everything above it
+belongs to MT-004 and is unchanged.
 
 Recipes are pinned in `docs/backlog/stories/MT-004.md` `## Contract` PO-2, and
 were verified there against Pillow 12.3.0 on 2026-09-15 in a scratch directory
@@ -23,7 +26,7 @@ from __future__ import annotations
 import base64
 import struct
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import pytest
 
@@ -111,3 +114,55 @@ def corrupt_png_13x29_bytes() -> bytes:
 @pytest.fixture
 def garbage_bytes() -> bytes:
     return _GARBAGE_BYTES
+
+
+# -- MT-007: a 1-bit PNG builder ----------------------------------------------
+#
+# `RawRegion.mask` is "PNG-encoded 1-bit, page-sized" (MT-007 C-7), and the
+# domain may not import an encoder: `architecture.md` §3 contract 2 forbids
+# `domain` from importing PIL. So the tests that exercise the type, and the
+# store round trip of AC-5, need mask bytes built with the standard library
+# alone - `zlib` and `struct`, the same two `_png_bytes` above uses.
+#
+# Bit depth 1, colour type 0 (greyscale): one bit per pixel, MSB first, `1` =
+# set. That is exactly what `Image.open(...).mode == "1"` reads back, and what
+# `tests/core/test_detect_postprocess.py` asserts of the shipped encoder by
+# parsing IHDR directly.
+
+
+def _one_bit_png(width: int, height: int, rects: Sequence[tuple[int, int, int, int]]) -> bytes:
+    """A 1-bit PNG of `width` x `height`, with every half-open `rect` set.
+
+    `rects` are `(x0, y0, x1, y1)` covering `x0 <= x < x1` and `y0 <= y < y1`,
+    the same half-open convention `fixtures/detect/README.md` pins.
+    """
+    stride = (width + 7) // 8
+    raw = bytearray()
+    for y in range(height):
+        row = bytearray(stride)
+        for x0, y0, x1, y1 in rects:
+            if y0 <= y < y1:
+                for x in range(max(0, x0), min(width, x1)):
+                    row[x // 8] |= 0x80 >> (x % 8)
+        raw += b"\x00" + row
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 1, 0, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+        + chunk(b"IEND", b"")
+    )
+
+
+@pytest.fixture
+def one_bit_png() -> Callable[..., bytes]:
+    """A builder: `one_bit_png(width, height, [(x0, y0, x1, y1), ...])`."""
+    return _one_bit_png

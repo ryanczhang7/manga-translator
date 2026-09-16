@@ -1,0 +1,21 @@
+{
+  "name": "page-edge",
+  "provenance": "Authored by hand by the Test Developer (claude-opus-5) for MT-007 RED on 2026-09-15. Wholly synthetic.",
+  "purpose": "AC-4. Two blobs hard against the page boundary - one at the top-left corner, one at the bottom-right - each inside a box that reaches the page edge, so dilation has nowhere to go and every polygon vertex must still land inside the page.",
+  "page_size": [320, 240],
+  "background": 0.0,
+  "paint": [
+    {"id": "TL", "rect": [0, 0, 60, 50], "value": 1.0, "note": "flush with x=0 and y=0"},
+    {"id": "BR", "rect": [280, 200, 320, 240], "value": 1.0, "note": "flush with x=width and y=height"}
+  ],
+  "boxes": [
+    {"for": "TL", "rect": [0, 0, 60, 50], "conf": 0.83, "cls": 1},
+    {"for": "BR", "rect": [280, 200, 320, 240], "conf": 0.79, "cls": 0}
+  ],
+  "sfx_rects": [],
+  "notes": [
+    "TL = 60x50 = 3000 px, BR = 40x40 = 1600 px. Each box equals its blob, so each mask is pixel-exact at any dilation.",
+    "Emission order by (bbox y0, bbox x0) is TL then BR.",
+    "The legal polygon coordinate range is 0..319 in x and 0..239 in y: a polygon written in exclusive-end coordinates puts a vertex at x=320 and fails AC-4."
+  ]
+}
