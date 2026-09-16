@@ -1,0 +1,25 @@
+{
+  "source": "spikes/MT-002/pages/013.jpg",
+  "page_size": [1125, 1600],
+  "layout": "unusual",
+  "layout_reason": "The top tier is a two-column panel grid with text in both columns: a left-hand column of two stacked panels (x 65-645) beside a tall right-hand panel (x 655-1090). Reading it needs the panel borders - region 2 sits lower on the page than region 0 and further right, yet precedes it, because it is the second bubble of the right-hand panel and region 0 is in the left column. architecture.md D10 says v1 does not segment panels, so this page is excluded from AC-6 scoring.",
+  "boxes": [
+    [498, 38, 600, 188],
+    [938, 120, 1030, 290],
+    [700, 322, 736, 478],
+    [900, 538, 1008, 792],
+    [82, 918, 222, 1182],
+    [888, 1352, 1022, 1522],
+    [38, 1362, 148, 1538]
+  ],
+  "labels": [
+    "望みは何？",
+    "それで共存を望むと",
+    "仲良くしよう",
+    "神である僕達を",
+    "熱心に崇めて欲しいんだ",
+    "社（やしろ）とかもっと沢山建ててさ",
+    "そうしてくれれば神は満足さ"
+  ],
+  "reading_order": [1, 2, 0, 3, 4, 5, 6]
+}
