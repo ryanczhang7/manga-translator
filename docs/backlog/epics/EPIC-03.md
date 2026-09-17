@@ -1,7 +1,7 @@
 ---
 id: EPIC-03
 title: Reading the page — what is text, in what order, and what does it say
-status: todo
+status: done
 stories: [MT-030, MT-007, MT-008, MT-009, MT-035, MT-010, MT-036]
 ---
 
