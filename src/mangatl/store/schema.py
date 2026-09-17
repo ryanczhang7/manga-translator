@@ -109,6 +109,19 @@ CREATE TABLE region (
     UNIQUE (page_id, reading_index)
 );
 
+-- `ocr_empty` is MT-010's column and the reason this schema is at version 2. It
+-- means "the model emitted no tokens", NOT "source_ja is empty" (MT-010 C-5):
+-- a specials-only decode is a successful read of nothing printable and stores
+-- `0` with an empty `source_ja`. NOT NULL keeps it a boolean - a nullable flag
+-- has three states and the review screen has two - and `DEFAULT 0` is what lets
+-- every `INSERT INTO line (...)` written before this column existed keep
+-- working, in `store.project`, in the migration, and in three test suites.
+--
+-- It is declared **last**, after the nullable translation columns it has
+-- nothing to do with, for one reason: `ALTER TABLE ... ADD COLUMN` appends, so
+-- this is the only position in which a file created at version 2 and a version
+-- 1 file migrated to it have the *same* table, rather than the same columns in
+-- a different order (`store.project._migrate_to_current`).
 CREATE TABLE line (
     id          INTEGER PRIMARY KEY,
     region_id   INTEGER NOT NULL UNIQUE REFERENCES region(id) ON DELETE CASCADE,
@@ -116,7 +129,8 @@ CREATE TABLE line (
     proposed_en TEXT,
     final_en    TEXT,
     edited_at   TEXT,
-    viewed_at   TEXT
+    viewed_at   TEXT,
+    ocr_empty   INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE run (
