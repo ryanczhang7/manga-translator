@@ -20,10 +20,36 @@ Two conventions here are load-bearing rather than stylistic:
 A note on what these tests do NOT constrain: whether `main` refreshes the
 project from the source folder on reopen, which stream the progress lines go to,
 and what `main(None)` reads out of `sys.argv`. Those are the implementer's.
+
+-- MT-036 -------------------------------------------------------------------
+
+**Every end-to-end case in this file now passes `--models` and installs the
+seam, and that is a consequence of C-3 rather than a convenience.** After MT-036
+`main` resolves a models directory *before* `read_chapter` and asks the
+composition root for the stage list, so a `main([folder])` on a machine with no
+weights exits non-zero by design (PO-4, put to the user and accepted). A case
+that wants to reach the walk has to say where the weights are, and a case that
+wants to assert a *different* failure has to get past this one to reach it -
+which is why the two "nothing to translate" tests below carry `--models` too,
+and then assert that the composition root was never asked to build anything.
+
+**The seam is `mangatl.cli.build_pipeline`, the module attribute** (C-3).
+`cli.py` imports the name and calls it by that name, so replacing the attribute
+replaces the composition root for the duration of one test. That is the whole
+mechanism by which AC-3 is assertable with no weights, no GPU and no network,
+and it is why `compose` is a module rather than four more lines of `main`.
+`resolve_models_dir` is deliberately **not** stubbed: it is pure, C-2 has it
+take the environment as an argument, and a test that stubbed it would stop
+checking that `main` wires the two together at all.
+
+**`MANGATL_MODELS` is removed from the environment for every test in this
+file.** A developer with it set in their shell would otherwise see different
+behaviour from CI on the one branch PO-4 cares most about.
 """
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import sqlite3
 from collections.abc import Callable, Sequence
@@ -32,7 +58,8 @@ from pathlib import Path
 import pytest
 
 from mangatl.cli import main
-from mangatl.store.project import project_dir_for
+from mangatl.pipeline.stage import PageContext, Stage
+from mangatl.store.project import PAGE_DONE, project_dir_for
 
 _SOURCE_PAGES: tuple[tuple[str, int, int], ...] = (
     ("p1.png", 7, 3),
@@ -41,6 +68,81 @@ _SOURCE_PAGES: tuple[tuple[str, int, int], ...] = (
     ("p4.png", 23, 17),
 )
 _FILENAMES: list[str] = [name for name, _, _ in _SOURCE_PAGES]
+
+#: `mangatl.compose.MODELS_ENV`, spelled out rather than imported. It is a
+#: promise to a person typing it into a shell - the same reason `<folder>_en` is
+#: spelled out above - and importing it would also drag `onnxruntime` into this
+#: file for one string. `test_compose.py` is where the constant is pinned.
+_MODELS_ENV = "MANGATL_MODELS"
+
+
+# -- the composition root, replaced at the seam C-3 names ----------------------
+
+
+class _CountingStage:
+    """A `Stage` that records the ordinals it ran and writes nothing.
+
+    Behaviourally `PassThroughStage` with a notebook: `is_done` asks the store
+    the same question - is this page's `status` the done marker - so the resume
+    case below still resumes, and `run` is a no-op so the output folder is still
+    a copy of the scans. The notebook is what AC-3 reads: "the stages it runs
+    are the built list" is only assertable if the built list can say it ran.
+    """
+
+    def __init__(self, name: str = "counting") -> None:
+        self.name = name
+        self.ran: list[int] = []
+
+    def run(self, ctx: PageContext) -> None:
+        self.ran.append(ctx.page.ordinal)
+
+    def is_done(self, ctx: PageContext) -> bool:
+        return ctx.project.page_status(ctx.page.ordinal) == PAGE_DONE
+
+
+class _CompositionRoot:
+    """A stand-in for `mangatl.compose.build_pipeline`, installed at the seam.
+
+    It records every models directory it was handed - so the flag, the
+    environment variable and the precedence between them are all observable -
+    and hands back one stage that the run can be seen to have used.
+    """
+
+    def __init__(self) -> None:
+        self.models_dirs: list[Path] = []
+        self.stage = _CountingStage()
+
+    def __call__(self, models_dir: Path) -> tuple[Stage, ...]:
+        self.models_dirs.append(models_dir)
+        return (self.stage,)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_models_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`MANGATL_MODELS` out of the environment for every test in this file."""
+    monkeypatch.delenv(_MODELS_ENV, raising=False)
+
+
+@pytest.fixture
+def models_dir(tmp_path: Path) -> Path:
+    """A directory that exists and holds nothing.
+
+    `resolve_models_dir` does not stat the weight files (C-2) and
+    `build_pipeline` is replaced, so an empty directory is exactly enough. It
+    also keeps the tests honest about which of the two functions each one is
+    exercising.
+    """
+    directory = tmp_path / "models"
+    directory.mkdir()
+    return directory
+
+
+@pytest.fixture
+def composition_root(monkeypatch: pytest.MonkeyPatch) -> _CompositionRoot:
+    root = _CompositionRoot()
+    monkeypatch.setattr("mangatl.cli.build_pipeline", root)
+    return root
+
 
 # -- helpers -------------------------------------------------------------------
 
@@ -100,11 +202,14 @@ def _lines_naming(lines: Sequence[str], filename: str) -> list[str]:
 
 
 def test_pointing_the_cli_at_a_folder_creates_the_project_beside_it(
-    tmp_path: Path, png_bytes: Callable[..., bytes]
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
 ) -> None:
     source_dir = _build_source(tmp_path, png_bytes)
 
-    code = main([str(source_dir)])
+    code = main([str(source_dir), "--models", str(models_dir)])
 
     assert code == 0
     project_dir = project_dir_for(source_dir)
@@ -113,12 +218,15 @@ def test_pointing_the_cli_at_a_folder_creates_the_project_beside_it(
 
 
 def test_pointing_the_cli_at_a_folder_writes_the_sibling_output_folder(
-    tmp_path: Path, png_bytes: Callable[..., bytes]
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
 ) -> None:
     source_dir = _build_source(tmp_path, png_bytes)
     output_dir = _output_dir_for(source_dir)
 
-    assert main([str(source_dir)]) == 0
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
 
     assert output_dir.parent == source_dir.parent, "the output folder is a sibling, not a child"
     assert _contents(output_dir) == sorted(_FILENAMES)
@@ -131,11 +239,14 @@ def test_pointing_the_cli_at_a_folder_writes_the_sibling_output_folder(
 
 
 def test_the_cli_ran_every_page_and_recorded_a_finished_run(
-    tmp_path: Path, png_bytes: Callable[..., bytes]
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
 ) -> None:
     source_dir = _build_source(tmp_path, png_bytes)
 
-    assert main([str(source_dir)]) == 0
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
 
     db_path = project_dir_for(source_dir) / "project.db"
     assert [row[0] for row in _raw(db_path, "SELECT outcome FROM run ORDER BY id")] == ["finished"]
@@ -143,7 +254,11 @@ def test_the_cli_ran_every_page_and_recorded_a_finished_run(
 
 
 def test_the_cli_emits_exactly_one_line_of_progress_per_page(
-    tmp_path: Path, png_bytes: Callable[..., bytes], capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
 ) -> None:
     # "one line of progress output per page" (AC-10). Asserted by counting the
     # lines that name each page's own filename, which pins the *shape* of the
@@ -152,7 +267,7 @@ def test_the_cli_emits_exactly_one_line_of_progress_per_page(
     # summary line, or one line per stage, fails here.
     source_dir = _build_source(tmp_path, png_bytes)
 
-    assert main([str(source_dir)]) == 0
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
 
     lines = _lines(capsys.readouterr().out)
     counted = {name: len(_lines_naming(lines, name)) for name in _FILENAMES}
@@ -160,7 +275,10 @@ def test_the_cli_emits_exactly_one_line_of_progress_per_page(
 
 
 def test_the_cli_never_writes_inside_the_folder_of_scans(
-    tmp_path: Path, png_bytes: Callable[..., bytes]
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
 ) -> None:
     # AC-8 end to end. The project and the output folder are both siblings, so
     # after a whole CLI run the user's scans must be byte-for-byte what they
@@ -169,7 +287,7 @@ def test_the_cli_never_writes_inside_the_folder_of_scans(
     before = _snapshot(source_dir)
     assert sum(1 for value in before.values() if value is not None) == len(_SOURCE_PAGES)
 
-    assert main([str(source_dir)]) == 0
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
 
     assert _snapshot(source_dir) == before
 
@@ -178,7 +296,10 @@ def test_the_cli_never_writes_inside_the_folder_of_scans(
 
 
 def test_a_second_invocation_reopens_the_project_rather_than_recreating_it(
-    tmp_path: Path, png_bytes: Callable[..., bytes]
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
 ) -> None:
     # `create_project` refuses an existing `project.db` with `ProjectExists`
     # rather than clobbering hours of edits (MT-005), so a CLI that always
@@ -186,9 +307,9 @@ def test_a_second_invocation_reopens_the_project_rather_than_recreating_it(
     # what "reopened and ran again" looks like from outside; one row would mean
     # the file was rebuilt from scratch and the first run's work thrown away.
     source_dir = _build_source(tmp_path, png_bytes)
-    assert main([str(source_dir)]) == 0
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
 
-    assert main([str(source_dir)]) == 0
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
 
     db_path = project_dir_for(source_dir) / "project.db"
     assert [row[0] for row in _raw(db_path, "SELECT outcome FROM run ORDER BY id")] == [
@@ -196,20 +317,27 @@ def test_a_second_invocation_reopens_the_project_rather_than_recreating_it(
         "finished",
     ]
     assert len(_raw(db_path, "SELECT id FROM chapter")) == 1
+    # Two invocations, two runs, two builds: the composition root is asked once
+    # per `main`, not once per process and not once per page.
+    assert composition_root.models_dirs == [models_dir, models_dir]
 
 
 def test_a_second_invocation_skips_the_pages_the_first_one_finished(
-    tmp_path: Path, png_bytes: Callable[..., bytes], capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
 ) -> None:
     # EPIC-02's done-when, through the entry point: starting again resumes
     # rather than restarting. Progress is still one line per page - a skipped
     # page is progress the user wants to see - and the output folder still holds
     # exactly the chapter.
     source_dir = _build_source(tmp_path, png_bytes)
-    assert main([str(source_dir)]) == 0
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
     capsys.readouterr()
 
-    assert main([str(source_dir)]) == 0
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
 
     lines = _lines(capsys.readouterr().out)
     counted = {name: len(_lines_naming(lines, name)) for name in _FILENAMES}
@@ -221,13 +349,16 @@ def test_a_second_invocation_skips_the_pages_the_first_one_finished(
 
 
 def test_a_folder_with_no_page_scans_exits_non_zero_with_a_named_message(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
 ) -> None:
     source_dir = tmp_path / "scans"
     source_dir.mkdir()
     (source_dir / "notes.txt").write_text("not a scan\n", encoding="utf-8")
 
-    code = main([str(source_dir)])
+    code = main([str(source_dir), "--models", str(models_dir)])
 
     assert code != 0, "a folder with nothing to translate reported success"
     captured = capsys.readouterr()
@@ -237,19 +368,167 @@ def test_a_folder_with_no_page_scans_exits_non_zero_with_a_named_message(
     assert "Traceback" not in message, "the CLI let a traceback reach the user"
     assert not project_dir_for(source_dir).exists(), "a project was created for an empty chapter"
     assert not _output_dir_for(source_dir).exists()
+    assert composition_root.models_dirs == [], (
+        "the composition root was asked to load the weights for a chapter with"
+        " nothing to translate; on a real machine that is a second or more of ONNX"
+        " session construction before a message the CLI could have printed first"
+    )
 
 
 def test_a_folder_that_is_not_there_exits_non_zero_with_a_named_message(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
 ) -> None:
     # The likeliest user error of all: a typo in a path. It must read as a
     # message, not as an unhandled `FileNotFoundError` from `Path.iterdir`.
     missing = tmp_path / "not-a-folder"
 
-    code = main([str(missing)])
+    code = main([str(missing), "--models", str(models_dir)])
 
     assert code != 0, "a folder that does not exist reported success"
     captured = capsys.readouterr()
     message = captured.err + captured.out
     assert missing.name in message, "the message does not say which folder"
     assert "Traceback" not in message, "the CLI let a traceback reach the user"
+    assert composition_root.models_dirs == []
+
+
+# -- MT-036 AC-3: the run walks the stages the composition root built ----------
+
+
+def test_the_cli_runs_the_stages_the_composition_root_built(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**AC-3.** The stage list `mangatl-run` walks is `build_pipeline`'s.
+
+    Asserted by the stages themselves rather than by inspecting an argument:
+    the stage the composition root handed back has to have been run on every
+    page of the chapter. A `main` that still built its own `PassThroughStage`
+    would leave this notebook empty while every other test in this file passed,
+    which is exactly the gap MT-035 PO-1 predicted and this story closes.
+    """
+    source_dir = _build_source(tmp_path, png_bytes)
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    assert composition_root.models_dirs == [models_dir], (
+        "the composition root was not asked for the stage list exactly once, with"
+        f" the resolved models directory: {composition_root.models_dirs}"
+    )
+    assert composition_root.stage.ran == list(range(len(_SOURCE_PAGES))), (
+        "the stages the composition root built were not the stages the run walked;"
+        f" the built stage ran on {composition_root.stage.ran}"
+    )
+
+
+def test_the_cli_no_longer_reaches_for_the_pass_through_stage() -> None:
+    """**AC-3's second half**, and the half a behavioural test cannot reach.
+
+    `PassThroughStage` is the identity element the runner's own tests are built
+    on and it stays in `pipeline/stage.py` (C-3) - so "not `PassThroughStage`"
+    cannot be asserted by its absence from the project. It is asserted where the
+    decision lives: the entry point does not import it and does not name it.
+
+    The module's source is read rather than its namespace, so the name cannot
+    survive as a local, a default argument or a fallback inside a branch no test
+    happens to take.
+    """
+    import mangatl.cli as module
+
+    assert module.__file__ is not None
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+
+    mentions = [
+        node
+        for node in ast.walk(tree)
+        if (isinstance(node, ast.Name) and node.id == "PassThroughStage")
+        or (isinstance(node, ast.Attribute) and node.attr == "PassThroughStage")
+        or (isinstance(node, ast.alias) and node.name == "PassThroughStage")
+    ]
+    assert mentions == [], (
+        "mangatl/cli.py still names PassThroughStage. After MT-036 the entry point"
+        " asks the composition root for its stages (C-3); the identity element"
+        " belongs to the runner's tests, not to the CLI."
+    )
+
+
+def test_the_cli_takes_the_models_directory_from_the_environment_when_no_flag_is_given(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PO-4's second branch, through the entry point.
+
+    `resolve_models_dir` takes the environment as an argument (C-2) and every
+    branch of it is tested in `test_compose.py` without touching `os.environ`.
+    This test is the other half and cannot be replaced by those: it is what
+    pins that `main` passes the *real* environment in, rather than an empty
+    mapping that would make `$MANGATL_MODELS` dead configuration.
+    """
+    source_dir = _build_source(tmp_path, png_bytes)
+    monkeypatch.setenv(_MODELS_ENV, str(models_dir))
+
+    assert main([str(source_dir)]) == 0
+
+    assert composition_root.models_dirs == [models_dir]
+
+
+def test_the_models_flag_wins_over_the_environment_variable(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PO-4's resolution order, end to end. Both are valid directories, so
+    precedence is the only thing that can decide the answer."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    from_env = tmp_path / "models-from-the-environment"
+    from_env.mkdir()
+    monkeypatch.setenv(_MODELS_ENV, str(from_env))
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    assert composition_root.models_dirs == [models_dir]
+
+
+def test_a_run_with_no_models_directory_fails_before_it_creates_anything(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    composition_root: _CompositionRoot,
+) -> None:
+    """PO-4's last branch, and C-3's ordering clause.
+
+    *"No silent default"*: a default pointing at a missing directory produces an
+    onnxruntime stack trace instead of a sentence. And the resolution happens
+    **before** `read_chapter`, so the failure costs the user nothing - no
+    project directory beside their scans to wonder about and delete, no output
+    folder. The user was told, and accepted, that `mangatl-run` now fails here
+    where MT-006 left it succeeding.
+    """
+    source_dir = _build_source(tmp_path, png_bytes)
+
+    code = main([str(source_dir)])
+
+    assert code != 0, "a run with nowhere to load the weights from reported success"
+    captured = capsys.readouterr()
+    message = captured.err + captured.out
+    assert _MODELS_ENV in message, (
+        f"the message does not name {_MODELS_ENV}, so a user who has not set it is"
+        f" not told what to set: {message!r}"
+    )
+    assert "Traceback" not in message, "the CLI let a traceback reach the user"
+    assert not project_dir_for(source_dir).exists(), (
+        "a project was created beside the scans before the run found out it had no"
+        " weights to run with (C-3: resolve the models directory before read_chapter)"
+    )
+    assert not _output_dir_for(source_dir).exists()
+    assert composition_root.models_dirs == []

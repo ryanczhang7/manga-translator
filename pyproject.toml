@@ -225,8 +225,13 @@ type = "forbidden"
 # `mangatl.cli` is the opposite kind of entry point and belongs here: MT-006's
 # AC-9/AC-10 make it headless, and this contract is what turns that from a claim
 # a test makes into a fact the `lint` gate checks (MT-006 PO-5).
+# `mangatl.compose` joins it in MT-036 (C-5, PO-3): the composition root is the
+# one module exempted from the onnxruntime contract below, and that exemption
+# must not become a back door out of this one. Neither the entry point nor the
+# module that builds its sessions may reach a widget.
 source_modules = [
     "mangatl.cli",
+    "mangatl.compose",
     "mangatl.domain",
     "mangatl.store",
     "mangatl.detect",
@@ -260,9 +265,18 @@ forbidden_modules = ["anthropic"]
 [[tool.importlinter.contracts]]
 name = "Only detect, ocr and clean import onnxruntime"
 type = "forbidden"
+# **Eight entries, and `mangatl.cli` is deliberately not one of them.** MT-036
+# (AC-1, PO-1, PO-2) amends `architecture.md` §3 rule 5 with the composition-root
+# exception: something has to construct the runtime, `mangatl.compose` is that
+# something and `mangatl.cli` imports it. Measured before it was written - one
+# top-level import in `cli.py` breaks this contract, and removing that single
+# name returns `5 kept, 0 broken` with the import still in place.
+# `allow_indirect_imports` is NOT added: it would stop import-linter reporting
+# the chain through `detect.session`, which is the whole of what this contract
+# catches, for all eight modules still listed. `mangatl.app` stays listed (PO-2):
+# an exemption is earned by a gate that fails, not anticipated.
 source_modules = [
     "mangatl.app",
-    "mangatl.cli",
     "mangatl.domain",
     "mangatl.store",
     "mangatl.translate",

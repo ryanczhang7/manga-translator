@@ -57,6 +57,10 @@ from mangatl.domain.events import (
     RunStarted,
     StageFinished,
 )
+from mangatl.domain.line import OcrResult
+from mangatl.domain.region import RawRegion
+from mangatl.pipeline.detect_stage import DetectStage
+from mangatl.pipeline.ocr_stage import OcrStage
 from mangatl.pipeline.runner import RUN_ABORTED, RUN_FINISHED, RunOutcome, run_chapter
 from mangatl.pipeline.stage import PageContext, PassThroughStage, Stage
 from mangatl.store.intake import read_chapter
@@ -182,6 +186,13 @@ class _RecordingStage:
     "already done" means. It is a double for `run`, not for `is_done`: the
     resume decision stays a question about persisted state, which is the whole
     of AC-5.
+
+    **MT-036 added `done`, and it defaults to that same page-status question**,
+    so every call site written before this story behaves exactly as it did. The
+    override exists because MT-036 AC-5 needs two stages that disagree about
+    done-ness on the *same* page - which page status cannot express, being one
+    value per page (`architecture.md` §5) - and that is the state a real resume
+    is in: `DetectStage.is_done` reads regions, `OcrStage.is_done` reads lines.
     """
 
     def __init__(
@@ -190,11 +201,13 @@ class _RecordingStage:
         *,
         raise_on: int | None = None,
         on_run: Callable[[PageContext], None] | None = None,
+        done: Callable[[PageContext], bool] | None = None,
     ) -> None:
         self.name = name
         self.ran: list[int] = []
         self._raise_on = raise_on
         self._on_run = on_run
+        self._done = done
 
     def run(self, ctx: PageContext) -> None:
         self.ran.append(ctx.page.ordinal)
@@ -204,6 +217,8 @@ class _RecordingStage:
             raise _StageExploded(_BOOM)
 
     def is_done(self, ctx: PageContext) -> bool:
+        if self._done is not None:
+            return self._done(ctx)
         return ctx.project.page_status(ctx.page.ordinal) == PAGE_DONE
 
 
@@ -760,6 +775,272 @@ def test_a_fresh_run_after_an_abort_resumes_at_the_page_that_failed(
     assert [row[1] for row in runs] == [RUN_ABORTED, RUN_FINISHED]
     assert {int(row[0]) for row in runs} == {first.run_id, second.run_id}
     assert first.run_id != second.run_id, "the resumed run reused the aborted run's row"
+
+
+# -- MT-036 AC-5: `is_done` is per stage per page ------------------------------
+#
+# MEASURED AT PLANNING, 2026-09-17, and reproduced by this file's own red run:
+# the runner consults `is_done` **only** in the page-level `all(...)` check and
+# then runs every stage unconditionally. So `Stage`'s own docstring - "`is_done`
+# is per stage per page ... a page that has regions but no translations resumes
+# at translation" - is a claim no code makes true, and MT-036 C-4 makes it true.
+#
+# The trap C-4 records, and the reason these tests are written the way they are:
+# the obvious implementation *replaces* the page-level skip with a per-stage one,
+# which satisfies AC-5 and breaks `_RESUMED_PROJECTION` above and
+# `tests/core/test_detect_stage.py`'s "a fully detected page is skipped rather
+# than started". **Both behaviours, not one replacing the other** - so the last
+# two tests in this section pin the page-level skip and the cancel boundary from
+# the other side, with stages whose done-ness is NOT page status.
+
+#: Four pages, a `detect` stage already done on every one of them and an `ocr`
+#: stage done on none. Every page is started - it is not fully done - and only
+#: the stage with work to do reports a `StageFinished`. PO-6: a skipped stage
+#: emits no event at all, because `StageFinished.elapsed_ms` is a *measured*
+#: duration and emitting one for work that did not happen would be a lie.
+_PER_STAGE_SKIP_PROJECTION: list[_Projected] = [
+    ("RunStarted", None, None),
+    ("PageStarted", 0, None),
+    ("StageFinished", 0, "ocr"),
+    ("PageStarted", 1, None),
+    ("StageFinished", 1, "ocr"),
+    ("PageStarted", 2, None),
+    ("StageFinished", 2, "ocr"),
+    ("PageStarted", 3, None),
+    ("StageFinished", 3, "ocr"),
+    ("RunFinished", None, None),
+]
+
+#: Four pages on which every stage reports itself done, while `page.status` is
+#: still pending. The page-level skip is what produces this, and nothing else
+#: can: a per-stage skip alone would emit `PageStarted` for all four.
+_ALL_STAGES_DONE_PROJECTION: list[_Projected] = [
+    ("RunStarted", None, None),
+    ("PageSkipped", 0, None),
+    ("PageSkipped", 1, None),
+    ("PageSkipped", 2, None),
+    ("PageSkipped", 3, None),
+    ("RunFinished", None, None),
+]
+
+
+class _SeededDetector:
+    """A `PageDetector` that records which page it was asked about.
+
+    `PageDetector` is handed bytes, not an ordinal, so the ordinal is recovered
+    through an index of the fixture scans - which is only possible because the
+    four fixture pages have four distinct sizes and therefore four distinct
+    encodings. That is the same property `_SOURCE_PAGES` was chosen for.
+    """
+
+    def __init__(self, index: dict[bytes, int], mask: bytes) -> None:
+        self._index = index
+        self._mask = mask
+        self.pages: list[int] = []
+
+    def __call__(self, image_bytes: bytes) -> Sequence[RawRegion]:
+        ordinal = self._index[image_bytes]
+        self.pages.append(ordinal)
+        return (_region(self._mask, 50, 50),)
+
+
+class _SeededTranscriber:
+    """A `PageTranscriber` that records the page and how many regions it saw."""
+
+    def __init__(self, index: dict[bytes, int]) -> None:
+        self._index = index
+        self.pages: list[int] = []
+        self.region_counts: list[int] = []
+
+    def __call__(self, image_bytes: bytes, regions: Sequence[RawRegion]) -> Sequence[OcrResult]:
+        self.pages.append(self._index[image_bytes])
+        self.region_counts.append(len(regions))
+        return tuple(OcrResult(text=f"line-{index}") for index in range(len(regions)))
+
+
+def _region(mask: bytes, x: int, y: int) -> RawRegion:
+    """A closed-ring square region with its top-left corner at `(x, y)`."""
+    ring = ((x, y), (x + 4, y), (x + 4, y + 4), (x, y + 4), (x, y))
+    return RawRegion(polygon=ring, mask=mask, confidence=1.0, kind="bubble")
+
+
+def _page_index(source_dir: Path) -> dict[bytes, int]:
+    return {
+        (source_dir / filename).read_bytes(): ordinal
+        for ordinal, (filename, _width, _height) in enumerate(_SOURCE_PAGES)
+    }
+
+
+def _done(ctx: PageContext) -> bool:
+    return True
+
+
+def _not_done(ctx: PageContext) -> bool:
+    return False
+
+
+def test_a_stage_that_is_already_done_for_a_page_is_neither_run_nor_reported(
+    tmp_path: Path, png_bytes: Callable[..., bytes]
+) -> None:
+    """**AC-5**, at the runner, with two stages that disagree about done-ness.
+
+    This is the shape a real resume is in and the shape page status cannot
+    express: `detect` has already written its regions, `ocr` has written no
+    lines, and the page as a whole is not done. The stage with nothing to do
+    must not be run and - PO-6 - must not report a `StageFinished` it did not
+    earn.
+    """
+    source_dir = _build_source(tmp_path, png_bytes)
+    detect = _RecordingStage("detect", done=_done)
+    ocr = _RecordingStage("ocr", done=_not_done)
+
+    with _new_project(source_dir) as project:
+        events, outcome = _run(project, [detect, ocr])
+        statuses = _statuses(project)
+
+    assert detect.ran == [], (
+        f"the detect stage ran on pages {detect.ran} that it reported itself already"
+        " done for; is_done is per stage per page (C-4), and on a real chapter each"
+        " of those is a GPU inference the user already paid for"
+    )
+    assert ocr.ran == [0, 1, 2, 3], "the stage with work to do was skipped as well"
+    assert _projected(events) == _PER_STAGE_SKIP_PROJECTION
+    assert outcome.outcome == RUN_FINISHED
+    assert outcome.pages_done == _PAGE_COUNT
+    # C-4 clause 4: `_mark_done` still runs at the end of a page that was not
+    # page-skipped, even though one of its two stages never ran.
+    assert statuses == [PAGE_DONE] * _PAGE_COUNT
+
+
+def test_a_page_interrupted_after_detection_resumes_into_ocr_without_detecting_again(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """**AC-5**, in the words the criterion is written in, with the real stages.
+
+    Page 0's regions are already in the store - the state a run killed between
+    detection and OCR leaves behind - and no page is marked done. `DetectStage`
+    reads its done-ness off the regions (MT-035 C-6) and `OcrStage` reads its
+    own off the lines (MT-010), so the two genuinely disagree about page 0 and
+    nothing here has to stub `is_done` to make them.
+
+    The store is the second observer: page 0's regions must be the *seeded*
+    ones afterwards. A detector that ran anyway would replace them with its own
+    and the region count alone would not notice.
+    """
+    source_dir = _build_source(tmp_path, png_bytes)
+    mask = one_bit_png(8, 8, [(0, 0, 4, 4)])
+    seeded = (_region(mask, 100, 100), _region(mask, 200, 200))
+    index = _page_index(source_dir)
+    detector = _SeededDetector(index, mask)
+    transcriber = _SeededTranscriber(index)
+
+    with _new_project(source_dir) as project:
+        project.write_regions(0, seeded)
+        stages = [DetectStage(detect=detector), OcrStage(transcribe=transcriber)]
+        events, outcome = _run(project, stages)
+        regions_on_page_zero = project.read_regions(0)
+        lines_on_page_zero = project.read_lines(0)
+
+    assert detector.pages == [1, 2, 3], (
+        f"the detector ran on pages {detector.pages}; page 0 already had regions,"
+        " so AC-5 says detection is skipped there and nowhere else"
+    )
+    assert transcriber.pages == [0, 1, 2, 3], (
+        f"the transcriber ran on pages {transcriber.pages}; AC-5 says OCR is *not*"
+        " skipped on the page whose detection was already done"
+    )
+    assert transcriber.region_counts[0] == len(seeded), (
+        "the transcriber was handed the wrong number of regions for page 0, so it"
+        " did not transcribe what the interrupted run had detected"
+    )
+    assert regions_on_page_zero == seeded, "the skipped detect stage rewrote the page anyway"
+    assert [result.text for result in lines_on_page_zero] == ["line-0", "line-1"]
+    assert _projected(events) == [
+        ("RunStarted", None, None),
+        ("PageStarted", 0, None),
+        ("StageFinished", 0, "ocr"),
+        ("PageStarted", 1, None),
+        ("StageFinished", 1, "detect"),
+        ("StageFinished", 1, "ocr"),
+        ("PageStarted", 2, None),
+        ("StageFinished", 2, "detect"),
+        ("StageFinished", 2, "ocr"),
+        ("PageStarted", 3, None),
+        ("StageFinished", 3, "detect"),
+        ("StageFinished", 3, "ocr"),
+        ("RunFinished", None, None),
+    ]
+    assert outcome.outcome == RUN_FINISHED
+
+
+def test_a_page_every_stage_of_which_is_done_is_skipped_before_it_is_started(
+    tmp_path: Path, png_bytes: Callable[..., bytes]
+) -> None:
+    """**C-4 clause 2**, from the side `_RESUMED_PROJECTION` cannot see.
+
+    Every existing resume test in this file marks `page.status` done, so the
+    page-level skip and a per-stage skip would agree there. Here the page status
+    is untouched and the *stages* report themselves done, which is what the real
+    stages do after this story - and a runner that replaced the page-level
+    `all(...)` check with a per-stage one emits four `PageStarted` events instead
+    of four `PageSkipped` ones. That is the regression C-4 exists to prevent and
+    it is the one this suite would otherwise meet in
+    `tests/core/test_detect_stage.py` rather than here.
+    """
+    source_dir = _build_source(tmp_path, png_bytes)
+    detect = _RecordingStage("detect", done=_done)
+    ocr = _RecordingStage("ocr", done=_done)
+
+    with _new_project(source_dir) as project:
+        events, outcome = _run(project, [detect, ocr])
+        statuses = _statuses(project)
+
+    assert _projected(events) == _ALL_STAGES_DONE_PROJECTION
+    assert (detect.ran, ocr.ran) == ([], [])
+    assert outcome.pages_done == _PAGE_COUNT
+    # A page-skipped page is not marked done by this run: it is done already,
+    # whoever did it, and `_mark_done` is for pages this run walked (C-4).
+    assert statuses == [PAGE_PENDING] * _PAGE_COUNT
+
+
+def test_the_cancel_check_is_consulted_for_a_stage_even_when_that_stage_is_skipped(
+    tmp_path: Path, png_bytes: Callable[..., bytes]
+) -> None:
+    """**C-4 clause 3**: the cancel boundary does not move.
+
+    `runner.py`'s own docstring says `cancelled()` is consulted at the top of
+    the page loop and at the top of the stage loop *and nowhere else*, and the
+    per-stage skip goes **after** it. Counting the consultations is the only
+    thing that can tell the two orderings apart: the event stream, the store and
+    the outcome are identical either way, because a cancel and a skip both end
+    with the stage not running.
+
+    Four pages, two stages, every page started: four page-loop checks and eight
+    stage-loop checks. If the skip were hoisted above the check, the four
+    skipped stages would never consult it and the count would be eight.
+    """
+    source_dir = _build_source(tmp_path, png_bytes)
+    consultations: list[None] = []
+
+    def counting_cancelled() -> bool:
+        consultations.append(None)
+        return False
+
+    stages = [_RecordingStage("detect", done=_done), _RecordingStage("ocr", done=_not_done)]
+
+    with _new_project(source_dir) as project:
+        _, outcome = _run(project, stages, counting_cancelled)
+
+    assert outcome.outcome == RUN_FINISHED
+    assert len(consultations) == _PAGE_COUNT + _PAGE_COUNT * len(stages), (
+        f"cancelled() was consulted {len(consultations)} times for {_PAGE_COUNT} pages"
+        f" of {len(stages)} stages. Once per page and once per stage is"
+        f" {_PAGE_COUNT + _PAGE_COUNT * len(stages)}; {_PAGE_COUNT + _PAGE_COUNT} means"
+        " the is_done check was hoisted above the cancel check and the cancel"
+        " boundary moved (C-4 clause 3)"
+    )
 
 
 # -- the pass-through stage: the identity element ------------------------------

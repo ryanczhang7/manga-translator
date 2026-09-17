@@ -20,7 +20,12 @@ Four decisions are load-bearing, and each is a test away from being wrong:
    wrapped the page in one would turn all of them into `RuntimeError`.
 3. **The skip predicate is `stages and all(...)`, not `all(...)`.** `all([])` is
    `True`, so a zero-stage run would otherwise report every page as already
-   done and skip the chapter.
+   done and skip the chapter. **There are two skips and the second did not
+   replace the first** (MT-036 C-4): a page every stage of which is done is
+   skipped before it is started, and inside a page that *is* started, a stage
+   that is done is not run. Replacing the page-level check with the per-stage
+   one satisfies "resume at OCR" and turns every fully-done page from a
+   `PageSkipped` into a `PageStarted` with no stages in it.
 4. **`pages_done` is how many pages are complete when the run ends** - the ones
    this run processed *plus* the ones it skipped as already done - and never the
    page an abort happened on. The alternative reading makes a fully translated
@@ -153,6 +158,16 @@ def _run_page(
         if cancelled():
             progress.reason = CANCELLED
             return False
+        if stage.is_done(ctx):
+            # Per stage per page (MT-036 C-4), which is what `Stage.is_done`'s
+            # docstring has always claimed: a page that has regions but no
+            # transcriptions resumes at OCR and does not detect again. **After**
+            # the cancel check, so the cancel boundary does not move - a skipped
+            # stage is still a boundary the user's cancel is honoured at. No
+            # event is emitted: `StageFinished.elapsed_ms` is a measured
+            # duration and emitting one for work that did not happen would be a
+            # lie (PO-6).
+            continue
         started_ns = time.perf_counter_ns()
         try:
             stage.run(ctx)
