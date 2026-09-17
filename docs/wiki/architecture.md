@@ -108,10 +108,67 @@ pass over stories whose artifact nothing exercised — the failure mode
 2. **`domain` is independent.** It may import the standard library and nothing
    else of ours — and not `numpy`, `PIL`, `PySide6`, `onnxruntime` or
    `anthropic`.
-3. **Nothing imports `ui`.** Including `bench`, which must be runnable headless.
+3. **Nothing imports `ui`.** Including `bench`, which must be runnable headless,
+   and `compose` (below), which is the composition root and has no display.
 4. **Only `translate` imports `anthropic`.** This is the contract that makes
    "one place spend can originate" a checked fact.
-5. **Only `detect`, `ocr` and `clean` import `onnxruntime`.**
+5. **Only `detect`, `ocr` and `clean` import `onnxruntime`** — *and the
+   composition root, which is `mangatl.compose` and `mangatl.cli`.*
+
+### The composition-root exception to rule 5
+
+*Amended 2026-09-17 by MT-036 (PO-1), on a measurement reproduced by the
+orchestrator against this tree before the amendment was written.*
+
+Rule 5 confines the inference runtime. It cannot also forbid **constructing** it,
+because something has to. The contract is a `forbidden` one with no
+`allow_indirect_imports`, so import-linter reports the whole chain — a lazy
+import inside a function body is not an escape, and neither is a
+`TYPE_CHECKING` guard. With `mangatl.cli` listed and a single top-level import
+added to it:
+
+```
+mangatl.cli is not allowed to import onnxruntime:
+-   mangatl.cli -> mangatl.detect.page (l.32)
+    mangatl.detect.page -> mangatl.detect.session (l.64)
+    mangatl.detect.session -> onnxruntime (l.32)
+```
+
+Removing `mangatl.cli` from that contract's `source_modules`, and nothing else,
+returns `Contracts: 5 kept, 0 broken` with the same import in place. So the
+amendment is exactly one name, and the other four contracts are untouched by it.
+
+**What the rule still buys, which is all of its architectural value.**
+`onnxruntime` remains forbidden to `domain`, `store`, `pipeline`, `translate`,
+`typeset`, `bench`, `ui` **and `mangatl.app`** — the eight modules a stage's
+logic, the orchestrator and the benchmark live in. The adapter split of §2 is
+what the rule protects and it is unchanged: `pipeline` still may not import
+`mangatl.detect` or `mangatl.ocr`, which is why `DetectStage` and `OcrStage`
+name their collaborators behind plain `Callable`s.
+
+**What it deliberately does not do.**
+
+- **`mangatl.app` stays listed.** It is the window entry point and nothing in it
+  needs a session yet. An exemption is earned by a gate that fails, not
+  anticipated; MT-015 amends this again if and when it needs to, and will then
+  have to say why `compose` was not enough.
+- **`mangatl.compose` is added to rule 3.** MT-006 PO-5 put `mangatl.cli` in
+  "Nothing imports `ui`" on purpose, to make headlessness a checked fact rather
+  than a claim, and this amendment must not undo that by the back door. It does
+  not: `cli` stays in rule 3, and the new module that does the constructing is
+  listed there too, so neither the entry point nor the composition root can
+  reach a widget.
+- **`mangatl.compose` is *not* added to rule 1's layer stack.** A composition
+  root sits outside the layers by definition — it imports `pipeline`, `detect`
+  and `ocr` in order to bind them together — and placing it would force a guess
+  about whether `ui` may import it, which no story needs answered yet. MT-015 is
+  where that question becomes real.
+
+**Rejected: making the import invisible.** `importlib.import_module("mangatl.detect.session")`
+would satisfy rule 5 as written, because import-linter cannot follow a string.
+That is working around the boundary with a tool that does not inspect it, and it
+is refused on the same grounds `rules.md` law 5 refuses `sed -i` on a frozen
+file. The rule is amended in the open instead.
 
 A gate that has never been observed to fail is not a gate. The story that adds
 these contracts must write each violation on purpose, watch `lint-imports`

@@ -13,19 +13,28 @@ lets the whole walking skeleton run with no display, no GPU and no network.
 
 Nothing here decides anything the pipeline decides: it is argument parsing, the
 create-or-reopen choice, a `print` per event and an exit code.
+
+**MT-036: the stages are real, and where the weights live is now an argument.**
+`mangatl.compose` is the composition root - the one module that constructs ONNX
+sessions - and this module asks it for the stage list by the name it imported,
+which is the seam a test replaces to walk the whole entry point with no weights
+on the machine (C-3). `--models`, then `$MANGATL_MODELS`, then a sentence: PO-4
+decided there is no silent default, and accepted that `mangatl-run` now fails on
+a machine with no weights where it used to write an empty translation.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from mangatl.compose import MODELS_ENV, ModelsNotFound, build_pipeline, resolve_models_dir
 from mangatl.domain.events import PageSkipped, PageStarted, RunEvent
 from mangatl.pipeline.export import write_output_folder
 from mangatl.pipeline.runner import RUN_FINISHED, run_chapter
-from mangatl.pipeline.stage import PassThroughStage
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
 from mangatl.store.project import ProjectExists, create_project, open_project, project_dir_for
 
@@ -51,7 +60,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(prog=_PROG, description="Translate a folder of page scans.")
     parser.add_argument("folder", type=Path, help="the folder of page scans to translate")
-    source_dir: Path = parser.parse_args(list(sys.argv[1:] if argv is None else argv)).folder
+    parser.add_argument(
+        "--models",
+        type=Path,
+        default=None,
+        help=f"directory holding the model weights (or set {MODELS_ENV})",
+    )
+    arguments = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+    source_dir: Path = arguments.folder
+
+    try:
+        # Before `read_chapter`, so a run with nowhere to load the weights from
+        # fails in one line and leaves nothing behind for the user to delete
+        # (MT-036 C-3). The real environment, read at call time: `$MANGATL_MODELS`
+        # is a working branch of PO-4's resolution order, not documentation.
+        models_dir = resolve_models_dir(arguments.models, os.environ)
+    except ModelsNotFound as error:
+        return _fail(str(error))
 
     if not source_dir.is_dir():
         return _fail(f"no such folder: {source_dir}")
@@ -70,9 +95,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         project = open_project(project_dir_for(source_dir))
 
     output_dir = source_dir.with_name(source_dir.name + _OUTPUT_SUFFIX)
+    # The stage list is the composition root's, and asking for it is the last
+    # thing that happens before the walk: it is where the ONNX sessions are
+    # built, and a chapter with nothing to translate should not pay for them.
+    stages = build_pipeline(models_dir)
     with project:
         filenames = {page.ordinal: page.filename for page in project.pages()}
-        outcome = run_chapter(project, [PassThroughStage()], _reporter(filenames), _never)
+        outcome = run_chapter(project, stages, _reporter(filenames), _never)
         if outcome.outcome != RUN_FINISHED:
             return _fail(f"run aborted: {outcome.aborted_reason}")
         write_output_folder(project, output_dir)

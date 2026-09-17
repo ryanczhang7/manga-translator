@@ -166,6 +166,11 @@ def test_nothing_below_the_entry_point_imports_ui() -> None:
     # from a claim a test makes into a fact the `lint` gate checks, and AC-9's
     # boundary is the whole reason MT-006's entry point is a CLI and not a
     # window. `mangatl.app` stays out, for the reason the test below gives.
+    # MT-036 added `mangatl.compose` (C-5, PO-3). The composition root is the
+    # one module exempted from contract 5, and the exemption must not become a
+    # back door out of this one: `cli` stays listed and the new module that does
+    # the constructing is listed beside it, so neither the entry point nor the
+    # composition root can reach a widget. Eleven entries.
     contract = _contract(UI)
     assert contract.get("type") == "forbidden"
     assert _modules(contract, "forbidden_modules") == ["mangatl.ui"]
@@ -173,6 +178,7 @@ def test_nothing_below_the_entry_point_imports_ui() -> None:
         "mangatl.bench",
         "mangatl.clean",
         "mangatl.cli",
+        "mangatl.compose",
         "mangatl.detect",
         "mangatl.domain",
         "mangatl.ocr",
@@ -211,13 +217,18 @@ def test_only_translate_may_import_anthropic() -> None:
 
 
 def test_only_detect_ocr_and_clean_may_import_onnxruntime() -> None:
+    # MT-036 AC-1: **eight** entries, `mangatl.cli` removed and nothing else.
+    # `architecture.md` §3's "composition-root exception to rule 5" carries the
+    # measurement - one top-level import in `cli.py` breaks this contract and
+    # removing that single name returns `5 kept, 0 broken` with the import still
+    # in place. `allow_indirect_imports` is deliberately NOT added: it would
+    # weaken the rule for all eight of the modules still listed here.
     contract = _contract(ONNX)
     assert contract.get("type") == "forbidden"
     assert _modules(contract, "forbidden_modules") == ["onnxruntime"]
     assert _modules(contract, "source_modules") == [
         "mangatl.app",
         "mangatl.bench",
-        "mangatl.cli",
         "mangatl.domain",
         "mangatl.pipeline",
         "mangatl.store",
@@ -225,6 +236,31 @@ def test_only_detect_ocr_and_clean_may_import_onnxruntime() -> None:
         "mangatl.typeset",
         "mangatl.ui",
     ]
+    assert "allow_indirect_imports" not in contract, (
+        "allow_indirect_imports would stop import-linter reporting the chain"
+        " pipeline -> detect.columns -> detect.postprocess -> detect.session ->"
+        " onnxruntime, which is the whole of what this contract catches"
+    )
+
+
+def test_the_composition_root_is_exempt_from_onnx_and_the_window_entry_point_is_not() -> None:
+    """MT-036 AC-1 and PO-2, stated as the decision rather than as two lists.
+
+    Only the two modules that *construct* sessions come out of contract 5:
+    `mangatl.compose`, which is the composition root, and `mangatl.cli`, which
+    imports it. `mangatl.app` stays listed - nothing in it needs a session, and
+    MT-015 amends this again if and when it does, having to say why `compose`
+    was not enough. An exemption is earned by a gate that fails, not
+    anticipated.
+    """
+    confined = _contract(ONNX).get("source_modules", [])
+
+    assert "mangatl.compose" not in confined
+    assert "mangatl.cli" not in confined
+    assert "mangatl.app" in confined, (
+        "mangatl.app was exempted from the onnxruntime confinement without a story"
+        " that needed it (MT-036 PO-2)"
+    )
 
 
 def test_the_package_that_owns_a_dependency_is_not_forbidden_from_importing_it() -> None:
