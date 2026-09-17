@@ -110,8 +110,24 @@ _SCHEMA_COLUMNS: dict[str, frozenset[str]] = {
             "merged_from",
         }
     ),
+    # `ocr_empty` added by MT-010 (C-1, PO-3): the flag that distinguishes "the
+    # model emitted no tokens" from "this line has not been OCR'd", which a
+    # reopened project cannot tell apart otherwise. Note that the assertion this
+    # set feeds is `expected <= actual`, so omitting the column here would NOT
+    # have failed - the schema would simply have grown a column nothing checked.
+    # MT-010's own `test_line_store.py` pins its type, its NOT NULL and its
+    # DEFAULT; this line is what keeps the data model's column list complete.
     "line": frozenset(
-        {"id", "region_id", "source_ja", "proposed_en", "final_en", "edited_at", "viewed_at"}
+        {
+            "id",
+            "region_id",
+            "source_ja",
+            "proposed_en",
+            "final_en",
+            "edited_at",
+            "viewed_at",
+            "ocr_empty",
+        }
     ),
     "run": frozenset({"id", "chapter_id", "started_at", "ended_at", "outcome", "aborted_reason"}),
     "llm_call": frozenset(
@@ -399,10 +415,16 @@ def live_project(built: _Built) -> Iterator[Project]:
 
 
 def test_the_schema_version_and_the_two_page_status_values_are_the_pinned_ones() -> None:
-    # `## Contract` PO-2 and the story's `SCHEMA_VERSION: int # starts at 1`.
+    # MT-005 `## Contract` PO-2 pinned this at 1; **MT-010 PO-3 takes it to 2**,
+    # because `line` gains `ocr_empty` and a project created before that update
+    # has to be migrated rather than opened and then failed on the first write.
     # A store that agreed with itself but not with the contract would pass every
     # round trip below and still write a file no later version can recognise.
-    assert SCHEMA_VERSION == 1
+    #
+    # The migration itself, and everything about the new column, is MT-010's
+    # `tests/core/test_line_store.py`. This line is here because it is the one
+    # assertion in the repository that would otherwise still say 1.
+    assert SCHEMA_VERSION == 2
     assert PAGE_PENDING == "pending"
     assert PAGE_STALE == "stale"
     assert PAGE_PENDING != PAGE_STALE

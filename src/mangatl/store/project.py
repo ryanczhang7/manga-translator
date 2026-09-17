@@ -53,6 +53,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
+from mangatl.domain.line import OcrResult
 from mangatl.domain.page import Chapter, Page
 from mangatl.domain.region import RawRegion
 from mangatl.store.intake import read_chapter
@@ -73,9 +74,12 @@ __all__ = [
 
 #: The schema version this code writes and is willing to read. Stored in the
 #: file as `PRAGMA user_version`. A *newer* file is refused (`SchemaTooNew`); an
-#: older one would be a migration and there are none, so a v1 file opened by v1
-#: code is the only case that exists today.
-SCHEMA_VERSION: int = 1
+#: older one is migrated in place on open (`_migrate_to_current`).
+#:
+#: Version 2 is MT-010's: `line.ocr_empty`. It is the project's first migration,
+#: and it is not optional tidiness (MT-010 PO-3) - a v1 file opened by this build
+#: would open without complaint and then fail on the first `write_lines`.
+SCHEMA_VERSION: int = 2
 
 #: `page.status` as `create_project` writes it: read, hashed, nothing done yet.
 PAGE_PENDING: str = "pending"
@@ -149,6 +153,39 @@ _INSERT_PAGE = (
     "INSERT INTO page (chapter_id, ordinal, filename, width, height, sha256, status)"
     " VALUES (?, ?, ?, ?, ?, ?, ?)"
 )
+
+# The line writer's upsert, the same shape and for the same reasons as
+# `_UPSERT_REGION`: `line.region_id` is UNIQUE, so `ON CONFLICT (region_id)`
+# matches, and `INSERT OR REPLACE` is the form that must NOT be used - it deletes
+# the row, taking any `proposed_en` and `final_en` on it with it. Re-running OCR
+# over a page replaces what the model read and touches nothing the translator or
+# the user wrote.
+_UPSERT_LINE = (
+    "INSERT INTO line (region_id, source_ja, ocr_empty) VALUES (?, ?, ?)"
+    " ON CONFLICT (region_id) DO UPDATE SET"
+    " source_ja = excluded.source_ja, ocr_empty = excluded.ocr_empty"
+)
+# One page's regions, in reading order, as ids - which is what a line is hung
+# off. `ORDER BY` is explicit for the reason `_SELECT_PAGES` gives.
+_SELECT_REGION_IDS = (
+    "SELECT region.id FROM region JOIN page ON page.id = region.page_id"
+    " WHERE page.ordinal = ? ORDER BY region.reading_index"
+)
+_SELECT_LINES = (
+    "SELECT line.source_ja, line.ocr_empty"
+    " FROM line JOIN region ON region.id = line.region_id"
+    " JOIN page ON page.id = region.page_id"
+    " WHERE page.ordinal = ? ORDER BY region.reading_index"
+)
+
+#: The one migration this build knows: version 1 to version 2 (MT-010 PO-3).
+#: `ALTER TABLE ... ADD COLUMN` rather than the "new table, copy the rows, drop
+#: the old one" recipe, and that choice is the whole of AC-10's rows-survive
+#: clause: ADD COLUMN rewrites no row, so every value, every NULL and every
+#: constraint - `region_id UNIQUE`, `ON DELETE CASCADE` - is still the one MT-005
+#: declared. The NOT NULL is legal here only because a non-NULL constant DEFAULT
+#: is given, which is also what fills the column for the rows already there.
+_MIGRATE_TO_V2 = "ALTER TABLE line ADD COLUMN ocr_empty INTEGER NOT NULL DEFAULT 0"
 
 
 class SchemaTooNew(Exception):
@@ -228,6 +265,13 @@ def open_project(project_dir: Path) -> Project:
     rather than discovered from sqlite3, which would *create* the file and fail
     later with the wrong error - and `SchemaTooNew` if the file's version
     exceeds `SCHEMA_VERSION`, before a single `SELECT` is issued against it.
+
+    An **older** file is migrated in place, on open, with no separate command
+    (MT-010 AC-10). "In place" is a property of the file rather than of this
+    connection: the migration commits before any caller sees the project, so the
+    next process to open it finds a version 2 file rather than doing the whole
+    thing again. Migrating is not the same as "open anything" - a newer file is
+    still refused above, and the refusal is now of version 3 and upward.
     """
     db_path = project_dir / _DB_NAME
     if not db_path.is_file():
@@ -243,7 +287,35 @@ def open_project(project_dir: Path) -> Project:
             f"{db_path} has schema version {found}, but this build supports"
             f" {SCHEMA_VERSION}; upgrade mangatl to open it"
         )
+    if found < SCHEMA_VERSION:
+        _migrate_to_current(connection)
     return Project(connection, _read_chapter(connection))
+
+
+def _migrate_to_current(connection: sqlite3.Connection) -> None:
+    """Bring a version 1 file up to `SCHEMA_VERSION`, committing before it
+    returns.
+
+    One statement, because there is exactly one older version. The day a version
+    3 arrives this becomes a chain keyed on the version found; writing that chain
+    now would be writing a loop whose second iteration no test can reach.
+
+    **Both** records of the version are updated. `PRAGMA user_version` is the
+    one `open_project` reads, and `chapter.schema_version` is the one
+    `architecture.md` §4 keeps for fidelity (MT-005 PO-7) - a migration that
+    moved one of them would leave a file disagreeing with itself.
+
+    The explicit `commit()` is not decoration: `UPDATE` opens an implicit
+    transaction under sqlite3's legacy isolation handling, and a migration that
+    is not on disk when the process ends is not a migration.
+    """
+    connection.execute(_MIGRATE_TO_V2)
+    connection.execute("UPDATE chapter SET schema_version = ?", (SCHEMA_VERSION,))
+    # Not parameterisable - a PRAGMA value cannot be bound - and formatted from
+    # this module's own int, so there is nothing to inject. Same call, and same
+    # reasoning, as `create_project`.
+    connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION:d}")
+    connection.commit()
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -408,6 +480,44 @@ class Project:
             for polygon, mask_blob, kind, confidence, merged_from in self._connection.execute(
                 _SELECT_REGIONS, (page_ordinal,)
             )
+        )
+
+    def write_lines(self, page_ordinal: int, results: Sequence[OcrResult]) -> None:
+        """Store one page's transcriptions, positionally against reading order.
+
+        `results[i]` belongs to the region at `reading_index == i`, exactly as
+        `write_regions` is positional (MT-007 A-11): a `RawRegion` carries no id
+        of its own (MT-009 PO-1), so position is the only carrier of identity and
+        nothing here sorts.
+
+        The write **upserts** on `region_id`, which is UNIQUE - so a re-run of a
+        page replaces its lines instead of raising `IntegrityError`, and it
+        updates rather than deleting, which is what keeps a re-read of the page
+        from taking the translations hanging off those rows with it by cascade.
+
+        `zip(..., strict=True)`: a result count that does not match the page's
+        region count means the caller transcribed a different page's regions, and
+        silently writing the shorter of the two would store one region's text
+        against another's id. Like `write_regions`, it opens its own
+        `transaction()` and therefore refuses a caller that already holds one.
+        """
+        with self.transaction() as cursor:
+            region_ids = [row[0] for row in cursor.execute(_SELECT_REGION_IDS, (page_ordinal,))]
+            for region_id, result in zip(region_ids, results, strict=True):
+                cursor.execute(_UPSERT_LINE, (region_id, result.text, int(result.ocr_empty)))
+
+    def read_lines(self, page_ordinal: int) -> tuple[OcrResult, ...]:
+        """One page's transcriptions, ordered by `reading_index`; `()` if there
+        are none.
+
+        Empty rather than an exception, because a page whose regions are stored
+        and whose OCR has not run is the normal state of every page between the
+        detect stage and this one - and `OcrStage.is_done` is this call's
+        emptiness.
+        """
+        return tuple(
+            OcrResult(text=str(source_ja), ocr_empty=bool(ocr_empty))
+            for source_ja, ocr_empty in self._connection.execute(_SELECT_LINES, (page_ordinal,))
         )
 
     @contextmanager

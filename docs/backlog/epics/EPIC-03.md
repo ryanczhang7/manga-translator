@@ -2,7 +2,7 @@
 id: EPIC-03
 title: Reading the page — what is text, in what order, and what does it say
 status: todo
-stories: [MT-030, MT-007, MT-008, MT-009, MT-035, MT-010]
+stories: [MT-030, MT-007, MT-008, MT-009, MT-035, MT-010, MT-036]
 ---
 
 ## Goal
@@ -58,6 +58,15 @@ column appears as a region of its own.
   epic will need an OCR stage after it in the same way.
 - **MT-010** — OCR: vertical Japanese in a region crop becomes text, without a
   deskew step that would break it.
+- **MT-036** — the wiring. Filed in MT-010's PLANNED phase by user decision
+  (MT-010 PO-4), and the third instance of the gap MT-009 PO-4 and MT-035 PO-1
+  both named: after MT-010 the project has `DetectStage` and `OcrStage`, both
+  correct, and `cli.py` still runs `[PassThroughStage()]`. This epic's done-when
+  says *"the **pipeline** produces"*, so **this epic closes on MT-036, not on
+  MT-010.** It is separate because the composition root needs an
+  `architecture.md` §3 amendment — `mangatl.cli` is in the "Only detect, ocr and
+  clean import onnxruntime" contract, and import-linter catches function-body
+  imports, which was measured rather than assumed.
 
 ## Deliberately not in this epic
 
@@ -67,3 +76,4 @@ of what MT-007 is allowed to emit, not a filter applied later. Panel
 segmentation is also out (`architecture.md` D10): v1 orders regions by geometry
 and leans on the LLM seeing the page to recover from an imperfect order.
 Translation is EPIC-04.
+
