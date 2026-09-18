@@ -48,6 +48,18 @@ actual:               $3" ;;
   esac
 }
 
+# assert_not_contains <what> <needle> <haystack>   The negative control's
+# assertion. "It reports X" is satisfied by a run that reports X AND the wrong
+# thing beside it, so a criterion phrased as "something other than PASS" needs
+# this rather than a second assert_contains.
+assert_not_contains() { # <what> <needle> <haystack>
+  case "$3" in
+    *"$2"*) _bad "$1" "expected NOT to contain: $2
+actual:                   $3" ;;
+    *) _ok "$1" ;;
+  esac
+}
+
 # --- fixture -----------------------------------------------------------------
 
 # make_fixture   Creates a throwaway repository that looks enough like a project
