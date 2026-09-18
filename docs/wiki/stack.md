@@ -346,7 +346,7 @@ glossary header) ≈ 1,500 tokens, cache-written once and read 19 times.
 | D — design A but two LLM passes per page | **$2.29 — over** |
 
 Reproduce with `awk -f docs/wiki/cost-model.awk`; the numbers above came from
-that script, and MT-010 replaces its assumptions with measured
+that script, and **MT-037** replaces its assumptions with measured
 `response.usage` values.
 
 Three things follow, and they are architecture, not preference:
@@ -356,16 +356,27 @@ Three things follow, and they are architecture, not preference:
 2. **One LLM call per page.** Design D is over the ceiling on its own. A retry
    path exists, but the budget guard prices retries before making them.
 3. **The ceiling is enforced in code, not hoped for.** `translate` reads
-   `response.usage` off every response, prices it from a pinned rate table,
-   writes it to the ledger, and the run aborts when projected chapter cost
-   crosses the configured ceiling (default $2.00). MT-010 is that story.
+   `response.usage` off every response (**MT-011**), prices it from a pinned
+   rate table and writes it to the ledger (**MT-012**), and the run aborts when
+   projected chapter cost crosses the configured ceiling, default $2.00
+   (**MT-013**).
 
 The estimate is unverified in one respect that matters: **the adaptive-thinking
 output is a guess.** Thinking tokens bill as output at $25/MTok, so if Opus 5
 thinks 3,000 tokens per page instead of 800, design A becomes $2.24 and the
-ceiling fails. MT-009's acceptance criteria therefore require the *measured*
-mean output tokens per page to be recorded, and MT-010's budget guard is what
-makes a bad guess safe rather than expensive.
+ceiling fails. **MT-037**'s acceptance criteria therefore require the *measured*
+mean output tokens per page to be recorded, and **MT-013**'s budget guard is
+what makes a bad guess safe rather than expensive.
+
+**A second assumption in this estimate is also unverified, and it was not
+visible when the estimate was written** (MT-011 PO-5, 2026-09-18). The $1.14
+figure assumes the ≈1,500-token stable prefix is cache-written once and **read
+19 times**. Prompt caching has a model-dependent *minimum cacheable prefix*
+(512–4096 tokens), and a prefix below that minimum **silently does not cache** —
+no error is raised and `usage.cache_read_input_tokens` simply stays at zero. If
+Opus 5's minimum is above ≈1,500 tokens, the 19 cache reads never happen.
+MT-037 AC-2 is the measurement; a zero there is a finding about this estimate,
+not a defect in the code.
 
 ### O6 — vertical text and furigana
 

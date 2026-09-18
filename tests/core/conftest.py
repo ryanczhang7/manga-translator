@@ -1,7 +1,8 @@
 """Fixture bytes shared by MT-004's page-intake tests, and by MT-007's.
 
-MT-007 appended `one_bit_png` at the foot of this file; everything above it
-belongs to MT-004 and is unchanged.
+MT-007 appended `one_bit_png` at the foot of this file, MT-009 `page_mask` below
+it, and MT-011 the structured-output `Message` stand-in below that; everything
+above `one_bit_png` belongs to MT-004 and is unchanged.
 
 Recipes are pinned in `docs/backlog/stories/MT-004.md` `## Contract` PO-2, and
 were verified there against Pillow 12.3.0 on 2026-09-15 in a scratch directory
@@ -27,6 +28,8 @@ import base64
 import struct
 import zlib
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -187,3 +190,107 @@ def one_bit_png() -> Callable[..., bytes]:
 def page_mask() -> bytes:
     """A 1125x1600 1-bit PNG with one small rect set. Built once per session."""
     return _one_bit_png(1125, 1600, [(0, 0, 8, 8)])
+
+
+# -- MT-011: a fake structured-output `Message`, and the recorded bodies -------
+#
+# `mangatl.translate.parse.parse_lines` takes an `anthropic.types.Message`
+# (MT-011 C-4). No test in MT-011 makes a network call or constructs a real
+# `Anthropic` client, so what it is handed here is a duck-typed stand-in built
+# out of the standard library.
+#
+# The stand-in is faithful in the two ways that matter, both from the Anthropic
+# API reference (MT-011 PO-5, re-read in RED):
+#
+# * **structured output puts the JSON in a `text` content block** -
+#   `output_config.format` guarantees a text block carrying valid JSON, reached
+#   as `next(b.text for b in response.content if b.type == "text")`;
+# * **adaptive thinking can put a `thinking` block in front of it** (C-5 pins
+#   `thinking={"type": "adaptive"}`), and a thinking block has `.thinking`, not
+#   `.text`. So `_FakeThinkingBlock` deliberately has **no** `text` attribute:
+#   an implementation reaching for `response.content[0].text` fails with an
+#   `AttributeError` naming it rather than silently reading an empty string.
+#
+# `usage` carries the four fields C-5 names and C-2 converts to `TokenUsage`.
+
+#: Where `fixtures/translate/*.json` lives, relative to this file.
+_TRANSLATE_FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "translate"
+
+
+@dataclass(frozen=True)
+class FakeUsage:
+    """`response.usage`, with the four fields MT-011 C-5 reads off it."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class FakeTextBlock:
+    text: str
+    type: str = "text"
+
+
+@dataclass(frozen=True)
+class FakeThinkingBlock:
+    """A `thinking` block. Note the absence of a `text` attribute - see above."""
+
+    thinking: str = ""
+    type: str = "thinking"
+
+
+@dataclass(frozen=True)
+class FakeMessage:
+    content: tuple[FakeTextBlock | FakeThinkingBlock, ...]
+    usage: FakeUsage = FakeUsage()
+    stop_reason: str = "end_turn"
+
+
+def _fake_message(
+    body: str,
+    *,
+    leading_thinking: bool = False,
+    usage: FakeUsage | None = None,
+    stop_reason: str = "end_turn",
+) -> FakeMessage:
+    """A `Message`-shaped value whose text block carries `body` verbatim."""
+    blocks: list[FakeTextBlock | FakeThinkingBlock] = []
+    if leading_thinking:
+        blocks.append(FakeThinkingBlock())
+    blocks.append(FakeTextBlock(text=body))
+    return FakeMessage(
+        content=tuple(blocks),
+        usage=usage if usage is not None else FakeUsage(),
+        stop_reason=stop_reason,
+    )
+
+
+@pytest.fixture
+def fake_message() -> Callable[..., FakeMessage]:
+    """A builder: `fake_message(body, leading_thinking=..., usage=...)`."""
+    return _fake_message
+
+
+def _response_body(name: str) -> str:
+    """One recorded body from `fixtures/translate/`, as **text**.
+
+    `read_text` and never `json.load`: key order is what MT-011's falsifiable
+    success condition 1 is about, and round-tripping through a `dict` and back
+    out of `json.dumps` would silently normalise it. See that folder's README.
+    """
+    return (_TRANSLATE_FIXTURES / f"{name}.json").read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def response_body() -> Callable[[str], str]:
+    """A loader: `response_body("well-formed")` -> the raw JSON body text."""
+    return _response_body
+
+
+@pytest.fixture
+def fake_usage() -> type[FakeUsage]:
+    """The `usage` type `fake_message` accepts, for a test that needs to set
+    the four counts to distinct values and check where each one landed."""
+    return FakeUsage
