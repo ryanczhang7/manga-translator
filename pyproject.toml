@@ -48,6 +48,16 @@ dependencies = [
     # full-width `!` it produces U+1FEE1 - so this takes the dependency the audit
     # measured. Pure Python, no extension module, no transitive dependencies.
     "jaconv>=0.4,<0.5",
+    # Added by MT-011 (PO-12), the first story that calls the cloud model.
+    # `translate/client.py` annotates its parameter `Anthropic` and
+    # `translate/parse.py` annotates the response `Message`, so the SDK is a
+    # runtime import of `mangatl.translate` and of nothing else - which is the
+    # moment `pyproject.toml`'s *"Only translate imports anthropic"* contract
+    # stops being vacuous and starts having something to catch (PO-4 measured
+    # what it would catch). The SDK ships `py.typed`, so no mypy override is
+    # needed or wanted. The floor is a release carrying `output_config.format`
+    # and adaptive thinking, which C-5 pins the call shape on.
+    "anthropic>=0.75,<1",
 ]
 
 [project.scripts]

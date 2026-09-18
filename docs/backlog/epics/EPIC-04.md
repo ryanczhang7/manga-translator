@@ -2,7 +2,7 @@
 id: EPIC-04
 title: Translating with the page in view, under a hard budget
 status: todo
-stories: [MT-011, MT-012, MT-013, MT-014]
+stories: [MT-011, MT-012, MT-013, MT-014, MT-038]
 ---
 
 ## Goal
@@ -35,10 +35,17 @@ called the same thing on page 17.
 
 `docs/wiki/stack.md` §5/O4 puts the chosen design at $1.14 per 20-page chapter
 against a $2.00 ceiling, and `docs/wiki/cost-model.awk` shows that a plausible
-adaptive-thinking volume (3,200 tokens per page) crosses it. MT-011 must
+adaptive-thinking volume (3,200 tokens per page) crosses it. **MT-038** must
 therefore *record* the measured mean output tokens per page, and MT-013 is what
 makes a wrong estimate safe rather than expensive. An epic that reports "cost
 looks fine" without a measured number has not finished.
+
+*Amended 2026-09-18 by the user (MT-011 PO-1):* this measurement was MT-011's
+AC-8 and is now **MT-038**, a story of its own. MT-011 has no credential on the
+development machine and no CI job that could ever discharge it — the `network`
+marker never runs on CI — so leaving it there meant one criterion in a
+seven-criterion story whose only available outcome was a waiver, in exactly the
+place this section says a waiver is unacceptable.
 
 ## Stories
 
@@ -50,6 +57,8 @@ looks fine" without a measured number has not finished.
   before the call is made.
 - **MT-014** — continuity: a running glossary of names, honorifics and place
   names carried across pages.
+- **MT-038** — the measurement: one real call, `response.usage` recorded, and
+  the cost model re-run against it rather than against its own assumptions.
 
 ## Deliberately not in this epic
 

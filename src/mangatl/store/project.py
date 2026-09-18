@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -174,6 +174,27 @@ _SELECT_REGION_IDS = (
 _SELECT_LINES = (
     "SELECT line.source_ja, line.ocr_empty"
     " FROM line JOIN region ON region.id = line.region_id"
+    " JOIN page ON page.id = region.page_id"
+    " WHERE page.ordinal = ? ORDER BY region.reading_index"
+)
+
+# MT-011 C-6: the translator's write. A plain `UPDATE` of the one column it
+# owns, and every other spelling is worse. `INSERT OR REPLACE` deletes the row
+# and the live `ON DELETE CASCADE` takes it away entirely; an `INSERT ... ON
+# CONFLICT DO UPDATE` naming `source_ja` would blank the transcription the OCR
+# stage paid 50 ms a region for; and a `DELETE`/`UPDATE ... = NULL` over the
+# page first would destroy a previous run's English, which cost real money
+# (`architecture.md` §4/§6). This statement can only ever set `proposed_en`, on
+# one row, and it leaves `source_ja`, `ocr_empty`, `final_en` and `edited_at`
+# exactly as they were.
+_UPDATE_PROPOSED = "UPDATE line SET proposed_en = ? WHERE region_id = ?"
+# One entry per **region**, which is why the join starts at `region` and is a
+# LEFT JOIN: a page whose regions are stored and whose OCR has not run has no
+# `line` rows at all, and it has to read back as NULLs rather than as an empty
+# page. `ORDER BY` is explicit for the reason `_SELECT_PAGES` gives.
+_SELECT_PROPOSED = (
+    "SELECT line.proposed_en"
+    " FROM region LEFT JOIN line ON line.region_id = region.id"
     " JOIN page ON page.id = region.page_id"
     " WHERE page.ordinal = ? ORDER BY region.reading_index"
 )
@@ -518,6 +539,67 @@ class Project:
         return tuple(
             OcrResult(text=str(source_ja), ocr_empty=bool(ocr_empty))
             for source_ja, ocr_empty in self._connection.execute(_SELECT_LINES, (page_ordinal,))
+        )
+
+    def write_proposed(self, page_ordinal: int, proposed: Mapping[int, str]) -> None:
+        """Store one page's proposed English, **by reading index** (MT-011 C-6).
+
+        A `Mapping` and not a positional `Sequence` - unlike `write_lines`, and
+        for two reasons that are both criteria. AC-5 needs "the model omitted
+        region 3" to be distinguishable from "the model proposed the empty
+        string for region 3", which only an absent key can say; and AC-6 needs
+        an index the page does not have to be *expressible*, so that it can be
+        rejected rather than silently landing on a neighbour.
+
+        **It updates only the rows it names and never clears the page first.**
+        By the time a user re-runs a chapter those rows carry translations that
+        cost real money (`architecture.md` §4/§6) and may already have been
+        accepted, so a region this mapping does not mention keeps whatever it
+        had - including NULL, which is what "untranslated" means. An empty
+        mapping is therefore a no-op, and that is AC-7's page of wordless art
+        reaching the store.
+
+        An index outside the page's reading indices raises **`ValueError`
+        naming it, with nothing written** (C-6's RED amendment). `ValueError`
+        and not `UnknownRegionIndex`: `mangatl.store` sits *below*
+        `mangatl.translate` in the layers contract and may not import it, and
+        `write_lines`'s `zip(..., strict=True)` already raises `ValueError` for
+        exactly this class of caller mistake. Every index is checked **before**
+        the first write, so "nothing is written" does not rest on the rollback
+        alone - though the rollback is there too, because like `write_lines` and
+        `write_regions` this opens its own `transaction()` and therefore refuses
+        a caller that already holds one.
+
+        A region with no `line` row yet cannot be translated - `TranslateStage`
+        builds its request out of `read_lines` - so the `UPDATE` finding no row
+        is a state the pipeline cannot reach, and inventing a `source_ja` for it
+        would be storing a transcription nobody made.
+        """
+        with self.transaction() as cursor:
+            region_ids = [row[0] for row in cursor.execute(_SELECT_REGION_IDS, (page_ordinal,))]
+            for reading_index in proposed:
+                if not 0 <= reading_index < len(region_ids):
+                    raise ValueError(
+                        f"reading index {reading_index} is not on page {page_ordinal}:"
+                        f" the page has {len(region_ids)} region(s)"
+                    )
+            for reading_index, english in proposed.items():
+                cursor.execute(_UPDATE_PROPOSED, (english, region_ids[reading_index]))
+
+    def read_proposed(self, page_ordinal: int) -> tuple[str | None, ...]:
+        """One page's proposed English, one entry per region in reading order.
+
+        `None` where `line.proposed_en` is NULL - which is what "untranslated"
+        means (C-6: no new column, no schema version bump) - and `()` for a page
+        with no regions, exactly as `read_lines` is empty for a page with no
+        lines. `TranslateStage.is_done` is "any entry here is not None".
+
+        Opens **no** transaction, as `read_lines` and `read_regions` open none,
+        so a caller already holding one can still ask what is stored.
+        """
+        return tuple(
+            None if proposed_en is None else str(proposed_en)
+            for (proposed_en,) in self._connection.execute(_SELECT_PROPOSED, (page_ordinal,))
         )
 
     @contextmanager
