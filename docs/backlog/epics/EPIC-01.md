@@ -2,7 +2,7 @@
 id: EPIC-01
 title: Foundations — a real toolchain, real gates, and a model runtime we trust
 status: todo
-stories: [MT-001, MT-002, MT-003, MT-031, MT-032, MT-033, MT-034]
+stories: [MT-001, MT-002, MT-003, MT-031, MT-032, MT-033, MT-034, MT-037]
 ---
 
 ## Goal

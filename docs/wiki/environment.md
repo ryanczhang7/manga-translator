@@ -276,6 +276,36 @@ PySide6 needs a display. On a machine or runner without one, set
 `integration` gate is marked optional precisely because it needs a GPU and a
 network that CI does not have.
 
+### The `integration` gate needs a checkout that has `spikes/`
+
+The integration suite's inputs — the page scans and the model weights — live
+under `spikes/**`, which `.gitignore` covers, deliberately and permanently: they
+are a non-redistributable scan of a commercial release and a GPL-3.0 model's
+weights. **A git worktree shares `.git` and not the ignored working files, so a
+worktree never carries them** — and this harness dispatches its agents into
+`.claude/worktrees/**`. So the default condition of an agent running
+`bash scripts/gates.sh` here is that 25 of the suite's 26 tests skip at call
+time. CI is in the same position, for the same reason.
+
+That is no longer a silent `PASS`. Since MT-037, `integration` carries a
+`floor` of 26 and a `skipped-when` line in `.claude/harness/project.conf`, so
+such a run reports **`KNOWN`** (exit 0) when nothing is leaning on the gate and
+**`BLOCKED`** (exit 3) when a story escalated it through `required_gates`. Read
+either as *this checkout cannot answer that question* — it is a declared
+non-result, not a failure and not a pass.
+
+To actually get an answer, run the gate from a checkout that has `spikes/`
+(normally the main checkout rather than a worktree):
+
+```bash
+bash scripts/gates.sh --gate integration   # expect: PASS integration (…, observed 26, floor 26)
+```
+
+Copying or symlinking `spikes/` into the worktree works too. What does not work
+is committing it; see MT-037 `## Out of scope`. This is step 2 of the BLOCKED
+playbook — supply what the environment lacks — and not step 3: quoting a CI log
+would certify nothing here, because CI is the weaker machine.
+
 ### Installer signing
 
 Not an environment prerequisite, but it lands in MT-024: an unsigned PyInstaller

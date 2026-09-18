@@ -692,4 +692,307 @@ assert_contains "the story's own branch records" "recorded in docs/backlog/stori
 assert_eq "and the block is in the story"        "1" "$(gate_blocks)"
 set_phase "$FIX" ""
 
+# ---------------------------------------------------------------------------
+describe "skipped-when: a gate that skipped its work stops reporting PASS"
+
+# MT-037. `integration` reported `PASS integration (9s, observed 1)` on a run
+# where 1 of its 26 collected tests ran and 25 skipped, because the evidence
+# regex `[1-9][0-9]* passed` is satisfied by `1 passed` and the gate had no
+# floor. That is the vacuous pass the evidence mechanism exists to catch, and
+# the mechanism could not catch it.
+#
+# The fix is a floor plus a new manifest kind, `skipped-when`, that CLASSIFIES
+# a below-floor shortfall: the environment declining to supply the work
+# (BLOCKED when a story leans on the gate, KNOWN when it does not) rather than
+# the suite having lost it (FAIL/WARN, exactly as today). The two halves of
+# that sentence are tested against each other throughout this block - a fix
+# that made `integration` never pass, and a pattern that excused every
+# shortfall, would each satisfy one half of it.
+
+set_phase "$FIX" ""
+git -C "$FIX" checkout -q -B story/T-1-fixture 2>/dev/null
+
+# The `why` string, verbatim, for the 1-of-26 run most cases below use. It
+# carries the observed count, the floor and the word `skipped`, so the summary
+# line answers *why* without anyone opening the gate log.
+SKIPWHY='did 1 units of work, below the floor of 26 in project.conf; the log says 25 skipped, so the work was skipped rather than lost: the environment did not supply it'
+SKIPCMD='printf "1 passed, 25 skipped in 0.46s\n"'
+INTLOG='-> .claude/state/gate-logs/integration.log'
+
+# The configuration C-3 puts in the real manifest, spelled out so that the
+# cases below test gates.sh's machinery rather than the manifest's contents.
+# AC-1's own two cases read the real manifest instead; see below.
+int_conf() { # <required|optional> <gate command>
+  write_conf "$FIX" <<EOF
+gate         | integration | $1 | . | $2
+evidence     | integration | [1-9][0-9]* passed
+floor        | integration | 26
+skipped-when | integration | [1-9][0-9]* skipped
+EOF
+}
+
+# --- AC-1: the bug, at the manifest and then end to end ---------------------
+
+# The manifest itself, not a fixture copy of it. A suite that only ever asks
+# gates.sh about a conf it wrote itself goes green while the REAL integration
+# gate still reports PASS on a machine that ran one of its 26 tests - and that
+# machine is every worktree this harness dispatches into. Same reasoning as
+# make_fixture copying the real paths.conf and VERSION rather than inventing
+# them.
+REAL_CONF="$REPO_ROOT/.claude/harness/project.conf"
+real_conf_value() { # <kind> <gate id>
+  grep -E "^[[:space:]]*$1[[:space:]]*\|[[:space:]]*$2[[:space:]]*\|" "$REAL_CONF" \
+    | head -1 | cut -d'|' -f3- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+# 26 is settled: the collected count of `tests/integration -m "gpu or network"`,
+# observed as `26 passed` in MT-036's stamped record and as `1 passed, 25
+# skipped` in MT-037 PO-1. Not re-derived here.
+assert_eq "the manifest gives integration a floor of 26" \
+  "26" "$(real_conf_value floor integration)"
+# `skipped` and NOT `deselected`, exactly. A skip is the tests deciding at call
+# time that their inputs are absent; a deselection is the gate's own marker
+# expression, which is a change to the manifest and therefore a regression. A
+# pattern widened to cover `deselected` would excuse the regression AC-5
+# protects against, and would do it in one word nobody would notice.
+assert_eq "and a skipped-when pattern that matches skips only" \
+  "[1-9][0-9]* skipped" "$(real_conf_value skipped-when integration)"
+
+# End to end, with the real manifest's own integration lines lifted into the
+# fixture and only the command replaced. This is MT-037 PO-1 reproduced
+# mechanically, and it is the permanent regression test.
+{ printf 'gate         | integration | optional | . | %s\n' "$SKIPCMD"
+  grep -E '^[[:space:]]*(evidence|floor|skipped-when)[[:space:]]*\|[[:space:]]*integration[[:space:]]*\|' "$REAL_CONF"
+} | write_conf "$FIX"
+out="$(gates)"
+assert_not_contains "a run that skipped 25 of its 26 tests is not a PASS" \
+  "PASS         integration" "$out"
+
+# --- AC-2: the negative control for AC-1 ------------------------------------
+
+# A fix that satisfies AC-1 by making `integration` never pass fails here, and
+# it is the cheapest wrong fix available.
+int_conf optional 'printf "26 passed in 7.1s\n"'
+out="$(gates)"; rc=$?
+assert_contains "a machine that has the data still passes" "PASS         integration" "$out"
+assert_contains "naming both the count and the floor"      "observed 26, floor 26" "$out"
+assert_eq "and the run exits 0"                            "0" "$rc"
+
+# C-1: the pattern is never consulted at or above the floor. A gate that did
+# all its work is a pass even though some of its tests skipped.
+int_conf optional 'printf "26 passed, 3 skipped in 7.1s\n"'
+out="$(gates)"
+assert_contains "a gate at its floor passes even though tests skipped" \
+  "PASS         integration" "$out"
+assert_not_contains "and is not turned into a declared non-result" \
+  "KNOWN        integration" "$out"
+
+# --- AC-4: no active story, so the gate is optional -------------------------
+# Ordered before AC-3 because it needs no story file, and AC-3 leaves one.
+
+set_phase "$FIX" ""
+int_conf optional "$SKIPCMD"
+rm -f "$FIX/.claude/state/last-gate-run"
+out="$(gates)"; rc=$?
+assert_contains "an optional gate the environment starved reports KNOWN" \
+  "KNOWN        integration" "$out"
+assert_contains "and says why, inline"   "$SKIPWHY" "$out"
+assert_contains "and points at the log"  "$INTLOG" "$out"
+# Specifically not WARN: a WARN on every PR for the life of the project is the
+# outcome MT-007 and MT-008 declined a floor to avoid, and quality-gates
+# reserves WARN for something that CHANGED.
+assert_not_contains "and is specifically not a WARN" "WARN         integration" "$out"
+assert_eq "and the run exits 0" "0" "$rc"
+assert_contains "and it is counted as a known non-result" \
+  "All required gates passed (1 ran, 0 unconfigured, 1 known)" "$out"
+assert_contains "and the stamp still records a pass" $'RESULT=pass\nWHEN=' \
+  "$(cat "$FIX/.claude/state/last-gate-run")"
+
+# C-2: an optional gate that also carries a waiver keeps the waiver wording -
+# the waiver is the broader declaration.
+write_conf "$FIX" <<EOF
+gate         | integration | optional | . | $SKIPCMD
+evidence     | integration | [1-9][0-9]* passed
+floor        | integration | 26
+skipped-when | integration | [1-9][0-9]* skipped
+waiver       | integration | the spike data is not redistributable
+EOF
+out="$(gates)"
+assert_contains "a waiver is still named beside the reason" \
+  "$SKIPWHY; the spike data is not redistributable" "$out"
+
+# --- AC-3: a story escalated the gate ---------------------------------------
+
+story "$FIX" T-1 GATES <<'EOF'
+required_gates: [integration]
+EOF
+set_phase "$FIX" GATES
+int_conf optional "$SKIPCMD"
+rm -f "$FIX/.claude/state/last-gate-run"
+out="$(gates)"; rc=$?
+assert_contains "a gate the story leans on is BLOCKED" "BLOCKED      integration" "$out"
+assert_contains "naming the story that escalated it"   "required by story T-1" "$out"
+assert_contains "and says why"                         "$SKIPWHY" "$out"
+assert_contains "and points at the log"                "$INTLOG" "$out"
+assert_contains "and it is counted as a gate that could not run" \
+  "1 required gate(s) could not run" "$out"
+assert_eq "and the run exits 3, not 0 and not 1" "3" "$rc"
+assert_contains "and the story records result: blocked" "result: blocked" \
+  "$(cat "$FIX/docs/backlog/stories/T-1.md")"
+# C-5: check-boundaries.sh greps ## Gate results for
+# `^[[:space:]]*PASS[[:space:]]+<gate>` and calls it "story-required gate '<g>'
+# passed in the recorded run". This is the assertion that makes that check bite
+# instead of agreeing with a vacuous run - the same grep, run here against what
+# gates.sh actually wrote.
+assert_eq "so the record carries no PASS line for check-boundaries.sh to read" "0" \
+  "$(grep -cE '^[[:space:]]*PASS[[:space:]]+integration( |\(|$)' "$FIX/docs/backlog/stories/T-1.md")"
+
+# --- AC-5: the negative control for AC-3 and AC-4 ---------------------------
+# The pattern CLASSIFIES a shortfall. It must never excuse one.
+
+int_conf optional 'printf "3 passed in 0.4s\n"'
+out="$(gates)"; rc=$?
+assert_contains "required: a shortfall the pattern does not match still FAILs" \
+  "FAIL         integration" "$out"
+assert_contains "with the floor wording it has always had" \
+  "did 3 units of work, below the floor of 26 in project.conf" "$out"
+assert_not_contains "and is not reported as a block" "BLOCKED      integration" "$out"
+assert_eq "and the run exits 1" "1" "$rc"
+
+set_phase "$FIX" ""
+out="$(gates)"; rc=$?
+assert_contains "optional: the same shortfall still WARNs" "WARN         integration" "$out"
+assert_not_contains "and is not excused as a declared non-result" \
+  "KNOWN        integration" "$out"
+assert_eq "and the run exits 0" "0" "$rc"
+
+# The distinction C-3 calls load-bearing, at the only place it can be tested:
+# `deselected` is the gate's own marker expression having changed, which is a
+# regression in the manifest, not an environment that failed to supply data.
+# `-m "network"` in place of `-m "gpu or network"` must still be caught.
+int_conf optional 'printf "3 passed, 23 deselected in 0.4s\n"'
+out="$(gates)"
+assert_contains "a deselected shortfall is a manifest regression, not an environment" \
+  "WARN         integration" "$out"
+assert_not_contains "so the skip pattern does not classify it" \
+  "KNOWN        integration" "$out"
+
+# --- DV-2: the new arm is unreachable on the rc != 0 path -------------------
+# `skipped-when` is consulted only for a gate that exited 0 and came in below
+# its floor. A command that exits non-zero is the existing fail/blocked-when
+# logic, whatever its log says.
+#
+# The claim has two halves, and each needs the fixture that can observe it. On a
+# REQUIRED gate a broken rc guard would send this log into the `environment` arm
+# and out as BLOCKED, so `required` is where "not a block" discriminates. It is
+# also where `KNOWN` is impossible for a reason that has nothing to do with DV-2
+# - a required gate never reports KNOWN without a waiver - so the other half is
+# asserted on the OPTIONAL twin below, where `KNOWN` is exactly what a broken rc
+# guard produces. See `## Regressions` R-6.
+
+int_conf required 'printf "1 passed, 25 skipped in 0.46s\nINTERNALERROR: the run aborted\n"; exit 2'
+out="$(gates)"; rc=$?
+assert_contains "a non-zero exit fails even when the log matches the skip pattern" \
+  "FAIL         integration" "$out"
+assert_not_contains "and is not a block"            "BLOCKED      integration" "$out"
+assert_eq "and the run exits 1"                     "1" "$rc"
+
+# The optional twin: same command, same log, `optional` instead of `required`.
+# The rc != 0 path ends in WARN here, and the arm DV-2 says is unreachable would
+# end in KNOWN - so a single mutation of the rc guard turns this pair red.
+int_conf optional 'printf "1 passed, 25 skipped in 0.46s\nINTERNALERROR: the run aborted\n"; exit 2'
+out="$(gates)"
+assert_contains "optional: a non-zero exit warns even when the log matches the skip pattern" \
+  "WARN         integration" "$out"
+assert_not_contains "and is not excused as a declared non-result on the rc != 0 path" \
+  "KNOWN        integration" "$out"
+
+# --- C-1: the pattern survives the split on `|` -----------------------------
+# Stored with `cut -d'|' -f3-`, as `evidence` and `blocked-when` are, so a
+# pattern using alternation is not truncated at its first branch. Here only the
+# SECOND branch matches - `0 skipped` does not match `[1-9][0-9]* skipped` - so
+# a parser that kept `-f3` would report WARN.
+
+write_conf "$FIX" <<'EOF'
+gate         | integration | optional | . | printf "1 passed, 0 skipped in 0.4s\nno data files were supplied\n"
+evidence     | integration | [1-9][0-9]* passed
+floor        | integration | 26
+skipped-when | integration | [1-9][0-9]* skipped|no data files were supplied
+EOF
+out="$(gates)"
+assert_contains "a pattern using alternation is not truncated at the first branch" \
+  "KNOWN        integration" "$out"
+assert_contains "and the line quotes the branch that matched" \
+  "the log says no data files were supplied" "$out"
+
+# --- AC-6: the audit refuses a line that can never protect anything ---------
+
+# (a) names no configured gate: it fires on nothing.
+write_conf "$FIX" <<'EOF'
+gate         | integration | optional | . | printf "26 passed in 7.1s\n"
+evidence     | integration | [1-9][0-9]* passed
+floor        | integration | 26
+skipped-when | integratoin | [1-9][0-9]* skipped
+EOF
+out="$(gates --audit)"; rc=$?
+assert_contains "a skipped-when naming no configured gate fails the audit" \
+  'a `skipped-when` line names no configured gate' "$out"
+assert_eq "and the audit exits non-zero" "1" "$rc"
+
+# (b) no pattern: it would match every log and turn every shortfall into a
+# block, which is the opposite of the point.
+write_conf "$FIX" <<'EOF'
+gate         | integration | optional | . | printf "26 passed in 7.1s\n"
+evidence     | integration | [1-9][0-9]* passed
+floor        | integration | 26
+skipped-when | integration |
+EOF
+out="$(gates --audit)"; rc=$?
+assert_contains "a skipped-when with no pattern fails the audit" \
+  'a `skipped-when` line has no pattern' "$out"
+assert_eq "and the audit exits non-zero" "1" "$rc"
+
+# (c) names a gate with no floor: there is no measurement to classify, so the
+# line sits in the manifest looking like protection. Same reasoning as the
+# existing "a floor needs an evidence regex to measure".
+write_conf "$FIX" <<'EOF'
+gate         | build | required | . | printf "Bundled 3 targets\n"
+evidence     | build | Bundled [1-9][0-9]* targets
+skipped-when | build | [1-9][0-9]* skipped
+EOF
+out="$(gates --audit)"; rc=$?
+assert_contains "a skipped-when on a gate with no floor fails the audit" \
+  'a `skipped-when` line names a gate with no `floor` line' "$out"
+assert_eq "and the audit exits non-zero" "1" "$rc"
+
+# The negative control for all three: a well-formed line on a floored gate
+# passes, and is printed with the gate so that the audit shows what it read.
+write_conf "$FIX" <<'EOF'
+gate         | integration | optional | . | printf "26 passed in 7.1s\n"
+evidence     | integration | [1-9][0-9]* passed
+floor        | integration | 26
+skipped-when | integration | [1-9][0-9]* skipped
+EOF
+out="$(gates --audit)"; rc=$?
+assert_contains "a well-formed skipped-when passes the audit" "Manifest audit passed." "$out"
+assert_contains "and the audit prints it with the gate" \
+  "skipped-when: [1-9][0-9]* skipped" "$out"
+assert_eq "and the audit exits 0" "0" "$rc"
+
+# --- AC-7: --list prints the pattern ----------------------------------------
+
+write_conf "$FIX" <<'EOF'
+gate         | integration | optional | . | printf "26 passed in 7.1s\n"
+evidence     | integration | [1-9][0-9]* passed
+floor        | integration | 26
+blocked-when | integration | no CUDA-capable device
+skipped-when | integration | [1-9][0-9]* skipped
+EOF
+out="$(gates --list)"
+assert_contains "--list prints the skip pattern"  "skipped-when: [1-9][0-9]* skipped" "$out"
+assert_contains "beside the blocked-when line"    "blocked-when: no CUDA-capable device" "$out"
+assert_contains "beside the floor"                "floor:    26" "$out"
+assert_contains "and the evidence regex"          "evidence: [1-9][0-9]* passed" "$out"
+
+set_phase "$FIX" ""
+
 summary "gates"
