@@ -346,7 +346,7 @@ glossary header) ≈ 1,500 tokens, cache-written once and read 19 times.
 | D — design A but two LLM passes per page | **$2.29 — over** |
 
 Reproduce with `awk -f docs/wiki/cost-model.awk`; the numbers above came from
-that script, and **MT-037** replaces its assumptions with measured
+that script, and **MT-038** replaces its assumptions with measured
 `response.usage` values.
 
 Three things follow, and they are architecture, not preference:
@@ -364,7 +364,7 @@ Three things follow, and they are architecture, not preference:
 The estimate is unverified in one respect that matters: **the adaptive-thinking
 output is a guess.** Thinking tokens bill as output at $25/MTok, so if Opus 5
 thinks 3,000 tokens per page instead of 800, design A becomes $2.24 and the
-ceiling fails. **MT-037**'s acceptance criteria therefore require the *measured*
+ceiling fails. **MT-038**'s acceptance criteria therefore require the *measured*
 mean output tokens per page to be recorded, and **MT-013**'s budget guard is
 what makes a bad guess safe rather than expensive.
 
@@ -375,7 +375,7 @@ figure assumes the ≈1,500-token stable prefix is cache-written once and **read
 (512–4096 tokens), and a prefix below that minimum **silently does not cache** —
 no error is raised and `usage.cache_read_input_tokens` simply stays at zero. If
 Opus 5's minimum is above ≈1,500 tokens, the 19 cache reads never happen.
-MT-037 AC-2 is the measurement; a zero there is a finding about this estimate,
+MT-038 AC-2 is the measurement; a zero there is a finding about this estimate,
 not a defect in the code.
 
 ### O6 — vertical text and furigana
