@@ -28,6 +28,13 @@
 # rather than a defect - see the quality-gates skill, and `blocked-when` in
 # project.conf for a runner that words a launch failure its own way.
 #
+# A gate can also START, exit 0, match its evidence and still come in below its
+# floor because the ENVIRONMENT never supplied the work - gitignored test data
+# a worktree does not carry, and the suite skips rather than fails. A
+# `skipped-when` line classifies that shortfall: BLOCKED when a story escalated
+# the gate, KNOWN (a declared non-result, exit 0) when it did not. It only ever
+# classifies a shortfall the floor already measured; it never excuses one.
+#
 # `slow` lines name the gates a --fast run leaves out. --fast exists so that RED
 # and GREEN can ask the gates whether the tests are even ADMISSIBLE - lint, types,
 # and the instrumented test command they will actually be judged by - without
@@ -73,7 +80,7 @@ while [ $# -gt 0 ]; do
     --fast) FAST=1 ;;
     --audit) AUDIT=1 ;;
     --story) shift; STORY="${1:-}" ;;
-    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,43p' "$0"; exit 0 ;;
     *) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
   shift
@@ -88,6 +95,7 @@ ESC=$(printf '\033')
 # Read up front, so that --gate <id> still finds its own lines. Stored as
 # "<id><TAB><value>" lines; no associative arrays, for bash 3.2.
 EVIDENCE=""; WAIVERS=""; FLOORS=""; SLOWS=""; CIFACTORS=""; COVERS=""; BLOCKEDWHEN=""; GATE_IDS=""
+SKIPPEDWHEN=""
 GATE_REQ=""   # "<id><TAB>required|optional" per gate, after any story escalation
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -101,7 +109,7 @@ while IFS= read -r line; do
   # line", and a misspelt `floor` id fails the audit outright, but a misspelt
   # `slow` id is silent - the gate it meant to exclude simply stays in --fast.
   [ "$kind" = "gate" ] && { GATE_IDS="$GATE_IDS $tid"; continue; }
-  case "$kind" in evidence|waiver|floor|slow|ci-factor|covers|blocked-when) ;; *) continue ;; esac
+  case "$kind" in evidence|waiver|floor|slow|ci-factor|covers|blocked-when|skipped-when) ;; *) continue ;; esac
   # -f3- so that a regex containing `|` (alternation) survives the split.
   tval=$(trim "$(printf '%s' "$line" | cut -d'|' -f3-)")
   [ -n "$tid" ] || continue
@@ -119,6 +127,8 @@ while IFS= read -r line; do
     covers)   COVERS="$COVERS$tid$TAB$tval
 " ;;
     blocked-when) BLOCKEDWHEN="$BLOCKEDWHEN$tid$TAB$tval
+" ;;
+    skipped-when) SKIPPEDWHEN="$SKIPPEDWHEN$tid$TAB$tval
 " ;;
   esac
 done < "$CONF"
@@ -313,6 +323,9 @@ while IFS= read -r line; do
   slowwhy=$(table_lookup "$SLOWS" "$id"); is_slow=$?
   floor=$(table_lookup "$FLOORS" "$id") || floor=""
   cifactor=$(table_lookup "$CIFACTORS" "$id") || cifactor=""
+  # Read here with the other tables, but consulted in exactly one place below:
+  # a gate that exited 0, matched its evidence and came in BELOW its floor.
+  skippat=$(table_lookup "$SKIPPEDWHEN" "$id") || skippat=""
   logrel=".claude/state/gate-logs/$id.log"
 
   if [ "$LIST" = 1 ]; then
@@ -327,6 +340,9 @@ while IFS= read -r line; do
     while IFS="$TAB" read -r bid bpat; do
       [ "$bid" = "$id" ] && printf '%-12s %-9s %-6s blocked-when: %s\n' "" "" "" "$bpat"
     done <<< "$BLOCKEDWHEN"
+    while IFS="$TAB" read -r kid kpat; do
+      [ "$kid" = "$id" ] && printf '%-12s %-9s %-6s skipped-when: %s\n' "" "" "" "$kpat"
+    done <<< "$SKIPPEDWHEN"
     [ "$is_slow" = 0 ] && printf '%-12s %-9s %-6s slow:     %s (left out of --fast)\n' "" "" "" "${slowwhy:-no reason given}"
     [ -n "$escalated" ] && printf '%-12s %-9s %-6s optional for the repo,%s\n' "" "" "" "$escalated"
     continue
@@ -427,6 +443,7 @@ while IFS= read -r line; do
       printf 'ok   %-12s evidence: %s\n' "$id" "$exp"
     fi
     [ -n "$floor" ]  && printf '     %-12s floor:  %s\n' "" "$floor"
+    [ -n "$skippat" ] && printf '     %-12s skipped-when: %s\n' "" "$skippat"
     [ -n "$cifactor" ] && printf '     %-12s ci-factor: %s\n' "" "$cifactor"
     [ "$is_slow" = 0 ] && printf '     %-12s slow:   %s\n' "" "$slowwhy"
     [ -n "$waiver" ] && printf '     %-12s waiver: %s\n' "" "$waiver"
@@ -484,6 +501,16 @@ while IFS= read -r line; do
       elif [ "$observed" -lt "$floor" ]; then
         outcome=noevidence
         why="did $observed units of work, below the floor of $floor in project.conf"
+        # Did the suite LOSE the work, or did the environment never supply it?
+        # A `skipped-when` pattern classifies the shortfall it has just
+        # measured; it never excuses one. Without a matching pattern this is
+        # the floor shortfall it has always been, wording included - which is
+        # why $why is extended here rather than rewritten.
+        if [ -n "$skippat" ] && clean_log "$log" | grep -Eq -- "$skippat"; then
+          skipmatch="$(clean_log "$log" | grep -Eom1 -- "$skippat" | head -1)"
+          outcome=environment
+          why="$why; the log says $skipmatch, so the work was skipped rather than lost: the environment did not supply it"
+        fi
       fi
     fi
   fi
@@ -516,6 +543,21 @@ while IFS= read -r line; do
         results="$results\nKNOWN        $id (${dur}s, exit $rc; $waiver) -> $logrel"; known=$((known+1))
       else
         results="$results\nWARN         $id (${dur}s, exit $rc, optional) -> $logrel"; warns=$((warns+1))
+      fi ;;
+    environment)
+      # The gate ran, exited 0 and did less work than its floor, and its
+      # `skipped-when` pattern says the environment is why. A story leaning on
+      # it has no verdict and must get one from a machine that has the inputs,
+      # so that is a BLOCK (exit 3). Nobody leaning on it means nobody was
+      # going to be stopped: a declared non-result, not a WARN, because nothing
+      # CHANGED - this checkout simply cannot answer the question.
+      if [ "$req" = "required" ]; then
+        results="$results\nBLOCKED      $id$escalated (${dur}s, $why) -> $logrel"
+        blocked=$((blocked+1))
+      elif [ -n "$waiver" ]; then
+        results="$results\nKNOWN        $id (${dur}s, $why; $waiver) -> $logrel"; known=$((known+1))
+      else
+        results="$results\nKNOWN        $id (${dur}s, $why) -> $logrel"; known=$((known+1))
       fi ;;
     blocked)
       # An OPTIONAL gate the environment blocked is nobody's decision: it was
@@ -563,6 +605,23 @@ if [ "$AUDIT" = 1 ]; then
     esac
     [ -n "$bpat" ] || { printf 'FAIL %-12s a `blocked-when` line has no pattern\n' "$bid"; fails=$((fails+1)); }
   done <<< "$BLOCKEDWHEN"
+  # A skipped-when line classifies a shortfall a floor measured. One naming no
+  # gate fires on nothing; one with no pattern matches every log and would turn
+  # every shortfall into a block; one on a gate with no floor has no
+  # measurement to classify, so it can never fire - and each of the three sits
+  # in the manifest looking like protection.
+  while IFS="$TAB" read -r kid kpat; do
+    [ -n "$kid" ] || continue
+    case " $GATE_IDS " in
+      *" $kid "*) ;;
+      *) printf 'FAIL %-12s a `skipped-when` line names no configured gate\n' "$kid"; fails=$((fails+1)); continue ;;
+    esac
+    [ -n "$kpat" ] || { printf 'FAIL %-12s a `skipped-when` line has no pattern\n' "$kid"; fails=$((fails+1)); continue; }
+    table_lookup "$FLOORS" "$kid" >/dev/null || {
+      printf 'FAIL %-12s a `skipped-when` line names a gate with no `floor` line: there is nothing to measure the shortfall it would classify\n' "$kid"
+      fails=$((fails+1))
+    }
+  done <<< "$SKIPPEDWHEN"
   # A covers line naming no gate covers nothing; an empty glob covers nothing
   # while looking like it covers everything.
   while IFS="$TAB" read -r cid cglob; do
