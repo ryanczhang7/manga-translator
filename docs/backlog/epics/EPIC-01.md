@@ -1,7 +1,7 @@
 ---
 id: EPIC-01
 title: Foundations — a real toolchain, real gates, and a model runtime we trust
-status: todo
+status: done
 stories: [MT-001, MT-002, MT-003, MT-031, MT-032, MT-033, MT-034, MT-037]
 ---
 
@@ -86,3 +86,9 @@ into a locked fact is precisely what that sentence exists to prevent.
 with the story that first calls the API.
 
 **So EPIC-01 closes after MT-003**, with no clause outstanding.
+
+**Marked `done` on 2026-09-18, with MT-037.** The done-when above closed after
+MT-003 and was never reopened; what kept this epic open was its five later
+corrections to the machinery MT-001 built — MT-031 to MT-034, and MT-037, which
+removed the last way a gate in this repository could report PASS having done
+nothing. All eight stories are DONE and no clause is outstanding.
