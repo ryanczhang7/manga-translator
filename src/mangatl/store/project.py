@@ -57,7 +57,7 @@ from mangatl.domain.line import OcrResult
 from mangatl.domain.page import Chapter, Page
 from mangatl.domain.region import RawRegion
 from mangatl.store.intake import read_chapter
-from mangatl.store.schema import DDL
+from mangatl.store.schema import DDL, LLM_CALL_DDL
 
 __all__ = [
     "PAGE_DONE",
@@ -79,7 +79,12 @@ __all__ = [
 #: Version 2 is MT-010's: `line.ocr_empty`. It is the project's first migration,
 #: and it is not optional tidiness (MT-010 PO-3) - a v1 file opened by this build
 #: would open without complaint and then fail on the first `write_lines`.
-SCHEMA_VERSION: int = 2
+#:
+#: Version 3 is MT-012's cost ledger (PO-5): `llm_call.cost_usd REAL` becomes
+#: `cost_micro_usd INTEGER`, `rate_table_version` arrives, and two triggers make
+#: the table append-only. None of AC-2, AC-3 or AC-4 is expressible in a version
+#: 2 file, and a v2 file is what every existing user has.
+SCHEMA_VERSION: int = 3
 
 #: `page.status` as `create_project` writes it: read, hashed, nothing done yet.
 PAGE_PENDING: str = "pending"
@@ -199,14 +204,71 @@ _SELECT_PROPOSED = (
     " WHERE page.ordinal = ? ORDER BY region.reading_index"
 )
 
-#: The one migration this build knows: version 1 to version 2 (MT-010 PO-3).
-#: `ALTER TABLE ... ADD COLUMN` rather than the "new table, copy the rows, drop
-#: the old one" recipe, and that choice is the whole of AC-10's rows-survive
-#: clause: ADD COLUMN rewrites no row, so every value, every NULL and every
-#: constraint - `region_id UNIQUE`, `ON DELETE CASCADE` - is still the one MT-005
-#: declared. The NOT NULL is legal here only because a non-NULL constant DEFAULT
-#: is given, which is also what fills the column for the rows already there.
+#: Version 1 to version 2 (MT-010 PO-3). `ALTER TABLE ... ADD COLUMN` rather
+#: than the "new table, copy the rows, drop the old one" recipe, and that choice
+#: is the whole of AC-10's rows-survive clause: ADD COLUMN rewrites no row, so
+#: every value, every NULL and every constraint - `region_id UNIQUE`,
+#: `ON DELETE CASCADE` - is still the one MT-005 declared. The NOT NULL is legal
+#: here only because a non-NULL constant DEFAULT is given, which is also what
+#: fills the column for the rows already there.
 _MIGRATE_TO_V2 = "ALTER TABLE line ADD COLUMN ocr_empty INTEGER NOT NULL DEFAULT 0"
+
+#: Version 2 to version 3 (MT-012 PO-5): the cost ledger.
+#:
+#: **A table rebuild, not an `ALTER`** (RED-A5, refined by the PO). Two reasons,
+#: and the second is the one that matters. First, `ADD COLUMN` refuses a NOT NULL
+#: column with no DEFAULT - measured on sqlite 3.53.1, and measured again to say
+#: *when*: a table with no rows accepts it and a table with even one row refuses
+#: it, so the ALTER route would have passed on a fresh file and failed on a user's.
+#: Second, and decisively, version 3 **removes** `cost_usd`: the REAL dollar
+#: amounts a v2 file already holds have to be *converted* to integer
+#: micro-dollars, not defaulted. `DEFAULT 0` would silently zero-price exactly
+#: the rows AC-5 exists to protect, and §4 calls this table append-only - a
+#: migration that threw the money away would be the loudest possible rewrite of
+#: a run's spend.
+#:
+#: The new table comes from `schema.LLM_CALL_DDL`, the same string a fresh file
+#: is built from, so the migrated table has the same columns in the same order
+#: and the same two triggers. (MT-010's ordering invariant, which `schema.py`
+#: states in general terms about `line.ocr_empty`: a `SELECT *` must not behave
+#: differently on a migrated project than on a new one.) It acquires no UNIQUE
+#: key, because a retry is a second bill.
+#:
+#: `ROUND(cost_usd * 1000000)` does the conversion in SQL, where the value still
+#: *is* a double; rounding it to the nearest micro-dollar is what turns the
+#: double back into the exact decimal it was written from. `rate_table_version`
+#: is left `''` deliberately: a v2 row genuinely does not know which table
+#: priced it.
+_MIGRATE_TO_V3 = (
+    "ALTER TABLE llm_call RENAME TO llm_call_v2;\n"
+    + LLM_CALL_DDL
+    + """
+INSERT INTO llm_call (
+    id, run_id, page_id, request_id, model_id, input_tokens, output_tokens,
+    cache_write_tokens, cache_read_tokens, cost_micro_usd, rate_table_version, at
+)
+SELECT id, run_id, page_id, request_id, model_id, input_tokens, output_tokens,
+       cache_write_tokens, cache_read_tokens,
+       CAST(ROUND(cost_usd * 1000000) AS INTEGER), '', at
+FROM llm_call_v2;
+
+DROP TABLE llm_call_v2;
+"""
+)
+
+#: The migration chain, in order, each step keyed on the version it *produces*.
+#: A step runs when the file found on disk is older than that.
+#:
+#: This is the chain `_migrate_to_current`'s docstring predicted and MT-012 is
+#: the day it arrived. Before it, the v1 statement ran **unconditionally**
+#: whenever `found < SCHEMA_VERSION` - which was harmless while there was
+#: exactly one older version and fatal the moment there were two: every project
+#: a user has is at version 2, and re-running `ADD COLUMN ocr_empty` against it
+#: dies on `duplicate column name`.
+_MIGRATIONS: tuple[tuple[int, str], ...] = (
+    (2, _MIGRATE_TO_V2),
+    (3, _MIGRATE_TO_V3),
+)
 
 
 class SchemaTooNew(Exception):
@@ -290,9 +352,12 @@ def open_project(project_dir: Path) -> Project:
     An **older** file is migrated in place, on open, with no separate command
     (MT-010 AC-10). "In place" is a property of the file rather than of this
     connection: the migration commits before any caller sees the project, so the
-    next process to open it finds a version 2 file rather than doing the whole
+    next process to open it finds a current file rather than doing the whole
     thing again. Migrating is not the same as "open anything" - a newer file is
-    still refused above, and the refusal is now of version 3 and upward.
+    still refused above, and the refusal is now of version 4 and upward.
+
+    The version found is passed on to `_migrate_to_current` rather than
+    rediscovered there: with two migration steps it decides *which* of them run.
     """
     db_path = project_dir / _DB_NAME
     if not db_path.is_file():
@@ -309,17 +374,25 @@ def open_project(project_dir: Path) -> Project:
             f" {SCHEMA_VERSION}; upgrade mangatl to open it"
         )
     if found < SCHEMA_VERSION:
-        _migrate_to_current(connection)
+        _migrate_to_current(connection, found)
     return Project(connection, _read_chapter(connection))
 
 
-def _migrate_to_current(connection: sqlite3.Connection) -> None:
-    """Bring a version 1 file up to `SCHEMA_VERSION`, committing before it
-    returns.
+def _migrate_to_current(connection: sqlite3.Connection, found: int) -> None:
+    """Bring an older file up to `SCHEMA_VERSION`, committing before it returns.
 
-    One statement, because there is exactly one older version. The day a version
-    3 arrives this becomes a chain keyed on the version found; writing that chain
-    now would be writing a loop whose second iteration no test can reach.
+    **A chain keyed on the version found**, which is what the previous version
+    of this docstring said would arrive with version 3. MT-012 is that story.
+    Each step in `_MIGRATIONS` is keyed on the version it produces and runs only
+    when the file is older than that, so a version 1 file runs both steps in one
+    open and a version 2 file runs only the second. Running them all
+    unconditionally - which is what this function used to do, harmlessly, while
+    there was exactly one older version - would re-run
+    `ALTER TABLE line ADD COLUMN ocr_empty` against a v2 file and die on
+    `duplicate column name`.
+
+    `executescript` rather than `execute`, because the v2 -> v3 step is a table
+    rebuild and is several statements.
 
     **Both** records of the version are updated. `PRAGMA user_version` is the
     one `open_project` reads, and `chapter.schema_version` is the one
@@ -330,7 +403,9 @@ def _migrate_to_current(connection: sqlite3.Connection) -> None:
     transaction under sqlite3's legacy isolation handling, and a migration that
     is not on disk when the process ends is not a migration.
     """
-    connection.execute(_MIGRATE_TO_V2)
+    for version, script in _MIGRATIONS:
+        if found < version:
+            connection.executescript(script)
     connection.execute("UPDATE chapter SET schema_version = ?", (SCHEMA_VERSION,))
     # Not parameterisable - a PRAGMA value cannot be bound - and formatted from
     # this module's own int, so there is nothing to inject. Same call, and same
