@@ -130,6 +130,14 @@ _SCHEMA_COLUMNS: dict[str, frozenset[str]] = {
         }
     ),
     "run": frozenset({"id", "chapter_id", "started_at", "ended_at", "outcome", "aborted_reason"}),
+    # MT-012 (PO-2, PO-5): `cost_usd REAL` is **gone** and `cost_micro_usd
+    # INTEGER` and `rate_table_version TEXT` take its place. The removal is the
+    # load-bearing half of this edit. The assertion this set feeds is
+    # `expected <= actual`, a SUBSET check, so *adding* the two new names would
+    # have passed silently against the v2 schema on disk and proved nothing;
+    # taking `cost_usd` out is what fails while the REAL column is still there.
+    # `tests/core/test_ledger.py` pins the two new columns' types, their NOT
+    # NULL, `rate_table_version`'s DEFAULT and the append-only triggers.
     "llm_call": frozenset(
         {
             "id",
@@ -141,7 +149,8 @@ _SCHEMA_COLUMNS: dict[str, frozenset[str]] = {
             "output_tokens",
             "cache_write_tokens",
             "cache_read_tokens",
-            "cost_usd",
+            "cost_micro_usd",
+            "rate_table_version",
             "at",
         }
     ),
@@ -191,9 +200,14 @@ _INSERT_RUN = (
     "INSERT INTO run (chapter_id, started_at, ended_at, outcome, aborted_reason)"
     " VALUES (?, ?, ?, ?, ?)"
 )
+# `rate_table_version` is deliberately NOT named here (MT-012): the column
+# carries `DEFAULT ''` precisely so that this statement, written before it
+# existed, keeps working. A NOT NULL column without a default would take this
+# MT-005 test down with it, which is the trap `## Callers of changed
+# signatures` names.
 _INSERT_LLM_CALL = (
     "INSERT INTO llm_call (run_id, page_id, request_id, model_id, input_tokens,"
-    " output_tokens, cache_write_tokens, cache_read_tokens, cost_usd, at)"
+    " output_tokens, cache_write_tokens, cache_read_tokens, cost_micro_usd, at)"
     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
@@ -424,7 +438,12 @@ def test_the_schema_version_and_the_two_page_status_values_are_the_pinned_ones()
     # The migration itself, and everything about the new column, is MT-010's
     # `tests/core/test_line_store.py`. This line is here because it is the one
     # assertion in the repository that would otherwise still say 1.
-    assert SCHEMA_VERSION == 2
+    #
+    # **MT-012 PO-5 takes it to 3**, and for the same kind of reason: AC-2
+    # needs a rate-table version on every ledger row, AC-3 needs the cost off
+    # an IEEE-754 `REAL`, and AC-4 needs an append-only trigger. None of the
+    # three is expressible in a version 2 file.
+    assert SCHEMA_VERSION == 3
     assert PAGE_PENDING == "pending"
     assert PAGE_STALE == "stale"
     assert PAGE_PENDING != PAGE_STALE
@@ -1085,7 +1104,11 @@ def test_the_llm_call_ledger_accepts_two_identical_calls(live_project: Project) 
                     500,
                     0,
                     0,
-                    0.0123,
+                    # MT-012 PO-2: an integer number of micro-dollars, not a
+                    # float. `0.0123` here was a REAL going into a REAL column;
+                    # 12300 micro-dollars is the same money with no double in
+                    # the path.
+                    12300,
                     "2026-09-15T00:00:01+00:00",
                 ),
             )

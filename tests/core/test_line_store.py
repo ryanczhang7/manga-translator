@@ -317,19 +317,27 @@ def _build_v1_file(source_dir: Path, one_bit_png: Callable[..., bytes]) -> Path:
 # -- the constant, and the column ----------------------------------------------
 
 
-def test_this_build_writes_and_reads_schema_version_two() -> None:
+def test_this_build_writes_and_reads_the_current_schema_version() -> None:
     """PO-3's schema bump, stated once, where a reader looks for it.
 
     A store that agreed with itself but not with the contract would pass every
     round trip in this file and still write a file no other version recognises.
+
+    **Moved to 3 by MT-012 (PO-5)**, which is the second migration: `llm_call`
+    loses `cost_usd REAL`, gains `cost_micro_usd INTEGER` and
+    `rate_table_version`, and gains the two append-only triggers AC-4 needs.
+    AC-10's migration below is unaffected in substance - a v1 file is now
+    brought to 3 rather than to 2, through both steps - and `_V1_DDL` above is
+    still the v1 schema and must stay that way.
     """
-    assert SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 3
 
 
-def test_a_freshly_created_project_is_a_version_two_file_with_the_new_column(
+def test_a_freshly_created_project_is_a_current_version_file_with_the_new_column(
     source_dir: Path,
 ) -> None:
-    """The other half of AC-10: v2 is what `create_project` writes now.
+    """The other half of AC-10: the current version is what `create_project`
+    writes now - 2 at MT-010, 3 since MT-012 (PO-5).
 
     Both places the version is recorded - the schema-independent pragma
     `open_project` actually checks, and the `chapter.schema_version` column §4
@@ -340,8 +348,8 @@ def test_a_freshly_created_project_is_a_version_two_file_with_the_new_column(
         pass
     db_path = project_dir_for(source_dir) / "project.db"
 
-    assert _user_version(db_path) == 2
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(2,)]
+    assert _user_version(db_path) == 3
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(3,)]
     columns = {str(row[1]) for row in _raw(db_path, "PRAGMA table_info(line)")}
     assert "ocr_empty" in columns, f"the line table has {sorted(columns)}"
 
@@ -514,7 +522,10 @@ def test_a_version_one_file_is_migrated_in_place_when_it_is_opened(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 2
+    # 3, not 2: MT-012's v2 -> v3 step runs immediately after MT-010's, so a v1
+    # file arrives at the current version in one open. `test_ledger.py` covers
+    # the v2 -> v3 step on a file that starts at 2.
+    assert _user_version(db_path) == 3
     after = {str(row[1]) for row in _raw(db_path, "PRAGMA table_info(line)")}
     assert "ocr_empty" in after
     assert before <= after, f"the migration dropped {sorted(before - after)} from the line table"
