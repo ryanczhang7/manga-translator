@@ -2,7 +2,7 @@
 id: EPIC-04
 title: Translating with the page in view, under a hard budget
 status: todo
-stories: [MT-011, MT-012, MT-013, MT-014, MT-038]
+stories: [MT-011, MT-012, MT-013, MT-044, MT-014, MT-038]
 ---
 
 ## Goal
@@ -47,14 +47,31 @@ marker never runs on CI — so leaving it there meant one criterion in a
 seven-criterion story whose only available outcome was a waiver, in exactly the
 place this section says a waiver is unacceptable.
 
+*Amended 2026-09-21 by the user (MT-013 PO-1):* **MT-013 is split.** Its
+criteria described the budget arithmetic *and* the run-level behaviour that
+makes it bite, which is two RED→GREEN cycles. MT-013 keeps the arithmetic;
+**MT-044** takes the seam — wiring `TranslateStage` into `build_stages`,
+recording every call into the ledger, and the abort itself. The epic's
+budget clause — *"a run stops before crossing the configured ceiling and keeps
+the pages it already paid for"* — is delivered by **MT-044**, not MT-013.
+This matters because the seam had already been deferred twice: MT-011 shipped
+`TranslateStage` wired to nothing and named MT-013 as the wiring story, and
+MT-012 shipped `record_call` with no production caller. With nothing writing
+ledger rows, `chapter_total()` is permanently $0 and MT-013's guard is inert
+however correct its arithmetic. Filing MT-044 is what stops that being a third
+silent deferral.
+
 ## Stories
 
 - **MT-011** — one call per page: prompt assembly, the capped page image, the
   regions, the response parsed back onto region ids.
 - **MT-012** — the ledger: `response.usage` priced from a pinned rate table and
   written append-only.
-- **MT-013** — the guard: a projected overrun aborts the run with a reason,
-  before the call is made.
+- **MT-013** — the guard: the budget arithmetic, as a pure domain module —
+  the projection, the comparison against the ceiling, and the basis it reports.
+- **MT-044** — the seam: the translate stage in the running pipeline, every
+  call priced into the ledger, and a projected overrun aborting the run
+  **before** the call is made.
 - **MT-014** — continuity: a running glossary of names, honorifics and place
   names carried across pages.
 - **MT-038** — the measurement: one real call, `response.usage` recorded, and
