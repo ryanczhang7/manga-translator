@@ -1,8 +1,8 @@
 ---
 id: EPIC-01
 title: Foundations — a real toolchain, real gates, and a model runtime we trust
-status: done
-stories: [MT-001, MT-002, MT-003, MT-031, MT-032, MT-033, MT-034, MT-037]
+status: in-progress
+stories: [MT-001, MT-002, MT-003, MT-031, MT-032, MT-033, MT-034, MT-037, MT-039, MT-040, MT-041, MT-042]
 ---
 
 ## Goal
@@ -48,11 +48,23 @@ actually installed and ran.
 - **MT-034** — chore: a bare directory name classifies `source`, so `cp x docs/`
   is refused in a phase that permits `docs`, and `cp x tests/` is permitted in
   GREEN, which freezes tests.
+- **MT-037** — fix: a gate that skipped its work stops reporting PASS.
+- **MT-039** — chore: the harness self-test refuses to shrink — per-suite
+  assertion floors, so that MT-040, MT-041 and MT-042 cannot be satisfied by
+  running less of it.
+- **MT-040** — chore: parsing the gate manifest spawns no process per field —
+  1,669 external processes for `gates.sh --list`, of which 1,461 are one
+  `trim()`.
+- **MT-041** — chore: one phase-guard invocation costs half the processes — 44
+  spawns per invocation, driven 307 times by one suite.
+- **MT-042** — chore: the harness self-test runs its suites concurrently.
+  Carries a re-measure gate and may correctly be closed unstarted.
 
-**MT-031, MT-032, MT-033 and MT-034 are not clauses of `## Done when`.** They were filed into this
-epic after MT-003 closed it, because MT-001 built the machinery they correct and
-this is the toolchain epic. The done-when above was discharged by MT-001, MT-002
-and MT-003 and is not reopened by any of them — see the note at the end of this file.
+**MT-031, MT-032, MT-033, MT-034, MT-037, MT-039, MT-040, MT-041 and MT-042 are
+not clauses of `## Done when`.** They were filed into this epic after MT-003
+closed it, because MT-001 built the machinery they correct and this is the
+toolchain epic. The done-when above was discharged by MT-001, MT-002 and MT-003
+and is not reopened by any of them — see the notes at the end of this file.
 
 ## Deliberately not in this epic
 
@@ -91,4 +103,46 @@ with the story that first calls the API.
 MT-003 and was never reopened; what kept this epic open was its five later
 corrections to the machinery MT-001 built — MT-031 to MT-034, and MT-037, which
 removed the last way a gate in this repository could report PASS having done
-nothing. All eight stories are DONE and no clause is outstanding.
+nothing. At that point all eight stories were DONE and no clause was
+outstanding.
+
+## Reopened on 2026-09-20 — `status: done` → `status: in-progress`
+
+**What changed:** four stories were added to this epic at the user's direction
+— **MT-039, MT-040, MT-041, MT-042** — all of them corrections to the cost of
+the machinery MT-001 built. They came out of a measurement taken at REVIEW by
+two consecutive stories: CI's `gates` job spends 63% of its wall-clock in the
+harness self-test and 25% in the gates that judge the product, and both figures
+moved the same way between MT-011 (PR #25) and MT-012 (PR #26).
+
+**Why the `status:` field moved, and why that is the honest answer rather than
+a bookkeeping nicety.** `status: done` on an epic is a claim about its
+`## Stories` list. With four stories in that list at `PLANNED`, the claim is
+false, and the closing note above said in terms *"All eight stories are DONE
+and no clause is outstanding"* — a sentence that stops being true the moment a
+ninth is added. Nothing in the harness reads an epic's `status`
+(`bash scripts/phase.sh board` shows story status, not epic status; no script
+parses `docs/backlog/epics/**`), so this is a documentation-honesty call and
+not a mechanical one. It is made rather than skipped precisely because nothing
+enforces it: the epic is read by people and by agents with empty context, and a
+`done` epic containing four undone stories teaches both that the field means
+nothing.
+
+**What has NOT changed, and is not reopened by any of the four:** every clause
+of `## Done when` above remains **discharged**, exactly as the note on the last
+clause records. `bash scripts/gates.sh` still runs every gate against the
+walking skeleton and passes; `--audit` is still clean; `bash scripts/task.sh
+dev` still opens a Qt window; each required gate still has a pasted failure in
+a story's `## Gate probes`; and `docs/wiki/stack.md`'s correction still stands
+on MT-001 plus MT-002, on the qualified reading the user approved on 2026-09-12
+— including the distinction between rows **locked** against `uv.lock` and rows
+**measured in a spike**, which §3 keeps as a separate third state. None of
+MT-039 to MT-042 touches any of that: they change how fast the harness runs,
+never what it decides. MT-040 and MT-041 are both held to byte-identical output
+and unchanged verdicts as acceptance criteria.
+
+**What closes this epic again:** MT-039, MT-040 and MT-041 DONE, and MT-042
+either DONE or closed unstarted on its own re-measure gate (MT-042 DV-0, which
+may correctly conclude the work is not worth building once MT-040 and MT-041
+have landed). No new `## Done when` clause is added, for the same reason none
+was added for MT-031 to MT-034 and MT-037.
