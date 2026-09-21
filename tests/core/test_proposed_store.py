@@ -144,8 +144,15 @@ def fixture(
 def test_storing_a_proposal_needs_no_schema_version_bump() -> None:
     """C-6. `line.proposed_en` already exists, already is nullable, and
     `schema.py` already says why. If this number moves, the story grew a
-    migration and a `_migrate_to_v3` and stopped being one cycle."""
-    assert SCHEMA_VERSION == 2
+    migration and a `_migrate_to_v3` and stopped being one cycle.
+
+    **MT-012 is that story, and it grew that migration on purpose** (PO-5):
+    AC-2's rate-table version per ledger row, AC-3's integer micro-dollars and
+    AC-4's append-only triggers are all unsatisfiable at version 2. What this
+    test still says is what it always said - MT-009 did not need a bump - so
+    the number is updated rather than the assertion removed. If it moves again,
+    ask the same question again."""
+    assert SCHEMA_VERSION == 3
 
 
 def test_the_two_methods_are_named_on_the_project_beside_their_line_siblings() -> None:
