@@ -29,6 +29,18 @@ _bad() {
   printf '%s\n' "$2" | sed -e 's/^/         /'
 }
 
+# summary <suite name>
+#
+# THE FORMAT STRING BELOW IS LOAD BEARING OUTSIDE THIS FILE. Since MT-039,
+# scripts/selftest.sh reads the `N` of `<name>: N passed, M failed` back out of
+# each suite's stdout and compares it against that suite's floor in
+# .claude/tests/floors.conf - so this is the count a suite declares it did, and
+# not merely something printed for a human. It is matched anchored and by name,
+# `^<name>: ([0-9]+) passed, ([0-9]+) failed$`, and the LAST match wins.
+#
+# Change the wording and every floor stops being read. `.claude/tests/
+# selftest.test.sh` pins the string at the other end so that cannot happen
+# quietly; if you are here to reword it, change that suite in the same commit.
 summary() { # <suite name>
   printf '\n%s: %d passed, %d failed\n' "$1" "$_pass" "$_fail"
   [ "$_fail" -eq 0 ] || return 1
