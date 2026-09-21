@@ -2,7 +2,7 @@
 id: EPIC-01
 title: Foundations — a real toolchain, real gates, and a model runtime we trust
 status: in-progress
-stories: [MT-001, MT-002, MT-003, MT-031, MT-032, MT-033, MT-034, MT-037, MT-039, MT-040, MT-041, MT-042]
+stories: [MT-001, MT-002, MT-003, MT-031, MT-032, MT-033, MT-034, MT-037, MT-039, MT-040, MT-041, MT-042, MT-043]
 ---
 
 ## Goal
@@ -59,12 +59,17 @@ actually installed and ran.
   spawns per invocation, driven 307 times by one suite.
 - **MT-042** — chore: the harness self-test runs its suites concurrently.
   Carries a re-measure gate and may correctly be closed unstarted.
+- **MT-043** — fix: `gates.sh --audit` says "1 required gate(s) have no
+  evidence line" when the one gate without an evidence line is `mutation`,
+  which is optional — and the count that would report a *genuinely* required
+  gate losing its line is therefore already non-zero.
 
-**MT-031, MT-032, MT-033, MT-034, MT-037, MT-039, MT-040, MT-041 and MT-042 are
-not clauses of `## Done when`.** They were filed into this epic after MT-003
-closed it, because MT-001 built the machinery they correct and this is the
-toolchain epic. The done-when above was discharged by MT-001, MT-002 and MT-003
-and is not reopened by any of them — see the notes at the end of this file.
+**MT-031, MT-032, MT-033, MT-034, MT-037, MT-039, MT-040, MT-041, MT-042 and
+MT-043 are not clauses of `## Done when`.** They were filed into this epic after
+MT-003 closed it, because MT-001 built the machinery they correct and this is
+the toolchain epic. The done-when above was discharged by MT-001, MT-002 and
+MT-003 and is not reopened by any of them — see the notes at the end of this
+file.
 
 ## Deliberately not in this epic
 
@@ -146,3 +151,35 @@ either DONE or closed unstarted on its own re-measure gate (MT-042 DV-0, which
 may correctly conclude the work is not worth building once MT-040 and MT-041
 have landed). No new `## Done when` clause is added, for the same reason none
 was added for MT-031 to MT-034 and MT-037.
+**Amended 2026-09-21:** and **MT-043** DONE. See the note below.
+
+## MT-043 added on 2026-09-21 — and what it does and does not touch
+
+**What changed:** one story was added at the orchestrator's direction, out of a
+defect found and reproduced while closing MT-039 — **MT-043**, a `fix`. It is
+the tenth correction to the machinery MT-001 built and the second `fix` in this
+epic after MT-037. `status:` stays `in-progress`; it was already, and the
+sentence above about a `done` epic containing undone stories applies unchanged.
+**What closes the epic is now the list above plus MT-043.**
+
+**The one `## Done when` clause it brushes against, stated plainly rather than
+glossed.** That list contains *"`bash scripts/gates.sh --audit` is clean"*. It
+still is, on the reading that clause was written under and that MT-001 and
+MT-003 discharged it under: `--audit` exits 0 and prints `Manifest audit
+passed.`, with no manifest problem, today. **That clause is not reopened.**
+
+What MT-043 corrects is a *false sentence inside output that passes*. `--audit`
+also prints `1 required gate(s) have no evidence line`, and the one gate without
+one is `mutation`, which is `optional`; all six required gates have an evidence
+line. The audit's verdict is right and its prose is wrong. That is a defect in
+the machinery, not an outstanding clause of this epic's goal — the same
+distinction MT-037 turned on, where a gate reporting `PASS` having run one of
+twenty-six tests was a defect in the gate rather than a reopening of *"each
+required gate has a pasted failure in a story's `## Gate probes`"*.
+
+**Ordering.** MT-043 should land **before MT-040**, which is held to
+byte-identical output as an acceptance criterion and would otherwise record a
+baseline that MT-043 then invalidates. MT-043 `## Notes` PO-5 has the reasoning
+and notes that the ordering is stated, not enforced — enforcing it would mean
+adding `MT-043` to MT-040's `depends_on`, which the Lead PO left as a decision
+for the orchestrator rather than taking unasked.
