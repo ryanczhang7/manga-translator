@@ -425,17 +425,22 @@ def run_id(project: Project) -> int:
 # -- PO-5: the schema this story requires --------------------------------------
 
 
-def test_this_build_writes_and_reads_schema_version_three(project: Project, db_path: Path) -> None:
+def test_this_build_writes_and_reads_schema_version_four(project: Project, db_path: Path) -> None:
     """PO-5's bump, stated once, where a reader looks for it.
 
     AC-2 (a version per row), AC-3 (no float on disk) and AC-4 (a trigger) are
     all unsatisfiable against version 2, so the number moving is the story.
     Both records of it, because MT-005 PO-7 required both and a migration that
     updated one of them is a file that disagrees with itself.
+
+    **MT-044 C-12 takes it to 4** - `chapter.budget_ceiling_usd REAL` becomes
+    `budget_ceiling_micro_usd INTEGER`, because AC-5 reads a ceiling out of the
+    chapter row and MT-012 PO-2 already settled that money on disk is an
+    integer count of micro-dollars.
     """
-    assert SCHEMA_VERSION == 3
-    assert _user_version(db_path) == 3
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(3,)]
+    assert SCHEMA_VERSION == 4
+    assert _user_version(db_path) == 4
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(4,)]
 
 
 def test_the_ledger_stores_integer_micro_dollars_and_carries_no_real_cost_column(
@@ -737,7 +742,7 @@ def test_a_resumed_chapters_total_includes_the_calls_of_both_runs(
 # -- PO-5: a version-2 file on disk still opens --------------------------------
 
 
-def test_a_version_two_file_is_migrated_to_version_three_when_it_is_opened(
+def test_a_version_two_file_is_migrated_to_version_four_when_it_is_opened(
     source_dir: Path,
 ) -> None:
     """In place, on open, with no separate command - MT-010's precedent.
@@ -747,6 +752,12 @@ def test_a_version_two_file_is_migrated_to_version_three_when_it_is_opened(
     fails with `duplicate column name: ocr_empty` unless the migration becomes
     version-aware. The v1 fixture in `test_line_store.py` cannot catch it,
     because a v1 file legitimately needs that statement.
+
+    **MT-044 C-12 makes this a two-step chain again** - a v2 file now runs the
+    v3 step *and* the v4 step in one open - so `SCHEMA_VERSION` is the oracle
+    rather than a literal 3. The v2 fixture below is a historical artefact and
+    is deliberately **not** updated: the day someone "fixes" it to track
+    `schema.py` is the day this stops testing a migration.
     """
     db_path = _build_v2_file(source_dir)
     assert _user_version(db_path) == 2
@@ -755,9 +766,13 @@ def test_a_version_two_file_is_migrated_to_version_three_when_it_is_opened(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 3
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(3,)]
+    assert _user_version(db_path) == 4
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(4,)]
     assert set(_columns(db_path, "llm_call")) == _LLM_CALL_COLUMNS_V3
+    # The v4 step rebuilds `chapter`, not `llm_call`. A v2 file's ledger rows
+    # must survive the *second* rebuild untouched, and the two tests below say
+    # so about their contents; this says so about the table's shape.
+    assert _ledger_rows(db_path) == len(_V2_LEDGER_ROWS)
 
 
 def test_the_costs_a_version_two_file_already_held_survive_as_micro_dollars(

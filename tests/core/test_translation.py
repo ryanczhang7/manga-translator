@@ -34,7 +34,18 @@ from typing import get_type_hints
 
 import pytest
 
-from mangatl.domain.translation import TokenUsage, TranslationResult
+from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
+
+
+def _call() -> CallInfo:
+    """MT-044 C-4's `CallInfo`: the identity of one API call.
+
+    Two **different** strings, so a constructor that assigned `model_id` from
+    `request_id` (or the reverse) is caught. `msg_...` and `claude-opus-5` are
+    the shapes the SDK actually returns - `Message.id` and `Message.model` -
+    which is where C-5 reads them from.
+    """
+    return CallInfo(request_id="msg_01RedFixture", model_id="claude-opus-5")
 
 
 def _usage() -> TokenUsage:
@@ -53,10 +64,15 @@ def _usage() -> TokenUsage:
     )
 
 
-def test_the_module_exports_the_two_value_types_and_nothing_else() -> None:
+def test_the_module_exports_the_three_value_types_and_nothing_else() -> None:
     import mangatl.domain.translation as module
 
-    assert module.__all__ == ["TokenUsage", "TranslationResult"]
+    # MT-044 C-4 adds `CallInfo`. `call is None` <=> no API call was made <=> no
+    # `llm_call` row: today that fact is only *inferable*, from
+    # `usage == TokenUsage(0, 0, 0, 0)`, and an inference is the wrong basis for
+    # a decision about money - a real call that legitimately reported four
+    # zeroes would be dropped from the ledger by it.
+    assert module.__all__ == ["CallInfo", "TokenUsage", "TranslationResult"]
 
 
 def test_token_usage_carries_the_four_counts_the_llm_call_table_has() -> None:
@@ -90,35 +106,42 @@ def test_a_translation_result_carries_the_lines_and_the_usage() -> None:
     positional sequence: AC-5 needs "region 3 was omitted" to be distinguishable
     from "region 3 was translated as the empty string", and a sequence cannot
     express the difference without a sentinel."""
-    result = TranslationResult(lines={0: "Hello.", 2: "Goodbye."}, usage=_usage())
+    result = TranslationResult(lines={0: "Hello.", 2: "Goodbye."}, usage=_usage(), call=_call())
 
     assert result.lines == {0: "Hello.", 2: "Goodbye."}
     assert result.usage == _usage()
+    assert result.call == _call()
 
 
 def test_a_translation_result_is_a_frozen_value() -> None:
-    result = TranslationResult(lines={}, usage=_usage())
+    result = TranslationResult(lines={}, usage=_usage(), call=_call())
 
     assert dataclasses.is_dataclass(TranslationResult)
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.usage = _usage()  # type: ignore[misc]
 
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.call = None  # type: ignore[misc]
+
 
 def test_an_empty_mapping_is_a_legal_result_and_is_the_no_call_page() -> None:
     """C-2 in terms: "an EMPTY mapping is AC-7's no-call page". A page of
     wordless art is not an error and is not a missing result - it is a result
     with nothing in it, and it must be constructible without a sentinel."""
-    result = TranslationResult(lines={}, usage=TokenUsage(0, 0, 0, 0))
+    result = TranslationResult(lines={}, usage=TokenUsage(0, 0, 0, 0), call=None)
 
     assert result.lines == {}
     assert not result.lines
+    # MT-044 C-4: `call is None` is the no-call statement itself, and the four
+    # zeroes are now corroboration rather than the evidence.
+    assert result.call is None
 
 
 def test_the_sparse_mapping_distinguishes_an_omission_from_an_empty_string() -> None:
     """AC-5's reason for the shape, stated as the thing it has to be able to
     say. Region 3 is absent; region 2 was translated as `""`."""
-    result = TranslationResult(lines={2: ""}, usage=_usage())
+    result = TranslationResult(lines={2: ""}, usage=_usage(), call=_call())
 
     assert 2 in result.lines
     assert result.lines[2] == ""
@@ -136,6 +159,7 @@ def test_neither_type_names_anything_the_domain_may_not_import() -> None:
     annotations = {
         **get_type_hints(TokenUsage),
         **get_type_hints(TranslationResult),
+        **get_type_hints(CallInfo),
     }
 
     for name, annotation in annotations.items():
@@ -143,3 +167,79 @@ def test_neither_type_names_anything_the_domain_may_not_import() -> None:
         assert not module.startswith("anthropic"), f"{name} is an SDK type: {annotation!r}"
         assert not module.startswith("mangatl.translate"), f"{name} is below domain: {annotation!r}"
         assert not module.startswith("mangatl.pipeline"), f"{name} is above domain: {annotation!r}"
+
+
+# -- MT-044 C-4: CallInfo ------------------------------------------------------
+
+
+def test_a_call_info_carries_the_request_id_and_the_model_that_served_it() -> None:
+    """MT-044 C-4. Two required strings on one optional field.
+
+    **Not two optional fields on `TranslationResult`.** `model_id: str | None`
+    beside `request_id: str | None` is an invariant nothing enforces - the two
+    must agree about whether a call happened, and nothing makes them. One
+    optional field holding two required strings has no disagreeing state.
+
+    The two values are deliberately different strings, so a constructor that
+    assigned one field from the other is caught.
+    """
+    call = CallInfo(request_id="msg_01RedFixture", model_id="claude-opus-5")
+
+    assert call.request_id == "msg_01RedFixture"
+    assert call.model_id == "claude-opus-5"
+    assert call != CallInfo(request_id="claude-opus-5", model_id="msg_01RedFixture")
+
+
+def test_a_call_info_is_a_frozen_value_like_every_other_type_here() -> None:
+    """`domain` sits under `coverage-core`'s `--cov-fail-under=100` with branch
+    coverage on, so this construction is not free and MT-044's RED spends it
+    deliberately (C-4)."""
+    call = _call()
+
+    assert dataclasses.is_dataclass(CallInfo)
+    assert call == _call()
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        call.model_id = "claude-sonnet-5"  # type: ignore[misc]
+
+
+def test_a_result_that_made_a_call_and_one_that_did_not_are_distinguishable() -> None:
+    """C-4's whole reason, stated as the discrimination it buys.
+
+    A real call that legitimately reported four zero token counts is
+    **indistinguishable** from a wordless page under the old inference
+    (`usage == TokenUsage(0, 0, 0, 0)`), and under it the ledger would drop the
+    bill. With `call` the two differ in the field that says so, while their
+    usages are identical.
+    """
+    zero = TokenUsage(0, 0, 0, 0)
+    billed = TranslationResult(lines={}, usage=zero, call=_call())
+    wordless = TranslationResult(lines={}, usage=zero, call=None)
+
+    assert billed.usage == wordless.usage
+    assert billed.call is not None
+    assert wordless.call is None
+    assert billed != wordless
+
+
+def test_the_call_field_has_no_default_so_a_caller_cannot_forget_it() -> None:
+    """C-4's pin, and it is the one AC-2 depends on.
+
+    `call: CallInfo | None = None` would make "record nothing" the behaviour a
+    caller gets **by saying nothing** - which is exactly the vacuous
+    implementation AC-2's note warns about, arriving through a default argument
+    instead of through a missing line. Read off the dataclass fields rather than
+    off a `TypeError`, so the failure message names the field.
+    """
+    fields = {field.name: field for field in dataclasses.fields(TranslationResult)}
+
+    assert fields["call"].default is dataclasses.MISSING, (
+        "TranslationResult.call has a default, so `TranslationResult(lines=..., usage=...)`"
+        " silently means 'no call was made' and the ledger stays empty (C-4)"
+    )
+    assert fields["call"].default_factory is dataclasses.MISSING
+    assert [field.name for field in dataclasses.fields(TranslationResult)] == [
+        "lines",
+        "usage",
+        "call",
+    ]

@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-__all__ = ["TokenUsage", "TranslationResult"]
+__all__ = ["CallInfo", "TokenUsage", "TranslationResult"]
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,26 @@ class TokenUsage:
 
 
 @dataclass(frozen=True)
+class CallInfo:
+    """The identity of one API call, for the row the ledger writes about it.
+
+    Two required strings rather than two optionals on `TranslationResult`: a
+    request id without a model id, or the other way round, is a state nothing
+    could enforce. One optional field holding two required strings has no
+    disagreeing state, and `call is None` then *means* "no call was made"
+    rather than being inferred from four zero token counts - an inference that
+    would drop a real call legitimately reporting zeroes out of the ledger.
+
+    Deliberately branch-free: no `__post_init__`, no validation. It is inside
+    `coverage-core`'s `--cov-fail-under=100` with branch coverage, and a branch
+    here would owe a test per arm (MT-044 C-4, F-3).
+    """
+
+    request_id: str
+    model_id: str
+
+
+@dataclass(frozen=True)
 class TranslationResult:
     """One page's proposed English, and what the page cost.
 
@@ -65,8 +85,15 @@ class TranslationResult:
     region, and `Project.write_proposed` leaves its `proposed_en` NULL.
 
     An **empty** mapping is AC-7's page of wordless art - a legal result with
-    nothing in it, carrying `TokenUsage(0, 0, 0, 0)` because no call was made.
+    nothing in it, carrying `TokenUsage(0, 0, 0, 0)` and `call=None` because no
+    call was made.
+
+    **`call` has no default** (MT-044 C-4). A default of `None` would make
+    "record nothing in the ledger" the behaviour a caller gets by saying
+    nothing, which is exactly the vacuous implementation AC-2 warns about,
+    arriving through a default argument instead of through a missing line.
     """
 
     lines: Mapping[int, str]
     usage: TokenUsage
+    call: CallInfo | None

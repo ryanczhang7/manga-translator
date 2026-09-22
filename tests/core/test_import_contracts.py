@@ -198,6 +198,31 @@ def test_the_entry_point_may_still_open_the_window_it_exists_to_open() -> None:
 
 
 def test_only_translate_may_import_anthropic() -> None:
+    # MT-044 PO-1: **ten** entries, `mangatl.cli` removed and nothing else.
+    # `compose.build_pipeline` must construct the `Anthropic` client to bind
+    # `partial(translate_page, client)` into the stage list (C-13).
+    # `mangatl.compose` is already absent from this list - but `mangatl.cli`
+    # imports `compose`, and this contract carries no `allow_indirect_imports`,
+    # so import-linter reports the chain. Measured before dispatch, with a
+    # throwaway `mangatl/_probe_client_in_compose.py` imported from
+    # `compose.py`:
+    #
+    #     Only translate imports anthropic BROKEN
+    #     mangatl.cli is not allowed to import anthropic:
+    #     -   mangatl.cli -> mangatl.compose (l.34)
+    #         mangatl.compose -> mangatl._probe_client_in_compose (l.151)
+    #         mangatl._probe_client_in_compose -> anthropic (l.2)
+    #
+    # Removing that one name returned `Contracts: 5 kept, 0 broken` with the
+    # probe still in place. This mirrors
+    # `test_the_composition_root_is_exempt_from_onnx_and_the_window_entry_point_is_not`
+    # exactly: MT-036 made the identical move for the onnxruntime contract, and
+    # `architecture.md` §3 rule 5's composition-root exception is the precedent.
+    #
+    # `allow_indirect_imports = true` was rejected: it would weaken the contract
+    # for all eleven modules, `mangatl.pipeline` included, and the chain
+    # `pipeline -> translate -> anthropic` is the one MT-011 C-1 exists to stop.
+    # The test below keeps `mangatl.pipeline` listed, which is that confinement.
     contract = _contract(ANTHROPIC)
     assert contract.get("type") == "forbidden"
     assert _modules(contract, "forbidden_modules") == ["anthropic"]
@@ -205,7 +230,6 @@ def test_only_translate_may_import_anthropic() -> None:
         "mangatl.app",
         "mangatl.bench",
         "mangatl.clean",
-        "mangatl.cli",
         "mangatl.detect",
         "mangatl.domain",
         "mangatl.ocr",
@@ -214,6 +238,50 @@ def test_only_translate_may_import_anthropic() -> None:
         "mangatl.typeset",
         "mangatl.ui",
     ]
+    assert "allow_indirect_imports" not in contract, (
+        "allow_indirect_imports would stop import-linter reporting the chain"
+        " pipeline -> translate.client -> anthropic, which is the whole of what"
+        " MT-011 C-1 is built around; MT-044 PO-1 dropped one module instead"
+    )
+
+
+def test_the_composition_root_is_exempt_from_anthropic_and_the_pipeline_is_not() -> None:
+    """MT-044 PO-1, stated as the decision rather than as one list.
+
+    Only the module that *constructs* the client, and the entry point that
+    imports it, come out of this contract: `mangatl.compose` was already absent
+    and `mangatl.cli` joins it. `mangatl.app` stays listed for MT-036 PO-2's
+    reason - `app.py` imports `mangatl.ui.main_window` and nothing else, so it
+    needs no exemption and will not be given one in advance.
+
+    What is lost, stated honestly: `mangatl.cli` may now import
+    `mangatl.translate` directly and this contract will not complain. What is
+    kept is the confinement that matters, measured on 2026-09-21 with the
+    ten-entry list in place -
+
+        mangatl.pipeline is not allowed to import anthropic:
+        -   mangatl.pipeline._probe_chain -> mangatl.translate.client (l.2)
+            mangatl.translate.client -> anthropic (l.43, l.44)
+
+    and `mangatl.compose` is in the *"Nothing imports ui"* contract, so this
+    does not become a back door out of that one either.
+    """
+    confined = _contract(ANTHROPIC).get("source_modules", [])
+
+    assert "mangatl.compose" not in confined
+    assert "mangatl.cli" not in confined
+    assert "mangatl.pipeline" in confined, (
+        "mangatl.pipeline was exempted from the anthropic confinement; that chain"
+        " is the one MT-011 C-1 and MT-044 PO-1 both exist to keep reportable"
+    )
+    assert "mangatl.app" in confined, (
+        "mangatl.app was exempted from the anthropic confinement without a story"
+        " that needed it (MT-036 PO-2's rule, applied to this contract)"
+    )
+    assert "mangatl.compose" in _contract(UI).get("source_modules", []), (
+        "the composition root's exemption from the anthropic contract must not"
+        " become a back door out of 'Nothing imports ui' (MT-036 C-5, PO-3)"
+    )
 
 
 def test_only_detect_ocr_and_clean_may_import_onnxruntime() -> None:

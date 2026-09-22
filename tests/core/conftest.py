@@ -2,7 +2,10 @@
 
 MT-007 appended `one_bit_png` at the foot of this file, MT-009 `page_mask` below
 it, and MT-011 the structured-output `Message` stand-in below that; everything
-above `one_bit_png` belongs to MT-004 and is unchanged.
+above `one_bit_png` belongs to MT-004 and is unchanged. MT-044 added two
+defaulted identity fields to that stand-in (`id`, `model`) because
+`translate/client.py` now reads them off a response; see `## Regressions` in
+`docs/backlog/stories/MT-044.md`.
 
 Recipes are pinned in `docs/backlog/stories/MT-004.md` `## Contract` PO-2, and
 were verified there against Pillow 12.3.0 on 2026-09-15 in a scratch directory
@@ -241,11 +244,35 @@ class FakeThinkingBlock:
     type: str = "thinking"
 
 
+# MT-044 C-5: `translate/client.py` now reads `response.id` and `response.model`
+# to fill `CallInfo`, so a stand-in for `Message` that lacks them cannot
+# represent a response at all. Both are on the real type - MEASURED 2026-09-21
+# and again 2026-09-22 against `anthropic` as locked in `uv.lock`:
+# `Message.model_fields` gives `id: str` and `model:
+# Union[Literal['claude-sonnet-5', ..., 'claude-opus-5', ...], str]`.
+#
+# The two defaults below are what make this additive: the ~13 existing
+# construction sites and `_fake_message` say nothing about call identity and
+# must not have to, because nothing they assert is about it.
+
+#: `msg_fake`, not a plausible-looking `msg_01ABC...`: a reader who sees this id
+#: in a failure message should know at a glance it came from the double.
+_FAKE_MESSAGE_ID = "msg_fake"
+
+#: A model id `domain.rates.RATES` **lists**. An unlisted one would make
+#: `price` raise `UnknownModel` (MT-044 C-5, DV-5) the first time any test
+#: prices a fake response, which would be a fixture defect wearing the costume
+#: of a pricing bug.
+_FAKE_MODEL_ID = "claude-opus-5"
+
+
 @dataclass(frozen=True)
 class FakeMessage:
     content: tuple[FakeTextBlock | FakeThinkingBlock, ...]
     usage: FakeUsage = FakeUsage()
     stop_reason: str = "end_turn"
+    id: str = _FAKE_MESSAGE_ID
+    model: str = _FAKE_MODEL_ID
 
 
 def _fake_message(
@@ -254,8 +281,15 @@ def _fake_message(
     leading_thinking: bool = False,
     usage: FakeUsage | None = None,
     stop_reason: str = "end_turn",
+    message_id: str = _FAKE_MESSAGE_ID,
+    model: str = _FAKE_MODEL_ID,
 ) -> FakeMessage:
-    """A `Message`-shaped value whose text block carries `body` verbatim."""
+    """A `Message`-shaped value whose text block carries `body` verbatim.
+
+    `message_id` sets the field the real `Message` spells `id`; the *field* has
+    to be `id` because production reads `response.id`, while the *parameter* is
+    spelled out so the builder's body does not shadow the builtin.
+    """
     blocks: list[FakeTextBlock | FakeThinkingBlock] = []
     if leading_thinking:
         blocks.append(FakeThinkingBlock())
@@ -264,12 +298,15 @@ def _fake_message(
         content=tuple(blocks),
         usage=usage if usage is not None else FakeUsage(),
         stop_reason=stop_reason,
+        id=message_id,
+        model=model,
     )
 
 
 @pytest.fixture
 def fake_message() -> Callable[..., FakeMessage]:
-    """A builder: `fake_message(body, leading_thinking=..., usage=...)`."""
+    """A builder: `fake_message(body, leading_thinking=..., usage=...,
+    message_id=..., model=...)`."""
     return _fake_message
 
 

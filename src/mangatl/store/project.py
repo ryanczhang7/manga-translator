@@ -54,10 +54,11 @@ from pathlib import Path
 from typing import Literal, cast
 
 from mangatl.domain.line import OcrResult
+from mangatl.domain.money import Usd
 from mangatl.domain.page import Chapter, Page
 from mangatl.domain.region import RawRegion
 from mangatl.store.intake import read_chapter
-from mangatl.store.schema import DDL, LLM_CALL_DDL
+from mangatl.store.schema import CHAPTER_DDL, DDL, LLM_CALL_DDL
 
 __all__ = [
     "PAGE_DONE",
@@ -84,7 +85,13 @@ __all__ = [
 #: `cost_micro_usd INTEGER`, `rate_table_version` arrives, and two triggers make
 #: the table append-only. None of AC-2, AC-3 or AC-4 is expressible in a version
 #: 2 file, and a v2 file is what every existing user has.
-SCHEMA_VERSION: int = 3
+#:
+#: Version 4 is MT-044's budget ceiling (C-12): `chapter.budget_ceiling_usd REAL`
+#: becomes `budget_ceiling_micro_usd INTEGER`, in the same column position. The
+#: ceiling is money, and money is exact micro-dollars everywhere else in this
+#: project; a REAL column is an IEEE-754 double. AC-5 is unanswerable in a
+#: version 3 file without reading a ceiling back through a float.
+SCHEMA_VERSION: int = 4
 
 #: `page.status` as `create_project` writes it: read, hashed, nothing done yet.
 PAGE_PENDING: str = "pending"
@@ -115,9 +122,13 @@ _OUTPUT_SUFFIX = "_en"
 # nondeterministic by contract even when it happens to come back sorted.
 _SELECT_PAGES = "SELECT ordinal, filename, width, height, sha256 FROM page ORDER BY ordinal"
 
+#: MT-044 C-10. Unqualified, because one project file is one chapter - the same
+#: reason `store.ledger`'s totals carry no `WHERE chapter_id`.
+_SELECT_CEILING = "SELECT budget_ceiling_micro_usd FROM chapter"
+
 _INSERT_CHAPTER = (
     "INSERT INTO chapter (source_dir, output_dir, created_at, schema_version,"
-    " budget_ceiling_usd, model_id, rate_table_version)"
+    " budget_ceiling_micro_usd, model_id, rate_table_version)"
     # The three NULLs are named rather than left out of the column list, so that
     # PO-8's decision - MT-012 and MT-013 own these, this story does not invent
     # them - is visible in the statement and not only in a comment.
@@ -256,6 +267,66 @@ DROP TABLE llm_call_v2;
 """
 )
 
+#: Version 3 to version 4 (MT-044 C-12): `chapter.budget_ceiling_usd REAL`
+#: becomes `budget_ceiling_micro_usd INTEGER`, in the same column position. A
+#: table rebuild for `_MIGRATE_TO_V3`'s second reason: the column is *converted*,
+#: not defaulted, and SQLite cannot change a column's type in place.
+#:
+#: **The two opening pragmas are the whole of this block, and each is silently
+#: wrong on its own.** `chapter` is a *parent* table with three cascading
+#: children - `page`, `run` and `glossary` - so MT-012's `llm_call` recipe
+#: applied here destroys the project in two different ways, neither of which
+#: raises. Measured on sqlite 3.53.1 against a 1-chapter / 3-page / 2-run /
+#: 2-glossary fixture:
+#:
+#: | recipe | child FK names | pages | runs | glossary | `foreign_key_check` |
+#: |---|---|---|---|---|---|
+#: | neither pragma | `chapter_v3` | **0** | **0** | **0** | `[]` |
+#: | `foreign_keys=OFF` only | `chapter_v3` | 3 | 2 | 2 | **7 violations** |
+#: | both (this one) | `chapter` | 3 | 2 | 2 | `[]` |
+#:
+#: Without `foreign_keys = OFF`, `ALTER TABLE chapter RENAME TO chapter_v3`
+#: repoints every child at `chapter_v3` and the `DROP TABLE chapter_v3` then
+#: **cascades and deletes every page and every run in the project** - and
+#: `foreign_key_check` reports clean afterwards, because there is nothing left
+#: to violate. Without `legacy_alter_table = ON` the rows survive but every
+#: child still names a table that no longer exists, and the row counts are
+#: *identical* to the correct recipe's: a migration test that counts rows passes
+#: against the broken one. `PRAGMA foreign_key_check` is the only thing that
+#: separates those two, and the violation *count* is one per surviving child row
+#: - a property of the fixture, not of the recipe - so a test asserts it is
+#: **empty**, never that it has a particular length.
+#:
+#: They are the first statements *inside* the script because `executescript`
+#: commits any open transaction first, so neither pragma lands inside one - and
+#: a pragma set inside a transaction is the silent no-op this module's own
+#: docstring records. `_migrate_to_current` puts both back **after** its commit.
+#:
+#: `CAST(ROUND(... * 1000000) AS INTEGER)` is `_MIGRATE_TO_V3`'s conversion and
+#: its reason: the value still *is* a double at that point, and rounding to the
+#: nearest micro-dollar is what turns it back into the exact decimal it was
+#: written from. A NULL ceiling arithmetics to NULL and stays NULL, which is
+#: what AC-5's second half needs.
+_MIGRATE_TO_V4 = (
+    """
+PRAGMA foreign_keys = OFF;
+PRAGMA legacy_alter_table = ON;
+
+ALTER TABLE chapter RENAME TO chapter_v3;
+"""
+    + CHAPTER_DDL
+    + """
+INSERT INTO chapter (id, source_dir, output_dir, created_at, schema_version,
+                     budget_ceiling_micro_usd, model_id, rate_table_version)
+SELECT id, source_dir, output_dir, created_at, schema_version,
+       CAST(ROUND(budget_ceiling_usd * 1000000) AS INTEGER), model_id,
+       rate_table_version
+FROM chapter_v3;
+
+DROP TABLE chapter_v3;
+"""
+)
+
 #: The migration chain, in order, each step keyed on the version it *produces*.
 #: A step runs when the file found on disk is older than that.
 #:
@@ -268,6 +339,7 @@ DROP TABLE llm_call_v2;
 _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (2, _MIGRATE_TO_V2),
     (3, _MIGRATE_TO_V3),
+    (4, _MIGRATE_TO_V4),
 )
 
 
@@ -402,6 +474,15 @@ def _migrate_to_current(connection: sqlite3.Connection, found: int) -> None:
     The explicit `commit()` is not decoration: `UPDATE` opens an implicit
     transaction under sqlite3's legacy isolation handling, and a migration that
     is not on disk when the process ends is not a migration.
+
+    **The two pragma restores go after that commit, and that is measured rather
+    than stylistic** (MT-044 C-12). `_MIGRATE_TO_V4` turns `foreign_keys` and
+    `legacy_alter_table` off to rebuild a parent table safely, and the `UPDATE`
+    on the line above opens exactly the implicit transaction this module's own
+    docstring warns about - inside which setting a pragma is a silent no-op:
+
+        restore before commit ->  0      # still 0 after the commit, too
+        restore after commit  ->  1
     """
     for version, script in _MIGRATIONS:
         if found < version:
@@ -412,6 +493,15 @@ def _migrate_to_current(connection: sqlite3.Connection, found: int) -> None:
     # reasoning, as `create_project`.
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION:d}")
     connection.commit()
+    # After the commit, and measured: before it both of these read back
+    # unchanged. `_connect` turned foreign keys on because every cascade in
+    # `schema.py` depends on it, and a migration that left them off would
+    # silently disable MT-007's per-page invalidation for the rest of the
+    # session. Unconditional and after the loop, so a file that ran no
+    # migration pays two no-op pragmas and a file that ran the v4 step cannot
+    # skip the restore.
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA legacy_alter_table = OFF")
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -497,6 +587,23 @@ class Project:
             "SELECT status FROM page WHERE ordinal = ?", (ordinal,)
         ).fetchone()
         return str(row[0])
+
+    def budget_ceiling(self) -> Usd | None:
+        """The chapter's ceiling, or `None` when the column is NULL (C-10).
+
+        **`None` and not `DEFAULT_CEILING`.** The store reports what is stored,
+        and the default is a *domain* constant: a store that substituted it
+        would put half of MT-044 AC-5 in the layer that may not import
+        `domain.budget` to spell it. `pipeline.translate_stage.budget_for` is
+        where the two halves meet.
+
+        A stored **zero** comes back as `Usd.from_micro(0)` and not as `None`.
+        The two are different facts - "refuse everything, forever" against "no
+        ceiling was ever set" - and only `IS NULL` can tell them apart, which
+        is why this reads the column rather than testing it for truthiness.
+        """
+        row = self._connection.execute(_SELECT_CEILING).fetchone()
+        return None if row[0] is None else Usd.from_micro(int(row[0]))
 
     def write_regions(self, page_ordinal: int, regions: Sequence[RawRegion]) -> None:
         """Replace one page's regions with `regions`, in the order handed over.

@@ -48,10 +48,10 @@ from mangatl.domain.events import (
     RunStarted,
     StageFinished,
 )
-from mangatl.pipeline.stage import PageContext, Stage
+from mangatl.pipeline.stage import BudgetRefused, PageContext, Stage
 from mangatl.store.project import PAGE_DONE, Project
 
-__all__ = ["RUN_ABORTED", "RUN_FINISHED", "RunOutcome", "run_chapter"]
+__all__ = ["BUDGET", "RUN_ABORTED", "RUN_FINISHED", "RunOutcome", "run_chapter"]
 
 #: The two values written to the `run` row's `outcome` column, and carried on
 #: `RunOutcome.outcome`. One value in two places, so AC-1's "ends with outcome
@@ -62,6 +62,11 @@ RUN_ABORTED = "aborted"
 #: `RunAborted.reason` for a cancellation. A cancel is not an error, so it reads
 #: as itself rather than as an exception message, and it names no page.
 CANCELLED = "cancelled"
+
+#: `RunAborted.reason` for a budget refusal. MT-044 AC-1 pins this exact string,
+#: and it is a constant here beside `RUN_ABORTED` and `RUN_FINISHED` for their
+#: reason: the criterion asserts the value and a test should not re-spell it.
+BUDGET = "budget"
 
 #: `PageSkipped.reason`. Free text for the user, not a code anything branches on.
 ALREADY_DONE = "already done"
@@ -116,7 +121,7 @@ def run_chapter(
         if cancelled():
             progress.reason = CANCELLED
             break
-        ctx = PageContext(project=project, page=page)
+        ctx = PageContext(project=project, page=page, run_id=run_id)
         if not _run_page(project, ctx, stages, emit, cancelled, progress):
             break
         progress.pages_done += 1
@@ -171,6 +176,18 @@ def _run_page(
         started_ns = time.perf_counter_ns()
         try:
             stage.run(ctx)
+        except BudgetRefused:
+            # **Before** the general arm, and that order is load-bearing:
+            # `BudgetRefused` *is* an `Exception`, so the general arm placed
+            # first swallows it and produces
+            # `reason="BudgetRefused: the projected next call of ..."` - a
+            # plausible string that fails AC-1's exact comparison and passes
+            # any substring check. The decision on the exception is not read
+            # here: MT-018 renders it, and `RunAborted` carries a reason and an
+            # ordinal.
+            progress.reason = BUDGET
+            progress.ordinal = ordinal
+            return False
         except Exception as error:
             progress.reason = f"{type(error).__name__}: {error}"
             progress.ordinal = ordinal

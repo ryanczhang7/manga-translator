@@ -90,6 +90,17 @@ def project(tmp_path: Path) -> Iterator[Project]:
         yield opened
 
 
+def _open_run(project: Project) -> int:
+    """A real `run` row, for MT-044 C-1's `PageContext.run_id`."""
+    with project.transaction() as cursor:
+        chapter_id = int(cursor.execute("SELECT id FROM chapter").fetchone()[0])
+        cursor.execute(
+            "INSERT INTO run (chapter_id, started_at) VALUES (?, ?)",
+            (chapter_id, "2026-09-21T09:00:00+00:00"),
+        )
+        return int(cursor.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+
 class _Recording:
     """The real detector, wrapped so the test can see what it returned.
 
@@ -121,7 +132,15 @@ def test_the_real_chain_reaches_the_store_in_reading_order(
     (page,) = project.pages()
     detector = _Recording(session)
 
-    DetectStage(detect=detector).run(PageContext(project=project, page=page))
+    # MT-044 C-1 gave `PageContext` a required `run_id`. `DetectStage` never
+    # reads it, and **no required gate compiles this file** - `unit` and
+    # `coverage` run `tests/core tests/ui`, `integration` is optional and runs
+    # `-m "gpu or network"`, and `typecheck` is `mypy src`, which reads no test
+    # at all. A stale two-argument call here would therefore pass every gate and
+    # surface months later as a collection error on the GPU suite.
+    DetectStage(detect=detector).run(
+        PageContext(project=project, page=page, run_id=_open_run(project))
+    )
 
     stored = project.read_regions(page.ordinal)
 

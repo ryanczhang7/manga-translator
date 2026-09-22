@@ -41,8 +41,9 @@ count of the parent table, which is why the store pins the pragma directly.
 the story that creates the row knows the value; nullable wherever a later stage
 supplies it, because a writer forced to invent a value stores a lie:
 
-- `chapter.budget_ceiling_usd`, `model_id`, `rate_table_version` - MT-012 and
-  MT-013 own these; `create_project` has no business inventing them (PO-8).
+- `chapter.budget_ceiling_micro_usd`, `model_id`, `rate_table_version` - MT-012
+  and MT-013 own these; `create_project` has no business inventing them (PO-8),
+  and MT-044 AC-5's second half is the NULL ceiling.
 - `line.final_en` - §4's own rule, "NULL `final_en` means unedited", which is
   what makes "accepted as-is" a query rather than a diff of an event log.
   `edited_at` and `viewed_at` follow: an unedited, unviewed line has no such
@@ -54,7 +55,38 @@ supplies it, because a writer forced to invent a value stores a lie:
 
 from __future__ import annotations
 
-__all__ = ["DDL", "LLM_CALL_DDL"]
+__all__ = ["CHAPTER_DDL", "DDL", "LLM_CALL_DDL"]
+
+#: The chapter table, as its own string because **two** callers create it
+#: (MT-044 C-12, for MT-012 RED-A5's reason): `DDL` below, for a fresh file, and
+#: `store.project._MIGRATE_TO_V4`, which rebuilds it in a version 3 file. A
+#: migrated table has to be the same table as a fresh one, and the cheapest way
+#: to guarantee that is for there to be only one definition of it.
+#:
+#: **`budget_ceiling_micro_usd INTEGER`, not `budget_ceiling_usd REAL`**, and in
+#: the **same column position** (sixth) the REAL column held, so a `SELECT *`
+#: behaves the same on a migrated file as on a new one - the ordering invariant
+#: `line.ocr_empty` records below, arriving a second time. A REAL column is an
+#: IEEE-754 double and the ceiling is money: `domain.money.Usd` is exact
+#: micro-dollars everywhere else in this project, and `Usd.micro()` is the only
+#: bridge across.
+#:
+#: **Still nullable.** `create_project` has no business inventing a ceiling
+#: (MT-005 PO-8), and MT-044 AC-5's second half is exactly the NULL case: no
+#: stored ceiling means `domain.budget.DEFAULT_CEILING`, which is a domain
+#: constant the store cannot and should not spell.
+CHAPTER_DDL: str = """
+CREATE TABLE chapter (
+    id                       INTEGER PRIMARY KEY,
+    source_dir               TEXT    NOT NULL,
+    output_dir               TEXT    NOT NULL,
+    created_at               TEXT    NOT NULL,
+    schema_version           INTEGER NOT NULL,
+    budget_ceiling_micro_usd INTEGER,
+    model_id                 TEXT,
+    rate_table_version       TEXT
+);
+"""
 
 #: The ledger table and the two triggers that make it append-only, as their own
 #: string because **two** callers create it: `DDL` below, for a fresh file, and
@@ -120,22 +152,13 @@ END;
 #: `Connection.executescript`, so statements are separated by semicolons and
 #: nothing here is parameterised.
 #:
-#: Concatenated rather than written as one literal only because `LLM_CALL_DDL`
-#: above has a second caller. It is still one string and still the whole
-#: schema: `executescript(DDL)` on a bare connection creates every table.
+#: Concatenated rather than written as one literal only because `CHAPTER_DDL`
+#: and `LLM_CALL_DDL` above each have a second caller - the migration that
+#: rebuilds that table. It is still one string and still the whole schema:
+#: `executescript(DDL)` on a bare connection creates every table.
 DDL: str = (
-    """
-CREATE TABLE chapter (
-    id                 INTEGER PRIMARY KEY,
-    source_dir         TEXT    NOT NULL,
-    output_dir         TEXT    NOT NULL,
-    created_at         TEXT    NOT NULL,
-    schema_version     INTEGER NOT NULL,
-    budget_ceiling_usd REAL,
-    model_id           TEXT,
-    rate_table_version TEXT
-);
-
+    CHAPTER_DDL
+    + """
 -- `ordinal` is filename order at intake and never changes: it is the page's
 -- identity for the rest of the product (MT-004), which is why it is unique
 -- within the chapter rather than merely indexed. `filename` is unique for a
