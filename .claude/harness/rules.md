@@ -167,11 +167,15 @@ inspect.
   phase and the gate stamp - and `.claude/state/README.md` says which, in a column
   `.claude/tests/settings.test.sh` checks against the rules in both directions. A
   new state file belongs in that table, with a yes or no, or the suite fails. A
-  `.bak` left behind under `mutations/` means a
-  restore failed and `mutate.sh` exited 90 saying so; everything else it cleans
-  up. The backup path is explicit rather than `$TMPDIR` because that variable is
-  unset in some of the shells this harness runs in, and a mutation whose backup
-  went nowhere once left its restore depending on the `sed` expression happening
-  to be an exact inverse of a single-occurrence match.
+  `.bak` left behind under `mutations/` means a restore failed and `mutate.sh`
+  exited 90 saying so; everything else it cleans up, on every path it can still
+  run code on. The exception is a kill, which it cannot trap: that leaves a
+  scratch `.new` beside the `.bak`, and that pair means `cmp` the source against
+  the backup before trusting the tree. A `.new` is never evidence on its own -
+  `.claude/state/README.md` has the rule. The backup path is explicit rather
+  than `$TMPDIR` because that variable is unset in some of the shells this
+  harness runs in, and a mutation whose backup went nowhere once left its
+  restore depending on the `sed` expression happening to be an exact inverse of
+  a single-occurrence match.
 - Agentic scaffolding (`.claude/`, `docs/`, `scripts/`, `.github/`) never ships
   in a production image. Keep `.dockerignore` honest.
