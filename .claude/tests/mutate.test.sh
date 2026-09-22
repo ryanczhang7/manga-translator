@@ -124,6 +124,71 @@ assert_contains "it says the restore failed" "COULD NOT RESTORE" "$out"
 assert_eq "and exits 90, whatever the command did" "90" "$rc"
 
 # ---------------------------------------------------------------------------
+describe "the scratch file never outlives the run"
+
+# .claude/state/mutations/ has exactly one signal in it, and rules.md states it:
+# a `.bak` left behind means a restore failed. That sentence ends "everything
+# else it cleans up", which was not true. The mutated text is built in a `.new`
+# beside the backup - sed cannot read and write one path - and each exit path
+# removed it separately, so the two paths that write no log line removed nothing.
+# Two `.new` files from different weeks sat in this repository's state directory
+# with no log entry to explain either and no rule to read them by. Unlike the
+# backup, a `.new` is not evidence of anything: its content is the backup put
+# through the expression, and the log records both.
+#
+# So most of the cases below are one assertion - nothing named `.new` is left -
+# and the point is that it holds on the paths that report nothing as much as on
+# the ones that report success.
+
+scratch() { ls "$FIX/.claude/state/mutations" 2>/dev/null | grep -c '\.new$'; }
+backups() { ls "$FIX/.claude/state/mutations" 2>/dev/null | grep -c '\.bak$'; }
+
+reset_src
+mutate src/main.ts 's/90/-90/' -- true >/dev/null 2>&1
+assert_eq "after a command that passed" "0" "$(scratch)"
+
+mutate src/main.ts 's/90/-90/' -- sh -c 'exit 1' >/dev/null 2>&1
+assert_eq "after a command that failed" "0" "$(scratch)"
+
+mutate src/main.ts 's/90/-90/' -- no-such-command-here >/dev/null 2>&1
+assert_eq "after a command that never ran" "0" "$(scratch)"
+
+mutate src/main.ts 's/90/-90' -- true >/dev/null 2>&1
+assert_eq "after sed rejected the expression" "0" "$(scratch)"
+
+mutate src/main.ts 's/NOT_IN_THE_FILE/x/' -- true >/dev/null 2>&1
+assert_eq "after an expression that changed nothing" "0" "$(scratch)"
+
+# The one path that is MEANT to leave something, so that the cleanup above is
+# not merely "delete everything". When the restore cannot be verified the backup
+# is the only copy of the original and it must survive; the scratch file is
+# still scratch. The command makes the target unwritable, so the restore that
+# follows it genuinely fails.
+reset_src
+out="$(mutate src/main.ts 's/90/-90/' -- chmod 444 src/main.ts)"; rc=$?
+chmod 644 "$SRC" 2>/dev/null
+assert_eq "a restore that could not be verified exits 90" "90" "$rc"
+assert_eq "and keeps its backup"                          "1" "$(backups)"
+assert_eq "but not its scratch file"                      "0" "$(scratch)"
+rm -f "$FIX"/.claude/state/mutations/*.bak
+
+# The file cannot be written at all. This is the other path that writes no log
+# line, and the shape that produced the older of the two orphans: the backup was
+# taken, the scratch file was built, and then nothing could be copied over the
+# original. Nothing was mutated, so there is nothing to go and look at - neither
+# file should survive, and a `.bak` here would be a false alarm under a rule that
+# reads a `.bak` as a failed restore.
+reset_src
+before="$(sha "$SRC")"
+chmod 444 "$SRC" 2>/dev/null
+mutate src/main.ts 's/90/-90/' -- true >/dev/null 2>&1
+chmod 644 "$SRC" 2>/dev/null
+assert_eq "an unwritable target leaves no scratch file" "0" "$(scratch)"
+assert_eq "and no backup, because nothing was mutated"  "0" "$(backups)"
+assert_eq "and the file is untouched"                   "$before" "$(sha "$SRC")"
+reset_src
+
+# ---------------------------------------------------------------------------
 describe "it refuses to mutate the script that is running"
 
 # Found by using this script on this repository. bash reads a script

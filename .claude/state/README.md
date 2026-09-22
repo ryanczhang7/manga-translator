@@ -9,6 +9,7 @@ in here is ever committed; only this file and `.gitkeep` are tracked.
 | `last-gate-run` | `scripts/gates.sh` | the stop hook | no |
 | `gate-logs/*.log` | `scripts/gates.sh` | you, when a gate fails | yes |
 | `mutations/*.bak` | `scripts/mutate.sh` | `scripts/mutate.sh`, to restore the file | yes |
+| `mutations/*.new` | `scripts/mutate.sh` | nothing; it is scratch | yes |
 | `mutations/log` | `scripts/mutate.sh` | you, and the story that quotes it | yes |
 | `phase-guard-declined.log` | `.claude/hooks/phase-guard.sh` | you, when the guard looks noisy | yes |
 
@@ -58,6 +59,29 @@ explicit rather than `$TMPDIR` because that variable is unset in some of the
 shells this harness runs in - a mutation whose backup went nowhere once left its
 restore depending on the `sed` expression happening to be an exact inverse of a
 single-occurrence match. **A `.bak` left behind means a restore failed.**
-`mutate.sh` exits 90 and says so when that happens; on every other path it cleans
-up after itself. Put the file back from the backup, check it with `cmp`, then
-delete the backup.
+`mutate.sh` exits 90 and says so when that happens; on every other path it can
+still run code on, it cleans up after itself. Put the file back from the backup,
+check it with `cmp`, then delete the backup. The one path it cannot run code on
+is a kill, and that leaves a `.new` beside the `.bak` - see below.
+
+**A `.new` is scratch, not a signal.** `sed` cannot read and write one path, so
+`mutate.sh` builds the mutated text in `mutations/<file>.<stamp>.<pid>.new` and
+copies that over the original. Its content is the `.bak` put through the
+expression, and `mutations/log` records both, so there is nothing in it to act
+on. A single trap removes it on every path the script can still run code on -
+including the two that write no log line, a target that cannot be written and an
+interrupt.
+
+So a `.new` that outlives a run means the run was **killed outright**: a
+`SIGKILL`, a closed terminal, a tool timeout that does not wait. Nothing can be
+trapped there, which is why the case is documented rather than fixed. It arrives
+with its `.bak`, and that pair is the whole instruction: the source file may
+still be mutated, so `cmp` it against the backup before running anything that
+judges the tree, then delete both. There is no log line for such a run, and the
+absence is itself the confirmation - the log is written after the command
+returns, and it never did.
+
+This was not always so. Each exit path removed the scratch file separately, the
+two that report nothing removed nothing, and two `.new` files from different
+weeks sat here with no log entry to explain either.
+`.claude/tests/mutate.test.sh` pins every path now.
