@@ -649,6 +649,36 @@ if [ "$AUDIT" = 1 ]; then
   exit 0
 fi
 
+# --- is the tree the code? --------------------------------------------------
+# Everything below judges the working tree and files the verdict as evidence,
+# stamped with a hash of the code it ran against. scripts/mutate.sh deliberately
+# mutates that tree, and puts the file back on every path it can still run code
+# on - but a kill is a path where it cannot, and a restore that fails is a path
+# where it could not. In both the file is left mutated, and a gate run behind
+# one produces a verdict about code nobody wrote, recorded under law 3 against a
+# tree hash that faithfully describes the mutation.
+#
+# `mutate.sh --check` reads the sentinels mutate.sh leaves while a mutation is in
+# flight. Detection, not a lock, for the same reason the project.conf
+# fingerprint above is detection: nothing here waits or holds anything, and a
+# mutation whose process is still alive is reported as in flight rather than as
+# wreckage. Refused before any gate runs, because a run behind a stranded
+# mutation is minutes spent producing a number that must be thrown away.
+#
+# Placed after --list and --audit, which read the manifest and never look at the
+# tree: a check that refused those too would gag the harness at exactly the
+# moment somebody needs it to explain itself. Inert on CI, where .claude/state
+# is gitignored and no sentinel can exist.
+if [ -x "$ROOT/scripts/mutate.sh" ] || [ -f "$ROOT/scripts/mutate.sh" ]; then
+  if ! mutation_report="$(bash "$ROOT/scripts/mutate.sh" --check 2>&1)"; then
+    printf '%s\n' "$mutation_report" >&2
+    printf 'gates: refusing to run. The gates judge the working tree and record the\n' >&2
+    printf 'verdict as evidence; behind an unaccounted-for mutation that verdict is\n' >&2
+    printf 'about code nobody wrote. Resolve the above, then run the gates again.\n' >&2
+    exit 2
+  fi
+fi
+
 # --- what this story changed ------------------------------------------------
 # "All required gates passed" is true and meaningless when the gates that
 # passed never read the story's artifact. That happened: a renderer's tests in

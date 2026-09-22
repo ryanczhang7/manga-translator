@@ -170,9 +170,13 @@ inspect.
   `.bak` left behind under `mutations/` means a restore failed and `mutate.sh`
   exited 90 saying so; everything else it cleans up, on every path it can still
   run code on. The exception is a kill, which it cannot trap: that leaves a
-  scratch `.new` beside the `.bak`, and that pair means `cmp` the source against
-  the backup before trusting the tree. A `.new` is never evidence on its own -
-  `.claude/state/README.md` has the rule. The backup path is explicit rather
+  scratch `.new` beside the `.bak`, and neither is evidence on its own. What is,
+  is the `.active` file `mutate.sh` writes before it touches a file and removes
+  only once that file is verifiably back - so one surviving means a mutation is
+  either in flight or stranded. `bash scripts/mutate.sh --check` reads them, and
+  `gates.sh` runs it before any gate: a verdict recorded under law 3 from behind
+  a stranded mutation is about code nobody wrote. `.claude/state/README.md` has
+  the rules for all three. The backup path is explicit rather
   than `$TMPDIR` because that variable is unset in some of the shells this
   harness runs in, and a mutation whose backup went nowhere once left its
   restore depending on the `sed` expression happening to be an exact inverse of

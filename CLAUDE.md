@@ -96,6 +96,7 @@ bash scripts/check-boundaries.sh # the other half of CI: the commit, not the cod
 bash scripts/ci-local.sh         # every step CI runs, in order, on this machine
 bash scripts/task.sh dev         # run the app
 bash scripts/mutate.sh F 'EXPR' -- CMD   # the only sanctioned diagnostic mutation
+bash scripts/mutate.sh --check          # is a mutation still stranded in the tree?
 ```
 
 `mutate.sh` exists because the law below requires mutating production code in a

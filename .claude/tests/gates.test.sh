@@ -147,7 +147,6 @@ EOF
 out="$(gates)"
 assert_contains "a waiver on a story-required gate is refused" "waiver" "$out"
 assert_contains "and it fails"                                 "1 required gate(s) failed" "$out"
-
 set_phase "$FIX" ""
 
 
@@ -994,5 +993,51 @@ assert_contains "beside the floor"                "floor:    26" "$out"
 assert_contains "and the evidence regex"          "evidence: [1-9][0-9]* passed" "$out"
 
 set_phase "$FIX" ""
+
+
+# --- a mutation left in the tree is not a thing to judge code against -------
+describe "the gates refuse to run while a mutation is unaccounted for"
+
+# scripts/mutate.sh can put the file back on every path it can still run code
+# on, and there is one it cannot: a kill. The file is then left mutated with
+# nothing to say so, and the next thing to read the tree judges code nobody
+# wrote. Under law 3 that verdict is filed as evidence, stamped against a tree
+# hash that faithfully records the mutated version.
+#
+# So mutate.sh leaves a sentinel while a mutation is in flight and `--check`
+# reads it, and this is the consumer that matters. Detection, not a lock - the
+# rule this file already holds about project.conf: nothing waits, nothing is
+# held, the run is refused and the reason is printed.
+
+write_conf "$FIX" <<'EOF'
+gate     | unit | required | . | printf 'Tests  47 passed (47)\n'
+evidence | unit | Tests +[1-9][0-9]* passed
+EOF
+
+# Stranded the way a killed run strands one: the command makes the target
+# unwritable, so mutate.sh's restore genuinely fails and its sentinel stays.
+printf 'export const clamp = (v) => Math.min(90, v)\n' > "$FIX/src/main.ts"
+( cd "$FIX" && bash scripts/mutate.sh src/main.ts 's/90/-90/' -- chmod 444 src/main.ts ) >/dev/null 2>&1
+chmod 644 "$FIX/src/main.ts" 2>/dev/null
+
+out="$(gates)"; rc=$?
+assert_contains "it says the tree may not be the code"  "may not be the code you think" "$out"
+assert_contains "and names the file that is mutated"    "src/main.ts" "$out"
+assert_eq       "and exits non-zero"                    "2" "$rc"
+assert_not_contains "and no gate ran"                   "PASS         unit" "$out"
+
+# --list and --audit read the manifest and run nothing against the tree, so a
+# stranded mutation is none of their business. A check that refused everything
+# would make the harness unusable at exactly the moment somebody needs it to
+# explain itself.
+out="$(gates --list)"
+assert_contains "--list still works" "unit" "$out"
+
+# The negative control. Without this, a check that refused unconditionally
+# would satisfy every assertion above.
+cp "$FIX"/.claude/state/mutations/*.bak "$FIX/src/main.ts" 2>/dev/null
+rm -f "$FIX"/.claude/state/mutations/*.active "$FIX"/.claude/state/mutations/*.bak
+out="$(gates)"
+assert_contains "resolved, the gates run again" "PASS         unit" "$out"
 
 summary "gates"
