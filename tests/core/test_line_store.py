@@ -329,8 +329,14 @@ def test_this_build_writes_and_reads_the_current_schema_version() -> None:
     AC-10's migration below is unaffected in substance - a v1 file is now
     brought to 3 rather than to 2, through both steps - and `_V1_DDL` above is
     still the v1 schema and must stay that way.
+
+    **Moved to 4 by MT-044 (C-12)**: `chapter.budget_ceiling_usd REAL` becomes
+    `budget_ceiling_micro_usd INTEGER`, so AC-5 can read a ceiling off the
+    chapter row as the integer micro-dollars MT-012 PO-2 settled money on.
+    A v1 file now runs three steps in one open, and `_V1_DDL` above is still the
+    v1 schema and must still stay that way.
     """
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
 
 
 def test_a_freshly_created_project_is_a_current_version_file_with_the_new_column(
@@ -348,8 +354,8 @@ def test_a_freshly_created_project_is_a_current_version_file_with_the_new_column
         pass
     db_path = project_dir_for(source_dir) / "project.db"
 
-    assert _user_version(db_path) == 3
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(3,)]
+    assert _user_version(db_path) == 4
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(4,)]
     columns = {str(row[1]) for row in _raw(db_path, "PRAGMA table_info(line)")}
     assert "ocr_empty" in columns, f"the line table has {sorted(columns)}"
 
@@ -522,10 +528,11 @@ def test_a_version_one_file_is_migrated_in_place_when_it_is_opened(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    # 3, not 2: MT-012's v2 -> v3 step runs immediately after MT-010's, so a v1
-    # file arrives at the current version in one open. `test_ledger.py` covers
-    # the v2 -> v3 step on a file that starts at 2.
-    assert _user_version(db_path) == 3
+    # 4, not 2: MT-012's v2 -> v3 step and MT-044's v3 -> v4 step both run
+    # immediately after MT-010's, so a v1 file arrives at the current version in
+    # one open. `test_ledger.py` covers the v2 -> v3 step on a file that starts
+    # at 2, and `test_schema_v4.py` the v3 -> v4 step on one that starts at 3.
+    assert _user_version(db_path) == 4
     after = {str(row[1]) for row in _raw(db_path, "PRAGMA table_info(line)")}
     assert "ocr_empty" in after
     assert before <= after, f"the migration dropped {sorted(before - after)} from the line table"

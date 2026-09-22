@@ -106,14 +106,30 @@ class _CompositionRoot:
     It records every models directory it was handed - so the flag, the
     environment variable and the precedence between them are all observable -
     and hands back one stage that the run can be seen to have used.
+
+    **MT-044 C-14** gives it a second thing to record: `translate=`, as `main`
+    passed it, or `None` where `main` passed nothing at all.
+
+    **The `None` sentinel is load-bearing and is not a tidy default.** A double
+    defaulting to `True` would record `True` for a `main` that never mentioned
+    the flag, so the test pinning C-14's default would have passed against
+    today's one-argument call - green on arrival, asserting nothing. `None` is
+    a value `main` cannot produce, so "the default is True" and "`main` never
+    said" are different observations here.
+
+    The `*` is load-bearing too: C-14 makes `translate` keyword-only, so a
+    `main` that passed it positionally is a `TypeError` here rather than a
+    second models directory.
     """
 
     def __init__(self) -> None:
         self.models_dirs: list[Path] = []
+        self.translate_flags: list[bool | None] = []
         self.stage = _CountingStage()
 
-    def __call__(self, models_dir: Path) -> tuple[Stage, ...]:
+    def __call__(self, models_dir: Path, *, translate: bool | None = None) -> tuple[Stage, ...]:
         self.models_dirs.append(models_dir)
+        self.translate_flags.append(translate)
         return (self.stage,)
 
 
@@ -532,3 +548,96 @@ def test_a_run_with_no_models_directory_fails_before_it_creates_anything(
     )
     assert not _output_dir_for(source_dir).exists()
     assert composition_root.models_dirs == []
+
+
+# -- MT-044 AC-6: `--no-translate`, the flag and its default -------------------
+
+
+def test_the_no_translate_flag_asks_the_composition_root_not_to_translate(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**AC-6**, the argparse half: `--no-translate` reaches `build_pipeline`
+    as `translate=False`, and the run still walks the whole chapter.
+
+    Asserted at the seam rather than by inspecting the parser, because what
+    AC-6 is about is not that a flag exists but that it *arrives*: a `main` that
+    declared `--no-translate` and then called `build_pipeline(models_dir)`
+    anyway would pass a help-text assertion, pass every other test in this file,
+    and translate five pages with a key nobody has (C-14).
+
+    **What this test cannot see** is the stage list itself: the composition root
+    is replaced here, so `translate=False` is observed as an argument and not as
+    a two-stage tuple. `test_compose.py` is where the flag's *effect* is pinned,
+    and the client counter with it.
+
+    The tail of the test is AC-6's "the run completes" at the level this file
+    reaches: exit 0, every page walked, `<folder>_en` written. The whole-chapter
+    form of it, on a machine with real weights and no API key, is
+    `tests/integration/test_pipeline_chapter.py`'s.
+    """
+    source_dir = _build_source(tmp_path, png_bytes)
+
+    code = main([str(source_dir), "--models", str(models_dir), "--no-translate"])
+
+    assert code == 0, "mangatl-run --no-translate did not complete the chapter"
+    assert composition_root.translate_flags == [False], (
+        "the composition root was asked for"
+        f" translate={composition_root.translate_flags}; --no-translate must"
+        " reach it as translate=False (C-14), and [None] means main never"
+        " mentioned it at all"
+    )
+    assert composition_root.models_dirs == [models_dir]
+    assert composition_root.stage.ran == list(range(len(_SOURCE_PAGES)))
+    assert _contents(_output_dir_for(source_dir)) == sorted(_FILENAMES)
+
+
+def test_a_run_without_the_flag_asks_for_a_translating_pipeline_and_says_so(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """C-14's default, through the entry point: **absent flag means translate**.
+
+    `[True]` and not `[None]`: `main` passes `translate=not
+    arguments.no_translate` on every call, so the builder is told what to do
+    rather than left to its own default. The distinction is the whole reason
+    `_CompositionRoot` records a `None` sentinel - with a double that defaulted
+    to `True`, this assertion would have been satisfied by today's
+    `build_pipeline(models_dir)` and would have asserted nothing.
+    """
+    source_dir = _build_source(tmp_path, png_bytes)
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    assert composition_root.translate_flags == [True], (
+        "a run with no --no-translate asked the composition root for"
+        f" translate={composition_root.translate_flags}; [None] means main did"
+        " not pass the argument at all and the pipeline's own default is the"
+        " only thing deciding whether the tool spends money"
+    )
+
+
+def test_the_flag_is_one_the_parser_knows_about_and_tells_the_user_about(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--no-translate` is a declared argument, not a string `main` sniffs out.
+
+    A user who cannot find the flag cannot use it, and argparse's own help is
+    where they will look. This also pins that the flag is *declared*: a `main`
+    that scanned `argv` itself would leave it out of `--help` and would accept
+    typos silently instead of refusing them.
+
+    The help text's wording is deliberately **not** pinned - C-14 suggests one
+    and GREEN may write a better one.
+    """
+    with pytest.raises(SystemExit) as raised:
+        main(["--help"])
+
+    assert raised.value.code == 0
+    assert "--no-translate" in capsys.readouterr().out, (
+        "mangatl-run --help does not mention --no-translate"
+    )

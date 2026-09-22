@@ -1,4 +1,4 @@
-"""The composition root: the one module that builds real ONNX sessions.
+"""The composition root: the one module that builds real sessions and clients.
 
 **MT-036 C-2, and `architecture.md` §3's "composition-root exception to rule
 5".** Rule 5 confines the inference runtime to `detect`, `ocr` and `clean`; it
@@ -24,6 +24,27 @@ The module is deliberately in two halves:
 overlooked (PO-9): deferring the imports into `build_pipeline` would not avoid
 the rule-5 exemption, because import-linter reports function-body imports too.
 Importing the runtime is not loading a model.
+
+**The same exception, a second time, for the Anthropic client** (MT-044 PO-1).
+Something has to construct the client `partial(translate_page, client)` binds,
+and by the same argument that something is this module. `mangatl.cli` came out
+of the *"Only translate imports anthropic"* contract's source list for it,
+leaving ten entries and adding no `allow_indirect_imports` - so `pipeline` is
+still confined, and `pipeline -> translate -> anthropic` is still caught.
+
+**The API key is `Anthropic()`'s own environment lookup for now.**
+`%APPDATA%\\mangatl\\settings.json` is MT-024's. Measured: with
+`ANTHROPIC_API_KEY` absent, `Anthropic()` constructs successfully and leaves
+`api_key` as `None`, raising at request time rather than at construction. So
+`mangatl-run` on a keyless machine still starts, still detects and still OCRs,
+and fails on the first page that needs a call - reaching the user as
+`run aborted: <error>` through the runner's general arm rather than as a
+traceback out of this function. That is the behaviour to expect, not a defect,
+and MT-044 A-1 records that the user chose to keep it: a run that *silently*
+did not translate is the failure mode EPIC-04's budget work exists to make
+visible. The way to run without a key is `mangatl-run --no-translate`, which
+this module answers with `translate=False` and a stage list that never reaches
+for a client.
 """
 
 from __future__ import annotations
@@ -32,12 +53,15 @@ from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
 
+from anthropic import Anthropic
+
 from mangatl.detect.page import detect_page_regions
 from mangatl.detect.session import load_detector
 from mangatl.ocr.page import transcribe_page_regions
 from mangatl.ocr.session import VOCAB_FILENAME, load_ocr, load_vocab
 from mangatl.pipeline.stage import Stage
 from mangatl.pipeline.stages import build_stages
+from mangatl.translate.client import translate_page
 
 __all__ = [
     "DETECTOR_FILENAME",
@@ -120,14 +144,31 @@ def resolve_models_dir(override: Path | None, env: Mapping[str, str]) -> Path:
     return _directory(Path(value))
 
 
-def build_pipeline(models_dir: Path) -> tuple[Stage, ...]:
+def build_pipeline(models_dir: Path, *, translate: bool = True) -> tuple[Stage, ...]:
     """Load the weights out of `models_dir` and bind them into the stage list.
 
-    The one function in the project that may construct an inference session, and
-    the reason this module exists. Everything it does is wiring: the sessions are
-    `detect`'s and `ocr`'s, the binding is `functools.partial`, and the order of
-    the stages is `pipeline.stages.build_stages`'s. Nothing here decides anything
-    a stage decides.
+    The one function in the project that may construct an inference session or
+    an API client, and the reason this module exists. Everything it does is
+    wiring: the sessions are `detect`'s and `ocr`'s, the client is
+    `anthropic`'s, the binding is `functools.partial`, and the order of the
+    stages is `pipeline.stages.build_stages`'s. Nothing here decides anything a
+    stage decides.
+
+    **The only positional argument is still `models_dir`** (MT-044 C-13, C-14).
+    The Anthropic client needs no argument from this signature: it reads its own
+    key out of the environment, and where a key *should* come from is MT-024's
+    question, not a parameter to thread through now.
+
+    **`translate` is keyword-only and defaults to `True`** (C-14). Translating
+    is what the tool is for, so `mangatl-run --no-translate` is an opt-out a
+    user types and never a state the program drifts into. Under the flag the
+    weights still load - the run still detects and still transcribes - and
+    **no `Anthropic` is constructed at all**, not constructed and discarded:
+    `Anthropic()` succeeds with no key and raises only at request time, so a
+    client built and dropped here is invisible to every run that completes and
+    is exactly what AC-6 forbids. The short stage list itself is
+    `build_stages`', not assembled here (MT-036 C-1: the list is a pipeline
+    fact), so `None` is the whole of what this function decides.
 
     Layout is C-6: the detector directly under `models_dir`, the OCR export in
     `OCR_SUBDIR`.
@@ -139,6 +180,7 @@ def build_pipeline(models_dir: Path) -> tuple[Stage, ...]:
     return build_stages(
         partial(detect_page_regions, detector),
         partial(transcribe_page_regions, ocr, vocab),
+        partial(translate_page, Anthropic()) if translate else None,
     )
 
 

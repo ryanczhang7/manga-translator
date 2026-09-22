@@ -38,7 +38,7 @@ from mangatl.domain.money import Usd
 from mangatl.domain.rates import CostRecord
 from mangatl.store.project import Project
 
-__all__ = ["chapter_total", "record_call", "run_total"]
+__all__ = ["chapter_call_costs", "chapter_total", "record_call", "run_total"]
 
 #: Both cache counts are named in the column list, write before read, matching
 #: `CostRecord`'s field order and `llm_call`'s columns - the one order in which
@@ -65,6 +65,16 @@ _SELECT_TOTAL = "SELECT COALESCE(SUM(cost_micro_usd), 0) FROM llm_call"
 #: chapter, so filtering to the current run would under-report every resumed
 #: chapter by exactly the amount already spent on it.
 _SELECT_RUN_TOTAL = f"{_SELECT_TOTAL} WHERE run_id = ?"
+
+#: The guard's samples (MT-044 C-9). **No `WHERE run_id`**, for `chapter_total`'s
+#: stated reason (AC-6): a resume is a second `run` row against one chapter and
+#: the ceiling is a question about the chapter, so a per-run sample set would
+#: reset the projection's basis to `estimate` on every resume.
+#:
+#: `ORDER BY id` and not unordered, for `_SELECT_PAGES`' reason: `Budget.project`
+#: takes a mean and is order-insensitive *today*, and a SELECT without an ORDER
+#: BY is nondeterministic by contract even when it happens to come back sorted.
+_SELECT_CALL_COSTS = "SELECT cost_micro_usd FROM llm_call ORDER BY id"
 
 
 def record_call(
@@ -113,6 +123,21 @@ def chapter_total(project: Project) -> Usd:
     """
     with project.transaction() as cursor:
         return Usd.from_micro(int(cursor.execute(_SELECT_TOTAL).fetchone()[0]))
+
+
+def chapter_call_costs(project: Project) -> tuple[Usd, ...]:
+    """Every priced call of this chapter, oldest first - the guard's samples.
+
+    The individual costs and not the total, because `Budget.project` needs a
+    *sample count* as well as a sum: fewer than `MIN_SAMPLES_FOR_PROJECTION`
+    of them and the projection is the bootstrap estimate rather than the
+    observed mean, and a single figure cannot say how many calls made it.
+    """
+    with project.transaction() as cursor:
+        return tuple(
+            Usd.from_micro(int(cost_micro_usd))
+            for (cost_micro_usd,) in cursor.execute(_SELECT_CALL_COSTS)
+        )
 
 
 def run_total(project: Project, run_id: int) -> Usd:

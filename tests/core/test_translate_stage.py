@@ -44,6 +44,21 @@ changed.
 so there is no budget in this file to size; if a later story adds one, every
 test and hook here needs one. The dominant cost is `conftest._one_bit_png`
 (MT-009: 281 ms page-sized, 7 ms small), so the fixture pages are 30-50 px wide.
+
+**MT-044 amended this file in RED.** Three changes, each recorded in that
+story's `## Regressions`:
+
+1. `PageContext` gained `run_id` (C-1), so `_Fixture` carries a real `run` row
+   id and every context here is built with it.
+2. `TranslationResult` gained `call` (C-4), so `_FakeTranslator` passes one.
+   It defaults to `None` *in the double* - see the class docstring; that is the
+   domain's own "no API call was made", which is what every criterion in this
+   file is about.
+3. `test_the_stage_list_is_left_exactly_as_mt_036_left_it` was **deleted**. Its
+   docstring said the wiring belongs to "MT-013 ... through its own RED"; the
+   split at MT-013's PLANNED->RED boundary moved that to **MT-044**, and MT-044
+   is the story doing the wiring. `tests/core/test_stages.py` now asserts the
+   three-stage list positively, which is the same fact from the other side.
 """
 
 from __future__ import annotations
@@ -59,7 +74,7 @@ import pytest
 
 from mangatl.domain.line import OcrResult
 from mangatl.domain.region import RawRegion
-from mangatl.domain.translation import TokenUsage, TranslationResult
+from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
 from mangatl.pipeline.stage import PageContext
 from mangatl.pipeline.translate_stage import PageTranslator, TranslateStage
 from mangatl.store.intake import read_chapter
@@ -128,6 +143,11 @@ class _Fixture:
     source_dir: Path
     project: Project
     mask: bytes
+    #: MT-044 C-1: `PageContext` carries the run the stage is recording against,
+    #: and it has **no default**. A real `run` row id rather than a literal,
+    #: because `llm_call.run_id` is a NOT NULL foreign key to `run(id)` and a
+    #: made-up value is caught only when no run happens to have it.
+    run_id: int
 
     @property
     def context(self) -> PageContext:
@@ -135,7 +155,7 @@ class _Fixture:
 
     def page_context(self, ordinal: int) -> PageContext:
         page = next(page for page in self.project.pages() if page.ordinal == ordinal)
-        return PageContext(project=self.project, page=page)
+        return PageContext(project=self.project, page=page, run_id=self.run_id)
 
     @property
     def regions(self) -> tuple[RawRegion, ...]:
@@ -176,26 +196,45 @@ def fixture(
         (source_dir / filename).write_bytes(png_bytes(width, height, (index * 40, 0, 0)))
 
     with create_project(read_chapter(source_dir), project_dir_for(source_dir)) as project:
+        with project.transaction() as cursor:
+            chapter_id = int(cursor.execute("SELECT id FROM chapter").fetchone()[0])
+            cursor.execute(
+                "INSERT INTO run (chapter_id, started_at) VALUES (?, ?)",
+                (chapter_id, "2026-09-21T09:00:00+00:00"),
+            )
+            run_id = int(cursor.execute("SELECT last_insert_rowid()").fetchone()[0])
         yield _Fixture(
             source_dir=source_dir,
             project=project,
             mask=one_bit_png(_PAGE_WIDTH, _PAGE_HEIGHT, [(0, 0, 4, 4)]),
+            run_id=run_id,
         )
 
 
 class _FakeTranslator:
     """A `PageTranslator`: page bytes and the page's OCR results in, one result
     out. Records every call, because the criteria are claims about the count,
-    about the exact bytes and about the exact results it was handed."""
+    about the exact bytes and about the exact results it was handed.
+
+    **`call` defaults to `None` here and only here.** MT-044 C-4 gives
+    `TranslationResult.call` no default *in the domain type*, and that pin is
+    what stops a real implementation recording nothing by saying nothing. This
+    double is a different thing: `call=None` is the domain's own statement that
+    **no API call was made**, which is what every MT-011 criterion in this file
+    is about - the store, not the ledger. The ledger half is
+    `tests/core/test_budget_run.py`, where the double passes a real `CallInfo`.
+    """
 
     def __init__(
         self,
         lines: dict[int, str] | None = None,
         *,
         raises: BaseException | None = None,
+        call: CallInfo | None = None,
     ) -> None:
         self._lines = dict(lines or {})
         self._raises = raises
+        self._call = call
         self.seen: list[tuple[bytes, tuple[OcrResult, ...]]] = []
 
     @property
@@ -206,7 +245,7 @@ class _FakeTranslator:
         self.seen.append((image, tuple(results)))
         if self._raises is not None:
             raise self._raises
-        return TranslationResult(lines=dict(self._lines), usage=_USAGE)
+        return TranslationResult(lines=dict(self._lines), usage=_USAGE, call=self._call)
 
 
 def _snapshot(root: Path) -> dict[str, str | None]:
@@ -234,7 +273,16 @@ def test_the_stage_is_exported_from_mangatl_pipeline_translate_stage_under_that_
     """
     import mangatl.pipeline.translate_stage as module
 
-    assert module.__all__ == ["PageTranslator", "TranslateStage"]
+    # MT-044 C-8/C-11 add two module-level functions beside the stage:
+    # `budget_for` builds this chapter's guard (AC-5) and `pages_remaining`
+    # feeds the projection. Both are named here because this assertion is
+    # exact, so leaving either out would make GREEN's correct module red.
+    assert module.__all__ == [
+        "PageTranslator",
+        "TranslateStage",
+        "budget_for",
+        "pages_remaining",
+    ]
 
     translator = _FakeTranslator()
     stage = TranslateStage(translate=translator)
@@ -513,45 +561,3 @@ def test_is_done_reads_the_page_it_is_given_and_not_the_first_one(
 
     assert stage.is_done(fixture.page_context(0)) is True
     assert stage.is_done(fixture.context) is False
-
-
-# -- C-8: this story does not wire the stage into the pipeline -----------------
-
-
-def test_the_stage_list_is_left_exactly_as_mt_036_left_it() -> None:
-    """**C-8**, PO-6, *decided by the user on 2026-09-18.*
-
-    Wiring `TranslateStage` into `build_stages` now would make every
-    `mangatl-run` spend real money with no ledger (MT-012) and no budget guard
-    (MT-013), which is the precise failure EPIC-04 exists to prevent. MT-013
-    owns the wiring, and it has to go through its own RED because
-    `tests/core/test_stages.py` pins this module's `__all__` to an exact list.
-
-    Precedent, not invention: MT-035 shipped `DetectStage` and MT-010 shipped
-    `OcrStage`, both correct and neither in any stage list, until MT-036.
-
-    **This test passes on arrival** and is a regression guard for a decision
-    rather than for behaviour. It earns its place the way `red-phase.md` asks:
-    the probe is in MT-011's `## Handoff: RED -> GREEN`, and it is cheap -
-    adding a third stage to `build_stages` turns this red *and*
-    `test_stages.py`'s `__all__` assertion with it.
-
-    The import check is read off the module's `ast` and not off its text.
-    MEASURED in RED, 2026-09-18: `stages.py` line 17 already says *"the story
-    that adds a translate stage changes one line here"*, so a substring search
-    for `translate` over the source fails today, against a module nobody has
-    touched. That version of this test would have been red on arrival for a
-    reason that has nothing to do with C-8.
-    """
-    import mangatl.pipeline.stages as module
-
-    assert module.__all__ == ["build_stages"]
-
-    tree = ast.parse(Path(module.__file__ or "").read_text(encoding="utf-8"))
-    imported = [
-        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module
-    ]
-
-    assert not any("translate" in name for name in imported), (
-        f"pipeline/stages.py imports {imported}; C-8 says MT-013 wires the stage, not this story"
-    )

@@ -151,8 +151,13 @@ def test_storing_a_proposal_needs_no_schema_version_bump() -> None:
     AC-4's append-only triggers are all unsatisfiable at version 2. What this
     test still says is what it always said - MT-009 did not need a bump - so
     the number is updated rather than the assertion removed. If it moves again,
-    ask the same question again."""
-    assert SCHEMA_VERSION == 3
+    ask the same question again.
+
+    **MT-044 C-12 is the next time it moves**, and the question is asked again
+    and answered the same way: AC-5 reads a budget ceiling out of the chapter
+    row, and `budget_ceiling_usd REAL` cannot hold the integer micro-dollars
+    MT-012 PO-2 settled money on. Nothing about `line.proposed_en` changes."""
+    assert SCHEMA_VERSION == 4
 
 
 def test_the_two_methods_are_named_on_the_project_beside_their_line_siblings() -> None:

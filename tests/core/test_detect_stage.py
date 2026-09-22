@@ -106,6 +106,11 @@ class _Fixture:
     source_dir: Path
     project: Project
     mask: bytes
+    #: MT-044 C-1: `PageContext` carries the run, with no default. `DetectStage`
+    #: never reads it - the field is on the context because the context is what
+    #: the runner hands every stage - but the id is a real `run` row's all the
+    #: same, so nothing here teaches the habit of inventing one.
+    run_id: int
 
     @property
     def context(self) -> PageContext:
@@ -113,7 +118,7 @@ class _Fixture:
 
     def page_context(self, ordinal: int) -> PageContext:
         page = next(page for page in self.project.pages() if page.ordinal == ordinal)
-        return PageContext(project=self.project, page=page)
+        return PageContext(project=self.project, page=page, run_id=self.run_id)
 
     def region(self, x0: int, y0: int, x1: int, y1: int, confidence: float) -> RawRegion:
         """One region at a rectangle. `confidence` is exactly representable in
@@ -181,7 +186,19 @@ def fixture(
             source_dir=source_dir,
             project=project,
             mask=one_bit_png(_PAGE_WIDTH, _PAGE_HEIGHT, [(0, 0, 4, 4)]),
+            run_id=_open_run(project),
         )
+
+
+def _open_run(project: Project) -> int:
+    """A real `run` row, for MT-044 C-1's `PageContext.run_id`."""
+    with project.transaction() as cursor:
+        chapter_id = int(cursor.execute("SELECT id FROM chapter").fetchone()[0])
+        cursor.execute(
+            "INSERT INTO run (chapter_id, started_at) VALUES (?, ?)",
+            (chapter_id, "2026-09-21T09:00:00+00:00"),
+        )
+        return int(cursor.execute("SELECT last_insert_rowid()").fetchone()[0])
 
 
 # -- the fake detector ---------------------------------------------------------

@@ -21,6 +21,14 @@ which is the seam a test replaces to walk the whole entry point with no weights
 on the machine (C-3). `--models`, then `$MANGATL_MODELS`, then a sentence: PO-4
 decided there is no silent default, and accepted that `mangatl-run` now fails on
 a machine with no weights where it used to write an empty translation.
+
+**MT-044: the run translates, so `--no-translate` is the way to run without
+paying for it.** The flag asks the composition root for a detect-and-OCR stage
+list, and with it no API client is constructed and nothing is billed. It is an
+opt-out the user types: without it, a machine with no `ANTHROPIC_API_KEY` still
+aborts on the first page that needs a call, because a run that quietly did not
+translate is the failure mode EPIC-04's budget work exists to make visible
+(A-1).
 """
 
 from __future__ import annotations
@@ -66,6 +74,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help=f"directory holding the model weights (or set {MODELS_ENV})",
     )
+    parser.add_argument(
+        "--no-translate",
+        action="store_true",
+        help="detect and transcribe only; make no API calls and spend nothing",
+    )
     arguments = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     source_dir: Path = arguments.folder
 
@@ -98,7 +111,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     # The stage list is the composition root's, and asking for it is the last
     # thing that happens before the walk: it is where the ONNX sessions are
     # built, and a chapter with nothing to translate should not pay for them.
-    stages = build_pipeline(models_dir)
+    #
+    # `translate=` is passed on every call, flagged or not (MT-044 C-14): what
+    # the tool does with a user's money is a decision this entry point makes
+    # out loud, not one it leaves to whatever the builder's default happens to
+    # be on the day someone changes it.
+    stages = build_pipeline(models_dir, translate=not arguments.no_translate)
     with project:
         filenames = {page.ordinal: page.filename for page in project.pages()}
         outcome = run_chapter(project, stages, _reporter(filenames), _never)

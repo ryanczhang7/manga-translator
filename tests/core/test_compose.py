@@ -16,16 +16,31 @@ itself succeeds on a CI runner with no GPU - that is what makes its
 `blocked-when` expression match a *provider* failure rather than an import one.
 What §2 forbids is a required gate that needs weights, and nothing here does.
 
+**MT-044 AC-6 changes one sentence of the paragraph above, and only one.**
+`build_pipeline` is still never called here with its real collaborators - it is
+called with `load_detector`, `load_ocr` and `load_vocab` replaced at its own
+names, so nothing is loaded, nothing is decoded and no weights need exist. AC-6
+is a criterion about *which stages `build_pipeline` builds and what it
+constructs while doing it*, and a signature assertion cannot reach either. What
+§2's adapter split forbids is a required gate that needs weights; it does not
+forbid one that proves the wiring without them, and the three loaders are the
+whole of what needs stubbing to get there. The real model still gets its smoke
+test in `tests/integration`, where AC-6's "the run completes" clause lives.
+
 What these tests do NOT constrain: how `build_pipeline` orders its three loads,
-whether `resolve_models_dir` expands `~` or resolves symlinks, what
-`ModelsNotFound` derives from beyond `Exception`, and the `str` form of any
-message except the one branch PO-4 made a user decision about.
+*how* it produces a two-stage list under `translate=False` (C-14 pins the
+signature and the outcome, not the body - a conditional tuple, a second builder
+and an optional parameter on `build_stages` are all equally acceptable), whether
+`resolve_models_dir` expands `~` or resolves symlinks, what `ModelsNotFound`
+derives from beyond `Exception`, and the `str` form of any message except the
+one branch PO-4 made a user decision about.
 """
 
 from __future__ import annotations
 
 import ast
 import inspect
+import os
 from pathlib import Path
 
 import pytest
@@ -40,6 +55,14 @@ from mangatl.compose import (
     resolve_models_dir,
 )
 from mangatl.ocr.session import DECODER_FILENAME, ENCODER_FILENAME, VOCAB_FILENAME
+from mangatl.pipeline.detect_stage import DetectStage
+from mangatl.pipeline.ocr_stage import OcrStage
+from mangatl.pipeline.translate_stage import TranslateStage
+
+#: `ANTHROPIC_API_KEY`, spelled out rather than read off the SDK. AC-6 is a
+#: promise about a machine whose environment does not hold this name, and the
+#: name is the SDK's contract with a person typing it into a shell.
+_API_KEY_ENV = "ANTHROPIC_API_KEY"
 
 # -- the module's shape --------------------------------------------------------
 
@@ -156,15 +179,259 @@ def test_the_composition_root_does_not_import_the_window_it_has_no_display_for()
     assert forbidden == [], f"{forbidden} is imported by mangatl.compose"
 
 
-def test_the_pipeline_builder_takes_one_argument_and_it_is_the_models_directory() -> None:
-    """`build_pipeline` is not called here - it constructs real sessions - so
-    its shape is pinned the only way `tests/core` honestly can.
+def test_the_pipeline_builders_only_positional_argument_is_the_models_directory() -> None:
+    """The builder's shape, pinned where `tests/core` can hold it.
 
     `architecture.md` §2: the real model gets its smoke test in
     `tests/integration`, and AC-4 is that test.
+
+    **AMENDED IN RED for MT-044 AC-6, 2026-09-22 (`## Regressions` R-10), and
+    renamed with it.** It said `parameters == ["models_dir"]` and was named
+    `..._takes_one_argument_and_...`, which C-14 makes false: the builder now
+    takes a second parameter, `translate`. The *intent* was never "one
+    parameter" - it was **"the only positional argument is the models
+    directory"**, which is exactly what keyword-only preserves, so the
+    amendment is the narrow one and the assertion got stronger rather than
+    looser. The name changed because the old one would have read like a bug
+    report about a thing that is no longer a bug.
+
+    The three assertions are the three separate facts C-14 relies on, and each
+    fails on its own account: `translate` exists, it cannot be passed
+    positionally (so `build_pipeline(models_dir, False)` is a `TypeError` at
+    every call site rather than a silent argument in the wrong slot), and
+    omitting it translates (the flag is an opt-out a user types, never a state
+    the program drifts into).
     """
-    parameters = list(inspect.signature(build_pipeline).parameters)
-    assert parameters == ["models_dir"]
+    parameters = inspect.signature(build_pipeline).parameters
+
+    assert list(parameters) == ["models_dir", "translate"], (
+        f"build_pipeline takes {list(parameters)}; C-14 makes it (models_dir, *, translate)"
+    )
+    assert parameters["models_dir"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD, (
+        "the models directory stopped being positional; every caller in the"
+        " project passes it positionally"
+    )
+    assert parameters["translate"].kind is inspect.Parameter.KEYWORD_ONLY, (
+        f"translate is {parameters['translate'].kind}, not keyword-only. C-14 is"
+        " keyword-only so that the builder's only positional argument stays the"
+        " models directory, which is what this test has pinned since MT-036"
+    )
+    assert parameters["translate"].default is True, (
+        f"translate defaults to {parameters['translate'].default!r}. C-14: the"
+        " default is True because translating is what the tool is for - the flag"
+        " is an opt-out a user types, never a state the program drifts into"
+    )
+
+
+# -- MT-044 AC-6: `--no-translate`, at the seam that decides both halves -------
+
+
+class _Loaders:
+    """The three weight loaders `build_pipeline` calls, replaced at its own names.
+
+    Nothing here loads anything: each call records the path it was handed and
+    returns a sentinel that only has to be identifiable. That is what puts
+    AC-6 - a criterion about *which stages get built* - inside `tests/core`,
+    which three required gates read, with no weights on the machine and no GPU.
+    """
+
+    def __init__(self) -> None:
+        self.detector_paths: list[Path] = []
+        self.ocr_dirs: list[Path] = []
+        self.vocab_paths: list[Path] = []
+
+    def load_detector(self, path: Path, providers: tuple[str, ...]) -> object:
+        self.detector_paths.append(path)
+        return f"detector-session({path})"
+
+    def load_ocr(self, directory: Path, providers: tuple[str, ...]) -> object:
+        self.ocr_dirs.append(directory)
+        return f"ocr-session({directory})"
+
+    def load_vocab(self, path: Path) -> object:
+        self.vocab_paths.append(path)
+        return f"vocab({path})"
+
+
+class _ClientSpy:
+    """A stand-in for `anthropic.Anthropic`, at `mangatl.compose`'s name for it.
+
+    **This counter is the only thing in `tests/core` that can tell "never
+    constructed" from "constructed and thrown away".** C-13 measured that a real
+    `Anthropic()` constructs happily with no key and raises only at request
+    time, so a build that runs to completion on a keyless machine proves exactly
+    nothing about AC-6's middle clause. Counting constructions does.
+
+    **What it would not catch, stated so nobody mistakes its reach.** A
+    `build_pipeline` that constructed its client somewhere other than
+    `mangatl.compose.Anthropic` - a factory, a helper module, a lazily imported
+    name - would leave this counter at zero under the flag, and the negative
+    assertion would pass while a client was being built. That is why the
+    positive control lives in the same file with the same patch installed: if
+    the construction ever moves off this name, the *control* goes red rather
+    than the negative assertion going quietly vacuous. Neither test is evidence
+    without the other.
+    """
+
+    def __init__(self) -> None:
+        self.clients: list[object] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        # `*args`/`**kwargs` rather than `()`: C-13 pins `Anthropic()` with no
+        # arguments, and this double is here to count constructions, not to
+        # re-pin the call shape at a second site.
+        client = f"anthropic-client-{len(self.clients)}"
+        self.clients.append(client)
+        return client
+
+
+@pytest.fixture
+def loaders(monkeypatch: pytest.MonkeyPatch) -> _Loaders:
+    stubs = _Loaders()
+    monkeypatch.setattr("mangatl.compose.load_detector", stubs.load_detector)
+    monkeypatch.setattr("mangatl.compose.load_ocr", stubs.load_ocr)
+    monkeypatch.setattr("mangatl.compose.load_vocab", stubs.load_vocab)
+    return stubs
+
+
+@pytest.fixture
+def client_spy(monkeypatch: pytest.MonkeyPatch) -> _ClientSpy:
+    spy = _ClientSpy()
+    monkeypatch.setattr("mangatl.compose.Anthropic", spy)
+    return spy
+
+
+@pytest.fixture
+def keyless(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`ANTHROPIC_API_KEY` out of the environment: AC-6's "no API key" machine.
+
+    A developer with a key exported in their shell must not see different
+    behaviour from CI on the one clause this criterion is about.
+    """
+    monkeypatch.delenv(_API_KEY_ENV, raising=False)
+
+
+@pytest.fixture
+def weights_dir(tmp_path: Path) -> Path:
+    """A models directory that exists and holds nothing.
+
+    The loaders are replaced and `build_pipeline` does not stat anything else,
+    so an empty directory is exactly enough - and it keeps these tests honest
+    about which half of the module each one exercises.
+    """
+    directory = tmp_path / "models"
+    directory.mkdir()
+    return directory
+
+
+def test_the_no_translate_flag_builds_detect_and_ocr_only_and_constructs_no_client(
+    weights_dir: Path, loaders: _Loaders, client_spy: _ClientSpy, keyless: None
+) -> None:
+    """**AC-6**, first and second clauses, at the one place both are decided.
+
+    *Holds detect and OCR only* is asserted by type and by length, the way
+    `test_stages.py` asserts the three-stage list: a list that lost or gained a
+    stage still satisfies every assertion about the ones it kept, so the count
+    is not decoration. The stage classes are imported rather than named by
+    string - `"detect"` and `"ocr"` are `test_stages.py`'s literals and C-6's,
+    and re-spelling settled names here would let the two files disagree.
+
+    *No `Anthropic` client is constructed* is asserted by the counter, for the
+    reason `_ClientSpy` gives at length: this is a claim about something that
+    does not happen, and every cheaper way of checking it - running keyless and
+    seeing no error, reading the module's AST for the name - is satisfied by a
+    build that constructs a client and drops it on the floor. C-14: *"must not
+    construct an `Anthropic` at all - not construct-and-discard"*.
+
+    The two loader assertions are what stops the whole thing passing for the
+    wrong reason: a `build_pipeline` that refused the flag by building *nothing*
+    would satisfy the first three and is not a pipeline. With the flag the
+    weights still load, because the run still detects and still transcribes.
+    """
+    stages = build_pipeline(weights_dir, translate=False)
+
+    assert [type(stage) for stage in stages] == [DetectStage, OcrStage], (
+        f"--no-translate built {[type(stage).__name__ for stage in stages]};"
+        " AC-6 says detect and OCR only"
+    )
+    assert len(stages) == 2, (
+        f"the flagged stage list holds {len(stages)} stages; a list that kept a"
+        " third one satisfies every type assertion about the first two"
+    )
+    assert [stage.name for stage in stages] == [DetectStage.name, OcrStage.name]
+    assert client_spy.clients == [], (
+        f"--no-translate constructed {len(client_spy.clients)} Anthropic"
+        " client(s). C-13 measured that construction succeeds with no key and"
+        " raises only at request time, so this is invisible to a run that"
+        " completes - which is exactly why AC-6 names the construction and not"
+        " the failure"
+    )
+    assert loaders.detector_paths == [weights_dir / DETECTOR_FILENAME], (
+        "the flagged pipeline did not load the detector; --no-translate drops"
+        f" the translate stage, not the run: {loaders.detector_paths}"
+    )
+    assert loaders.ocr_dirs == [weights_dir / OCR_SUBDIR]
+    assert loaders.vocab_paths == [weights_dir / OCR_SUBDIR / VOCAB_FILENAME]
+
+
+def test_the_unflagged_build_still_translates_and_constructs_exactly_one_client(
+    weights_dir: Path, loaders: _Loaders, client_spy: _ClientSpy, keyless: None
+) -> None:
+    """**AC-6's positive control, and C-14's default read off a real call.**
+
+    Two things at once, and neither is spare. It pins that omitting the flag
+    still builds the translating pipeline - `translate` defaults to `True`,
+    asserted here by behaviour rather than by `inspect` - and it is what makes
+    the negative assertion in the test above mean anything: the counter is
+    reading the name `build_pipeline` actually constructs its client through, so
+    a zero under the flag is a fact about the flag rather than about the patch.
+
+    **Green on arrival**, because today's one-argument `build_pipeline` already
+    builds three stages and one client. Earned with two mutations of the exact
+    production behaviour it claims to pin - the client construction in
+    `compose.py` and the translate stage in `stages.py` - both reverted, both
+    pasted into `## Regressions` R-10.
+    """
+    stages = build_pipeline(weights_dir)
+
+    assert [type(stage) for stage in stages] == [DetectStage, OcrStage, TranslateStage], (
+        f"the unflagged stage list is {[type(stage).__name__ for stage in stages]};"
+        " AC-4 is detect, then OCR, then translate, and C-14 leaves it alone"
+    )
+    assert len(client_spy.clients) == 1, (
+        f"the unflagged build constructed {len(client_spy.clients)} clients"
+        " through mangatl.compose.Anthropic. Exactly one is C-13; zero means the"
+        " construction has moved off this name, and every 'no client was"
+        " constructed' assertion in this file is reading a counter nothing"
+        " increments any more"
+    )
+
+
+def test_the_flagged_build_needs_no_api_key_in_the_environment(
+    weights_dir: Path, loaders: _Loaders, keyless: None
+) -> None:
+    """**AC-6's last clause**, as far as `tests/core` can honestly carry it.
+
+    The real `anthropic.Anthropic` is left in place here - no `client_spy` - so
+    this is the flagged build running through production's own names on a
+    machine with no key.
+
+    **What it would catch:** a `build_pipeline` that reads the key eagerly, or
+    that asks the SDK for anything that needs one, under `--no-translate`.
+
+    **What it would not catch, and this is the important half:** C-13 measured
+    that `Anthropic()` constructs successfully with `ANTHROPIC_API_KEY` absent,
+    so a build that constructs a client and discards it passes here without a
+    murmur. This test is not evidence about construction and is not offered as
+    any; the counter two tests up is. What neither can reach is *the run* - five
+    real pages walked end to end with no key - which is
+    `tests/integration/test_pipeline_chapter.py`'s, on a machine with the
+    weights.
+    """
+    stages = build_pipeline(weights_dir, translate=False)
+
+    assert len(stages) == 2
+    assert _API_KEY_ENV not in os.environ, "the premise of this test was not established"
 
 
 # -- C-2: resolving the models directory, every branch -------------------------

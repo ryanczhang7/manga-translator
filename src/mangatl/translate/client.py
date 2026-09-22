@@ -44,7 +44,7 @@ from anthropic import Anthropic
 from anthropic.types import Usage
 
 from mangatl.domain.line import OcrResult
-from mangatl.domain.translation import TokenUsage, TranslationResult
+from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
 from mangatl.translate.parse import parse_lines
 from mangatl.translate.prompt import build_request
 
@@ -56,12 +56,25 @@ def translate_page(
 ) -> TranslationResult:
     """Translate one page: one request, one response, one result.
 
-    Returns `TranslationResult(lines={}, usage=TokenUsage(0, 0, 0, 0))` without
-    touching `client` when every region read empty - or when there are no
-    regions at all, which `all(...)` answers for free.
+    Returns
+    `TranslationResult(lines={}, usage=TokenUsage(0, 0, 0, 0), call=None)`
+    without touching `client` when every region read empty - or when there are
+    no regions at all, which `all(...)` answers for free. `call=None` is the
+    statement that no API call was made (MT-044 C-4), and it is what
+    `TranslateStage` reads to decide there is no ledger row to write; the four
+    zero counts are what it *cost*, which is a different fact.
+
+    On a call, `call` carries the response's own `id` and `model`. **The
+    model is `response.model` and not `prompt.MODEL_ID`** (MT-044 C-5): the
+    ledger exists to be reconciled against the provider's bill, and the bill is
+    for the model that actually served the request, so pinning the request's
+    constant records a lie the day an alias resolves to a snapshot. The cost of
+    that pin is named rather than hidden: an id `domain.rates.RATES` does not
+    list makes `price` raise `UnknownModel` and aborts the run, which is
+    `rates.py`'s designed behaviour and is carried as MT-044 DV-5.
     """
     if all(result.ocr_empty for result in ocr_results):
-        return TranslationResult(lines={}, usage=TokenUsage(0, 0, 0, 0))
+        return TranslationResult(lines={}, usage=TokenUsage(0, 0, 0, 0), call=None)
 
     request, _ = build_request(page_image, ocr_results)
     response = client.messages.create(**request)
@@ -69,6 +82,7 @@ def translate_page(
     return TranslationResult(
         lines=parse_lines(response, range(len(ocr_results))),
         usage=_usage_of(response.usage),
+        call=CallInfo(request_id=response.id, model_id=response.model),
     )
 
 

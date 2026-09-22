@@ -90,7 +90,10 @@ _SCHEMA_COLUMNS: dict[str, frozenset[str]] = {
             "output_dir",
             "created_at",
             "schema_version",
-            "budget_ceiling_usd",
+            # MT-044 C-12: integer micro-dollars, not a REAL dollar figure, and
+            # in the same column position so a `SELECT *` behaves the same on a
+            # migrated file as on a new one.
+            "budget_ceiling_micro_usd",
             "model_id",
             "rate_table_version",
         }
@@ -443,7 +446,14 @@ def test_the_schema_version_and_the_two_page_status_values_are_the_pinned_ones()
     # needs a rate-table version on every ledger row, AC-3 needs the cost off
     # an IEEE-754 `REAL`, and AC-4 needs an append-only trigger. None of the
     # three is expressible in a version 2 file.
-    assert SCHEMA_VERSION == 3
+    #
+    # **MT-044 C-12 takes it to 4**: `chapter.budget_ceiling_usd REAL` becomes
+    # `budget_ceiling_micro_usd INTEGER`, in the same column position, so AC-5
+    # can read a ceiling off the chapter row as the integer micro-dollars
+    # MT-012 PO-2 settled money on. The rebuild that does it is the first
+    # migration in this project to touch a **parent** table with cascading
+    # children, and `tests/core/test_schema_v4.py` is where that is tested.
+    assert SCHEMA_VERSION == 4
     assert PAGE_PENDING == "pending"
     assert PAGE_STALE == "stale"
     assert PAGE_PENDING != PAGE_STALE
@@ -536,7 +546,10 @@ def test_the_chapter_row_carries_the_paths_and_leaves_the_later_stories_columns_
 
     rows = _raw(
         built.db_path,
-        "SELECT source_dir, output_dir, created_at, budget_ceiling_usd, model_id,"
+        # MT-044 C-12 renames the ceiling column and changes its type;
+        # `create_project` still writes it NULL (PO-8) and AC-5's second half is
+        # exactly that NULL case.
+        "SELECT source_dir, output_dir, created_at, budget_ceiling_micro_usd, model_id,"
         " rate_table_version FROM chapter",
     )
     assert len(rows) == 1

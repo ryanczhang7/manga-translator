@@ -353,6 +353,23 @@ def _raw(db_path: Path, sql: str) -> list[tuple[object, ...]]:
         connection.close()
 
 
+def _open_run(project: Project) -> int:
+    """A real `run` row, for MT-044 C-1's `PageContext.run_id`.
+
+    The runner opens its own, so this exists only for the two tests below that
+    build a context by hand. Raw SQL through `project.transaction()`, the same
+    convention `_mark_done` follows and for its reason: this story ships no
+    "start a run" helper on `Project` and the test must not invent one.
+    """
+    with project.transaction() as cursor:
+        chapter_id = int(cursor.execute("SELECT id FROM chapter").fetchone()[0])
+        cursor.execute(
+            "INSERT INTO run (chapter_id, started_at) VALUES (?, ?)",
+            (chapter_id, "2026-09-21T09:00:00+00:00"),
+        )
+        return int(cursor.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+
 def _mark_done(project: Project, *ordinals: int) -> None:
     """Set `page.status` to the done marker, the way a finished run leaves it.
 
@@ -1061,10 +1078,11 @@ def test_the_pass_through_stage_asks_the_store_whether_a_page_is_already_done(
 
     with _new_project(source_dir) as project:
         pages = project.pages()
-        assert stage.is_done(PageContext(project=project, page=pages[0])) is False
+        run_id = _open_run(project)
+        assert stage.is_done(PageContext(project=project, page=pages[0], run_id=run_id)) is False
         _mark_done(project, 0)
-        assert stage.is_done(PageContext(project=project, page=pages[0])) is True
-        assert stage.is_done(PageContext(project=project, page=pages[1])) is False
+        assert stage.is_done(PageContext(project=project, page=pages[0], run_id=run_id)) is True
+        assert stage.is_done(PageContext(project=project, page=pages[1], run_id=run_id)) is False
 
 
 def test_the_pass_through_stage_writes_nothing_of_its_own(
@@ -1075,7 +1093,8 @@ def test_the_pass_through_stage_writes_nothing_of_its_own(
 
     with _new_project(source_dir) as project:
         page = project.pages()[0]
-        assert PassThroughStage().run(PageContext(project=project, page=page)) is None
+        context = PageContext(project=project, page=page, run_id=_open_run(project))
+        assert PassThroughStage().run(context) is None
         assert project.page_status(0) == PAGE_PENDING
 
     assert _raw(db_path, "SELECT id FROM region") == []
