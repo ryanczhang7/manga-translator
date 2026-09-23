@@ -189,6 +189,74 @@ assert_eq "and the file is untouched"                   "$before" "$(sha "$SRC")
 reset_src
 
 # ---------------------------------------------------------------------------
+describe "a stranded mutation announces itself"
+
+# The one failure this script cannot clean up after is a kill: SIGKILL, a closed
+# terminal, a tool timeout that does not wait. Nothing runs, so the file is left
+# mutated with only a `.bak`/`.new` pair to say so - and nothing downstream reads
+# that pair. A suite run afterwards judges a tree that is not the code anybody
+# thinks it is, and law 3 records the result as evidence.
+#
+# So the mutation announces itself while it is in flight. An `.active` file is
+# written immediately before the file is mutated and removed only once the file
+# is verifiably back, which means it survives exactly the cases where the tree
+# may still be wrong: exit 90, and being killed. `--check` reads them.
+#
+# Detection, not a lock - gates.sh's rule, and for its reason: the harness's
+# concurrency is a fact of how it is used, and a lock it can deadlock against
+# its own subagent is worse than the race. `--check` reports; it holds nothing.
+
+active() { ls "$FIX/.claude/state/mutations" 2>/dev/null | grep -c '\.active$'; }
+check()  { ( cd "$FIX" && bash scripts/mutate.sh --check 2>&1 ); }
+
+reset_src
+rm -f "$FIX"/.claude/state/mutations/*.active "$FIX"/.claude/state/mutations/*.bak
+out="$(check)"; rc=$?
+assert_eq "a clean tree exits 0"      "0" "$rc"
+assert_contains "and says so briefly" "no stranded mutation" "$out"
+
+# Every path that clears the scratch file clears the sentinel with it.
+mutate src/main.ts 's/90/-90/' -- true >/dev/null 2>&1
+assert_eq "cleared after a command that passed" "0" "$(active)"
+mutate src/main.ts 's/90/-90/' -- sh -c 'exit 1' >/dev/null 2>&1
+assert_eq "cleared after a command that failed" "0" "$(active)"
+mutate src/main.ts 's/NOT_IN_THE_FILE/x/' -- true >/dev/null 2>&1
+assert_eq "never written when nothing was mutated" "0" "$(active)"
+
+reset_src
+before="$(sha "$SRC")"
+chmod 444 "$SRC" 2>/dev/null
+mutate src/main.ts 's/90/-90/' -- true >/dev/null 2>&1
+chmod 644 "$SRC" 2>/dev/null
+assert_eq "cleared when the file could not be written at all" "0" "$(active)"
+assert_eq "and the file is untouched" "$before" "$(sha "$SRC")"
+reset_src
+
+# The case that matters. The command makes the target unwritable, so the restore
+# genuinely fails: the file stays mutated, mutate.sh exits 90 - and the sentinel
+# stays, because the tree is still wrong.
+out="$(mutate src/main.ts 's/90/-90/' -- chmod 444 src/main.ts)"; rc=$?
+chmod 644 "$SRC" 2>/dev/null
+assert_eq "a failed restore exits 90"        "90" "$rc"
+assert_eq "and leaves the sentinel standing" "1" "$(active)"
+
+out="$(check)"; rc=$?
+assert_eq "--check now exits non-zero"     "1" "$rc"
+assert_contains "and names the file"       "src/main.ts" "$out"
+assert_contains "and the expression"       "s/90/-90/" "$out"
+assert_contains "and where the original is" ".bak" "$out"
+assert_contains "and says the run is over"  "GONE" "$out"
+assert_contains "and how to put it back"    "cp " "$out"
+
+# Clearing it is the documented cleanup, and --check goes quiet again.
+cp "$FIX"/.claude/state/mutations/*.bak "$SRC"
+rm -f "$FIX"/.claude/state/mutations/*.active "$FIX"/.claude/state/mutations/*.bak
+out="$(check)"; rc=$?
+assert_eq "cleaned up, --check is clean again" "0" "$rc"
+assert_contains "and the file is the original again" "Math.min(90, v)" "$(cat "$SRC")"
+reset_src
+
+# ---------------------------------------------------------------------------
 describe "it refuses to mutate the script that is running"
 
 # Found by using this script on this repository. bash reads a script

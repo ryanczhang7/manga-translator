@@ -8,6 +8,7 @@ in here is ever committed; only this file and `.gitkeep` are tracked.
 | `current-story.env` | `scripts/phase.sh` | the phase guard, the status line | no |
 | `last-gate-run` | `scripts/gates.sh` | the stop hook | no |
 | `gate-logs/*.log` | `scripts/gates.sh` | you, when a gate fails | yes |
+| `mutations/*.active` | `scripts/mutate.sh` | `mutate.sh --check`, and `gates.sh` through it | yes |
 | `mutations/*.bak` | `scripts/mutate.sh` | `scripts/mutate.sh`, to restore the file | yes |
 | `mutations/*.new` | `scripts/mutate.sh` | nothing; it is scratch | yes |
 | `mutations/log` | `scripts/mutate.sh` | you, and the story that quotes it | yes |
@@ -85,3 +86,35 @@ This was not always so. Each exit path removed the scratch file separately, the
 two that report nothing removed nothing, and two `.new` files from different
 weeks sat here with no log entry to explain either.
 `.claude/tests/mutate.test.sh` pins every path now.
+
+**An `.active` is a mutation in flight, and it is the one signal here that
+something else acts on.** `mutate.sh` writes it immediately before it touches the
+file and removes it only once the file is verifiably back, so it survives exactly
+the two states in which the tree is not what it looks like: a restore that could
+not be verified, and a run that was killed. It records the pid, the file, the
+backup, the expression, the command and the start stamp.
+
+```bash
+bash scripts/mutate.sh --check     # 0 and one line when clean; 1 and a report when not
+```
+
+`scripts/gates.sh` runs that before it runs any gate, and refuses with exit 2 if
+anything comes back. That is the point of the whole mechanism: the gates judge
+the working tree and file the verdict as evidence under law 3, stamped with a
+hash of the code they ran against — and behind a stranded mutation that verdict
+is about code nobody wrote, recorded against a hash that faithfully describes the
+mutation. `--list` and `--audit` read the manifest and never look at the tree, so
+they are not refused.
+
+Detection, not a lock — `gates.sh`'s own rule about `project.conf`, and for its
+reason: the harness's concurrency is a fact of how it is used, and a lock it can
+deadlock against its own subagent is worse than the race. `--check` reports and
+exits; it holds nothing and waits for nothing. A sentinel whose process is still
+alive is reported as **in flight** rather than as wreckage, because the answer
+differs — one is "wait", the other is "put the file back".
+
+**Hand-editable, deliberately.** Deleting one is the documented cleanup once the
+file is restored, and `--check` prints the exact command. Nothing is forged by
+creating one: a spurious `.active` only refuses gate runs, which is the safe
+direction. It is exhaust that something reads, not evidence that something is
+believed on.
