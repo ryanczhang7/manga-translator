@@ -435,7 +435,14 @@ while IFS= read -r line; do
     fi
     if [ "$exp" = "<none>" ]; then
       printf 'WARN %-12s no evidence line; a vacuous pass would go unnoticed\n' "$id"
-      noevidence=$((noevidence+1)); continue
+      # The summary below reports this count as "required gate(s)", and the run
+      # path guards its own increment by `req`. Guard this one the same way, or
+      # an optional gate makes the audit state something false about a required
+      # one - and masks a required gate that genuinely lost its line. `req`
+      # only: BOOTSTRAPPED is a property of the project's stage, and --audit is
+      # exactly the tool a bootstrap story uses on a half-filled manifest.
+      if [ "$req" = "required" ]; then noevidence=$((noevidence+1)); fi
+      continue
     fi
     if [ "$exp" = "-" ]; then
       printf 'ok   %-12s (liveness declared unassertable)\n' "$id"
