@@ -1140,4 +1140,323 @@ assert_contains "BOOTSTRAPPED=no still counts a required gate with no evidence l
   "1 required gate(s) have no evidence line." "$out"
 assert_eq "and that audit exits 0 too" "0" "$rc"
 
+# ============================================================================
+# MT-040: parsing the manifest spawns no process per field
+# ============================================================================
+#
+# gates.sh parsed project.conf with a `sed` trim() and a `cut -d'|'` per field:
+# 1,669 processes for one `--list` of the 629-line manifest, 1,461 of them the
+# same `sed`. The rewrite is pure bash, and it can go wrong in exactly three
+# ways, each of which a block below exists to catch:
+#
+#   * parse LESS (skip a table, stop early)            -> AC-2, byte-identity
+#   * lose everything after an embedded `|`            -> AC-3, whole values
+#   * trim a different character class than [:space:]  -> AC-4, equivalence
+#
+# The real-manifest runs read MANIFEST_SNAPSHOT (see _lib.sh), a copy of the
+# manifest as it stood when the oracle outputs were captured, never the live
+# project.conf: a later story that edits the manifest must not break a
+# byte-identity test whose oracle came from the old one.
+
+set_phase "$FIX" ""
+rm -f "$FIX/docs/backlog/stories/T-1.md"
+
+# trace_externals <trace> <script>...   AC-1's instrument. One "<count> <name>"
+# line per external command found in a `bash -x` trace, then "<total> TOTAL".
+#
+# What it counts: every trace line (one or more `+`, then a space - the depth
+# marks subshells and command substitutions) whose FIRST WORD, after stripping
+# the quotes bash -x adds (`'['`), is a program on PATH and is neither a bash
+# builtin or keyword nor a function defined in the traced scripts. Pure
+# assignments (`+ kind=gate`) are skipped. One such line is one exec'd process:
+# bash -x traces each element of a pipeline, and each command substitution's
+# commands, on a line of its own.
+#
+# What it does not count: forks that exec nothing (a `$(...)` whose body is all
+# builtins). AC-1 is about external processes, which is what the baseline
+# counted and where the cost is on Windows.
+trace_externals() {
+  local trace="$1" funcs n w t total=0; shift
+  funcs=" $(awk '/^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)/ {
+      sub(/^[[:space:]]*/, ""); sub(/[[:space:]]*\(.*/, ""); printf "%s ", $0 }' "$@") "
+  while read -r n w; do
+    [ -n "$w" ] || continue
+    case "$funcs" in *" $w "*) continue ;; esac
+    t=" $(type -at -- "$w" 2>/dev/null | tr '\n' ' ') "
+    case "$t" in *" builtin "*|*" keyword "*) continue ;; *" file "*) ;; *) continue ;; esac
+    printf '%s %s\n' "$n" "$w"; total=$((total+n))
+  done <<EOT
+$(awk '
+    /^\++ / {
+      sub(/^\++ /, "")
+      w = $1
+      if (w ~ /^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=/) next
+      gsub(/^\047|\047$/, "", w)
+      if (w != "") n[w]++
+    }
+    END { for (w in n) print n[w], w }' "$trace")
+EOT
+  printf '%s TOTAL\n' "$total"
+}
+# ext_count <counts> <name>   One name's count out of trace_externals' output.
+ext_count() { printf '%s\n' "$1" | awk -v w="$2" '$2 == w { print $1; f = 1 } END { if (!f) print 0 }'; }
+
+describe "MT-040 AC-1 instrument: the trace counter counts processes, and only processes"
+
+# The negative control for AC-1's two zeros. A counter that counts nothing
+# satisfies "zero sed" and "at most 50" against any implementation, so it is
+# shown counting a trace whose answer is known: three externals (sed, cut, tr),
+# a builtin (printf) that must not be counted, and a function (f) that must not
+# be counted even though bash -x traces it like a command.
+_ctl_dir="$(mktemp -d 2>/dev/null || mktemp -d -t mt040)"
+cat > "$_ctl_dir/ctl.sh" <<'CTL'
+f() { :; }
+f
+printf 'x\n' | sed 's/x/y/' | cut -c1 >/dev/null
+v="$(printf 'ab' | tr a b)"
+f
+CTL
+bash -x "$_ctl_dir/ctl.sh" 2> "$_ctl_dir/ctl.trace" >/dev/null
+_ctl="$(trace_externals "$_ctl_dir/ctl.trace" "$_ctl_dir/ctl.sh")"
+assert_eq "the counter sees the one sed in a trace with one sed" "1" "$(ext_count "$_ctl" sed)"
+assert_eq "the counter sees the one cut in a trace with one cut" "1" "$(ext_count "$_ctl" cut)"
+assert_eq "a builtin (printf) is not counted as a process"       "0" "$(ext_count "$_ctl" printf)"
+assert_eq "a function the script defines is not counted"         "0" "$(ext_count "$_ctl" f)"
+assert_eq "and the total is exactly the three externals"         "3" "$(ext_count "$_ctl" TOTAL)"
+rm -rf "$_ctl_dir"
+
+describe "MT-040 AC-1 / AC-2: --list over the 629-line manifest"
+
+assert_eq "the snapshot is the 629-line manifest AC-1 and AC-2 are stated against" \
+  "629" "$(awk 'END { print NR }' "$MANIFEST_SNAPSHOT")"
+
+cp "$MANIFEST_SNAPSHOT" "$FIX/.claude/harness/project.conf"
+_mt040="$(mktemp -d 2>/dev/null || mktemp -d -t mt040)"
+# One traced run serves AC-1 (the trace, on stderr) and AC-2 (the listing, on
+# stdout): -x writes nothing to stdout, so the listing is the untraced one.
+( cd "$FIX" && bash -x scripts/gates.sh --list > "$_mt040/list.out" 2> "$_mt040/list.trace" ); rc=$?
+assert_eq "--list over the real manifest exits 0" "0" "$rc"
+
+# AC-2. Byte-identical to what the unchanged tree printed for the same manifest
+# in a fixture like this one (76ed934; the story's handoff records how it was
+# captured, and its sha256). Nothing is normalised: --list prints no timing.
+if cmp -s "$MANIFEST_FIXTURES/list.golden" "$_mt040/list.out"; then
+  _ok "AC-2: --list output is byte-identical to the pre-MT-040 output"
+else
+  _bad "AC-2: --list output is byte-identical to the pre-MT-040 output" \
+    "$(diff "$MANIFEST_FIXTURES/list.golden" "$_mt040/list.out" | head -20)"
+fi
+
+# AC-1. The two zeros are the sharp claim; the total is the backstop against
+# the cost being moved into awk, a subshell loop or a helper script. 50 is the
+# story's number, not this suite's.
+_counts="$(trace_externals "$_mt040/list.trace" "$FIX/scripts/gates.sh" "$FIX/.claude/hooks/lib.sh")"
+assert_eq "AC-1: tracing --list over the manifest records zero sed processes" \
+  "0" "$(ext_count "$_counts" sed)"
+assert_eq "AC-1: tracing --list over the manifest records zero cut processes" \
+  "0" "$(ext_count "$_counts" cut)"
+_total="$(ext_count "$_counts" TOTAL)"
+if [ "$_total" -le 50 ]; then
+  _ok "AC-1: tracing --list over the manifest records at most 50 external processes"
+else
+  _bad "AC-1: tracing --list over the manifest records at most 50 external processes" \
+    "counted $_total; by command:
+$_counts"
+fi
+
+# AC-3, on the real lines, as --list prints them: the WHOLE remainder of the
+# line, embedded pipes included (story AC-3 table, rows :297 and :613).
+assert_contains "AC-3: the lint command keeps its embedded pipe (project.conf:297, -f5-)" \
+  'uv run ruff check --no-cache . && uv run ruff check --no-cache --show-files . | grep -qE "src.mangatl.*[.]py" && uv run lint-imports' \
+  "$(cat "$_mt040/list.out")"
+assert_contains "AC-3: the integration blocked-when regex keeps both alternations (project.conf:613, -f3-)" \
+  'blocked-when: (CUDAExecutionProvider is not in available provider names|Failed to load library .*onnxruntime_providers_cuda|no CUDA-capable device)' \
+  "$(cat "$_mt040/list.out")"
+
+describe "MT-040 AC-2: --audit over the 629-line manifest"
+
+( cd "$FIX" && bash scripts/gates.sh --audit > "$_mt040/audit.out" 2>&1 ); rc=$?
+assert_eq "--audit over the real manifest exits as it did before MT-040" \
+  "$(cat "$MANIFEST_FIXTURES/audit.rc")" "$rc"
+if cmp -s "$MANIFEST_FIXTURES/audit.golden" "$_mt040/audit.out"; then
+  _ok "AC-2: --audit output is byte-identical to the pre-MT-040 output"
+else
+  _bad "AC-2: --audit output is byte-identical to the pre-MT-040 output" \
+    "$(diff "$MANIFEST_FIXTURES/audit.golden" "$_mt040/audit.out" | head -20)"
+fi
+
+describe "MT-040 AC-3: a value containing | is the whole rest of the line"
+
+# -f3-, the one that matters most (story C-5 probe 3). The real project.conf:613
+# line, lifted verbatim from the snapshot; only the gate command is invented.
+# The log matches the THIRD alternation only, so a split that stops at the
+# first embedded pipe hands grep `(CUDAExecutionProvider ... names` - not even
+# a valid regex - and a launch failure is reported as a test FAIL.
+{ printf '%s\n' "gate         | integration | required | . | printf 'RuntimeError: no CUDA-capable device is detected\n'; exit 1"
+  grep -E '^[[:space:]]*blocked-when[[:space:]]*\|[[:space:]]*integration[[:space:]]*\|' "$MANIFEST_SNAPSHOT"
+} | write_conf "$FIX"
+out="$(gates)"; rc=$?
+assert_contains "a blocked-when regex matched on its third alternation still classifies BLOCKED" \
+  "BLOCKED      integration" "$out"
+assert_contains "and quotes the alternation that matched" \
+  "could not launch: no CUDA-capable device" "$out"
+assert_eq "and exits 3" "3" "$rc"
+
+{ printf '%s\n' "gate         | integration | required | . | printf 'OSError: Failed to load library C:/x/onnxruntime_providers_cuda.dll\n'; exit 1"
+  grep -E '^[[:space:]]*blocked-when[[:space:]]*\|[[:space:]]*integration[[:space:]]*\|' "$MANIFEST_SNAPSHOT"
+} | write_conf "$FIX"
+out="$(gates)"; rc=$?
+assert_contains "a blocked-when regex matched on its second alternation still classifies BLOCKED" \
+  "BLOCKED      integration" "$out"
+assert_eq "and exits 3 there too" "3" "$rc"
+
+# -f5-, the gate command. Shaped like project.conf:297: ONE embedded pipe, and
+# the evidence is printed only by the part after it. A command cut at the pipe
+# prints `src/mangatl/app.py` and nothing else, so the gate shows no evidence.
+write_conf "$FIX" <<'CONF'
+gate     | lint | required | . | printf 'src/mangatl/app.py\n' | grep -qE "src.mangatl.*[.]py" && printf 'Contracts: 5 kept\n'
+evidence | lint | Contracts: [1-9][0-9]* kept
+CONF
+out="$(gates)"; rc=$?
+assert_contains "a gate command with an embedded pipe runs whole and passes" \
+  "PASS         lint" "$out"
+assert_contains "and is echoed whole before it runs" \
+  "printf 'src/mangatl/app.py\n' | grep -qE \"src.mangatl.*[.]py\" && printf 'Contracts: 5 kept\n'" "$out"
+assert_eq "and the run exits 0" "0" "$rc"
+out="$(gates --list)"
+assert_contains "--list prints the whole command" \
+  "printf 'src/mangatl/app.py\n' | grep -qE \"src.mangatl.*[.]py\" && printf 'Contracts: 5 kept\n'" "$out"
+
+# The second-level split (gates.sh:391,395): a ci-factor VALUE is re-split into
+# its number (field 1) and its source (field 2 onwards). The source may itself
+# contain `|`, and --list and --audit print the value whole.
+write_conf "$FIX" <<'CONF'
+gate      | coverage | required | . | printf 'Tests  47 passed (47)\n'
+evidence  | coverage | Tests +[1-9][0-9]* passed
+ci-factor | coverage | 3.4 | actions run 412 | AC-4 file 1,262 ms instrumented
+slow      | coverage | instrumented | and on CI 3.4x slower
+CONF
+out="$(gates --list)"
+assert_contains "--list prints a ci-factor whose source contains a pipe, whole" \
+  "ci-factor: 3.4 | actions run 412 | AC-4 file 1,262 ms instrumented" "$out"
+assert_contains "--list prints a slow reason containing a pipe, whole" \
+  "slow:     instrumented | and on CI 3.4x slower (left out of --fast)" "$out"
+out="$(gates --audit)"; rc=$?
+assert_contains "--audit prints the same ci-factor whole" \
+  "ci-factor: 3.4 | actions run 412 | AC-4 file 1,262 ms instrumented" "$out"
+assert_eq "and accepts it" "0" "$rc"
+
+# The source is field 2 ONWARDS: an empty second field followed by a third is
+# a source, not a missing one. This is the only observable difference between
+# `-f2-` and `-f2` at gates.sh:395, pinned so the rewrite keeps the semantics
+# it replaces rather than a narrower one.
+write_conf "$FIX" <<'CONF'
+gate      | coverage | required | . | printf 'Tests  47 passed (47)\n'
+evidence  | coverage | Tests +[1-9][0-9]* passed
+ci-factor | coverage | 3.4 |  | measured in actions run 412
+CONF
+out="$(gates --audit)"; rc=$?
+assert_not_contains "a ci-factor source that starts after an empty field is still a source" \
+  "has no source" "$out"
+assert_eq "and the audit accepts it" "0" "$rc"
+
+describe "MT-040 C-3: what the parse loop must keep doing"
+
+# \r line endings. The loop strips `\r` before trimming (gates.sh:101,281); a
+# floor of `40\r` would otherwise be "not a number".
+write_conf "$FIX" <<'CONF'
+gate     | unit | required | . | printf 'Tests  47 passed (47)\n'
+evidence | unit | Tests +[1-9][0-9]* passed
+floor    | unit | 40
+CONF
+awk '{ printf "%s\r\n", $0 }' "$FIX/.claude/harness/project.conf" > "$FIX/.claude/harness/project.conf.crlf"
+mv "$FIX/.claude/harness/project.conf.crlf" "$FIX/.claude/harness/project.conf"
+out="$(gates)"; rc=$?
+assert_contains "a manifest with CRLF line endings still parses its floor" \
+  "observed 47, floor 40" "$out"
+assert_contains "and the gate passes" "PASS         unit" "$out"
+assert_eq "and the run exits 0" "0" "$rc"
+
+# A comment indented with a TAB is a comment: `[:space:]` is what makes it one.
+# Two commented lines that would each change the verdict if they were read.
+TABC="$(printf '\t')"
+write_conf "$FIX" <<CONF
+gate     | unit  | required | . | printf 'Tests  47 passed (47)\n'
+evidence | unit  | Tests +[1-9][0-9]* passed
+${TABC}# gate | ghost | required | . | printf 'boom\n'; exit 1
+ ${TABC} #floor | unit | 900
+CONF
+out="$(gates --list)"
+assert_not_contains "a tab-indented commented-out gate is not listed" "ghost" "$out"
+out="$(gates)"; rc=$?
+assert_contains "and the live gate passes on its own lines" "PASS         unit" "$out"
+assert_not_contains "a tab-indented commented-out floor is not applied" "floor of 900" "$out"
+assert_eq "and the run exits 0" "0" "$rc"
+
+# --gate <id> still finds its own lines: the evidence (with alternation) and the
+# floor of the gate it names, not another gate's.
+write_conf "$FIX" <<'CONF'
+gate     | unit | required | . | printf 'Tests  47 passed (47)\n'
+gate     | lint | required | . | printf 'Checked 5 files\n'
+evidence | unit | Tests +[1-9][0-9]* passed
+evidence | lint | Contracts: [1-9][0-9]* kept|Checked [1-9][0-9]* files
+floor    | unit | 40
+floor    | lint | 3
+CONF
+out="$(gates --gate lint)"; rc=$?
+assert_contains "--gate lint judges lint by its own evidence and floor" \
+  "observed 5, floor 3" "$out"
+assert_not_contains "and runs nothing else" "PASS         unit" "$out"
+assert_eq "and exits 0" "0" "$rc"
+
+# --fast still leaves out the gate a `slow` line names, when the reason for it
+# contains a pipe.
+write_conf "$FIX" <<'CONF'
+gate     | unit  | required | . | printf 'Tests  47 passed (47)\n'
+gate     | build | required | . | printf 'Bundled 3 targets\n'
+evidence | unit  | Tests +[1-9][0-9]* passed
+evidence | build | Bundled [1-9][0-9]* targets
+slow     | build | bundles | signs | minutes
+CONF
+out="$(gates --fast)"
+assert_contains "--fast still skips a slow gate whose reason contains a pipe" \
+  "--fast skipped: build" "$out"
+assert_not_contains "and does not run it" "PASS         build" "$out"
+
+describe "MT-040 AC-4: gates.sh's trim() agrees with the shipped sed form"
+
+# The trim() gates.sh DEFINES, lifted out of the script (extract_fn), over the
+# 629 manifest lines and the edge cases in _lib.sh's trim_inputs, against the
+# shipped sed expression as the oracle. Settled: 0 disagreements.
+trim_inputs "$_mt040/trim.in"
+trim_oracle "$_mt040/trim.in" "$_mt040/trim.oracle"
+assert_eq "the input set is the 629 manifest lines and six edge cases" \
+  "635" "$(awk 'END { print NR }' "$_mt040/trim.in")"
+assert_contains "gates.sh defines trim()" "trim()" "$(extract_fn "$REPO_ROOT/scripts/gates.sh" trim)"
+apply_trim "$REPO_ROOT/scripts/gates.sh" "$_mt040/trim.in" "$_mt040/trim.gates"
+_d="$(disagreements "$_mt040/trim.oracle" "$_mt040/trim.gates")"
+assert_eq "gates.sh trim() agrees with the sed form on all 635 inputs" "0" "$_d"
+
+# The control that makes the input set mean something: the naive space-only
+# trim must DISAGREE with the oracle, on the tab case and the multi-space case.
+# If it did not, the inputs could not tell `[:space:]` from a literal space.
+( naive() { local s="$1"; s="${s## }"; printf '%s' "${s%% }"; }
+  while IFS= read -r l || [ -n "$l" ]; do printf '%s\n' "$(naive "$l")"; done < "$_mt040/trim.in"
+) > "$_mt040/trim.naive"
+_differs() { [ "$(sed -n "$1p" "$2")" != "$(sed -n "$1p" "$3")" ] && echo differs || echo agrees; }
+assert_eq "control: the space-only trim disagrees on the tab-padded input (633)" \
+  "differs" "$(_differs 633 "$_mt040/trim.oracle" "$_mt040/trim.naive")"
+assert_eq "control: the space-only trim disagrees on the multi-space input (632)" \
+  "differs" "$(_differs 632 "$_mt040/trim.oracle" "$_mt040/trim.naive")"
+
+describe "MT-040 AC-5: the sed-based trim body is gone from the three scripts"
+
+# Scoped to the three scripts AC-5's Given names (story PO-4): lib.sh:1080 is
+# MT-041's, and the story file itself quotes the body.
+assert_eq "no copy of the sed trim body in gates.sh, doctor.sh or task.sh" \
+  "gates.sh:0 doctor.sh:0 task.sh:0" \
+  "$(for s in gates doctor task; do printf '%s.sh:%s ' "$s" "$(grep -cF -- "$TRIM_SED_BODY" "$REPO_ROOT/scripts/$s.sh")"; done | sed 's/ $//')"
+
+rm -rf "$_mt040"
+
 summary "gates"
