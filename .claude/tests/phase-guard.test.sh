@@ -1457,4 +1457,124 @@ set_phase "$FIX" RED
 assert_allowed "$FIX" 'cp docs/notes.md docs/backlog/' \
   'cp into docs/backlog/ during RED'
 
+# ===========================================================================
+# MT-041 - one guard invocation costs half the processes.
+#
+# ADDITIONS ONLY (AC-2): not one line above this block is changed by MT-041.
+# The cost claims are measured on the REAL hook, traced, by the instrument in
+# _spawns.sh - whose own negative control is in lib.test.sh. Everything else
+# here passes on arrival and pins a verdict the rewrite must keep; MT-041
+# `## Test plan` has the mutation that earned each.
+. "$TESTS_DIR/_spawns.sh"
+_t41="$(mktemp -d 2>/dev/null || mktemp -d -t mt041)"
+_f41="$(make_fixture)"
+_f41bs="$(printf '%s' "$_f41" | tr '/' '\134')"
+
+# ---------------------------------------------------------------------------
+describe "MT-041 AC-1: one guard invocation spawns at most 27 processes"
+set_phase "$_f41" RED
+
+# The invocation AC-1 names: `echo hi > src/main.ts`, phase RED, the real hook,
+# the _lib.sh fixture. RED ON ARRIVAL - measured at 30bdc9a: 45 in total (the
+# story's 44 plus the hook's own `cat` of stdin), of which tr -d '[:space:]' 7,
+# tr '\134' '/' 5, tr -d with both quotes 4. The bound 27 is the story's, read
+# out, not tuned here (C-6).
+spawn_trace "$_f41" Bash command 'echo hi > src/main.ts' "$_t41/ac1"
+_tally="$(spawn_tally "$_t41/ac1")"
+_why="$(printf 'measured, one line per tool (count, tool):\n%s' "$_tally")"
+
+# Vacuity controls: the bounds below are all "at most", so a trace that never
+# reached the classification would satisfy them by counting nothing.
+assert_contains "AC-1: the traced invocation still blocks src/main.ts (instrument control)" \
+  '"permissionDecision":"deny"' "$(cat "$_t41/ac1.out")"
+if [ "$(spawn_traced_calls "$_t41/ac1" classify)" -ge 1 ]; then
+  _ok "AC-1: the trace reached classify (instrument control)"
+else _bad "AC-1: the trace reached classify (instrument control)" "no classify call in the trace"; fi
+
+_n="$(spawn_count "$_tally" TOTAL)"
+if [ "$_n" -le 27 ]; then _ok "AC-1: at most 27 external processes for one guard invocation"
+else _bad "AC-1: at most 27 external processes for one guard invocation" "spawned $_n
+$_why"; fi
+assert_eq "AC-1: no tr -d '[:space:]' is spawned" "0" "$(spawn_count "$_tally" tr:space)"
+assert_eq "AC-1: no tr '\\134' '/' is spawned"    "0" "$(spawn_count "$_tally" tr:backslash)"
+assert_eq "AC-1: no tr -d of the two quote characters is spawned" "0" "$(spawn_count "$_tally" tr:quotes)"
+
+# ---------------------------------------------------------------------------
+describe "MT-041 AC-4: one guard invocation, at most one git check-ignore"
+
+# RED ON ARRIVAL: 2 in both - is_ignored asks `<p>`, then `<p>/`. The first is
+# the AC-1 trace above (src/main.ts is tracked, so both spellings are asked);
+# the second is decided by the SLASHED spelling alone.
+_n="$(spawn_count "$_tally" 'git check-ignore')"
+if [ "$_n" -le 1 ]; then _ok "AC-4: echo hi > src/main.ts spawns at most one git check-ignore"
+else _bad "AC-4: echo hi > src/main.ts spawns at most one git check-ignore" "spawned $_n"; fi
+
+spawn_trace "$_f41" Bash command 'rm -rf .vitest' "$_t41/ac4"
+_n="$(spawn_count "$(spawn_tally "$_t41/ac4")" 'git check-ignore')"
+assert_not_contains "AC-4: rm -rf .vitest is still allowed - ignored only as .vitest/" \
+  '"permissionDecision":"deny"' "$(cat "$_t41/ac4.out")"
+if [ "$(spawn_traced_calls "$_t41/ac4" is_ignored)" -lt 1 ]; then
+  _bad "AC-4: rm -rf .vitest spawns at most one git check-ignore" "the trace never reached is_ignored"
+elif [ "$_n" -le 1 ]; then _ok "AC-4: rm -rf .vitest spawns at most one git check-ignore"
+else _bad "AC-4: rm -rf .vitest spawns at most one git check-ignore" "spawned $_n"; fi
+
+# AC-4 as amended (A-1, PO-5 D-3): at most one per CLASSIFIED CANDIDATE. Three
+# source candidates in GREEN, which permits source, so no denial ends the hook
+# early and all three are classified. RED ON ARRIVAL: measured 6 at 30bdc9a.
+set_phase "$_f41" GREEN
+spawn_trace "$_f41" Bash command 'rm src/a.ts src/b.ts src/c.ts' "$_t41/ac4n"
+_n="$(spawn_count "$(spawn_tally "$_t41/ac4n")" 'git check-ignore')"
+_c="$(spawn_traced_calls "$_t41/ac4n" classify)"
+if [ "$_c" -ne 3 ]; then
+  _bad "AC-4: three candidates spawn at most three git check-ignore" "classify was called $_c times, not 3 (instrument control)"
+elif [ "$_n" -le 3 ]; then _ok "AC-4: three candidates spawn at most three git check-ignore"
+else _bad "AC-4: three candidates spawn at most three git check-ignore" "spawned $_n"; fi
+
+# "Both spellings of every candidate are still submitted." The instrument sees
+# argv, not stdin, so a `--stdin` implementation's input is invisible to it -
+# this is proved by VERDICT instead, which holds whatever the mechanism. Three
+# candidates in REVIEW, which refuses source, each ignored by a different
+# spelling: `.vitest` and `playwright-report` only as `<p>/`, `bareonly` only as
+# `<p>` (`!bareonly/` re-includes the slashed form). Allowed only if every
+# candidate's deciding spelling reached git; drop either spelling and one of
+# them falls to `source` and is refused. Also counted: at most three. RED ON
+# ARRIVAL for the count (measured 5: 2 + 1 + 2); the verdict passes today.
+_f41b="$(make_fixture)"
+printf 'bareonly\n!bareonly/\n' >> "$_f41b/.gitignore"
+set_phase "$_f41b" REVIEW
+spawn_trace "$_f41b" Bash command 'rm -rf .vitest bareonly playwright-report' "$_t41/ac4s"
+assert_not_contains "AC-4: both spellings of each of three candidates reach git (all three ignored, allowed in REVIEW)" \
+  '"permissionDecision":"deny"' "$(cat "$_t41/ac4s.out")"
+_n="$(spawn_count "$(spawn_tally "$_t41/ac4s")" 'git check-ignore')"
+_c="$(spawn_traced_calls "$_t41/ac4s" classify)"
+if [ "$_c" -ne 3 ]; then
+  _bad "AC-4: three ignored candidates spawn at most three git check-ignore" "classify was called $_c times, not 3 (instrument control)"
+elif [ "$_n" -le 3 ]; then _ok "AC-4: three ignored candidates spawn at most three git check-ignore"
+else _bad "AC-4: three ignored candidates spawn at most three git check-ignore" "spawned $_n"; fi
+rm -rf "$_f41b"
+
+# ---------------------------------------------------------------------------
+describe "MT-041 AC-5: the same verdicts through a backslash-spelled absolute path"
+
+# The guard's whole path from a Windows spelling: masked, unquoted, judged
+# absolute, placed by to_rel, classified. C-5 probe 2 - to_rel's backslash
+# conversion made a no-op - is what turns every one of these, and they are the
+# verdicts that move silently on the platform this repository is built on.
+# One row per way a category is decided - by git, by a rule, by the source
+# default, and a directory rule in the phase that freezes it. All eight rows of
+# AC-5's table go through the same spelling in lib.test.sh; here each guard
+# invocation costs seconds, in the suite this story exists to make cheaper.
+set_phase "$_f41" RED
+assert_allowed "$_f41" "rm -rf \"$_f41bs\\.vitest\"" \
+  'AC-5: rm -rf <root>\.vitest in RED - ignored'
+assert_allowed "$_f41" "rm -rf \"$_f41bs\\dist\"" \
+  'AC-5: rm -rf <root>\dist in RED - vendor'
+assert_blocked "$_f41" "rm -rf \"$_f41bs\\src\\mangatl\\ui\"" src/mangatl/ui \
+  'AC-5: rm -rf <root>\src\mangatl\ui in RED - source'
+set_phase "$_f41" GREEN
+assert_blocked "$_f41" "rm -rf \"$_f41bs\\tests\"" tests \
+  'AC-5: rm -rf <root>\tests in GREEN - test'
+
+rm -rf "$_f41" "$_t41"
+
 summary "phase-guard"
