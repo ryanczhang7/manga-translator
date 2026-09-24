@@ -1040,4 +1040,104 @@ rm -f "$FIX"/.claude/state/mutations/*.active "$FIX"/.claude/state/mutations/*.b
 out="$(gates)"
 assert_contains "resolved, the gates run again" "PASS         unit" "$out"
 
+
+# --- the audit's count must be about the thing its sentence names -----------
+describe "--audit counts only required gates as missing an evidence line"
+
+# MT-043. `noevidence` is ONE counter (gates.sh:277) incremented from two
+# places. The normal run path guards the increment by `req` (gates.sh:525); the
+# --audit path did not (gates.sh:436-439). The summary at gates.sh:640 prints
+# that count as "%d required gate(s) have no evidence line" - so an OPTIONAL
+# gate with no evidence line made the audit state something false about a
+# required one.
+#
+# This is not cosmetic. .github/workflows/gates.yml runs `--audit` to catch "a
+# gate ... whose evidence line was dropped", and this count is the only signal
+# it has. In this repository the count already reads 1 for a benign reason
+# (`mutation` is optional and has no evidence line), so a required gate that
+# GENUINELY loses its line reads 2 - in a sentence that is word-for-word
+# identical to the one a reader has been trained to expect. The real signal is
+# masked by the false one.
+#
+# Fixture runs, never a real `--audit`: that is 210 s on this machine and 86 s
+# on CI (MT-043 PO-6), and the whole defect reproduces here in about a second.
+
+# --- AC-1 / AC-2: every REQUIRED gate has evidence, one OPTIONAL has none ---
+write_conf "$FIX" <<'EOF'
+gate     | unit     | required | . | printf 'Tests  47 passed (47)\n'
+evidence | unit     | Tests +[1-9][0-9]* passed
+gate     | mutation | optional | . | printf 'mutants: 3\n'
+waiver   | mutation | mutmut is not installed and not configured yet; stack.md s6
+EOF
+out="$(gates --audit)"; rc=$?
+assert_not_contains "an optional gate's missing evidence line is not reported as a required one's" \
+  "required gate(s) have no evidence line" "$out"
+assert_eq "and the audit still exits 0" "0" "$rc"
+assert_contains "and the manifest still passes" "Manifest audit passed." "$out"
+
+# AC-2. The fix is NOT "delete the WARN". This per-gate line is the only place
+# an optional gate's missing evidence line is surfaced at all: on a normal run
+# gates.sh:525's own `req` guard prints a bare PASS with no annotation. The
+# authoritative form is the printf at gates.sh:437, `WARN %-12s ...` - assert
+# the two substrings on one line rather than hand-counting the padding.
+assert_contains "the optional gate is still warned about, by name" \
+  "WARN mutation" "$out"
+warnline="$(printf '%s\n' "$out" | grep -F 'WARN mutation')"
+assert_contains "and the warning keeps its wording, on that same line" \
+  "no evidence line; a vacuous pass would go unnoticed" "$warnline"
+
+# --- AC-3: the count must still move for a REQUIRED gate -------------------
+# The negative control on AC-1: a "fix" that simply deleted the summary block
+# would satisfy every assertion above and fail every one below.
+write_conf "$FIX" <<'EOF'
+gate     | unit | required | . | printf 'Tests  47 passed (47)\n'
+EOF
+out="$(gates --audit)"; rc=$?
+assert_contains "a required gate that lost its evidence line is still counted" \
+  "1 required gate(s) have no evidence line." "$out"
+# Severity is deliberately out of scope for MT-043: the audit reports and does
+# not fail. Pinned so a later story changing that has to say so.
+assert_eq "and the audit still only reports it, exit 0" "0" "$rc"
+
+# The masking case, stated as a test: one required and one optional gate both
+# without an evidence line is ONE required gate missing one, not two.
+write_conf "$FIX" <<'EOF'
+gate     | unit     | required | . | printf 'Tests  47 passed (47)\n'
+gate     | mutation | optional | . | printf 'mutants: 3\n'
+EOF
+out="$(gates --audit)"
+assert_contains "one required and one optional missing a line counts one" \
+  "1 required gate(s) have no evidence line." "$out"
+assert_not_contains "and never two - the optional gate must not inflate the signal" \
+  "2 required gate(s) have no evidence line." "$out"
+
+# Many: the counter is a count, not a flag. A fix that hard-coded 1 would pass
+# everything above.
+write_conf "$FIX" <<'EOF'
+gate     | unit     | required | . | printf 'Tests  47 passed (47)\n'
+gate     | build    | required | . | printf 'Bundled 3 targets\n'
+gate     | mutation | optional | . | printf 'mutants: 3\n'
+EOF
+out="$(gates --audit)"
+assert_contains "two required gates missing a line count two" \
+  "2 required gate(s) have no evidence line." "$out"
+assert_not_contains "not three - the optional gate is excluded from the total" \
+  "3 required gate(s) have no evidence line." "$out"
+
+# --- AC-4: BOOTSTRAPPED is NOT part of the guard being copied --------------
+# The run path guards by `BOOTSTRAPPED=yes && req=required`; only the `req`
+# half moves to the audit. `req` is a property of the manifest, which is what
+# the audit judges; BOOTSTRAPPED is a property of the project's stage, and
+# --audit is exactly the tool a bootstrap story uses on a manifest it is still
+# filling in. Pinned so the fix cannot drift into it. write_conf forces
+# BOOTSTRAPPED=yes, so this manifest is written directly.
+cat > "$FIX/.claude/harness/project.conf" <<'EOF'
+BOOTSTRAPPED=no
+gate     | unit | required | . | printf 'Tests  47 passed (47)\n'
+EOF
+out="$(gates --audit)"; rc=$?
+assert_contains "BOOTSTRAPPED=no still counts a required gate with no evidence line" \
+  "1 required gate(s) have no evidence line." "$out"
+assert_eq "and that audit exits 0 too" "0" "$rc"
+
 summary "gates"
