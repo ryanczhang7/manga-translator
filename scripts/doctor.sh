@@ -15,7 +15,31 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONF="$ROOT/.claude/harness/project.conf"
 missing=0
-trim() { printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+# Parsing project.conf with builtins only: a process per field (sed, cut, and
+# the fork of every `$(...)`) cost minutes per manifest walk on Windows. The
+# same three helpers as scripts/gates.sh, copied rather than shared - this
+# script must run before anything else is installed or sourced; see that file
+# for the full account.
+#
+# trim <string> [var]   <string> without leading or trailing [:space:] - the
+# carriage return of a CRLF manifest included, which this script relies on.
+# Printed, or assigned to <var>. Self-contained: the test suite evaluates it alone.
+trim() { local _t="$1"; _t="${_t#"${_t%%[![:space:]]*}"}"; _t="${_t%"${_t##*[![:space:]]}"}"; if [ $# -gt 1 ]; then printf -v "$2" '%s' "$_t"; else printf '%s' "$_t"; fi; }
+# from_field <n> <string> <var>   `cut -d'|' -f<n>-`, untrimmed: the later `|`s
+# kept, a string with no `|` returned whole, too few fields giving ''.
+from_field() {
+  local _r="$2" _i=1
+  case "$_r" in
+    *'|'*)
+      while [ "$_i" -lt "$1" ]; do
+        case "$_r" in *'|'*) _r="${_r#*|}" ;; *) _r=""; break ;; esac
+        _i=$((_i+1))
+      done ;;
+  esac
+  printf -v "$3" '%s' "$_r"
+}
+rest()  { local _v; from_field "$1" "$2" _v; trim "$_v" "$3"; }          # trimmed -f<n>-
+field() { local _v; from_field "$1" "$2" _v; trim "${_v%%|*}" "$3"; }    # trimmed -f<n>
 
 check() { # <executable> <what it is for>
   if command -v "$1" >/dev/null 2>&1; then
@@ -38,7 +62,7 @@ printf '  ok       %-12s %s\n' "bash ver" "${BASH_VERSION%%(*}"
 # An absent stamp is not a blank field: it is a copy from before stamping, which
 # is older than every stamped version.
 hv="$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' "$ROOT/.claude/harness/VERSION" 2>/dev/null | head -1)"
-hv="$(trim "${hv:-}")"
+trim "${hv:-}" hv
 printf '  ok       %-12s %s\n' "harness ver" "${hv:-unstamped (predates versioning; treat as older than any dated release)}"
 
 printf '\nHarness integrity\n'
@@ -60,16 +84,18 @@ for f in paths.conf phases.conf project.conf; do
 done
 
 printf '\nProject toolchain (from project.conf)\n'
-BOOTSTRAPPED="$(grep -E '^BOOTSTRAPPED=' "$CONF" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]')"
+BOOTSTRAPPED="$(grep -E '^BOOTSTRAPPED=' "$CONF" 2>/dev/null | head -1)"
+BOOTSTRAPPED="${BOOTSTRAPPED#*=}"; BOOTSTRAPPED="${BOOTSTRAPPED//[[:space:]]/}"
 seen=""
 found_any=0
 while IFS= read -r line; do
-  case "$(trim "$line")" in ''|'#'*) continue ;; esac
+  trim "$line" tline
+  case "$tline" in ''|'#'*) continue ;; esac
   case "$line" in *'|'*) ;; *) continue ;; esac
-  kind=$(trim "$(printf '%s' "$line" | cut -d'|' -f1)")
+  field 1 "$line" kind
   case "$kind" in gate|task) ;; *) continue ;; esac
-  id=$(trim  "$(printf '%s' "$line" | cut -d'|' -f2)")
-  cmd=$(trim "$(printf '%s' "$line" | cut -d'|' -f5-)")
+  field 2 "$line" id
+  rest  5 "$line" cmd
   [ -z "$cmd" ] && continue
   found_any=1
   exe=$(printf '%s' "$cmd" | awk '{print $1}')
@@ -124,13 +150,14 @@ printf '\nTest discovery\n'
 # command, and it must exit 0.
 disc_found=0
 while IFS= read -r line; do
-  case "$(trim "$line")" in ''|'#'*) continue ;; esac
+  trim "$line" tline
+  case "$tline" in ''|'#'*) continue ;; esac
   case "$line" in *'|'*) ;; *) continue ;; esac
-  kind=$(trim "$(printf '%s' "$line" | cut -d'|' -f1)")
+  field 1 "$line" kind
   [ "$kind" = "discovery" ] || continue
-  id=$(trim  "$(printf '%s' "$line" | cut -d'|' -f2)")
-  cwd=$(trim "$(printf '%s' "$line" | cut -d'|' -f3)"); [ -z "$cwd" ] && cwd="."
-  cmd=$(trim "$(printf '%s' "$line" | cut -d'|' -f4-)")
+  field 2 "$line" id
+  field 3 "$line" cwd; [ -z "$cwd" ] && cwd="."
+  rest  4 "$line" cmd
   [ -n "$cmd" ] || continue
   disc_found=1
   if ( cd "$ROOT/$cwd" 2>/dev/null && eval "$cmd" ) >/dev/null 2>&1; then

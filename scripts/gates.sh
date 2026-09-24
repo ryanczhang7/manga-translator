@@ -68,7 +68,8 @@ export CLAUDE_PROJECT_DIR="$ROOT"
 [ -f "$CONF" ] || { printf 'error: missing %s\n' "$CONF" >&2; exit 1; }
 mkdir -p "$LOGDIR"
 
-BOOTSTRAPPED="$(grep -E '^BOOTSTRAPPED=' "$CONF" | head -1 | cut -d= -f2- | tr -d '[:space:]')"
+BOOTSTRAPPED="$(grep -E '^BOOTSTRAPPED=' "$CONF" | head -1)"
+BOOTSTRAPPED="${BOOTSTRAPPED#*=}"; BOOTSTRAPPED="${BOOTSTRAPPED//[[:space:]]/}"
 [ -z "$BOOTSTRAPPED" ] && BOOTSTRAPPED=no
 
 ONLY=""; REQUIRED_ONLY=0; LIST=0; AUDIT=0; STORY=""; FAST=0
@@ -86,7 +87,45 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-trim() { printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+# --- parsing project.conf without a process per field -----------------------
+# The manifest is ~600 lines and both loops below walk all of it, so whatever
+# runs per field runs ~1,500 times per invocation. It used to be a `sed` inside
+# a `$(...)` around a `cut` inside another: ~1,670 processes to print --list,
+# over a minute on a CI runner and several on Windows. Everything here is
+# parameter expansion and builtins, and assigns into a variable rather than
+# printing, because a `$(...)` is a fork even when its body is all builtins -
+# measured at ~27 ms each on Windows, which on its own is 40 s of --list.
+#
+# trim <string> [var]   <string> without leading or trailing [:space:] (tabs
+# and carriage returns included, not only spaces). Printed, or assigned to
+# <var> when one is named. Self-contained on purpose: the test suite evaluates
+# this definition on its own and compares it with the old sed form.
+trim() { local _t="$1"; _t="${_t#"${_t%%[![:space:]]*}"}"; _t="${_t%"${_t##*[![:space:]]}"}"; if [ $# -gt 1 ]; then printf -v "$2" '%s' "$_t"; else printf '%s' "$_t"; fi; }
+
+# from_field <n> <string> <var>   Field <n> of a `|`-separated string and
+# everything after it, the later `|`s INCLUDED, untrimmed: `cut -d'|' -f<n>-`.
+# `IFS='|' read` is not a substitute - it drops the delimiters it consumed, so a
+# command or regex containing `|` would be cut at its first one. Like cut, a
+# string with no `|` at all is returned whole, and one with fewer than <n>
+# fields gives ''.
+from_field() {
+  local _r="$2" _i=1
+  case "$_r" in
+    *'|'*)
+      while [ "$_i" -lt "$1" ]; do
+        case "$_r" in *'|'*) _r="${_r#*|}" ;; *) _r=""; break ;; esac
+        _i=$((_i+1))
+      done ;;
+  esac
+  printf -v "$3" '%s' "$_r"
+}
+# rest <n> <string> <var>    trimmed `cut -d'|' -f<n>-`: the value of a line
+#                            whose last field may itself contain `|`.
+# field <n> <string> <var>   trimmed `cut -d'|' -f<n>`: one field.
+# Both work on a whole manifest line and on a value already taken out of one
+# (the ci-factor split below).
+rest()  { local _v; from_field "$1" "$2" _v; trim "$_v" "$3"; }
+field() { local _v; from_field "$1" "$2" _v; trim "${_v%%|*}" "$3"; }
 
 TAB=$(printf '\t')
 ESC=$(printf '\033')
@@ -99,10 +138,11 @@ SKIPPEDWHEN=""
 GATE_REQ=""   # "<id><TAB>required|optional" per gate, after any story escalation
 while IFS= read -r line; do
   line="${line%%$'\r'}"
-  case "$(trim "$line")" in ''|'#'*) continue ;; esac
+  trim "$line" tline
+  case "$tline" in ''|'#'*) continue ;; esac
   case "$line" in *'|'*) ;; *) continue ;; esac
-  kind=$(trim "$(printf '%s' "$line" | cut -d'|' -f1)")
-  tid=$(trim "$(printf '%s' "$line" | cut -d'|' -f2)")
+  field 1 "$line" kind
+  field 2 "$line" tid
   # Every gate id, so that --audit can tell a `slow` line naming a real gate
   # from one naming a typo. That distinction matters more here than for the
   # other tables: a misspelt `evidence` id makes its gate report "no evidence
@@ -110,8 +150,8 @@ while IFS= read -r line; do
   # `slow` id is silent - the gate it meant to exclude simply stays in --fast.
   [ "$kind" = "gate" ] && { GATE_IDS="$GATE_IDS $tid"; continue; }
   case "$kind" in evidence|waiver|floor|slow|ci-factor|covers|blocked-when|skipped-when) ;; *) continue ;; esac
-  # -f3- so that a regex containing `|` (alternation) survives the split.
-  tval=$(trim "$(printf '%s' "$line" | cut -d'|' -f3-)")
+  # rest, not field, so that a regex containing `|` (alternation) survives the split.
+  rest 3 "$line" tval
   [ -n "$tid" ] || continue
   case "$kind" in
     evidence) EVIDENCE="$EVIDENCE$tid$TAB$tval
@@ -279,15 +319,16 @@ results=""
 
 while IFS= read -r line; do
   line="${line%%$'\r'}"
-  case "$(trim "$line")" in ''|'#'*) continue ;; esac
+  trim "$line" tline
+  case "$tline" in ''|'#'*) continue ;; esac
   case "$line" in *'|'*) ;; *) continue ;; esac
 
-  kind=$(trim "$(printf '%s' "$line" | cut -d'|' -f1)")
+  field 1 "$line" kind
   [ "$kind" = "gate" ] || continue
-  id=$(trim   "$(printf '%s' "$line" | cut -d'|' -f2)")
-  req=$(trim  "$(printf '%s' "$line" | cut -d'|' -f3)")
-  cwd=$(trim  "$(printf '%s' "$line" | cut -d'|' -f4)")
-  cmd=$(trim  "$(printf '%s' "$line" | cut -d'|' -f5-)")
+  field 2 "$line" id
+  field 3 "$line" req
+  field 4 "$line" cwd
+  rest  5 "$line" cmd
   [ -z "$cwd" ] && cwd="."
 
   # An escalation makes the gate required for everything below, and says so
@@ -388,11 +429,11 @@ while IFS= read -r line; do
   # so a story can spend a day optimising a test that was already fine.
   cifactor_broken=""
   if [ -n "$cifactor" ]; then
-    cif_n=$(trim "$(printf '%s' "$cifactor" | cut -d'|' -f1)")
-    # cut prints the whole field when the delimiter is absent, which would
-    # read a missing source as a source repeating the number.
+    field 1 "$cifactor" cif_n
+    # rest, like cut, returns the whole value when the delimiter is absent,
+    # which would read a missing source as a source repeating the number.
     case "$cifactor" in
-      *'|'*) cif_src=$(trim "$(printf '%s' "$cifactor" | cut -d'|' -f2-)") ;;
+      *'|'*) rest 2 "$cifactor" cif_src ;;
       *)     cif_src="" ;;
     esac
     case "$cif_n" in

@@ -1,0 +1,14 @@
+Test discovery
+  MISSING  core-tests   nothing discovered by: uv run pytest --collect-only -q tests/core | grep -qE "[1-9][0-9]* tests? collected"
+               tests under it would be committed and never run
+  MISSING  ui-tests     nothing discovered by: uv run pytest --collect-only -q tests/ui | grep -q "tests/ui/"
+               tests under it would be committed and never run
+  MISSING  cov-domain   nothing discovered by: uv run coverage report --include="src/mangatl/domain/*" | grep -qE "^src.mangatl.domain"
+               tests under it would be committed and never run
+  MISSING  ruff-sees-src nothing discovered by: uv run ruff check --no-cache --show-files . | grep -qE "src.mangatl.*[.]py"
+               tests under it would be committed and never run
+  MISSING  providers    nothing discovered by: uv run python -c "import onnxruntime as o; print(o.get_available_providers())" | grep -qE "CUDA|Dml|CPU"
+               tests under it would be committed and never run
+
+5 thing(s) missing.
+No docs/wiki/environment.md yet. Run /setup-environment to write one.

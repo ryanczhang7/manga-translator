@@ -203,3 +203,77 @@ assert_blocked() {
     esac
   fi
 }
+
+# --- the manifest parser (MT-040) ---------------------------------------------
+
+# MANIFEST_SNAPSHOT   A byte-for-byte copy of .claude/harness/project.conf as it
+# stood at 76ed934, the 629-line manifest MT-040's criteria are stated against.
+# A copy rather than the live file so that a later story editing project.conf
+# does not break a byte-identity test whose oracle was captured from this one.
+MANIFEST_FIXTURES="$TESTS_DIR/fixtures/manifest-parse"
+MANIFEST_SNAPSHOT="$MANIFEST_FIXTURES/project.conf"
+
+# The shipped trim() body before MT-040, as the ORACLE for trim equivalence and
+# as the needle AC-5 searches for. Read from a heredoc so no quoting is lost.
+TRIM_SED_BODY="$(cat <<'BODY'
+sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+BODY
+)"
+
+# extract_fn <script> <name>   The source text of a function as the script
+# defines it: from `<name>()` to the line where its braces balance. So a test
+# exercises the definition the script SHIPS, not a copy pasted into the test.
+extract_fn() {
+  awk -v n="$2" '
+    !on && $0 ~ ("^[[:space:]]*" n "[[:space:]]*[(][)]") { on = 1 }
+    on {
+      print
+      o = gsub(/\{/, "{"); c = gsub(/\}/, "}"); d += o - c
+      if (o + c > 0 && d <= 0) exit
+    }' "$1"
+}
+
+# trim_inputs <file>   AC-4's input set, one per line: every line of the
+# manifest snapshot, then the five edge cases AC-4 names, then a sixth for the
+# carriage return doctor.sh and task.sh rely on trim() to remove (neither
+# strips `\r` itself). Line numbers of the edge cases are fixed: 630..635.
+trim_inputs() {
+  { cat "$MANIFEST_SNAPSHOT"
+    printf '\n'                                   # 630 empty string
+    printf ' \t  \t \n'                           # 631 all whitespace
+    printf '   inner  spaces   survive   \n'      # 632 multi-space around inner spaces
+    printf '\ttab-padded value\t\t\n'             # 633 tab-padded
+    printf 'no-surrounding-space\n'               # 634 no surrounding space
+    printf ' crlf value \r\n'                     # 635 carriage return
+  } > "$1"
+}
+
+# trim_oracle <inputs> <out>   The shipped sed form, applied ONCE over the whole
+# file: sed is line-oriented, so this is the per-line trim of every input
+# without spawning one process per line.
+trim_oracle() { sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$1" > "$2"; }
+
+# apply_trim <script> <inputs> <out>   Every input through the trim() the
+# script defines, called the way its call sites call it: `$(trim "$x")`.
+apply_trim() {
+  local fn; fn="$(extract_fn "$1" trim)"
+  ( eval "$fn"
+    while IFS= read -r l || [ -n "$l" ]; do printf '%s\n' "$(trim "$l")"; done < "$2"
+  ) > "$3"
+}
+
+# disagreements <expected> <actual>   "<count>" then up to three
+# "line N: expected [..] got [..]" lines. A differing line count is itself a
+# disagreement on every missing line.
+disagreements() {
+  awk 'NR == FNR { e[FNR] = $0; ne = FNR; next }
+       { a[FNR] = $0; na = FNR }
+       END {
+         n = (ne > na ? ne : na); bad = 0; out = ""
+         for (i = 1; i <= n; i++) if (!(i in e) || !(i in a) || e[i] != a[i]) {
+           bad++
+           if (bad <= 3) out = out sprintf("line %d: expected [%s] got [%s]\n", i, e[i], a[i])
+         }
+         printf "%d\n%s", bad, out
+       }' "$1" "$2"
+}
