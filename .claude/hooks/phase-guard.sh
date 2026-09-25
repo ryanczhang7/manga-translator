@@ -137,7 +137,7 @@ case "$TOOL" in
     case "$PARSED" in
       *$'\n'*) CANDIDATES="$(
         printf '%s\n' "${PARSED#*$'\n'}" \
-          | tr -d '"'"'" | grep -vE '^\s*$|^-|\*|^/dev/' | sort -u
+          | sed 's/["'"'"']//g' | grep -vE '^\s*$|^-|\*|^/dev/' | sort -u
       )" ;;
     esac
     # AC-8. A write-capable command whose operands the guard cannot see -

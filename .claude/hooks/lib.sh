@@ -230,8 +230,7 @@ unmask_shell_quotes() {
 shell_assignments() {
   printf '%s' "$1" \
     | grep -oE '(^|[;&|]|[[:space:]])[A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|<>()]*' \
-    | sed -E 's/^[^A-Za-z_]+//' \
-    | tr -d '"'"'" \
+    | sed -E -e 's/^[^A-Za-z_]+//' -e 's/["'"'"']//g' \
     | awk -F= 'length($1) > 0 { print length($1) "\t" $0 }' \
     | sort -rn | cut -f2-
 }
@@ -263,8 +262,7 @@ resolve_vars() {
 mutate_targets() {
   printf '%s' "$1" \
     | grep -oE 'scripts[/\\]mutate\.sh[[:space:]]+[^[:space:]|&;<>()]+' \
-    | awk '{ print $NF }' \
-    | tr -d '"'"'"
+    | awk '{ f = $NF; gsub(/["'"'"']/, "", f); print f }'
 }
 
 # --- Write targets in a command string ---------------------------------------
@@ -542,12 +540,23 @@ write_candidates() {
 # greps the shipped scripts for it.
 lower() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
 
+# _to_slashes <text>   Sets __lib_fs to <text> with every backslash turned into
+# a forward slash and any trailing newlines dropped - exactly what
+# `$(printf '%s' "$1" | tr '\134' '/')` produced, without spawning tr (MT-041).
+# The pattern is spelled unquoted in an assignment, where `\\` is one literal
+# backslash on every bash from 2.x on; no quoting rule of any version is in
+# play. A variable, not a `$( )`, because the subshell is the cost being cut.
+_to_slashes() {
+  __lib_fs=${1//\\//}
+  while [[ "$__lib_fs" == *$'\n' ]]; do __lib_fs=${__lib_fs%$'\n'}; done
+}
+
 # to_rel <path>   Repo-relative, forward slashes. Empty output means "outside
 # this repository", and therefore not the harness's business.
 to_rel() {
   local p root lp lr base
-  p=$(printf '%s' "$1" | tr '\134' '/')
-  root=$(printf '%s' "$HARNESS_ROOT" | tr '\134' '/')
+  _to_slashes "$1"; p=$__lib_fs
+  _to_slashes "$HARNESS_ROOT"; root=$__lib_fs
   root="${root%/}"
   lp="$(lower "$p")"
   lr="$(lower "$root")"
@@ -613,7 +622,8 @@ path_is_implausible() {
 
 # path_is_absolute <path>   True for /x and for C:/x or C:\x.
 path_is_absolute() {
-  case "$(printf '%s' "$1" | tr '\134' '/')" in
+  _to_slashes "$1"
+  case "$__lib_fs" in
     /*|?:/*) return 0 ;;
     *) return 1 ;;
   esac
@@ -624,7 +634,7 @@ path_is_absolute() {
 # not a repo path and not the lock's business.
 normalize_rel() {
   local p seg out="" oldIFS
-  p="$(printf '%s' "$1" | tr '\134' '/')"
+  _to_slashes "$1"; p=$__lib_fs
   oldIFS="$IFS"; IFS='/'
   # shellcheck disable=SC2086
   set -- $p
@@ -665,7 +675,7 @@ command_cwd() {
   local masked="$1" tgt cur="" rel joined lp lr
   # A bare `cd` goes home. Nothing after it is a repo path.
   printf '%s\n' "$masked" | grep -qE '(^|[|&;(])[[:space:]]*cd[[:space:]]*($|[|&;)])' && return 1
-  lr="$(lower "$(printf '%s' "${HARNESS_ROOT%/}" | tr '\134' '/')")"
+  _to_slashes "${HARNESS_ROOT%/}"; lr="$(lower "$__lib_fs")"
   while IFS= read -r tgt; do
     [ -z "$tgt" ] && continue
     tgt="$(printf '%s' "$tgt" | unmask_shell_quotes)"
@@ -676,7 +686,7 @@ command_cwd() {
       *'$'*)   return 1 ;;   # a variable the guard cannot expand
     esac
     if path_is_absolute "$tgt"; then
-      lp="$(lower "$(printf '%s' "${tgt%/}" | tr '\134' '/')")"
+      _to_slashes "${tgt%/}"; lp="$(lower "$__lib_fs")"
       if [ "$lp" = "$lr" ]; then cur=""; continue; fi
       rel="$(to_rel "$tgt")"
       if [ -z "$rel" ]; then cur="OUTSIDE"; else cur="$rel"; fi
@@ -687,8 +697,8 @@ command_cwd() {
     cur="$joined"
   done <<< "$(printf '%s\n' "$masked" \
     | grep -oE '(^|[|&;(]|[[:space:]])cd[[:space:]]+[^|&;><[:space:]]+' \
-    | sed -E 's/.*[[:space:]]cd[[:space:]]+|^cd[[:space:]]+|.*[|&;(]cd[[:space:]]+//' \
-    | tr -d '"'"'")"
+    | sed -E -e 's/.*[[:space:]]cd[[:space:]]+|^cd[[:space:]]+|.*[|&;(]cd[[:space:]]+//' \
+             -e 's/["'"'"']//g')"
   [ "$cur" = "OUTSIDE" ] && return 1
   printf '%s' "$cur"
   return 0
@@ -753,11 +763,17 @@ classify() {
 # does not match the path `.vitest` unless that directory already exists, and
 # the case that matters - `rm -rf .vitest` - is exactly the one where the agent
 # may be naming a directory git has never seen.
+#
+# Both spellings go to ONE git process as argv (MT-041 AC-4): exit 0 when at
+# least one of them is ignored, 1 when neither, 128 on a fatal error, which is
+# read as "not ignored" exactly as the two-call form read it. Argv rather than
+# `--stdin`, because a path may contain a newline, and non-verbose output never
+# reports a negated match, so there is no output to parse. NOT `-q`: git
+# refuses `--quiet` with more than one path (exit 128), which would silently
+# answer "not ignored" for everything - hence the redirect instead.
 is_ignored() {
   [ -n "${1:-}" ] || return 1
-  git -C "$HARNESS_ROOT" check-ignore -q -- "$1"  2>/dev/null && return 0
-  git -C "$HARNESS_ROOT" check-ignore -q -- "$1/" 2>/dev/null && return 0
-  return 1
+  git -C "$HARNESS_ROOT" check-ignore -- "$1" "$1/" >/dev/null 2>&1
 }
 
 # classify_stdin   One repo-relative path per input line -> "<category>\t<path>"
@@ -1047,10 +1063,12 @@ phase_allows() {
   while IFS= read -r line; do
     line="${line%%$'\r'}"
     case "$line" in ''|'#'*) continue ;; esac
-    ph="$(printf '%s' "${line%%|*}" | tr -d '[:space:]')"
+    # Whitespace deleted by pattern substitution (bash 2+), not `tr -d`: no
+    # process per phases.conf row (MT-041).
+    ph=${line%%|*}; ph=${ph//[[:space:]]/}
     [ "$ph" = "$PHASE" ] || continue
     cats="${line#*|}"; cats="${cats%%|*}"
-    cats="$(printf '%s' "$cats" | tr -d '[:space:]')"
+    cats=${cats//[[:space:]]/}
     case ",$cats," in *",$want,"*) return 0 ;; esac
     return 1
   done < "$HARNESS_DIR/phases.conf"
@@ -1074,10 +1092,13 @@ phase_message() {
   while IFS= read -r line; do
     line="${line%%$'\r'}"
     case "$line" in ''|'#'*) continue ;; esac
-    ph="$(printf '%s' "${line%%|*}" | tr -d '[:space:]')"
+    ph=${line%%|*}; ph=${ph//[[:space:]]/}
     [ "$ph" = "$PHASE" ] || continue
     msg="${line#*|}"; msg="${msg#*|}"
-    printf '%s' "$(printf '%s' "$msg" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    # Trimmed in-process (bash 2+ expansions, no sed): leading, then trailing.
+    msg="${msg#"${msg%%[![:space:]]*}"}"
+    msg="${msg%"${msg##*[![:space:]]}"}"
+    printf '%s' "$msg"
     return
   done < "$HARNESS_DIR/phases.conf"
 }
@@ -1094,8 +1115,10 @@ json_escape() {
   # awk, not `${s//\\/\\\\}`: doubling a backslash by parameter expansion is
   # not reliable across bash versions, and this used to emit the backslash
   # unchanged - so a deny reason quoting a Windows path was not JSON.
-  printf '%s' "$1" | tr -d '\r' | awk 'BEGIN { ORS = "" }
-    { gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); gsub(/\t/, "\\t")
+  # The carriage-return deletion is the awk's first action rather than a
+  # `tr -d` stage in front of it: one process fewer on every denial (MT-041).
+  printf '%s' "$1" | awk 'BEGIN { ORS = "" }
+    { gsub(/\r/, ""); gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); gsub(/\t/, "\\t")
       if (NR > 1) printf "\\n"
       printf "%s", $0 }'
 }

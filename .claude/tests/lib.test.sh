@@ -489,4 +489,288 @@ assert_eq "nothing when mutate.sh is not involved" "" \
 assert_eq "only scripts/mutate.sh" "" \
   "$(mutate_targets "$(m "bash tools/mutate.sh src/main.ts 's/a/b/' -- true")")"
 
+# ===========================================================================
+# MT-041 - one guard invocation costs half the processes.
+#
+# A cost story: lib.sh is rewritten to spawn fewer processes and NO verdict may
+# move. So almost everything below PASSES ON ARRIVAL - it is written against
+# code that already works, and pins what the rewrite must preserve. Each block
+# says which C-5 mutation earned it; the output is in MT-041 `## Test plan`.
+# The two assertions that are RED ON ARRIVAL are the cost claims themselves:
+# the process-count instrument's reading of one classify call (AC-4).
+. "$TESTS_DIR/_spawns.sh"
+_t41="$(mktemp -d 2>/dev/null || mktemp -d -t mt041)"
+_root41="$HARNESS_ROOT"; _dir41="$HARNESS_DIR"
+FIX41="$(make_fixture)"
+FIX41BS="$(printf '%s' "$FIX41" | tr '/' '\134')"
+HARNESS_ROOT="$FIX41"; HARNESS_DIR="$FIX41/.claude/harness"
+
+# ---------------------------------------------------------------------------
+describe "MT-041 instrument: the spawn counter counts what it claims to"
+
+# The negative control for every "at most N" in AC-1 and AC-4. A counter that
+# sees nothing satisfies every upper bound; so this runs a snippet whose spawns
+# are known - one tr, one git, one lower() (itself a tr today, and possibly not
+# after C-4, so it is not asserted on), and builtins that must NOT count.
+spawn_trace_fn "$FIX41" "$_t41/ctl" 'tr a b </dev/null; printf x; git rev-parse --git-dir; true; [ 1 = 1 ]'
+_tally="$(spawn_tally "$_t41/ctl")"
+assert_eq "instrument: one tr of an unnamed form"  "1" "$(spawn_count "$_tally" 'tr:other*')"
+assert_eq "instrument: one git, keyed by subcommand" "1" "$(spawn_count "$_tally" 'git rev-parse')"
+assert_eq "instrument: builtins are not spawns"      "2" "$(spawn_count "$_tally" TOTAL)"
+
+# MT-041 R-1: xtrace spells an embedded single quote as '\'' - a backslash
+# OUTSIDE quotes. A parser that reads that escaped quote as opening a span ends
+# the word early, and the next word of the VALUE becomes a command name; on the
+# CI runner that counted `.gitignore` twice and AC-1 read 29 for a true 27. The
+# decoy is an executable on PATH in the tallying shell, so the old parser counts
+# it on every platform: this control is red there everywhere, not only where
+# some file in the repository happens to resolve.
+_bin41="$_t41/bin"; mkdir -p "$_bin41"
+printf '#!/bin/sh\nexit 0\n' > "$_bin41/mt041decoy"; chmod +x "$_bin41/mt041decoy"
+spawn_trace_fn "$FIX41" "$_t41/esc" "v=\"it's mt041decoy here\""
+_tally="$(PATH="$_bin41:$PATH" spawn_tally "$_t41/esc")"
+if PATH="$_bin41:$PATH" type -P mt041decoy >/dev/null 2>&1; then _ok "instrument R-1: the decoy resolves on PATH (control precondition)"
+else _bad "instrument R-1: the decoy resolves on PATH (control precondition)" "type -P mt041decoy failed"; fi
+assert_contains "instrument R-1: the trace spells the quote as '\\''" "'\''" "$(cat "$_t41/esc")"
+assert_eq "instrument R-1: a word after '\\'' inside a value is not a command" "0" \
+  "$(spawn_count "$_tally" mt041decoy)"
+assert_eq "instrument R-1: an assignment alone spawns nothing" "0" "$(spawn_count "$_tally" TOTAL)"
+
+# ---------------------------------------------------------------------------
+describe "MT-041 AC-5: classify's answers, and the order they are decided in"
+
+# READ OUT of MT-034 C-3's measured table (C-6: settled), not re-derived. The
+# eight rows, spelled plainly, are ALREADY asserted above and are not repeated:
+# dist ("a vendor directory the project also gitignores"), .vitest and
+# playwright-report ("classify: git decides what is generated"), src and
+# src/mangatl/ui (MT-034 AC-4), docs and tests (MT-034 AC-1/AC-3), fixtures
+# (MT-034 AC-5). What is new is the SPELLING check_path hands them over in.
+#
+# The eight, reached the way check_path reaches them: through to_rel, from an
+# absolute path spelled with BACKSLASHES (C-2: `${s//\\//}` done wrong returns
+# its input unchanged, and every absolute-path verdict on Windows moves). to_rel
+# has two branches, and both are taken: the root itself spelled with
+# backslashes, for all eight rows; and a drive-letter path matched on the
+# repository's folder name, for one row decided by a rule and one decided by
+# git - the branch does not depend on the category, and each classify call
+# costs seconds on Windows in a suite this story exists to make cheaper.
+_base41="${FIX41##*/}"
+for case in \
+  "dist=vendor" \
+  ".vitest=ignored" \
+  "playwright-report=ignored" \
+  "docs=docs" \
+  "tests=test" \
+  "src=source" \
+  'src\mangatl\ui=source' \
+  "fixtures=test" \
+  ; do
+  p="${case%%=*}"; want="${case#*=}"
+  assert_eq "AC-5: classify of the backslash-spelled root + \\$p" "$want" \
+    "$(classify "$(to_rel "$FIX41BS\\$p")")"
+done
+for case in "dist=vendor" ".vitest=ignored"; do
+  p="${case%%=*}"; want="${case#*=}"
+  assert_eq "AC-5: classify of C:\\elsewhere\\<repo>\\$p" "$want" \
+    "$(classify "$(to_rel "C:\\elsewhere\\$_base41\\$p")")"
+done
+
+# ---------------------------------------------------------------------------
+describe "MT-041 AC-4: is_ignored asks both spellings, and reads git's answer right"
+
+# A fixture whose .gitignore is built to tell a correct batched is_ignored from
+# the plausible wrong ones. None of these names matches a paths.conf rule, so
+# every one of them is decided by is_ignored (C-3's third step). Each line says
+# what today's per-path, two-call is_ignored answers - MEASURED at 30bdc9a, and
+# the answer the rewrite must keep.
+#
+#   slashonly/   `slashonly` is ignored ONLY as `slashonly/` - the directory rule
+#                does not match a bare name that is not on disk. C-5 probe 3.
+#   bareonly     `bareonly` is ignored ONLY bare: `!bareonly/` re-includes the
+#   !bareonly/   slashed spelling. The mirror image, so dropping EITHER spelling
+#                moves a verdict.
+#   *.tmp        `keep.tmp` MATCHES a pattern - the negation - and is NOT
+#   !keep.tmp    ignored. `check-ignore --verbose` prints a line for it anyway
+#                (`.gitignore:N:!keep.tmp<TAB>keep.tmp`), so a batched reader
+#                that takes "not ::" to mean "ignored" turns it `ignored`.
+#                Measured; see MT-041 `## Handoff`.
+#   café/        a non-ASCII name: without -z, --verbose C-quotes it in the
+#                output ("caf\303\251/"), so a reader that matches output lines
+#                back to input by PATH text instead of by position loses it.
+_ign41="$(make_fixture)"
+printf 'slashonly/\nbareonly\n!bareonly/\n*.tmp\n!keep.tmp\ncaf\303\251/\n' >> "$_ign41/.gitignore"
+printf 'x\n' > "$_ign41/tracked.tmp"
+git -C "$_ign41" add -f tracked.tmp >/dev/null 2>&1
+HARNESS_ROOT="$_ign41"; HARNESS_DIR="$_ign41/.claude/harness"
+
+for case in \
+  "slashonly=ignored" \
+  "bareonly=ignored" \
+  "keep.tmp=source" \
+  "x.tmp=ignored" \
+  "$(printf 'caf\303\251')=ignored" \
+  "spikes=source" \
+  ; do
+  assert_eq "AC-4: classify ${case%%=*}" "${case#*=}" "$(classify "${case%%=*}")"
+done
+
+# The contract is unchanged (C-7): one path in, an exit status out.
+if is_ignored slashonly; then _ok "AC-4: is_ignored slashonly succeeds"
+else _bad "AC-4: is_ignored slashonly succeeds" "exit status said not ignored"; fi
+if is_ignored keep.tmp; then _bad "AC-4: is_ignored keep.tmp fails" "a negated match was read as ignored"
+else _ok "AC-4: is_ignored keep.tmp fails"; fi
+if is_ignored ""; then _bad "AC-4: is_ignored of nothing fails" "an empty path was ignored"
+else _ok "AC-4: is_ignored of nothing fails"; fi
+
+# PINNED AS TODAY'S VERDICT, NOT ENDORSED. A TRACKED file matching an ignore
+# rule classifies `ignored`, because the SLASHED spelling `tracked.tmp/` is not
+# in the index and `*.tmp` matches it - although lib.sh's own comment says a
+# tracked file is never reported ignored. MT-041 forbids any verdict change
+# (Out of scope 2), so this is held where it is and reported to the
+# orchestrator as its own defect. A story that fixes it flips this line.
+assert_eq "AC-4: a tracked file matching an ignore rule keeps today's verdict" \
+  "ignored" "$(classify tracked.tmp)"
+
+# C-3: a path with a NEWLINE in it. `--stdin` without -z reads it as two paths.
+# Decided (C-3 as amended in MT-041 RED): a newline-bearing path goes through
+# the SAME single process as any other path - no fallback to two calls. The
+# count loop below enforces that half; these three enforce the answers, which
+# are today's per-path answers, measured. Each is a different way a line-split
+# batch lies:
+#   x<LF>.vitest   no rule matches the whole name; the line `.vitest` would.
+#   a.tmp<LF>b     no rule matches the whole name; the line `a.tmp` would.
+#   a<LF>b.tmp     `*.tmp` DOES match the whole name; the first line would not.
+assert_eq "AC-4: a newline-bearing path is judged whole (x<LF>.vitest)" \
+  "source"  "$(classify "$(printf 'x\n.vitest')")"
+assert_eq "AC-4: a newline-bearing path is judged whole (a.tmp<LF>b)" \
+  "source"  "$(classify "$(printf 'a.tmp\nb')")"
+assert_eq "AC-4: a newline-bearing path is judged whole (a<LF>b.tmp)" \
+  "ignored" "$(classify "$(printf 'a\nb.tmp')")"
+
+# THE COST CLAIM, RED ON ARRIVAL. One classify call that reaches is_ignored
+# spawns at most one `git check-ignore`, whichever spelling decides it.
+# Measured today: 2 for spikes, slashonly, keep.tmp and x<LF>.vitest - is_ignored
+# asks `<p>` then `<p>/` - and 1 for bareonly, which the first call decides.
+#
+# The newline-bearing path is in this loop ON PURPOSE: it is what makes C-3's
+# decision a test rather than a sentence. A two-call fallback for such a path
+# keeps the verdicts above but spends two processes here. One process that
+# carries both spellings - `check-ignore -- "$1" "$1/"` as argv (measured in
+# MT-041 RED: same answer as today on every case in this block), or `--stdin -z`
+# - spends one.
+for p in spikes slashonly bareonly keep.tmp "$(printf 'x\n.vitest')"; do
+  spawn_trace_fn "$_ign41" "$_t41/ci" "classify '$p' >/dev/null"
+  _tally="$(spawn_tally "$_t41/ci")"
+  _n="$(spawn_count "$_tally" 'git check-ignore')"
+  _lbl="${p//$'\n'/<LF>}"
+  if [ "$(spawn_traced_calls "$_t41/ci" is_ignored)" -lt 1 ]; then
+    _bad "AC-4: classify $_lbl reaches is_ignored (instrument control)" "the trace never called is_ignored"
+  elif [ "$_n" -le 1 ]; then
+    _ok "AC-4: classify $_lbl spawns at most one git check-ignore"
+  else
+    _bad "AC-4: classify $_lbl spawns at most one git check-ignore" "spawned $_n"
+  fi
+done
+
+HARNESS_ROOT="$FIX41"; HARNESS_DIR="$FIX41/.claude/harness"
+rm -rf "$_ign41"
+
+# ---------------------------------------------------------------------------
+describe "MT-041 C-2: the tr equivalences, on the inputs that tell them apart"
+
+# tr -d '[:space:]' -> ${s//[[:space:]]/}  (phase_allows, phase_message)
+#
+# [:space:] is six characters, not one. A phases.conf row padded with a TAB, a
+# vertical tab and a form feed is still the RED row. C-5 probe 1 narrows the
+# class to ' ', after which the phase name no longer matches, phase_allows falls
+# through to "unknown phase: don't block" - the lock off - and these go red.
+_ph41="$(mktemp -d 2>/dev/null || mktemp -d -t mt041ph)"   # phases.conf only; no repo needed
+mkdir -p "$_ph41/.claude/harness"
+printf 'IDLE | vendor,ignored,test,source,config,docs,harness | idle\n\tRED\t\v| vendor, ignored ,\ttest,\fdocs ,harness\t | tabbed red message\n' \
+  > "$_ph41/.claude/harness/phases.conf"
+_phase41="${PHASE:-}"; HARNESS_DIR="$_ph41/.claude/harness"; PHASE=RED
+if phase_allows source; then _bad "C-2: a TAB-padded RED row still forbids source" "allowed"
+else _ok "C-2: a TAB-padded RED row still forbids source"; fi
+if phase_allows test; then _ok "C-2: a category after a TAB is still permitted"
+else _bad "C-2: a category after a TAB is still permitted" "refused test"; fi
+if phase_allows docs; then _ok "C-2: a category after a form feed is still permitted"
+else _bad "C-2: a category after a form feed is still permitted" "refused docs"; fi
+assert_eq "C-2: phase_message finds a TAB-padded phase name" "tabbed red message" "$(phase_message)"
+PHASE="$_phase41"; HARNESS_DIR="$FIX41/.claude/harness"
+rm -rf "$_ph41"
+
+# tr '\134' '/' -> ${s//\\//}  (to_rel x2, path_is_absolute, normalize_rel,
+# command_cwd x2). Every site, with a backslash that has to become a slash.
+assert_eq "C-2: to_rel of a backslash-spelled absolute path" "src/main.ts" \
+  "$(to_rel "$FIX41BS\\src\\main.ts")"
+_r41="$HARNESS_ROOT"; HARNESS_ROOT="$FIX41BS"
+assert_eq "C-2: to_rel against a backslash-spelled HARNESS_ROOT" "src/main.ts" \
+  "$(to_rel "$FIX41/src/main.ts")"
+HARNESS_ROOT="$_r41"
+if path_is_absolute 'C:\Users\x'; then _ok "C-2: C:\\Users\\x is absolute"
+else _bad "C-2: C:\\Users\\x is absolute" "judged relative"; fi
+if path_is_absolute '\tmp\x'; then _ok "C-2: \\tmp\\x is absolute"
+else _bad "C-2: \\tmp\\x is absolute" "judged relative"; fi
+if path_is_absolute 'src\main.ts'; then _bad "C-2: src\\main.ts is relative" "judged absolute"
+else _ok "C-2: src\\main.ts is relative"; fi
+assert_eq "C-2: normalize_rel collapses a backslash-spelled .." "src/b.ts" \
+  "$(normalize_rel 'src\a\..\b.ts')"
+assert_eq "C-2: cd into a backslash-spelled subdirectory" "src" \
+  "$(command_cwd "$(m "cd \"$FIX41BS\\src\" && echo x > a.ts")")"
+assert_eq "C-2: cd into the repository root spelled with backslashes" "0:" \
+  "$(r="$(command_cwd "$(m "cd \"$FIX41BS\" && echo x > a.ts")")"; printf '%s:%s' "$?" "$r")"
+_r41="$HARNESS_ROOT"; HARNESS_ROOT="$FIX41BS"
+assert_eq "C-2: cd into the root, against a backslash-spelled HARNESS_ROOT" "0:" \
+  "$(r="$(command_cwd "$(m "cd \"$FIX41\" && echo x > a.ts")")"; printf '%s:%s' "$?" "$r")"
+HARNESS_ROOT="$_r41"
+
+# tr -d '"'"'" -> ${s//[\"\']/}  (shell_assignments, mutate_targets,
+# command_cwd). The delete set is BOTH quote characters - C-2 as amended at
+# PLANNED->RED. The single quote is the one a `${s//\"/}` rewrite keeps.
+assert_eq "C-2: a single-quoted value loses its quotes" "F=src/main.ts" \
+  "$(shell_assignments "$(m "F='src/main.ts'; rm \"\$F\"")")"
+assert_eq "C-2: both quote characters go, wherever they are" "A=xy" \
+  "$(shell_assignments "$(m "A=\"x'y\"; rm \"\$A\"")")"
+assert_eq "C-2: a single-quoted mutate.sh FILE argument" "src/main.ts" \
+  "$(mutate_targets "$(m "bash scripts/mutate.sh 'src/main.ts' 's/a/b/' -- true")")"
+assert_eq "C-2: cd into a single-quoted directory" "src" \
+  "$(command_cwd "$(m "cd 'src' && echo x > a.ts")")"
+assert_eq "C-2: cd into a double-quoted directory" "src" \
+  "$(command_cwd "$(m 'cd "src" && echo x > a.ts')")"
+
+# And what the quote deletion must NOT delete: a backslash. `${s//[\"\']/}`
+# puts escaped quotes inside a bracket expression inside a parameter expansion,
+# which is exactly where bash versions disagree about what a backslash means;
+# a bracket that also holds `\` strips every Windows path that passes through.
+# (command_cwd's case is the backslash-spelled `cd` above.)
+assert_eq "C-2: a backslash in an assigned value survives the quote deletion" 'F=C:\x\y.ts' \
+  "$(shell_assignments "$(m 'F="C:\x\y.ts"; rm "$F"')")"
+assert_eq "C-2: a backslash in a mutate.sh FILE argument survives the quote deletion" 'C:\r\src\a.ts' \
+  "$(mutate_targets "$(m "bash scripts/mutate.sh 'C:\r\src\a.ts' 's/a/b/' -- true")")"
+
+# ---------------------------------------------------------------------------
+describe "MT-041 AC-3: lower() still lowers, by a mechanism bash 3.2 has"
+
+# The grep above ("no \${var,,} or \${var^^}") is AC-3's static half. This is
+# its behavioural half: to_rel's comparison is case-insensitive, whatever
+# mechanism does it - tr, or C-4's saved-and-restored nocasematch.
+#
+# And the static half has a hole, found by C-5's AC-3 probe in MT-041 RED: its
+# pattern requires a NAME, so `${1,,}` - the spelling lower() itself would use,
+# `printf '%s' "${1,,}"` - matches nothing and the assertion stays green. This
+# one covers positional and special parameters, array elements, the
+# single-character forms, `~`, bash 5's `@L`/`@U`/`@u`, and the case-converting
+# attributes of declare/typeset/local. Zero hits in the tree at 30bdc9a.
+hits="$(grep -nE '\$\{([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*])(\[[^]]*\])?(,,?|\^\^?|~~?|@[LUu])\}' $shipped || true)"
+hits="$hits$(grep -nE '(declare|typeset|local)[[:space:]]+-[A-Za-z]*[lu]' $shipped || true)"
+assert_eq "AC-3: no bash 4+ case conversion of any parameter in shipped scripts" "" "$hits"
+assert_eq "AC-3: lower converts ASCII capitals" "c:/users/ryanc/x.ts" "$(lower 'C:/Users/RyanC/X.ts')"
+assert_eq "AC-3: to_rel places a path whose root is spelled in capitals" "src/main.ts" \
+  "$(to_rel "$(printf '%s' "$FIX41" | tr 'a-z' 'A-Z')/src/main.ts")"
+assert_eq "AC-3: to_rel keeps the relative part's own case" "src/Main.TS" \
+  "$(to_rel "$(printf '%s' "$FIX41" | tr 'a-z' 'A-Z')/src/Main.TS")"
+
+HARNESS_ROOT="$_root41"; HARNESS_DIR="$_dir41"
+rm -rf "$FIX41" "$_t41"
+
 summary "lib"
