@@ -81,6 +81,10 @@ _spawn_commands() {
           if (i > n) return 0
           i++; continue
         }
+        # A backslash OUTSIDE quotes escapes the next character. xtrace spells
+        # an embedded single quote as '\'' - without this, that escaped quote
+        # opened a span and the word after it became a "command" (MT-041 R-1).
+        if (c == "\\") { i += 2; continue }
         i++
       }
       return 1

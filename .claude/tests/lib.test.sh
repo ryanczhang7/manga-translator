@@ -518,6 +518,24 @@ assert_eq "instrument: one tr of an unnamed form"  "1" "$(spawn_count "$_tally" 
 assert_eq "instrument: one git, keyed by subcommand" "1" "$(spawn_count "$_tally" 'git rev-parse')"
 assert_eq "instrument: builtins are not spawns"      "2" "$(spawn_count "$_tally" TOTAL)"
 
+# MT-041 R-1: xtrace spells an embedded single quote as '\'' - a backslash
+# OUTSIDE quotes. A parser that reads that escaped quote as opening a span ends
+# the word early, and the next word of the VALUE becomes a command name; on the
+# CI runner that counted `.gitignore` twice and AC-1 read 29 for a true 27. The
+# decoy is an executable on PATH in the tallying shell, so the old parser counts
+# it on every platform: this control is red there everywhere, not only where
+# some file in the repository happens to resolve.
+_bin41="$_t41/bin"; mkdir -p "$_bin41"
+printf '#!/bin/sh\nexit 0\n' > "$_bin41/mt041decoy"; chmod +x "$_bin41/mt041decoy"
+spawn_trace_fn "$FIX41" "$_t41/esc" "v=\"it's mt041decoy here\""
+_tally="$(PATH="$_bin41:$PATH" spawn_tally "$_t41/esc")"
+if PATH="$_bin41:$PATH" type -P mt041decoy >/dev/null 2>&1; then _ok "instrument R-1: the decoy resolves on PATH (control precondition)"
+else _bad "instrument R-1: the decoy resolves on PATH (control precondition)" "type -P mt041decoy failed"; fi
+assert_contains "instrument R-1: the trace spells the quote as '\\''" "'\''" "$(cat "$_t41/esc")"
+assert_eq "instrument R-1: a word after '\\'' inside a value is not a command" "0" \
+  "$(spawn_count "$_tally" mt041decoy)"
+assert_eq "instrument R-1: an assignment alone spawns nothing" "0" "$(spawn_count "$_tally" TOTAL)"
+
 # ---------------------------------------------------------------------------
 describe "MT-041 AC-5: classify's answers, and the order they are decided in"
 
