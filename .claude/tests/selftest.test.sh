@@ -426,4 +426,498 @@ assert_eq "profiles is floored at its 44 executed assertions, not its 1 call sit
 assert_eq "lib is floored at its 148 executed assertions, not its 57 call sites" \
   148 "$(floor_of lib)"
 
+# ===========================================================================
+# MT-042  the runner runs its suites CONCURRENTLY
+# ===========================================================================
+#
+# Everything below runs the fixture's copy of scripts/selftest.sh over PROBE
+# suites: synthetic suites that sleep, print numbered lines while they sleep,
+# and record what they observed into a marker directory ($MARKS) outside the
+# fixture's .claude/tests. The markers are the structural evidence - which
+# suites ran, how many were alive at once, which ones a suite saw beside it -
+# so no assertion here is a wall-clock threshold. Timing only ever makes the
+# evidence STRONGER (a slower machine overlaps more), never flips a verdict.
+#
+# The contract these pin is MT-042 C-2 and C-3 as amended in RED:
+#   SELFTEST_JOBS         the job bound; unset or empty means 4; anything that
+#                         is not a positive integer is refused, exit 1, before
+#                         any suite runs.
+#   SERIAL_SUITES=""      a line of scripts/selftest.sh, space-separated suite
+#                         names; a suite named there runs with no other suite
+#                         alive. Ships empty.
+#   .claude/state/selftest/<name>.out
+#                         each suite's output buffer, under the script's $ROOT,
+#                         created if absent, no file left behind, pass or fail.
+
+# The outer runner may have been started with a job bound of its own; the
+# nested fixture runs below must see only the one each case sets.
+unset SELFTEST_JOBS
+
+MARKS="$FIX/marks"
+cp "$FIX/scripts/selftest.sh" "$FIX/selftest.sh.as-copied"
+restore_runner() { cp "$FIX/selftest.sh.as-copied" "$FIX/scripts/selftest.sh"; }
+reset_marks() { rm -rf "$MARKS"; mkdir -p "$MARKS"; }
+
+# probe_suite <name> <asserts> <steps> [pass|fail|silent]
+#   A suite that, for each of <steps> steps, prints `<name> line <i>` and then
+#   sleeps 0.3 s and counts the `running.*` markers alive. It records:
+#     ran.<name>       it ran at all
+#     buffered.<name>  its output buffer existed when it started (C-2)
+#     peak.<name>      the most suites it saw alive at once, itself included
+#     saw.<name>       every other suite it saw alive
+#     verbose.<name>   VERBOSE reached it
+#   Then it executes <asserts> passing assertions from ONE call site (MT-039's
+#   shape), and - by mode - one failing assertion plus a stderr line, or no
+#   summary line at all. Counting is pure bash: a fork per sample would cost
+#   ~150 ms on Windows and blur the thing being sampled.
+probe_suite() {
+  local mode="${4:-pass}"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '. "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"\n'
+    printf "N='%s'; M='%s'; STEPS=%d; ASSERTS=%d\n" "$1" "$MARKS" "$3" "$2"
+    cat <<'BODY'
+: > "$M/running.$N"; : > "$M/ran.$N"
+[ -f "${BASH_SOURCE[0]%/*}/../state/selftest/$N.out" ] && : > "$M/buffered.$N"
+[ -n "${VERBOSE:-}" ] && : > "$M/verbose.$N"
+peak=1; saw=""; i=1
+while [ "$i" -le "$STEPS" ]; do
+  printf '%s line %d\n' "$N" "$i"
+  sleep 0.3
+  c=0
+  for f in "$M"/running.*; do
+    [ -e "$f" ] || continue
+    c=$((c+1)); o="${f##*/running.}"
+    [ "$o" = "$N" ] && continue
+    case " $saw " in *" $o "*) ;; *) saw="$saw $o" ;; esac
+  done
+  [ "$c" -gt "$peak" ] && peak=$c
+  i=$((i+1))
+done
+printf '%s\n' "$peak" > "$M/peak.$N"
+printf '%s\n' "${saw# }" > "$M/saw.$N"
+rm -f "$M/running.$N"
+j=0
+while [ "$j" -lt "$ASSERTS" ]; do assert_eq "$N case $j" x x; j=$((j+1)); done
+BODY
+    case "$mode" in
+      fail)
+        printf 'printf "%%s-stderr\\n" "$N" >&2\n'
+        printf 'assert_eq "$N is the one that is wrong" want got\n'
+        printf 'summary "$N"\n' ;;
+      silent)
+        printf 'exit 0\n' ;;
+      *)
+        printf 'summary "$N"\n' ;;
+    esac
+  } > "$FIX/.claude/tests/$1.test.sh"
+}
+
+# peak_of <names...>   The highest concurrency any of the named suites saw.
+peak_of() {
+  local m=0 n v
+  for n in "$@"; do
+    v=""; [ -f "$MARKS/peak.$n" ] && read -r v < "$MARKS/peak.$n"
+    [ -n "$v" ] && [ "$v" -gt "$m" ] && m=$v
+  done
+  printf '%s' "$m"
+}
+
+# ran_list <names...>   Which of the named suites left a ran.* marker.
+ran_list() {
+  local n r=""
+  for n in "$@"; do [ -e "$MARKS/ran.$n" ] && r="$r $n"; done
+  printf '%s' "${r# }"
+}
+
+# transcript <output>   Every `=== <name> ===` header as `H <name>` and every
+# probe line as `<name> <i>`, in the order printed. Two suites interleaved, a
+# line under the wrong header, or suites out of glob order all change it.
+transcript() {
+  printf '%s\n' "$1" | awk '
+    /^=== [^ ]+ ===$/        { print "H " $2; next }
+    /^[a-z]+ line [0-9]+$/   { print $1 " " $3 }'
+}
+
+# expect_transcript <name>:<steps> ...   The transcript of those suites run in
+# that order, each contiguous.
+expect_transcript() {
+  local spec n s i
+  for spec in "$@"; do
+    n="${spec%%:*}"; s="${spec#*:}"
+    printf 'H %s\n' "$n"
+    i=1; while [ "$i" -le "$s" ]; do printf '%s %d\n' "$n" "$i"; i=$((i+1)); done
+  done
+}
+
+# block <name>   The lines under suite <name>'s header, up to the next header.
+block() {
+  printf '%s\n' "$out" | awk -v h="=== $1 ===" '
+    $0 == h { on = 1; next } /^=== [^ ]+ ===$/ { on = 0 } on'
+}
+
+headers() { printf '%s\n' "$out" | grep -E '^=== [^ ]+ ===$'; }
+last_line() { printf '%s\n' "$out" | awk 'NF { l = $0 } END { print l }'; }
+leftover_buffers() {
+  [ -d "$FIX/.claude/state/selftest" ] || return 0
+  find "$FIX/.claude/state/selftest" -type f | sed "s|^$FIX/||"
+}
+
+# ---------------------------------------------------------------------------
+describe "MT-042 controls  the instruments below measure what they claim to"
+
+# The concurrency probe, driven WITHOUT the runner: two probe suites started
+# side by side by hand must see each other, and one alone must see only itself.
+# Without this pair a peak of 1 could mean "the runner is serial" or "the probe
+# cannot count", and every concurrency verdict below would be ambiguous.
+reset_suites; reset_marks
+probe_suite alpha 1 4
+probe_suite bravo 1 4
+( cd "$FIX" && { bash .claude/tests/alpha.test.sh >/dev/null 2>&1 &
+                 bash .claude/tests/bravo.test.sh >/dev/null 2>&1 & wait; } )
+assert_eq "two probe suites started side by side see a peak of 2" 2 "$(peak_of alpha bravo)"
+assert_eq "and each names the other" "bravo alpha" \
+  "$(cat "$MARKS/saw.alpha") $(cat "$MARKS/saw.bravo")"
+reset_marks
+( cd "$FIX" && bash .claude/tests/alpha.test.sh >/dev/null 2>&1 )
+assert_eq "one probe suite alone sees a peak of 1" 1 "$(peak_of alpha)"
+assert_eq "and sees nobody beside it" "" "$(cat "$MARKS/saw.alpha")"
+
+# The transcript instrument, on text: interleaving and misordering must both
+# change it, or the AC-4 comparison below proves nothing.
+good="$(printf '\n=== aa ===\naa line 1\naa line 2\n\n=== bb ===\nbb line 1\n')"
+mixed="$(printf '\n=== aa ===\naa line 1\nbb line 1\naa line 2\n\n=== bb ===\n')"
+swapped="$(printf '\n=== bb ===\nbb line 1\n\n=== aa ===\naa line 1\naa line 2\n')"
+want="$(expect_transcript aa:2 bb:1)"
+assert_eq "the transcript of contiguous, ordered output is the expected one" \
+  "$want" "$(transcript "$good")"
+assert_not_contains "an interleaved line changes the transcript" \
+  "$want" "$(transcript "$mixed")"
+assert_not_contains "and so does a swapped suite order" \
+  "$want" "$(transcript "$swapped")"
+
+# ---------------------------------------------------------------------------
+describe "MT-042 AC-2  an early suite that fails FIRST still fails the whole run"
+
+# The classic bug, in the shape that exposes it: the failing suite is first in
+# glob order and finishes first, and every suite after it passes and runs
+# longer. A runner that reports the last job's status, or reads a bare
+# `wait`'s $?, exits 0 here.
+reset_suites; reset_marks
+probe_suite alpha 2 0 fail
+probe_suite bravo 3 3
+probe_suite charlie 4 5
+floors <<'FLOORS'
+floor | alpha   | 2
+floor | bravo   | 3
+floor | charlie | 4
+FLOORS
+selftest
+assert_eq "the run exits non-zero" 1 "$RC"
+assert_eq "and its last line is the shipped FAILED count" \
+  "1 of 3 harness suite(s) FAILED." "$(last_line)"
+a="$(block alpha)"
+assert_contains "the failing suite's failure is shown under its own header" \
+  "FAIL alpha is the one that is wrong" "$a"
+assert_contains "with the detail under it" "expected: want" "$a"
+assert_contains "and its stderr too, in full" "alpha-stderr" "$a"
+assert_contains "and its own summary line" "alpha: 2 passed, 1 failed" "$a"
+assert_not_contains "the run does not also claim success" "harness suite(s) passed." "$out"
+
+# Two failures, not adjacent, both before a passing suite: the count must be 2
+# of 5, not 1 (a status overwritten by the next job) and not 0.
+reset_suites; reset_marks
+probe_suite alpha   1 3
+probe_suite bravo   1 0 fail
+probe_suite charlie 1 3
+probe_suite delta   1 1 fail
+probe_suite echo    1 2
+floors <<'FLOORS'
+floor | alpha   | 1
+floor | bravo   | 1
+floor | charlie | 1
+floor | delta   | 1
+floor | echo    | 1
+FLOORS
+selftest
+assert_eq "two non-adjacent failures exit non-zero" 1 "$RC"
+assert_eq "and are counted as two of five" \
+  "2 of 5 harness suite(s) FAILED." "$(last_line)"
+
+# ---------------------------------------------------------------------------
+describe "MT-042 AC-3  the interface is unchanged"
+
+# Exactly one suite: one header, and the markers prove the others never ran -
+# not merely that their output was not printed.
+reset_suites; reset_marks
+probe_suite alpha   1 0
+probe_suite bravo   1 0
+probe_suite charlie 1 0
+floors <<'FLOORS'
+floor | alpha   | 1
+floor | bravo   | 1
+floor | charlie | 1
+FLOORS
+selftest bravo
+assert_eq "a named suite runs and passes" 0 "$RC"
+assert_eq "exactly one header is printed, and it is that suite's" "=== bravo ===" "$(headers)"
+assert_eq "and no other suite ran at all" "bravo" "$(ran_list alpha bravo charlie)"
+assert_eq "and the run reports one suite passed" "1 harness suite(s) passed." "$(last_line)"
+
+# No such suite: the shipped message, on stderr, exit 1, nothing run.
+reset_marks
+err="$( cd "$FIX" && bash scripts/selftest.sh nosuchsuite 2>&1 >/dev/null )"; rc=$?
+assert_eq "an unknown suite exits 1" 1 "$rc"
+assert_eq "with the shipped message, on stderr" \
+  "No suites matched 'nosuchsuite'. Looked in .claude/tests/*.test.sh" "$err"
+assert_eq "and runs nothing" "" "$(ran_list alpha bravo charlie)"
+
+# VERBOSE reaches every suite on a FULL run - the concurrent path - and its
+# absence reaches them too: the negative control, so a probe that always writes
+# the marker cannot pass this.
+reset_marks
+VERBOSE=1 selftest
+assert_eq "a full VERBOSE run exits 0" 0 "$RC"
+assert_eq "VERBOSE reached every suite" "alpha bravo charlie" \
+  "$(for n in alpha bravo charlie; do [ -e "$MARKS/verbose.$n" ] && printf '%s ' "$n"; done | sed 's/ $//')"
+assert_contains "and every suite names its passing assertions" "ok   alpha case 0" "$(block alpha)"
+assert_contains "under its own header" "ok   charlie case 0" "$(block charlie)"
+assert_eq "a full passing run ends with the shipped passed line" \
+  "3 harness suite(s) passed." "$(last_line)"
+reset_marks
+VERBOSE= selftest
+assert_eq "without VERBOSE no suite sees it" "" \
+  "$(for n in alpha bravo charlie; do [ -e "$MARKS/verbose.$n" ] && printf '%s ' "$n"; done)"
+assert_not_contains "and no passing assertion is named" "ok   alpha case 0" "$out"
+
+# ---------------------------------------------------------------------------
+describe "MT-042 AC-4  suites print contiguously, in glob order, whatever order they finish in"
+
+# alpha is first in the glob and takes longest; charlie is last and finishes
+# first. Each prints numbered lines WHILE the others are running, so a runner
+# that streams interleaves them and a runner that prints on completion prints
+# charlie first. Both change the transcript.
+reset_suites; reset_marks
+probe_suite alpha   3 5
+probe_suite bravo   5 2
+probe_suite charlie 8 1
+floors <<'FLOORS'
+floor | alpha   | 3
+floor | bravo   | 4
+floor | charlie | 7
+FLOORS
+selftest
+assert_eq "the run passes" 0 "$RC"
+assert_eq "each suite's lines sit contiguously under its own header, in glob order" \
+  "$(expect_transcript alpha:5 bravo:2 charlie:1)" "$(transcript "$out")"
+# AC-6 rides on the same run: distinct counts and floors per suite, so a count
+# read from the wrong buffer changes a total.
+assert_contains "and every count was read from its own suite" \
+  "assertion floors: all 3 suite(s) met their declared floor (16 assertions executed, 14 declared)." "$out"
+
+# ---------------------------------------------------------------------------
+describe "MT-042 AC-6  each suite's floor is read from its own output"
+
+# bravo is below its floor and finishes first; alpha and charlie are above
+# theirs and finish later. Exactly one shortfall line, naming bravo, with
+# bravo's numbers.
+reset_suites; reset_marks
+probe_suite alpha   5 5
+probe_suite bravo   4 0
+probe_suite charlie 9 2
+floors <<'FLOORS'
+floor | alpha   | 3
+floor | bravo   | 6
+floor | charlie | 8
+FLOORS
+selftest
+assert_eq "a suite below its floor fails the run beside passing neighbours" 1 "$RC"
+assert_eq "exactly one shortfall is reported, and it is bravo's, with bravo's numbers" \
+  "FAIL bravo  did 4 units of work, below the floor of 6 in .claude/tests/floors.conf" \
+  "$(printf '%s\n' "$out" | grep -F 'below the floor')"
+assert_contains "the floors line counts the other two as met" \
+  "assertion floors: 2 of 3 suite(s) met their declared floor." "$out"
+assert_eq "and the run ends with one failed suite" \
+  "1 of 3 harness suite(s) FAILED." "$(last_line)"
+
+# A suite with no summary line, between two slower passing ones.
+reset_suites; reset_marks
+probe_suite alpha  2 4
+probe_suite bravo  3 0 silent
+probe_suite charlie 2 3
+floors <<'FLOORS'
+floor | alpha   | 2
+floor | bravo   | 7
+floor | charlie | 2
+FLOORS
+selftest
+assert_eq "a silent suite fails the run under concurrency too" 1 "$RC"
+assert_eq "and it alone is named as having printed no summary" \
+  "FAIL bravo  printed no summary line, so its floor of 7 could not be checked" \
+  "$(printf '%s\n' "$out" | grep -F 'printed no summary line')"
+assert_eq "the run ends with one failed suite" \
+  "1 of 3 harness suite(s) FAILED." "$(last_line)"
+
+# ---------------------------------------------------------------------------
+describe "MT-042 C-2  suites actually run concurrently, and never more than the bound"
+
+# Four suites, a bound of two. The peak must be EXACTLY two: above it is an
+# unbounded runner, below it is a serial one. This is the fixture-level proxy
+# for AC-1, which cannot hold unless this does.
+reset_suites; reset_marks
+for n in alpha bravo charlie delta; do probe_suite "$n" 1 3; done
+floors <<'FLOORS'
+floor | alpha   | 1
+floor | bravo   | 1
+floor | charlie | 1
+floor | delta   | 1
+FLOORS
+SELFTEST_JOBS=2 selftest
+assert_eq "SELFTEST_JOBS=2 passes" 0 "$RC"
+assert_eq "and runs exactly two suites at a time" 2 "$(peak_of alpha bravo charlie delta)"
+
+# The default bound is 4: five suites, and the peak is 3 or 4 - more than a
+# bound of 2 could produce, and never the 5 an nproc- or unbounded runner would.
+reset_suites; reset_marks
+for n in alpha bravo charlie delta echo; do probe_suite "$n" 1 4; done
+floors <<'FLOORS'
+floor | alpha   | 1
+floor | bravo   | 1
+floor | charlie | 1
+floor | delta   | 1
+floor | echo    | 1
+FLOORS
+selftest
+assert_eq "the default run passes" 0 "$RC"
+p="$(peak_of alpha bravo charlie delta echo)"
+if [ "$p" -ge 3 ] && [ "$p" -le 4 ]; then
+  _ok "with no SELFTEST_JOBS, at least 3 and at most 4 suites run at once"
+else
+  _bad "with no SELFTEST_JOBS, at least 3 and at most 4 suites run at once" "peak observed: $p"
+fi
+
+# SELFTEST_JOBS=1 is the serial runner, and the negative control for the peak
+# counter under the runner: it must not over-count.
+reset_suites; reset_marks
+for n in alpha bravo charlie; do probe_suite "$n" 1 3; done
+floors <<'FLOORS'
+floor | alpha   | 1
+floor | bravo   | 1
+floor | charlie | 1
+FLOORS
+SELFTEST_JOBS=1 selftest
+assert_eq "SELFTEST_JOBS=1 passes" 0 "$RC"
+assert_eq "and runs one suite at a time" 1 "$(peak_of alpha bravo charlie)"
+
+# A bound of zero would never start anything; a word is a typo. Both are
+# refused before any suite runs, never read as "the default". The suites take
+# no steps: a runner that ignores the bound should not cost seconds to catch.
+for n in alpha bravo charlie; do probe_suite "$n" 1 0; done
+for bad in 0 lots; do
+  reset_marks
+  SELFTEST_JOBS="$bad" selftest
+  assert_eq "SELFTEST_JOBS=$bad is refused with exit 1" 1 "$RC"
+  assert_contains "and the refusal names the variable" "SELFTEST_JOBS" "$out"
+  assert_eq "and no suite ran" "" "$(ran_list alpha bravo charlie)"
+done
+
+# ---------------------------------------------------------------------------
+describe "MT-042 C-2  output buffers live under the script's own .claude/state, and are cleaned up"
+
+# Run from a SUBDIRECTORY of the fixture with no .claude/state at all: a
+# buffer resolved from $PWD lands in src/.claude, and one that assumes the
+# directory exists fails to write.
+reset_suites; reset_marks
+probe_suite alpha 1 1
+probe_suite bravo 1 1
+floors <<'FLOORS'
+floor | alpha | 1
+floor | bravo | 1
+FLOORS
+rm -rf "$FIX/.claude/state" "$FIX/src/.claude"
+out="$( cd "$FIX/src" && bash ../scripts/selftest.sh 2>&1 )"; RC=$?
+assert_eq "a run from a subdirectory, with no state directory, passes" 0 "$RC"
+assert_eq "each suite's output went to .claude/state/selftest/<name>.out under the script's root" \
+  "alpha bravo" "$(for n in alpha bravo; do [ -e "$MARKS/buffered.$n" ] && printf '%s ' "$n"; done | sed 's/ $//')"
+assert_eq "nothing was written relative to the working directory" "" \
+  "$( [ -e "$FIX/src/.claude" ] && echo "src/.claude exists" )"
+assert_eq "and no buffer outlives a passing run" "" "$(leftover_buffers)"
+
+reset_marks
+probe_suite bravo 1 1 fail
+selftest
+assert_eq "a failing run fails" 1 "$RC"
+assert_eq "and still used the buffers" "alpha bravo" \
+  "$(for n in alpha bravo; do [ -e "$MARKS/buffered.$n" ] && printf '%s ' "$n"; done | sed 's/ $//')"
+assert_eq "and no buffer outlives a failing run either" "" "$(leftover_buffers)"
+mkdir -p "$FIX/.claude/state"
+
+# ---------------------------------------------------------------------------
+describe "MT-042 C-2  the runner stays within bash 3.2"
+
+# macOS ships bash 3.2.57. Job control is where bash 4+ features are most
+# tempting: `wait -n` (4.3), `wait -p` (5.1), associative arrays, mapfile.
+# Read from the code, because nothing here can run the other bash. Comments may
+# mention them; code may not.
+bash4() {
+  grep -nE '(wait[[:space:]]+-[np]|(declare|local|typeset)[[:space:]]+-[A-Za-z]*A|\bmapfile\b|\breadarray\b|\bcoproc\b|BASHPID|EPOCHREALTIME|EPOCHSECONDS)' "$1" \
+    | grep -vE '^[0-9]+:[[:space:]]*#' || true
+}
+printf '# wait -n is bash 4.3\nwait -n\ndeclare -A seen\n' > "$FIX/bash4-sample.sh"
+assert_eq "control: the check finds bash-4 job control in code, not in comments" \
+  "2:wait -n
+3:declare -A seen" "$(bash4 "$FIX/bash4-sample.sh")"
+assert_eq "scripts/selftest.sh uses no bash-4 feature" "" "$(bash4 "$REPO_ROOT/scripts/selftest.sh")"
+
+# ---------------------------------------------------------------------------
+describe "MT-042 C-3  the serial escape hatch ships, empty, and works"
+
+assert_eq "scripts/selftest.sh carries the list, and it ships empty" \
+  'SERIAL_SUITES=""' "$(grep -E '^SERIAL_SUITES=' "$REPO_ROOT/scripts/selftest.sh")"
+
+# Pin bravo and delta in the fixture's copy. Six suites, a bound of 4: the
+# unpinned ones must overlap each other (or the runner is merely serial and the
+# rest proves nothing), and neither pinned suite may see anyone beside it, nor
+# be seen. delta is also below its floor: a pinned suite's floor is still read.
+reset_suites; reset_marks
+for n in alpha bravo charlie delta echo foxtrot; do probe_suite "$n" 2 3; done
+probe_suite delta 1 3
+floors <<'FLOORS'
+floor | alpha   | 2
+floor | bravo   | 2
+floor | charlie | 2
+floor | delta   | 2
+floor | echo    | 2
+floor | foxtrot | 2
+FLOORS
+sed 's/^SERIAL_SUITES=""$/SERIAL_SUITES="bravo delta"/' "$FIX/scripts/selftest.sh" > "$FIX/selftest.sh.pinned"
+cp "$FIX/selftest.sh.pinned" "$FIX/scripts/selftest.sh"
+assert_eq "the fixture's runner now pins bravo and delta" \
+  'SERIAL_SUITES="bravo delta"' "$(grep -E '^SERIAL_SUITES=' "$FIX/scripts/selftest.sh")"
+SELFTEST_JOBS=4 selftest
+restore_runner
+assert_eq "the pinned run fails, because delta is below its floor" 1 "$RC"
+assert_eq "and delta, pinned, is the suite named short" \
+  "FAIL delta  did 1 units of work, below the floor of 2 in .claude/tests/floors.conf" \
+  "$(printf '%s\n' "$out" | grep -F 'below the floor')"
+p="$(peak_of alpha charlie echo foxtrot)"
+if [ "$p" -ge 2 ]; then _ok "the unpinned suites still ran concurrently"
+else _bad "the unpinned suites still ran concurrently" "peak observed among them: $p"; fi
+assert_eq "bravo, pinned, saw no other suite alive" "" "$(cat "$MARKS/saw.bravo" 2>/dev/null)"
+assert_eq "delta, pinned, saw no other suite alive" "" "$(cat "$MARKS/saw.delta" 2>/dev/null)"
+seen=""
+for n in alpha charlie echo foxtrot; do
+  case " $(cat "$MARKS/saw.$n" 2>/dev/null) " in
+    *" bravo "*|*" delta "*) seen="$seen $n" ;;
+  esac
+done
+assert_eq "and no unpinned suite saw a pinned one" "" "$seen"
+assert_eq "pinned suites still print in glob order" \
+  "=== alpha ===
+=== bravo ===
+=== charlie ===
+=== delta ===
+=== echo ===
+=== foxtrot ===" "$(headers)"
+
 summary "selftest"
