@@ -19,7 +19,7 @@
 # exist: the default sheet stays static and committed, and the HC sheet is
 # composed when the app starts. tokens.md §12, high-contrast.md §2.
 #
-# Token name grammar: ^[a-z][a-z0-9]*(\.[a-z0-9][a-z0-9-]*)*$
+# Token name grammar: ^[a-z][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$
 # Python constant name: dotted path uppercased, "." and "-" -> "_".
 #   color.text.on-accent -> COLOR_TEXT_ON_ACCENT
 #
