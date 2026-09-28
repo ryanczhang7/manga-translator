@@ -60,8 +60,12 @@ import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from mangatl.domain.glossary import PromptContext
 
 from mangatl.domain.budget import (
     BOOTSTRAP_PAGE_ESTIMATE,
@@ -240,13 +244,16 @@ class _Translator:
     def calls(self) -> int:
         return len(self.seen)
 
-    def __call__(self, image: bytes, results: Sequence[OcrResult]) -> TranslationResult:
+    def __call__(
+        self, image: bytes, results: Sequence[OcrResult], context: PromptContext
+    ) -> TranslationResult:
         call = self._calls[len(self.seen)]
         self.seen.append((image, tuple(results)))
         return TranslationResult(
             lines={index: f"EN({result.text})" for index, result in enumerate(results)},
             usage=call.usage,
             call=CallInfo(request_id=call.request_id, model_id=call.model_id),
+            proposed_terms=(),
         )
 
 
@@ -1051,12 +1058,15 @@ def test_the_stage_records_the_bill_before_it_writes_the_proposals(
         """A translator whose result names a region index that does not exist,
         so `write_proposed` raises **after** the call has been priced."""
 
-        def __call__(self, image: bytes, results: Sequence[OcrResult]) -> TranslationResult:
+        def __call__(
+            self, image: bytes, results: Sequence[OcrResult], context: PromptContext
+        ) -> TranslationResult:
             call = _CALLS[0]
             return TranslationResult(
                 lines={99: "a region that is not on this page"},
                 usage=call.usage,
                 call=CallInfo(request_id=call.request_id, model_id=call.model_id),
+                proposed_terms=(),
             )
 
     with pytest.raises(ValueError, match=r"\b99\b"):
@@ -1087,11 +1097,14 @@ def test_a_result_that_reports_no_call_writes_proposals_and_no_ledger_row(
     run_id = _seed_page_zero(fixture)
 
     class _NoCall:
-        def __call__(self, image: bytes, results: Sequence[OcrResult]) -> TranslationResult:
+        def __call__(
+            self, image: bytes, results: Sequence[OcrResult], context: PromptContext
+        ) -> TranslationResult:
             return TranslationResult(
                 lines={index: f"EN({result.text})" for index, result in enumerate(results)},
                 usage=TokenUsage(0, 0, 0, 0),
                 call=None,
+                proposed_terms=(),
             )
 
     TranslateStage(translate=_NoCall()).run(fixture.context(0, run_id))

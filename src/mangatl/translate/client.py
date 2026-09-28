@@ -43,24 +43,31 @@ from collections.abc import Sequence
 from anthropic import Anthropic
 from anthropic.types import Usage
 
+from mangatl.domain.glossary import PromptContext
 from mangatl.domain.line import OcrResult
 from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
-from mangatl.translate.parse import parse_lines
+from mangatl.translate.parse import parse_lines, parse_terms
 from mangatl.translate.prompt import build_request
 
 __all__ = ["translate_page"]
 
 
 def translate_page(
-    client: Anthropic, page_image: bytes, ocr_results: Sequence[OcrResult]
+    client: Anthropic,
+    page_image: bytes,
+    ocr_results: Sequence[OcrResult],
+    context: PromptContext,
 ) -> TranslationResult:
     """Translate one page: one request, one response, one result.
 
-    Returns
-    `TranslationResult(lines={}, usage=TokenUsage(0, 0, 0, 0), call=None)`
-    without touching `client` when every region read empty - or when there are
-    no regions at all, which `all(...)` answers for free. `call=None` is the
-    statement that no API call was made (MT-044 C-4), and it is what
+    `context` is the glossary and the previous page's English (MT-014 C-5),
+    handed to `build_request` unchanged. It is positional and after the client,
+    so `compose.py`'s `partial(translate_page, client)` needed no edit.
+
+    Returns `TranslationResult(lines={}, usage=TokenUsage(0, 0, 0, 0),
+    call=None, proposed_terms=())` without touching `client` when every region
+    read empty - or when there are no regions at all, which `all(...)` answers
+    for free. `call=None` is the statement that no API call was made (MT-044 C-4), and it is what
     `TranslateStage` reads to decide there is no ledger row to write; the four
     zero counts are what it *cost*, which is a different fact.
 
@@ -72,17 +79,23 @@ def translate_page(
     that pin is named rather than hidden: an id `domain.rates.RATES` does not
     list makes `price` raise `UnknownModel` and aborts the run, which is
     `rates.py`'s designed behaviour and is carried as MT-044 DV-5.
+
+    On a call, `proposed_terms` is `parse_terms(response)`: the glossary terms
+    the model proposed, in order, malformed items skipped.
     """
     if all(result.ocr_empty for result in ocr_results):
-        return TranslationResult(lines={}, usage=TokenUsage(0, 0, 0, 0), call=None)
+        return TranslationResult(
+            lines={}, usage=TokenUsage(0, 0, 0, 0), call=None, proposed_terms=()
+        )
 
-    request, _ = build_request(page_image, ocr_results)
+    request, _ = build_request(page_image, ocr_results, context)
     response = client.messages.create(**request)
 
     return TranslationResult(
         lines=parse_lines(response, range(len(ocr_results))),
         usage=_usage_of(response.usage),
         call=CallInfo(request_id=response.id, model_id=response.model),
+        proposed_terms=parse_terms(response),
     )
 
 

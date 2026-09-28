@@ -251,3 +251,42 @@ def test_a_body_that_is_not_json_is_loud_rather_than_silently_empty(
 
     with pytest.raises((ValueError, UnknownRegionIndex)):
         parse_lines(message, _REGION_INDICES)
+
+
+# -- MT-014 C-4: the one key that is not a region -------------------------------
+
+
+def test_the_glossary_key_is_skipped_rather_than_read_as_a_region(
+    fake_message: Callable[..., object],
+) -> None:
+    """MT-014 C-4: `parse_lines` skips the key `"glossary"`. Without it every
+    response that proposes a term raises `UnknownRegionIndex('glossary')` and
+    the page's lines are lost over an advisory field - which is exactly the
+    wrong trade C-4 names."""
+    body = (
+        '{"0": "Sakura!", "glossary": '
+        '[{"term_ja": "さくら", "term_en": "Sakura", "note": "name"}], "2": "Why?"}'
+    )
+
+    assert parse_lines(fake_message(body), _REGION_INDICES) == {0: "Sakura!", 2: "Why?"}
+
+
+def test_an_empty_glossary_beside_no_lines_is_an_empty_page_and_not_an_error(
+    fake_message: Callable[..., object],
+) -> None:
+    """The zero of C-4's skip: a body whose only key is `glossary`."""
+    assert parse_lines(fake_message('{"glossary": []}'), _REGION_INDICES) == {}
+
+
+@pytest.mark.parametrize("key", ["Glossary", "glossary ", "terms", "glossary_"])
+def test_only_the_exact_glossary_key_is_skipped_and_its_neighbours_still_raise(
+    fake_message: Callable[..., object], key: str
+) -> None:
+    """The negative control for the skip, and MT-011 AC-6 unchanged: **only**
+    `"glossary"` is skipped. A skip written as "any non-integer key" or as a
+    case-folded or prefix match passes the two tests above and silently turns
+    every malformed key into a dropped one."""
+    body = f'{{"0": "Sakura!", "{key}": []}}'
+
+    with pytest.raises(UnknownRegionIndex, match=key.strip()):
+        parse_lines(fake_message(body), _REGION_INDICES)

@@ -34,6 +34,7 @@ from typing import Any
 
 import pytest
 
+from mangatl.domain.glossary import EMPTY_CONTEXT, PromptContext, ProposedTerm
 from mangatl.domain.line import OcrResult
 from mangatl.domain.translation import TokenUsage, TranslationResult
 from mangatl.translate.client import translate_page
@@ -134,10 +135,12 @@ def test_a_page_whose_every_region_read_empty_makes_no_api_call_at_all() -> None
     """
     client = _FakeClient(explode=True)
 
-    result = translate_page(client, _page(), _ALL_EMPTY)
+    result = translate_page(client, _page(), _ALL_EMPTY, EMPTY_CONTEXT)
 
     assert client.calls == 0, f"{client.calls} API call(s) made for a page with no text"
     assert result.lines == {}
+    # MT-014 C-5: the wordless guard proposes nothing, because nothing was asked.
+    assert result.proposed_terms == ()
 
 
 def test_a_page_with_no_regions_at_all_makes_no_api_call_either() -> None:
@@ -147,7 +150,7 @@ def test_a_page_with_no_regions_at_all_makes_no_api_call_either() -> None:
     this right for free, while one that counted empties does not."""
     client = _FakeClient(explode=True)
 
-    assert translate_page(client, _page(), ()).lines == {}
+    assert translate_page(client, _page(), (), EMPTY_CONTEXT).lines == {}
     assert client.calls == 0
 
 
@@ -160,7 +163,7 @@ def test_the_no_call_page_is_priced_at_nothing_rather_than_at_no_usage() -> None
     first reader that forgets is a `TypeError` in the cost report rather than
     here.
     """
-    result = translate_page(_FakeClient(explode=True), _page(), _ALL_EMPTY)
+    result = translate_page(_FakeClient(explode=True), _page(), _ALL_EMPTY, EMPTY_CONTEXT)
 
     assert result.usage == TokenUsage(
         input_tokens=0, output_tokens=0, cache_read_tokens=0, cache_write_tokens=0
@@ -173,7 +176,10 @@ def test_a_page_with_one_region_that_read_empty_still_skips_the_call() -> None:
     `len(results) > 1` or as a `for`-loop with no else branch goes wrong."""
     client = _FakeClient(explode=True)
 
-    assert translate_page(client, _page(), (OcrResult(text="", ocr_empty=True),)).lines == {}
+    assert (
+        translate_page(client, _page(), (OcrResult(text="", ocr_empty=True),), EMPTY_CONTEXT).lines
+        == {}
+    )
     assert client.calls == 0
 
 
@@ -188,7 +194,7 @@ def test_a_page_with_a_single_region_that_read_something_does_make_the_call(
     """
     client = _FakeClient(fake_message('{"0": "Why are you here?"}'))
 
-    result = translate_page(client, _page(), (_OCR_RESULTS[2],))
+    result = translate_page(client, _page(), (_OCR_RESULTS[2],), EMPTY_CONTEXT)
 
     assert client.calls == 1, "a page that has text to translate must be sent"
     assert result.lines == {0: "Why are you here?"}
@@ -210,7 +216,7 @@ def test_a_page_where_only_some_regions_read_empty_is_still_sent(
         OcrResult(text="", ocr_empty=True),
     )
 
-    assert translate_page(client, _page(), mixed).lines == {1: "...I see."}
+    assert translate_page(client, _page(), mixed, EMPTY_CONTEXT).lines == {1: "...I see."}
     assert client.calls == 1
 
 
@@ -232,9 +238,9 @@ def test_a_page_with_text_makes_exactly_one_call_carrying_the_built_request(
     page = _page()
     client = _FakeClient(fake_message(response_body("well-formed")))
 
-    translate_page(client, page, _OCR_RESULTS)
+    translate_page(client, page, _OCR_RESULTS, EMPTY_CONTEXT)
 
-    expected, _ = build_request(page, _OCR_RESULTS)
+    expected, _ = build_request(page, _OCR_RESULTS, EMPTY_CONTEXT)
 
     assert client.calls == 1, f"{client.calls} calls for one page"
     assert client.messages.seen[0] == expected
@@ -253,7 +259,7 @@ def test_the_call_is_not_retried_when_the_model_answers(
         fake_message(response_body("well-formed")),
     )
 
-    translate_page(client, _page(), _OCR_RESULTS)
+    translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
 
     assert client.calls == 1
 
@@ -270,7 +276,7 @@ def test_the_lines_come_back_keyed_by_reading_index(
     `test_translate_parse.py` - see `fixtures/translate/README.md`."""
     client = _FakeClient(fake_message(response_body("well-formed")))
 
-    assert translate_page(client, _page(), _OCR_RESULTS).lines == _EXPECTED
+    assert translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT).lines == _EXPECTED
 
 
 def test_a_region_the_model_omitted_is_absent_from_the_result(
@@ -281,7 +287,7 @@ def test_a_region_the_model_omitted_is_absent_from_the_result(
     discarded."""
     client = _FakeClient(fake_message(response_body("omits-region-3")))
 
-    lines = translate_page(client, _page(), _OCR_RESULTS).lines
+    lines = translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT).lines
 
     assert set(lines) == {0, 1, 2}
     assert client.calls == 1
@@ -298,7 +304,7 @@ def test_a_response_naming_an_unknown_region_propagates_rather_than_being_swallo
     client = _FakeClient(fake_message(response_body("unknown-region-index")))
 
     with pytest.raises(UnknownRegionIndex, match=r"\b7\b"):
-        translate_page(client, _page(), _OCR_RESULTS)
+        translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
 
 
 # -- C-2/C-5: the SDK boundary is where conversion happens ---------------------
@@ -330,7 +336,7 @@ def test_the_four_usage_counts_are_carried_across_onto_the_right_fields(
         )
     )
 
-    usage = translate_page(client, _page(), _OCR_RESULTS).usage
+    usage = translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT).usage
 
     assert usage == TokenUsage(
         input_tokens=3011,
@@ -351,8 +357,80 @@ def test_the_result_carries_plain_domain_values_and_no_sdk_objects(
     see, because no import changed."""
     client = _FakeClient(fake_message(response_body("well-formed")))
 
-    result = translate_page(client, _page(), _OCR_RESULTS)
+    result = translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
 
     assert type(result) is TranslationResult
     assert type(result.usage) is TokenUsage
     assert all(type(key) is int and type(value) is str for key, value in result.lines.items())
+
+
+# -- MT-014 C-5: the context goes into the request, the terms come back out ----
+
+#: A context with both blocks non-empty, and text that cannot occur in the
+#: region listing or the system prompt, so "it reached the request" is a claim
+#: about this value and not about some neighbouring string.
+_CONTEXT = PromptContext(
+    glossary_block="Glossary - use these renderings exactly:\nさくら = Sakura (name)",
+    rolling_block="Previous page, in reading order:\nWait for me, Sakura!",
+)
+
+
+def test_the_context_the_caller_passes_is_the_context_the_request_carries(
+    response_body: Callable[[str], str],
+    fake_message: Callable[..., object],
+) -> None:
+    """MT-014 C-5. `translate_page` hands its `context` to `build_request`
+    unchanged - compared against `build_request`'s own output for the same
+    three arguments, so this is a claim about dispatch and C-3's shape stays
+    written down once, in `test_translate_prompt.py`.
+
+    The EMPTY_CONTEXT request is the negative control: an implementation that
+    dropped the context and always built the three-block request would pass
+    `test_a_page_with_text_makes_exactly_one_call_carrying_the_built_request`
+    above, and fails here.
+    """
+    page = _page()
+    client = _FakeClient(fake_message(response_body("well-formed")))
+
+    translate_page(client, page, _OCR_RESULTS, _CONTEXT)
+
+    expected, _ = build_request(page, _OCR_RESULTS, _CONTEXT)
+    without, _ = build_request(page, _OCR_RESULTS, EMPTY_CONTEXT)
+    assert client.messages.seen[0] == expected
+    assert client.messages.seen[0] != without, "the context never reached the request"
+
+
+def test_the_terms_the_model_proposed_come_back_on_the_result_in_order(
+    fake_message: Callable[..., object],
+) -> None:
+    """MT-014 C-5: `proposed_terms=parse_terms(response)` on a call. Two terms,
+    in the order the response gave them, beside the lines - the `glossary` key
+    is not a region and does not turn up in `lines`."""
+    body = (
+        '{"1": "Sakura!", "glossary": ['
+        '{"term_ja": "さくら", "term_en": "Sakura", "note": "name"},'
+        '{"term_ja": "先輩", "term_en": "senpai", "note": "honorific"}]}'
+    )
+    client = _FakeClient(fake_message(body))
+
+    result = translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+    assert result.lines == {1: "Sakura!"}
+    assert result.proposed_terms == (
+        ProposedTerm("さくら", "Sakura", "name"),
+        ProposedTerm("先輩", "senpai", "honorific"),
+    )
+
+
+def test_a_response_with_no_glossary_proposes_no_terms(
+    response_body: Callable[[str], str],
+    fake_message: Callable[..., object],
+) -> None:
+    """The zero of zero-one-many for C-5: MT-011's recorded bodies carry no
+    `glossary` key, and that is a page that proposed nothing, not an error."""
+    client = _FakeClient(fake_message(response_body("well-formed")))
+
+    result = translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+    assert result.proposed_terms == ()
+    assert result.lines == _EXPECTED

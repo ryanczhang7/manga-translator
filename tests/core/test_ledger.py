@@ -425,7 +425,9 @@ def run_id(project: Project) -> int:
 # -- PO-5: the schema this story requires --------------------------------------
 
 
-def test_this_build_writes_and_reads_schema_version_four(project: Project, db_path: Path) -> None:
+def test_this_build_writes_and_reads_the_current_schema_version(
+    project: Project, db_path: Path
+) -> None:
     """PO-5's bump, stated once, where a reader looks for it.
 
     AC-2 (a version per row), AC-3 (no float on disk) and AC-4 (a trigger) are
@@ -438,9 +440,10 @@ def test_this_build_writes_and_reads_schema_version_four(project: Project, db_pa
     chapter row and MT-012 PO-2 already settled that money on disk is an
     integer count of micro-dollars.
     """
-    assert SCHEMA_VERSION == 4
-    assert _user_version(db_path) == 4
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(4,)]
+    # MT-014 C-7 takes it to 5: `glossary` gains `last_seen_page` and `source`.
+    assert SCHEMA_VERSION == 5
+    assert _user_version(db_path) == 5
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(5,)]
 
 
 def test_the_ledger_stores_integer_micro_dollars_and_carries_no_real_cost_column(
@@ -742,7 +745,7 @@ def test_a_resumed_chapters_total_includes_the_calls_of_both_runs(
 # -- PO-5: a version-2 file on disk still opens --------------------------------
 
 
-def test_a_version_two_file_is_migrated_to_version_four_when_it_is_opened(
+def test_a_version_two_file_is_migrated_to_the_current_version_when_it_is_opened(
     source_dir: Path,
 ) -> None:
     """In place, on open, with no separate command - MT-010's precedent.
@@ -766,8 +769,8 @@ def test_a_version_two_file_is_migrated_to_version_four_when_it_is_opened(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 4
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(4,)]
+    assert _user_version(db_path) == SCHEMA_VERSION
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(SCHEMA_VERSION,)]
     assert set(_columns(db_path, "llm_call")) == _LLM_CALL_COLUMNS_V3
     # The v4 step rebuilds `chapter`, not `llm_call`. A v2 file's ledger rows
     # must survive the *second* rebuild untouched, and the two tests below say

@@ -44,6 +44,7 @@ from typing import Any
 
 import pytest
 
+from mangatl.domain.glossary import EMPTY_CONTEXT, PromptContext
 from mangatl.domain.line import OcrResult
 from mangatl.translate.prompt import (
     MAX_IMAGE_LONG_EDGE_PX,
@@ -155,9 +156,11 @@ def _user_text(request: dict[str, Any]) -> str:
     return str(block["text"])
 
 
-def _request(results: Sequence[OcrResult] = _OCR_RESULTS) -> dict[str, Any]:
+def _request(
+    results: Sequence[OcrResult] = _OCR_RESULTS, context: PromptContext = EMPTY_CONTEXT
+) -> dict[str, Any]:
     """The kwargs half of `build_request` for a 1568x1000 page."""
-    kwargs, _ = build_request(_page(1568, 1000), results)
+    kwargs, _ = build_request(_page(1568, 1000), results, context)
     return kwargs
 
 
@@ -406,7 +409,7 @@ def test_the_image_block_carries_exactly_the_prepared_bytes_as_unwrapped_base64(
     """
     page = _page(2400, 3400)
     expected, _ = prepare_page_image(page)
-    request, _ = build_request(page, _OCR_RESULTS)
+    request, _ = build_request(page, _OCR_RESULTS, EMPTY_CONTEXT)
 
     (image,) = [block for block in request["messages"][0]["content"] if block["type"] == "image"]
     source = image["source"]
@@ -429,7 +432,7 @@ def test_the_request_reports_the_estimate_of_the_image_it_actually_carries() -> 
     """
     page = _page(2400, 3400)
     _, prepared_estimate = prepare_page_image(page)
-    request, request_estimate = build_request(page, _OCR_RESULTS)
+    request, request_estimate = build_request(page, _OCR_RESULTS, EMPTY_CONTEXT)
 
     (image,) = [block for block in request["messages"][0]["content"] if block["type"] == "image"]
     _, width, height = _image_size(base64.b64decode(image["source"]["data"]))
@@ -505,5 +508,195 @@ def test_the_response_schema_names_the_pages_indices_and_requires_none_of_them()
 
     assert schema["type"] == "object"
     assert schema["additionalProperties"] is False
-    assert sorted(schema["properties"], key=int) == ["0", "1", "2", "3"]
+    # MT-014 C-3 adds exactly one non-index property, `glossary`, which can
+    # never collide with a reading index because an index is always digits.
+    regions = [name for name in schema["properties"] if name != "glossary"]
+    assert set(schema["properties"]) == {"0", "1", "2", "3", "glossary"}
+    assert sorted(regions, key=int) == ["0", "1", "2", "3"]
     assert not schema.get("required"), "AC-5 turns on no region being required"
+
+
+# -- MT-014 C-3: the glossary and the rolling context --------------------------
+
+#: The two blocks MT-014 adds, each carrying a sentinel that occurs nowhere
+#: else - not in the region listing, not in the system prompt - so "this block's
+#: text is in the system block" is a claim about the block and not about a word
+#: they happen to share.
+_GLOSSARY_BLOCK = "Glossary - use these renderings exactly:\nさくら = Sakura (name)\nZQX = Zqx"
+_ROLLING_BLOCK = "Previous page, in reading order:\nWait up, Sakura!\nQZV rolls on."
+_BOTH = PromptContext(glossary_block=_GLOSSARY_BLOCK, rolling_block=_ROLLING_BLOCK)
+
+#: C-3's schema property, verbatim.
+_GLOSSARY_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "term_ja": {"type": "string"},
+            "term_en": {"type": "string"},
+            "note": {"type": "string", "enum": ["name", "honorific", "place", ""]},
+        },
+        "required": ["term_ja", "term_en", "note"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _content(request: dict[str, Any]) -> list[dict[str, Any]]:
+    (message,) = request["messages"]
+    return list(message["content"])
+
+
+def _cache_controls(value: object, path: str = "") -> list[str]:
+    """Every path in the kwargs at which a `cache_control` key sits.
+
+    Walked over the whole request rather than looked up at the places a
+    breakpoint is expected, because AC-6 is "the **only** cache breakpoint"
+    and a lookup cannot see one somewhere nobody thought to look.
+    """
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "cache_control":
+                found.append(path)
+            found.extend(_cache_controls(item, f"{path}.{key}"))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            found.extend(_cache_controls(item, f"{path}[{index}]"))
+    return found
+
+
+def test_page_one_is_mt011s_three_blocks_with_no_context_block_at_all() -> None:
+    """**AC-5** at the request: `EMPTY_CONTEXT` gives `[image, listing]` -
+    exactly MT-011's three blocks with the system block - and not an empty
+    text block standing in for a glossary nobody has yet. An empty text block
+    is also a 400 from the Messages API, so "does not fail" is at stake too."""
+    request = _request(context=EMPTY_CONTEXT)
+
+    content = _content(request)
+    assert [block["type"] for block in content] == ["image", "text"]
+    assert content[1]["text"].startswith("Here is the page"), content[1]["text"]
+    assert len(request["system"]) == 1
+
+
+def test_a_context_equal_to_the_empty_one_is_treated_as_the_empty_one() -> None:
+    """C-3 says `context == EMPTY_CONTEXT`, which is value equality: a
+    `PromptContext("", "")` built somewhere else is page 1 too. An
+    implementation testing `context is EMPTY_CONTEXT` would send an empty text
+    block for it."""
+    request = _request(context=PromptContext(glossary_block="", rolling_block=""))
+
+    assert [block["type"] for block in _content(request)] == ["image", "text"]
+
+
+def test_a_context_sits_between_the_image_and_the_listing_as_one_text_block() -> None:
+    """C-3: `[image, text(context), text(listing)]`, the context text being the
+    glossary block, a blank line, then the rolling block - in that order."""
+    content = _content(_request(context=_BOTH))
+
+    assert [block["type"] for block in content] == ["image", "text", "text"]
+    assert content[1]["text"] == _GLOSSARY_BLOCK + "\n\n" + _ROLLING_BLOCK
+    assert content[2]["text"] == _content(_request())[1]["text"], (
+        "the region listing changed when a context was added"
+    )
+
+
+@pytest.mark.parametrize(
+    ("context", "expected"),
+    [
+        pytest.param(
+            PromptContext(glossary_block=_GLOSSARY_BLOCK, rolling_block=""),
+            _GLOSSARY_BLOCK,
+            id="glossary-only",
+        ),
+        pytest.param(
+            PromptContext(glossary_block="", rolling_block=_ROLLING_BLOCK),
+            _ROLLING_BLOCK,
+            id="rolling-only",
+        ),
+    ],
+)
+def test_an_empty_half_of_the_context_leaves_no_blank_lines_behind(
+    context: PromptContext, expected: str
+) -> None:
+    """C-3's "the **non-empty** blocks ... joined by a blank line". A join over
+    both halves unconditionally leaves a leading or trailing blank pair -
+    harmless to read, and a different byte string from the one the contract
+    names."""
+    content = _content(_request(context=context))
+
+    assert [block["type"] for block in content] == ["image", "text", "text"]
+    assert content[1]["text"] == expected
+
+
+def test_page_n_carries_exactly_one_image_and_it_is_the_current_pages() -> None:
+    """**AC-4**'s "and **not** the previous page's image". The previous page
+    reaches the model as its English (the rolling block) and never as pixels:
+    a second image block is a second page's worth of input tokens, which the
+    cost model's 900-token rolling allowance does not cover."""
+    page = _page(2400, 3400)
+    expected, _ = prepare_page_image(page)
+
+    request, _ = build_request(page, _OCR_RESULTS, _BOTH)
+
+    images = [block for block in _content(request) if block["type"] == "image"]
+    assert len(images) == 1, f"{len(images)} image blocks in one page's request"
+    assert base64.b64decode(images[0]["source"]["data"]) == expected
+    assert _ROLLING_BLOCK in _content(request)[1]["text"]
+
+
+def test_the_only_cache_breakpoint_is_still_system_zero_with_a_context_present() -> None:
+    """**AC-6**, structurally (PO-4): `cache_control` appears exactly once in
+    the whole request, on `system[0]`, and the context block after it in
+    `messages` carries none."""
+    request = _request(context=_BOTH)
+
+    assert _cache_controls(request) == [".system[0]"]
+    assert request["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_nothing_page_specific_is_in_or_before_the_cache_breakpoint() -> None:
+    """**AC-6**'s second half. Neither block's text is in `system`, and the
+    `system` block is byte-identical whatever the context, the page and the
+    regions - which is the property a cache prefix needs, stated directly
+    rather than inferred from the absence of two sentinels."""
+    request = _request(context=_BOTH)
+    system_text = "".join(str(block["text"]) for block in request["system"])
+
+    for sentinel in ("ZQX = Zqx", "QZV rolls on.", _GLOSSARY_BLOCK, _ROLLING_BLOCK):
+        assert sentinel not in system_text, f"{sentinel!r} is inside the cached prefix"
+    assert any(_GLOSSARY_BLOCK in str(block.get("text", "")) for block in _content(request))
+
+    other_page, _ = build_request(_page(1000, 1400), (_OCR_RESULTS[3],), EMPTY_CONTEXT)
+    assert request["system"] == other_page["system"], (
+        "the system block differs between two pages, so no page's cache entry"
+        " is ever read by the next"
+    )
+
+
+def test_the_system_prompt_tells_the_model_about_the_glossary() -> None:
+    """C-3: `_SYSTEM_PROMPT` gains stable text telling the model to follow the
+    glossary and to propose new terms under the `glossary` key. Pinned by the
+    key's name only - the wording is the implementer's - because a model never
+    told the key exists will never fill it, and AC-1 then has nothing to carry."""
+    system_text = str(_request()["system"][0]["text"])
+
+    assert "glossary" in system_text
+
+
+def test_the_response_schema_carries_the_glossary_property_c3_names() -> None:
+    """C-3's schema property, exactly, and **not** in a top-level `required`
+    (MT-011 AC-5: there is none). `additionalProperties: false` on each item is
+    what keeps a term the model invents a field for out of `parse_terms`."""
+    schema = _request()["output_config"]["format"]["schema"]
+
+    assert schema["properties"]["glossary"] == _GLOSSARY_SCHEMA
+    assert "glossary" not in (schema.get("required") or [])
+
+
+def test_a_page_with_no_regions_still_offers_the_glossary_property() -> None:
+    """The zero of zero-one-many for the schema: a page with no reading
+    indices has one property, `glossary`, and nothing else."""
+    schema = _request(results=())["output_config"]["format"]["schema"]
+
+    assert set(schema["properties"]) == {"glossary"}

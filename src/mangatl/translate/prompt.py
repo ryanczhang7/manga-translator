@@ -50,7 +50,9 @@ from typing import Any
 
 from PIL import Image
 
+from mangatl.domain.glossary import EMPTY_CONTEXT, PromptContext
 from mangatl.domain.line import OcrResult
+from mangatl.translate.parse import GLOSSARY_KEY
 
 __all__ = [
     "MAX_IMAGE_LONG_EDGE_PX",
@@ -79,6 +81,23 @@ _PIXELS_PER_TOKEN = 750
 #: not what the user sees.
 _JPEG_QUALITY = 85
 
+#: MT-014 C-3: the one non-index property of the response schema. Each item's
+#: `additionalProperties: false` keeps an invented field out of `parse_terms`;
+#: the note's enum is `domain.glossary.Note`.
+_GLOSSARY_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "term_ja": {"type": "string"},
+            "term_en": {"type": "string"},
+            "note": {"type": "string", "enum": ["name", "honorific", "place", ""]},
+        },
+        "required": ["term_ja", "term_en", "note"],
+        "additionalProperties": False,
+    },
+}
+
 #: The stable prefix, and the only block carrying a cache breakpoint. Nothing
 #: page-specific may appear here: everything in it is read again for every page
 #: of the chapter, and one volatile character invalidates the cache for all of
@@ -98,7 +117,17 @@ text, leave it out of your answer.
 - If you cannot read a region at all, leave it out of your answer rather than \
 guessing. An omitted region is recorded as untranslated, which is recoverable; \
 an invented line is not.
-- Answer with one entry per region, keyed by the region's reading index."""
+- Answer with one entry per region, keyed by the region's reading index.
+
+Continuity across pages:
+- You may also be given a glossary of names, honorifics and place names this \
+chapter has already settled on, and the previous page's English in reading \
+order. Use the glossary's renderings exactly, every time, and read the previous \
+page for who is speaking and what is being continued.
+- When a character name, an honorific or a place name appears on this page that \
+the glossary does not have, add it under the "glossary" key: its Japanese as \
+written, the English you used, and a note of "name", "honorific" or "place" \
+("" for anything else). Do not repeat terms the glossary already has."""
 
 
 def prepare_page_image(page_image: bytes) -> tuple[bytes, int]:
@@ -142,7 +171,7 @@ def prepare_page_image(page_image: bytes) -> tuple[bytes, int]:
 
 
 def build_request(
-    page_image: bytes, ocr_results: Sequence[OcrResult]
+    page_image: bytes, ocr_results: Sequence[OcrResult], context: PromptContext
 ) -> tuple[dict[str, Any], int]:
     """The kwargs for one page's `client.messages.create(**kwargs)`, and the
     estimate of the image they carry.
@@ -158,9 +187,22 @@ def build_request(
     `output_config.format` rather than the deprecated top-level `output_format`
     or an assistant prefill (also a 400), non-streaming at `max_tokens`. An
     agent that "improves" any of it has changed the cost model.
+
+    **MT-014 C-3: the context goes after the only cache breakpoint.** With
+    `context == EMPTY_CONTEXT` (by value) the content is MT-011's
+    `[image, listing]` exactly - page 1's request, and no empty text block,
+    which the Messages API rejects. Otherwise it is
+    `[image, context, listing]`, the context being the non-empty halves of the
+    glossary and rolling blocks joined by a blank line. Nothing page-specific
+    enters `system` (AC-6), and no image but the current page's is ever sent
+    (AC-4). The response schema gains the `glossary` property the model
+    proposes terms under; it is not required.
     """
     prepared, est_tokens = prepare_page_image(page_image)
     reading_indices = [str(index) for index in range(len(ocr_results))]
+    context_blocks: list[dict[str, Any]] = (
+        [] if context == EMPTY_CONTEXT else [{"type": "text", "text": _context_text(context)}]
+    )
 
     return {
         "model": MODEL_ID,
@@ -180,7 +222,8 @@ def build_request(
                             "description": f"The English for the region at reading index {index}.",
                         }
                         for index in reading_indices
-                    },
+                    }
+                    | {GLOSSARY_KEY: _GLOSSARY_SCHEMA},
                     # No `required`, and that is what makes AC-5 a real case: a
                     # compliant model may omit a region only if the schema lets
                     # it. `additionalProperties: false` is the other half - it
@@ -211,11 +254,17 @@ def build_request(
                             "data": base64.b64encode(prepared).decode("ascii"),
                         },
                     },
+                    *context_blocks,
                     {"type": "text", "text": _user_text(ocr_results)},
                 ],
             }
         ],
     }, est_tokens
+
+
+def _context_text(context: PromptContext) -> str:
+    """The glossary block, then the rolling block, the empty one omitted."""
+    return "\n\n".join(block for block in (context.glossary_block, context.rolling_block) if block)
 
 
 def _user_text(ocr_results: Sequence[OcrResult]) -> str:

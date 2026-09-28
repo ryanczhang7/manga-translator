@@ -233,6 +233,13 @@ CREATE TABLE run (
 """
     + LLM_CALL_DDL
     + """
+-- `last_seen_page` and `source` are MT-014's and the reason this schema is at
+-- version 5 (C-7): AC-3's least-recently-seen eviction sorts on the first, and
+-- PO-3's user-entries-last on the second. Declared **last**, for
+-- `line.ocr_empty`'s reason: `ALTER TABLE ... ADD COLUMN` appends, so this is
+-- the only position in which a fresh file and a migrated one have the same
+-- table. `store.project._MIGRATE_TO_V5` repeats both definitions verbatim,
+-- CHECK included; `test_schema_v5.py` holds the two to each other.
 CREATE TABLE glossary (
     id              INTEGER PRIMARY KEY,
     chapter_id      INTEGER NOT NULL REFERENCES chapter(id) ON DELETE CASCADE,
@@ -240,6 +247,8 @@ CREATE TABLE glossary (
     term_en         TEXT    NOT NULL,
     note            TEXT,
     first_seen_page INTEGER NOT NULL,
+    last_seen_page  INTEGER NOT NULL DEFAULT 0,
+    source          TEXT    NOT NULL DEFAULT 'model' CHECK (source IN ('model', 'user')),
     UNIQUE (chapter_id, term_ja)
 );
 """

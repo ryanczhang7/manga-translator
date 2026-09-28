@@ -375,7 +375,7 @@ def _migrating(
     )
 
     with open_project(project_dir_for(source_dir)) as project:
-        assert _user_version(db_path) == 4, (
+        assert _user_version(db_path) == SCHEMA_VERSION, (
             f"the file is still at version {_user_version(db_path)} after open_project:"
             " no migration ran, and every metric below is vacuously satisfied by a"
             " file nobody rebuilt"
@@ -422,18 +422,24 @@ def fresh(source_dir: Path) -> Iterator[Project]:
 # -- the version, and the fresh table ------------------------------------------
 
 
-def test_this_build_writes_and_reads_schema_version_four(fresh: Project, source_dir: Path) -> None:
+def test_this_build_writes_and_reads_the_current_schema_version(
+    fresh: Project, source_dir: Path
+) -> None:
     """C-12's bump, stated once where a reader looks for it.
 
     AC-5 is unsatisfiable against version 3 - `budget_ceiling_usd` is a REAL,
     and MT-012 PO-2 already settled that money on disk is an integer count of
     micro-dollars because a double cannot hold an exact decimal amount.
+
+    **MT-014 C-7 takes it to 5** (`glossary.last_seen_page`, `glossary.source`),
+    so this now reads "at least the version that carries the micro-dollar
+    ceiling" as the current one; `test_schema_v5.py` owns the literal.
     """
     db_path = project_dir_for(source_dir) / "project.db"
 
-    assert SCHEMA_VERSION == 4
-    assert _user_version(db_path) == 4
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(4,)]
+    assert SCHEMA_VERSION == 5
+    assert _user_version(db_path) == SCHEMA_VERSION
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(SCHEMA_VERSION,)]
 
 
 def test_a_freshly_created_chapter_table_has_the_ceiling_column_in_position_six(
@@ -482,7 +488,7 @@ def test_the_chapter_ddl_is_its_own_string_with_two_callers(fresh: Project) -> N
 # -- the v3 -> v4 migration: the four-part metric ------------------------------
 
 
-def test_a_version_three_file_is_migrated_to_version_four_when_it_is_opened(
+def test_a_version_three_file_is_migrated_to_the_current_version_when_it_is_opened(
     source_dir: Path,
 ) -> None:
     """In place, on open, with no separate command - MT-010's precedent, and the
@@ -494,8 +500,8 @@ def test_a_version_three_file_is_migrated_to_version_four_when_it_is_opened(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 4
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(4,)]
+    assert _user_version(db_path) == SCHEMA_VERSION
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(SCHEMA_VERSION,)]
     assert _columns(db_path, "chapter") == _CHAPTER_COLUMNS_V4
 
 
@@ -665,6 +671,15 @@ def test_a_migrated_chapter_table_is_the_same_table_as_a_freshly_created_one(
     assert _columns(migrated_db, "chapter") == _CHAPTER_COLUMNS_V4
 
 
+#: Every schema object the v3 -> v4 step has no business touching. `glossary` is
+#: excluded since MT-014: a v3 file opened today runs the v4 -> v5 step too, and
+#: that step ALTERs `glossary` on purpose (C-7), which rewrites its stored DDL.
+#: What the v5 step does to it is `tests/core/test_schema_v5.py`'s to assert.
+_UNTOUCHED_BY_THE_V4_STEP = (
+    "SELECT name, sql FROM sqlite_master WHERE name NOT IN ('chapter', 'glossary')"
+)
+
+
 def test_the_migration_leaves_the_tables_it_does_not_rebuild_alone(
     source_dir: Path,
 ) -> None:
@@ -676,23 +691,17 @@ def test_the_migration_leaves_the_tables_it_does_not_rebuild_alone(
     `foreign_key_check`, and destroys every row in the project.
     """
     db_path = _build_v3_file(source_dir, ceiling_usd=_V3_CEILING_USD)
-    before = {
-        str(row[0]): str(row[1] or "")
-        for row in _raw(db_path, "SELECT name, sql FROM sqlite_master WHERE name != 'chapter'")
-    }
+    before = {str(row[0]): str(row[1] or "") for row in _raw(db_path, _UNTOUCHED_BY_THE_V4_STEP)}
     assert "llm_call_no_update" in before, "the v3 fixture has no triggers to preserve"
 
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 4, (
+    assert _user_version(db_path) == SCHEMA_VERSION, (
         "no migration ran, so 'the tables it does not rebuild are unchanged' is"
         " a claim about a file nobody opened"
     )
-    after = {
-        str(row[0]): str(row[1] or "")
-        for row in _raw(db_path, "SELECT name, sql FROM sqlite_master WHERE name != 'chapter'")
-    }
+    after = {str(row[0]): str(row[1] or "") for row in _raw(db_path, _UNTOUCHED_BY_THE_V4_STEP)}
     assert after == before, (
         "the v4 migration rewrote a table it has no business touching:"
         f" {sorted(set(before) ^ set(after))} differ"

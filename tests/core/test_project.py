@@ -157,7 +157,21 @@ _SCHEMA_COLUMNS: dict[str, frozenset[str]] = {
             "at",
         }
     ),
-    "glossary": frozenset({"id", "chapter_id", "term_ja", "term_en", "note", "first_seen_page"}),
+    # MT-014 C-7: `last_seen_page` is what "least-recently-seen" eviction
+    # (AC-3) reads, and `source` is what lets a user's rendering outlive every
+    # model one (PO-3). tests/core/test_schema_v5.py pins their types.
+    "glossary": frozenset(
+        {
+            "id",
+            "chapter_id",
+            "term_ja",
+            "term_en",
+            "note",
+            "first_seen_page",
+            "last_seen_page",
+            "source",
+        }
+    ),
 }
 
 _TABLES: tuple[str, ...] = tuple(_SCHEMA_COLUMNS)
@@ -453,7 +467,8 @@ def test_the_schema_version_and_the_two_page_status_values_are_the_pinned_ones()
     # MT-012 PO-2 settled money on. The rebuild that does it is the first
     # migration in this project to touch a **parent** table with cascading
     # children, and `tests/core/test_schema_v4.py` is where that is tested.
-    assert SCHEMA_VERSION == 4
+    # MT-014 C-7 takes it to 5: `glossary` gains `last_seen_page` and `source`.
+    assert SCHEMA_VERSION == 5
     assert PAGE_PENDING == "pending"
     assert PAGE_STALE == "stale"
     assert PAGE_PENDING != PAGE_STALE

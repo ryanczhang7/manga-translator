@@ -68,7 +68,7 @@ import hashlib
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import get_args, get_origin
+from typing import TYPE_CHECKING, get_args, get_origin
 
 import pytest
 
@@ -79,6 +79,9 @@ from mangatl.pipeline.stage import PageContext
 from mangatl.pipeline.translate_stage import PageTranslator, TranslateStage
 from mangatl.store.intake import read_chapter
 from mangatl.store.project import Project, create_project, project_dir_for
+
+if TYPE_CHECKING:
+    from mangatl.domain.glossary import PromptContext
 
 # -- the fixture chapter -------------------------------------------------------
 
@@ -236,16 +239,23 @@ class _FakeTranslator:
         self._raises = raises
         self._call = call
         self.seen: list[tuple[bytes, tuple[OcrResult, ...]]] = []
+        #: MT-014 C-9: the `PromptContext` each call was handed, beside `seen`.
+        self.contexts: list[PromptContext] = []
 
     @property
     def calls(self) -> int:
         return len(self.seen)
 
-    def __call__(self, image: bytes, results: Sequence[OcrResult]) -> TranslationResult:
+    def __call__(
+        self, image: bytes, results: Sequence[OcrResult], context: PromptContext
+    ) -> TranslationResult:
         self.seen.append((image, tuple(results)))
+        self.contexts.append(context)
         if self._raises is not None:
             raise self._raises
-        return TranslationResult(lines=dict(self._lines), usage=_USAGE, call=self._call)
+        return TranslationResult(
+            lines=dict(self._lines), usage=_USAGE, call=self._call, proposed_terms=()
+        )
 
 
 def _snapshot(root: Path) -> dict[str, str | None]:
@@ -349,12 +359,20 @@ def test_the_page_translator_alias_names_only_stdlib_and_domain_types() -> None:
     """C-1's comment made executable: *"Every half is stdlib or domain. It must
     NOT name anything in mangatl.translate - that is the contract C-1 is
     about."* `bytes` and `Sequence` are stdlib; `OcrResult` and
-    `TranslationResult` are `domain`, which is what C-2 is for."""
+    `TranslationResult` are `domain`, which is what C-2 is for.
+
+    MT-014 C-9 adds a third argument, `PromptContext` - `domain`, so the
+    contract still holds. Imported here rather than at the top of the file so
+    that in RED, before `mangatl.domain.glossary` exists, only this test fails
+    at the import and every other test in the file fails on its own assertion.
+    """
+    from mangatl.domain.glossary import PromptContext
+
     assert get_origin(PageTranslator) is not None, "PageTranslator is not a Callable alias"
 
     arguments, result = get_args(PageTranslator)
 
-    assert arguments == [bytes, Sequence[OcrResult]]
+    assert arguments == [bytes, Sequence[OcrResult], PromptContext]
     assert result is TranslationResult
 
 
