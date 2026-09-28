@@ -91,7 +91,11 @@ __all__ = [
 #: ceiling is money, and money is exact micro-dollars everywhere else in this
 #: project; a REAL column is an IEEE-754 double. AC-5 is unanswerable in a
 #: version 3 file without reading a ceiling back through a float.
-SCHEMA_VERSION: int = 4
+#:
+#: Version 5 is MT-014's glossary (C-7): `glossary.last_seen_page` and
+#: `glossary.source`, appended by `ALTER TABLE ... ADD COLUMN`. AC-3's
+#: least-recently-seen eviction and PO-3's user-entries-last both sort on them.
+SCHEMA_VERSION: int = 5
 
 #: `page.status` as `create_project` writes it: read, hashed, nothing done yet.
 PAGE_PENDING: str = "pending"
@@ -327,6 +331,28 @@ DROP TABLE chapter_v3;
 """
 )
 
+#: Version 4 to version 5 (MT-014 C-7): `glossary.last_seen_page` and
+#: `glossary.source`. **`ADD COLUMN`, not a rebuild**, for `_MIGRATE_TO_V2`'s
+#: reason: nothing is converted, so no row is rewritten and every other
+#: constraint on the table is the one it had. The two column definitions are
+#: `schema.py`'s, verbatim and **CHECK included** - SQLite accepts a CHECK on
+#: `ADD COLUMN` and tests it against the rows already there - so a migrated
+#: file refuses `source = 'robot'` exactly as a fresh one does.
+#: (`schema.__all__` is pinned by MT-044's tests, so the definitions are
+#: repeated rather than exported; `test_schema_v5.py` compares the two tables.)
+#:
+#: The `UPDATE` is not tidiness. Without it every existing row reads as last
+#: seen on page 0 - the column DEFAULT, and the stalest possible sighting - so
+#: AC-3 would evict the names a chapter has carried longest first. Every
+#: existing row is a model's: no user edit could reach the glossary before
+#: this version.
+_MIGRATE_TO_V5 = """
+ALTER TABLE glossary ADD COLUMN last_seen_page INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE glossary ADD COLUMN
+    source TEXT NOT NULL DEFAULT 'model' CHECK (source IN ('model', 'user'));
+UPDATE glossary SET last_seen_page = first_seen_page;
+"""
+
 #: The migration chain, in order, each step keyed on the version it *produces*.
 #: A step runs when the file found on disk is older than that.
 #:
@@ -340,6 +366,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (2, _MIGRATE_TO_V2),
     (3, _MIGRATE_TO_V3),
     (4, _MIGRATE_TO_V4),
+    (5, _MIGRATE_TO_V5),
 )
 
 
@@ -426,7 +453,7 @@ def open_project(project_dir: Path) -> Project:
     connection: the migration commits before any caller sees the project, so the
     next process to open it finds a current file rather than doing the whole
     thing again. Migrating is not the same as "open anything" - a newer file is
-    still refused above, and the refusal is now of version 4 and upward.
+    still refused above, and the refusal is of anything above `SCHEMA_VERSION`.
 
     The version found is passed on to `_migrate_to_current` rather than
     rediscovered there: with two migration steps it decides *which* of them run.

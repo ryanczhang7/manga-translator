@@ -336,7 +336,8 @@ def test_this_build_writes_and_reads_the_current_schema_version() -> None:
     A v1 file now runs three steps in one open, and `_V1_DDL` above is still the
     v1 schema and must still stay that way.
     """
-    assert SCHEMA_VERSION == 4
+    # MT-014 C-7 takes it to 5: `glossary` gains `last_seen_page` and `source`.
+    assert SCHEMA_VERSION == 5
 
 
 def test_a_freshly_created_project_is_a_current_version_file_with_the_new_column(
@@ -354,8 +355,8 @@ def test_a_freshly_created_project_is_a_current_version_file_with_the_new_column
         pass
     db_path = project_dir_for(source_dir) / "project.db"
 
-    assert _user_version(db_path) == 4
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(4,)]
+    assert _user_version(db_path) == 5
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(5,)]
     columns = {str(row[1]) for row in _raw(db_path, "PRAGMA table_info(line)")}
     assert "ocr_empty" in columns, f"the line table has {sorted(columns)}"
 
@@ -528,11 +529,12 @@ def test_a_version_one_file_is_migrated_in_place_when_it_is_opened(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    # 4, not 2: MT-012's v2 -> v3 step and MT-044's v3 -> v4 step both run
+    # 5, not 2: MT-012's v2 -> v3 step, MT-044's v3 -> v4 step and MT-014's
+    # v4 -> v5 step all run
     # immediately after MT-010's, so a v1 file arrives at the current version in
     # one open. `test_ledger.py` covers the v2 -> v3 step on a file that starts
     # at 2, and `test_schema_v4.py` the v3 -> v4 step on one that starts at 3.
-    assert _user_version(db_path) == 4
+    assert _user_version(db_path) == 5
     after = {str(row[1]) for row in _raw(db_path, "PRAGMA table_info(line)")}
     assert "ocr_empty" in after
     assert before <= after, f"the migration dropped {sorted(before - after)} from the line table"
@@ -658,3 +660,48 @@ def test_a_file_newer_than_this_build_is_still_refused_after_the_migration_lands
     message = str(excinfo.value)
     assert str(SCHEMA_VERSION + 1) in message, message
     assert str(SCHEMA_VERSION) in message, message
+
+
+# -- MT-014 C-7: a v1 file walks all the way to v5 ------------------------------
+
+
+def test_a_version_one_file_arrives_at_v5_with_the_same_glossary_table_as_a_fresh_one(
+    source_dir: Path,
+    one_bit_png: Callable[..., bytes],
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+) -> None:
+    """MT-014 C-7: "a v1 file walks to v5 in one open", and its `glossary`
+    table is then the same table a fresh file gets - same columns, same order,
+    same types, same NOT NULL and DEFAULT. A glossary row is added to the v1
+    fixture here, first seen on page 1 so that `last_seen_page` reading the
+    column's `DEFAULT 0` instead of the migrated value is visible; `_V1_DDL`
+    itself is untouched."""
+    db_path = _build_v1_file(source_dir, one_bit_png)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "INSERT INTO glossary (chapter_id, term_ja, term_en, first_seen_page)"
+            " VALUES ((SELECT id FROM chapter), ?, ?, ?)",
+            ("さくら", "Sakura", 1),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    fresh_dir = tmp_path / "fresh"
+    fresh_dir.mkdir()
+    for name in ("p1.png", "p2.png"):
+        (fresh_dir / name).write_bytes(png_bytes(_PAGE_W, _PAGE_H))
+    with create_project(read_chapter(fresh_dir), project_dir_for(fresh_dir)):
+        pass
+    fresh_db = project_dir_for(fresh_dir) / "project.db"
+
+    with open_project(project_dir_for(source_dir)):
+        pass
+
+    shape = "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('glossary')"
+    assert _user_version(db_path) == 5
+    assert _raw(db_path, shape) == _raw(fresh_db, shape)
+    assert _raw(
+        db_path, "SELECT term_ja, first_seen_page, last_seen_page, source FROM glossary"
+    ) == [("さくら", 1, 1, "model")]

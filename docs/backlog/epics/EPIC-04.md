@@ -2,7 +2,7 @@
 id: EPIC-04
 title: Translating with the page in view, under a hard budget
 status: todo
-stories: [MT-011, MT-012, MT-013, MT-044, MT-014, MT-038]
+stories: [MT-011, MT-012, MT-013, MT-044, MT-014, MT-038, MT-045]
 ---
 
 ## Goal
@@ -76,6 +76,8 @@ silent deferral.
   names carried across pages.
 - **MT-038** — the measurement: one real call, `response.usage` recorded, and
   the cost model re-run against it rather than against its own assumptions.
+- **MT-045** — the evidence: a name translated live on two pages, with the
+  glossary on and off, K runs each (split out of MT-014, PO-1, 2026-09-28).
 
 ## Deliberately not in this epic
 

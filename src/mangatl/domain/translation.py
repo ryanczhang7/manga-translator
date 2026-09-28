@@ -29,6 +29,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from mangatl.domain.glossary import ProposedTerm
+
 __all__ = ["CallInfo", "TokenUsage", "TranslationResult"]
 
 
@@ -92,8 +94,14 @@ class TranslationResult:
     "record nothing in the ledger" the behaviour a caller gets by saying
     nothing, which is exactly the vacuous implementation AC-2 warns about,
     arriving through a default argument instead of through a missing line.
+
+    **`proposed_terms` has no default either** (MT-014 C-2), for the same
+    reason: the glossary terms the model proposed for this page, in response
+    order, and `()` for a page that made no call. A default of `()` would make
+    "the chapter learns no names" what a caller gets by saying nothing.
     """
 
     lines: Mapping[int, str]
     usage: TokenUsage
     call: CallInfo | None
+    proposed_terms: tuple[ProposedTerm, ...]

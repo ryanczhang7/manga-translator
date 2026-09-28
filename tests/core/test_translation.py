@@ -106,7 +106,9 @@ def test_a_translation_result_carries_the_lines_and_the_usage() -> None:
     positional sequence: AC-5 needs "region 3 was omitted" to be distinguishable
     from "region 3 was translated as the empty string", and a sequence cannot
     express the difference without a sentinel."""
-    result = TranslationResult(lines={0: "Hello.", 2: "Goodbye."}, usage=_usage(), call=_call())
+    result = TranslationResult(
+        lines={0: "Hello.", 2: "Goodbye."}, usage=_usage(), call=_call(), proposed_terms=()
+    )
 
     assert result.lines == {0: "Hello.", 2: "Goodbye."}
     assert result.usage == _usage()
@@ -114,7 +116,7 @@ def test_a_translation_result_carries_the_lines_and_the_usage() -> None:
 
 
 def test_a_translation_result_is_a_frozen_value() -> None:
-    result = TranslationResult(lines={}, usage=_usage(), call=_call())
+    result = TranslationResult(lines={}, usage=_usage(), call=_call(), proposed_terms=())
 
     assert dataclasses.is_dataclass(TranslationResult)
 
@@ -129,7 +131,7 @@ def test_an_empty_mapping_is_a_legal_result_and_is_the_no_call_page() -> None:
     """C-2 in terms: "an EMPTY mapping is AC-7's no-call page". A page of
     wordless art is not an error and is not a missing result - it is a result
     with nothing in it, and it must be constructible without a sentinel."""
-    result = TranslationResult(lines={}, usage=TokenUsage(0, 0, 0, 0), call=None)
+    result = TranslationResult(lines={}, usage=TokenUsage(0, 0, 0, 0), call=None, proposed_terms=())
 
     assert result.lines == {}
     assert not result.lines
@@ -141,7 +143,7 @@ def test_an_empty_mapping_is_a_legal_result_and_is_the_no_call_page() -> None:
 def test_the_sparse_mapping_distinguishes_an_omission_from_an_empty_string() -> None:
     """AC-5's reason for the shape, stated as the thing it has to be able to
     say. Region 3 is absent; region 2 was translated as `""`."""
-    result = TranslationResult(lines={2: ""}, usage=_usage(), call=_call())
+    result = TranslationResult(lines={2: ""}, usage=_usage(), call=_call(), proposed_terms=())
 
     assert 2 in result.lines
     assert result.lines[2] == ""
@@ -213,8 +215,8 @@ def test_a_result_that_made_a_call_and_one_that_did_not_are_distinguishable() ->
     usages are identical.
     """
     zero = TokenUsage(0, 0, 0, 0)
-    billed = TranslationResult(lines={}, usage=zero, call=_call())
-    wordless = TranslationResult(lines={}, usage=zero, call=None)
+    billed = TranslationResult(lines={}, usage=zero, call=_call(), proposed_terms=())
+    wordless = TranslationResult(lines={}, usage=zero, call=None, proposed_terms=())
 
     assert billed.usage == wordless.usage
     assert billed.call is not None
@@ -242,4 +244,33 @@ def test_the_call_field_has_no_default_so_a_caller_cannot_forget_it() -> None:
         "lines",
         "usage",
         "call",
+        "proposed_terms",
     ]
+
+
+# -- MT-014 C-2: proposed_terms ------------------------------------------------
+
+
+def test_the_proposed_terms_field_has_no_default_either() -> None:
+    """MT-014 C-2: `proposed_terms` is **required, no default**, for the reason
+    MT-044 C-4 gave for `call` - the twin of the test above. A default of `()`
+    would make "the model proposed nothing" what a caller gets by saying
+    nothing, and a `translate_page` that forgot to parse the glossary would
+    look exactly like one whose model never proposed a name: AC-1 fails with
+    nothing anywhere saying why."""
+    fields = {field.name: field for field in dataclasses.fields(TranslationResult)}
+
+    assert "proposed_terms" in fields, "TranslationResult has no proposed_terms field (C-2)"
+    assert fields["proposed_terms"].default is dataclasses.MISSING, (
+        "TranslationResult.proposed_terms has a default, so a translator that never"
+        " parsed the glossary is indistinguishable from a model that proposed nothing"
+    )
+    assert fields["proposed_terms"].default_factory is dataclasses.MISSING
+
+
+def test_the_wordless_page_is_the_c2_value_exactly() -> None:
+    """C-2 spells the wordless page out in full, and it proposes nothing."""
+    result = TranslationResult(lines={}, usage=TokenUsage(0, 0, 0, 0), call=None, proposed_terms=())
+
+    assert result.proposed_terms == ()
+    assert result == TranslationResult({}, TokenUsage(0, 0, 0, 0), None, ())

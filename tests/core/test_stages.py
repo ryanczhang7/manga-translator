@@ -47,6 +47,7 @@ import ast
 import sqlite3
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mangatl.domain.line import OcrResult
 from mangatl.domain.region import RawRegion
@@ -58,6 +59,9 @@ from mangatl.pipeline.stages import build_stages
 from mangatl.pipeline.translate_stage import TranslateStage
 from mangatl.store.intake import read_chapter
 from mangatl.store.project import Project, create_project, project_dir_for
+
+if TYPE_CHECKING:
+    from mangatl.domain.glossary import PromptContext
 
 _SOURCE_PAGES: tuple[tuple[str, int, int], ...] = (
     ("p1.png", 7, 3),
@@ -142,12 +146,15 @@ class _Translator:
     def __init__(self) -> None:
         self.result_counts: list[int] = []
 
-    def __call__(self, image_bytes: bytes, results: Sequence[OcrResult]) -> TranslationResult:
+    def __call__(
+        self, image_bytes: bytes, results: Sequence[OcrResult], context: PromptContext
+    ) -> TranslationResult:
         self.result_counts.append(len(results))
         return TranslationResult(
             lines={index: f"EN({result.text})" for index, result in enumerate(results)},
             usage=TokenUsage(0, 0, 0, 0),
             call=None,
+            proposed_terms=(),
         )
 
 

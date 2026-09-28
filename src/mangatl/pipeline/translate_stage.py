@@ -53,21 +53,25 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from mangatl.domain.budget import Budget
+from mangatl.domain.glossary import PromptContext, mark_seen, merge
 from mangatl.domain.line import OcrResult
 from mangatl.domain.rates import price
 from mangatl.domain.translation import TranslationResult
+from mangatl.pipeline.continuity import build_prompt_context
 from mangatl.pipeline.stage import BudgetRefused, PageContext
+from mangatl.store.glossary import read_entries, upsert
 from mangatl.store.ledger import chapter_call_costs, chapter_total, record_call
 from mangatl.store.project import Project
 
 __all__ = ["PageTranslator", "TranslateStage", "budget_for", "pages_remaining"]
 
-#: Page image bytes and the page's OCR results in, one result out.
+#: Page image bytes, the page's OCR results and its continuity context (MT-014
+#: C-9) in, one result out.
 #: Every half is stdlib or domain. It must NOT name anything in
 #: mangatl.translate - that is the contract C-1 is about. A `Callable` rather
 #: than a `Protocol` because any callable will do - a bound
 #: `partial(translate_page, client)`, a class with `__call__`, a function.
-PageTranslator = Callable[[bytes, Sequence[OcrResult]], TranslationResult]
+PageTranslator = Callable[[bytes, Sequence[OcrResult], PromptContext], TranslationResult]
 
 
 def budget_for(project: Project) -> Budget:
@@ -104,6 +108,25 @@ def pages_remaining(ctx: PageContext) -> int:
     the decision" is a reason to get it right once rather than to leave it.
     """
     return len(ctx.project.pages()) - ctx.page.ordinal
+
+
+def _update_glossary(
+    ctx: PageContext, result: TranslationResult, ocr_results: Sequence[OcrResult]
+) -> None:
+    """C-9 step 4: fold the page's proposals and sightings into the glossary,
+    and write only the entries that changed - each `upsert` opens its own
+    transaction, so an unchanged chapter costs one read and no writes."""
+    ordinal = ctx.page.ordinal
+    before = read_entries(ctx.project)
+    after = mark_seen(
+        merge(before, result.proposed_terms, ordinal),
+        [line.text for line in ocr_results],
+        ordinal,
+    )
+    unchanged = set(before)
+    for entry in after:
+        if entry not in unchanged:
+            upsert(ctx.project, entry)
 
 
 @dataclass
@@ -161,6 +184,17 @@ class TranslateStage:
         4. **No transaction is opened here.** Unchanged from MT-011 and for its
            reason: `write_proposed` and `record_call` each open their own, and a
            stage that wrapped them would turn both into `RuntimeError`.
+        5. **The glossary is written after the bill and before the proposals**
+           (MT-014 C-9). After the bill, so an unpriceable call leaves no names
+           behind either (clause 3). Before the proposals, for clause 2's
+           reason: a crash in between re-translates the page, and `merge` is
+           idempotent, whereas the other order marks the page done with its
+           names never recorded. A wordless page still runs it - `mark_seen`
+           over empty text changes nothing and nothing was proposed.
+
+        The request's context is built from the store before the call (C-8):
+        page 1 gets `EMPTY_CONTEXT`, every later page the glossary and the
+        previous page's proposed English.
 
         `chapter_call_costs` is read **per page and is deliberately not cached**
         (F-4): a cached sample set is a guard reading a stale spend, which is
@@ -174,7 +208,8 @@ class TranslateStage:
             raise BudgetRefused(decision)
 
         image_bytes = (ctx.project.chapter.source_dir / ctx.page.filename).read_bytes()
-        result = self.translate(image_bytes, ocr_results)
+        context = build_prompt_context(ctx.project, ctx.page.ordinal)
+        result = self.translate(image_bytes, ocr_results, context)
         if result.call is not None:
             record_call(
                 ctx.project,
@@ -183,6 +218,7 @@ class TranslateStage:
                 result.call.request_id,
                 price(result.call.model_id, result.usage),
             )
+        _update_glossary(ctx, result, ocr_results)
         ctx.project.write_proposed(ctx.page.ordinal, result.lines)
 
     def is_done(self, ctx: PageContext) -> bool:
