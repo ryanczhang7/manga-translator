@@ -30,7 +30,7 @@ meaning in QSS, so a template is still a readable stylesheet.
 `color.text.on-accent` → `COLOR_TEXT_ON_ACCENT`. The module also exports
 `TOKENS: dict[str, str]` keyed by the dotted name, so a test can iterate.
 
-**Token name grammar:** `^[a-z][a-z0-9]*(\.[a-z0-9][a-z0-9-]*)*$`.
+**Token name grammar:** `^[a-z][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$`.
 
 **What a test may assert about the generator:**
 

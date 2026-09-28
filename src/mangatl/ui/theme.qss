@@ -1,0 +1,170 @@
+/*
+ * theme.qss.in - the base (default, non-High-Contrast) stylesheet template.
+ *
+ * Source of values: docs/wiki/design/tokens.toml. Every placeholder names a
+ * token there. The generator renders this file with the authored values into
+ * theme.qss, and copies it verbatim into the package so the running app can
+ * re-render it against a High Contrast palette (tokens.md section 12).
+ *
+ * SEED, written 2026-09-28 by lead-designer before MT-025 entered RED. It
+ * covers only the global chrome every widget inherits. Workspace components
+ * (components.md sections 2-9) are added by the stories that build them.
+ *
+ * Rules for editing this file:
+ *   - comments in slash-star form only; no nested braces;
+ *   - the at-sign appears only in placeholders;
+ *   - pixel values are written as a placeholder followed by px;
+ *   - no overlay or typeset token belongs here: those are painted from Python;
+ *   - no 8-digit colour token belongs here: Qt reads 8-digit hex as AARRGGBB.
+ *
+ * Focus: QSS has no :focus-visible and no reliable outline, so the ring is a
+ * border in the :focus rule (tokens.md section 7, accessibility.md A-13.2).
+ * Focus rules set only border properties and hover/pressed rules set only
+ * ground and text, so the two are additive (A-04).
+ */
+
+/* ---- Ground, text, type, selection ------------------------------------ */
+
+QWidget {
+    color: #EDEDED;
+    font-family: Segoe UI Variable Text, Segoe UI, sans-serif;
+    font-size: 13px;
+    font-weight: 400;
+    selection-background-color: #17425C;
+    selection-color: #EDEDED;
+}
+
+QWidget:disabled {
+    color: #737373;
+}
+
+QMainWindow, QDialog {
+    background-color: #1C1C1C;
+}
+
+/* ---- Tooltip: elevation e2 -------------------------------------------- */
+
+QToolTip {
+    background-color: #2E2E2E;
+    color: #EDEDED;
+    border: 1px solid #4A4A4A;
+    padding: 4px 8px;
+}
+
+/* ---- Menu: elevation e2 ----------------------------------------------- */
+
+QMenu {
+    background-color: #2E2E2E;
+    border: 1px solid #4A4A4A;
+    padding: 4px 0px;
+}
+
+QMenu::item {
+    background-color: transparent;
+    color: #EDEDED;
+    padding: 8px 12px;
+}
+
+/* In a QMenu, :selected is the current item - hover and keyboard alike. */
+QMenu::item:selected {
+    background-color: #303030;
+    color: #EDEDED;
+}
+
+QMenu::item:disabled {
+    color: #737373;
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: #333333;
+    margin: 4px 8px;
+}
+
+/* ---- Button: components.md section 1, the secondary variant ----------- */
+/* The other variants need a selector components.md does not yet name.    */
+
+QPushButton {
+    background-color: #262626;
+    color: #EDEDED;
+    border: 1px solid #7A7A7A;
+    border-radius: 4px;
+    padding: 8px 12px;
+}
+
+QPushButton:hover {
+    background-color: #303030;
+}
+
+QPushButton:pressed {
+    background-color: #3A3A3A;
+}
+
+QPushButton:focus {
+    border: 2px solid #FFFFFF;
+}
+
+QPushButton:disabled {
+    background-color: #212121;
+    color: #737373;
+    border-color: #4A4A4A;
+}
+
+/* ---- Text fields ------------------------------------------------------ */
+
+QLineEdit, QPlainTextEdit {
+    background-color: #141414;
+    color: #EDEDED;
+    border: 1px solid #7A7A7A;
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+
+QLineEdit:focus, QPlainTextEdit:focus {
+    border: 2px solid #FFFFFF;
+}
+
+QLineEdit:disabled, QPlainTextEdit:disabled {
+    background-color: #212121;
+    color: #737373;
+    border-color: #4A4A4A;
+}
+
+/* ---- Scroll bars: no arrows, a handle that clears 3:1 (A-02) ---------- */
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 12px;
+    margin: 0px;
+    border: none;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 12px;
+    margin: 0px;
+    border: none;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #7A7A7A;
+    border-radius: 4px;
+    min-height: 32px;
+}
+
+QScrollBar::handle:horizontal {
+    background-color: #7A7A7A;
+    border-radius: 4px;
+    min-width: 32px;
+}
+
+QScrollBar::add-line, QScrollBar::sub-line {
+    width: 0px;
+    height: 0px;
+    border: none;
+    background: none;
+}
+
+QScrollBar::add-page, QScrollBar::sub-page {
+    background: none;
+}

@@ -1,0 +1,66 @@
+/*
+ * theme_hc.qss.in - the append-only High Contrast override template.
+ *
+ * Used only under a Windows contrast theme, and always APPENDED after the
+ * base template rendered against the contrast palette. It is never used
+ * otherwise (high-contrast.md section 2, tokens.md section 12.1).
+ *
+ * SEED, written 2026-09-28 by lead-designer before MT-025 entered RED.
+ *
+ * What belongs here: RULE changes, not value changes. The base template
+ * already resolves every colour through the High Contrast map, so a rule here
+ * exists only where HC needs different behaviour from the same selector.
+ *
+ * Constraints, all mechanically checked (MT-025 AC-12):
+ *   - every selector below appears verbatim in theme.qss.in;
+ *   - colours come ONLY from the five palette-role placeholders
+ *     Window, WindowText, Highlight, HighlightedText, DisabledText;
+ *     no colour token placeholder appears here;
+ *   - non-colour tokens such as widths may appear as ordinary placeholders;
+ *   - comments in slash-star form only; no nested braces.
+ *
+ * Do not set border properties on hover or pressed rules here: this sheet is
+ * appended, so it would win over the focus ring at equal specificity and focus
+ * would stop being additive (A-04, A-15.8).
+ */
+
+/* Selected text: WindowText on Highlight is not a pair Windows guarantees. */
+QWidget {
+    selection-background-color: @{hc.Highlight};
+    selection-color: @{hc.HighlightedText};
+}
+
+/* e2 under HC: Window plus a 2px WindowText boundary, no shadow. */
+QToolTip {
+    border: @{border-width.emphasis}px solid @{hc.WindowText};
+}
+
+QMenu {
+    border: @{border-width.emphasis}px solid @{hc.WindowText};
+}
+
+/* The current menu item is the guaranteed pair, inverted. */
+QMenu::item:selected {
+    background-color: @{hc.Highlight};
+    color: @{hc.HighlightedText};
+}
+
+/* components.md 10.1: hover is never a ground change under HC. */
+QPushButton:hover {
+    background-color: @{hc.Window};
+}
+
+/* components.md 10.1: pressed is the Highlight pair. */
+QPushButton:pressed {
+    background-color: @{hc.Highlight};
+    color: @{hc.HighlightedText};
+}
+
+/* components.md 10.1: disabled label and border are both DisabledText. */
+QPushButton:disabled {
+    border-color: @{hc.DisabledText};
+}
+
+QLineEdit:disabled, QPlainTextEdit:disabled {
+    border-color: @{hc.DisabledText};
+}
