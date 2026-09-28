@@ -36,10 +36,71 @@
 #     to learn one number; if the named suite has no floor it warns loudly and
 #     exits 0. CI and scripts/ci-local.sh both invoke the full run, which is
 #     where the audit has to hold.
+#
+# --- concurrency (MT-042) ---------------------------------------------------
+#
+#   SELFTEST_JOBS=2 bash scripts/selftest.sh   at most two suites at once
+#   SELFTEST_JOBS=1 bash scripts/selftest.sh   the serial runner
+#
+# Suites run concurrently, at most $SELFTEST_JOBS at once. Unset or empty means
+# 4, the CI runner's vCPU count, and deliberately not `nproc`: the work is
+# spawn-bound, and on Windows more jobs than cores is slower, not faster.
+# Anything that is not a positive integer is refused before any suite starts,
+# because a bound of 0 would never start anything.
+#
+# Four properties, each of which a concurrent runner gets wrong by default:
+#
+#   * EVERY job's exit status is collected on its own. A finished job is
+#     noticed with `kill -0 <pid>` and its status is then read with
+#     `wait <pid>`, which returns that job's status even though it has already
+#     exited. A bare `wait` would not. Should a bash ever forget a reaped job,
+#     `wait` returns 127 ("not a child"), which counts as a FAILURE, so this
+#     fails closed and never reports a lost status as a pass.
+#   * Output is BUFFERED per suite, in .claude/state/selftest/<name>.out under
+#     this script's own root (stdout and stderr together, as `2>&1` always
+#     was), and printed in GLOB order, each suite contiguous under its header,
+#     whatever order the suites finish in. A suite is printed as soon as it
+#     and every suite before it in the glob have finished. Each suite's floor
+#     is read from its own buffer. No buffer is left behind, pass or fail; one
+#     that survives means a run was killed, and it is safe to delete.
+#   * The LARGEST suite files start first. A run cannot finish before its
+#     longest suite does, so that suite must not wait in the queue behind short
+#     ones. Starting in glob order put `phase-guard` ~108 s late, which is over
+#     MT-042 AC-1's 1.10x ceiling before any contention is counted. File size is
+#     the proxy, because it needs no timing data and names no suite.
+#   * A slot is refilled the moment ANY job exits. Without bash 4.3's `wait -n`
+#     that means polling, and each `sleep` is a fork, so the interval backs off
+#     from 0.1 s to 2 s while nothing changes and resets when a job ends. The
+#     suites run for seconds to minutes, so 2 s is nothing on the critical path.
+#
+# SERIAL_SUITES, below, is the escape hatch for a suite that proves not to be
+# parallel-safe (MT-042 C-3). A suite named there runs alone, before the
+# concurrent ones, with no other suite alive. Its floor is still read and it
+# still prints in glob order. It is a line in this file, not an environment
+# variable, so that the exception is visible in the repository. It ships empty.
+#
+# Bash 3.2: no `wait -n`, no associative arrays, no mapfile; the tests grep for
+# them.
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ONLY="${1:-}"
+
+# Space-separated suite names, each of which runs with no other suite alive.
+SERIAL_SUITES=""
+
+# The job bound, validated before anything else happens.
+JOBS="${SELFTEST_JOBS:-}"
+case "$JOBS" in
+  '') JOBS=4 ;;
+  *[!0-9]*) JOBS="" ;;
+  *) JOBS="${JOBS#"${JOBS%%[!0]*}"}" ;;   # strip leading zeros; all zeros -> empty
+esac
+if [ -z "$JOBS" ]; then
+  printf "SELFTEST_JOBS must be a positive integer, the number of suites run at once; got '%s'. Nothing was run.\n" \
+    "${SELFTEST_JOBS:-}" >&2
+  exit 1
+fi
 
 # Resolved from the script's own root, never $PWD and never a baked path: the
 # harness's fixtures run a copy of this script from a throwaway tree.
@@ -154,13 +215,16 @@ SUITE_OUTPUT
 # --- what this run is going to run ------------------------------------------
 # Names by parameter expansion rather than `basename`, for the reason above: a
 # fork per suite, twice over, is the whole cost of this mechanism on Windows.
+# The same list is kept as indexed arrays, in glob order, for the run below.
 SUITES=""
+S_NAME=(); S_FILE=(); N=0
 for suite in "$TESTS_DIR"/*.test.sh; do
   [ -e "$suite" ] || continue
   name="${suite##*/}"; name="${name%.test.sh}"
   [ -n "$ONLY" ] && [ "$ONLY" != "$name" ] && continue
   SUITES="$SUITES$name
 "
+  S_NAME[$N]="$name"; S_FILE[$N]="$suite"; N=$((N+1))
 done
 
 # AC-6, on a full run only: a suite with no floor is a suite that can be
@@ -197,18 +261,114 @@ if [ "$faulted" -gt 0 ]; then
   exit 1
 fi
 
+if [ "$N" -eq 0 ]; then
+  printf 'No suites matched%s. Looked in .claude/tests/*.test.sh\n' "${ONLY:+ '$ONLY'}" >&2
+  exit 1
+fi
+
 # --- run --------------------------------------------------------------------
+# Per suite, by glob index: S_PID (empty until started), S_DONE (0/1), S_RC.
+BUF_DIR="$ROOT/.claude/state/selftest"
+[ -d "$BUF_DIR" ] || mkdir -p "$BUF_DIR" || {
+  printf 'selftest.sh: cannot create %s for the output buffers\n' "$BUF_DIR" >&2
+  exit 1
+}
+S_PID=(); S_DONE=(); S_RC=()
+i=0
+while [ "$i" -lt "$N" ]; do S_PID[$i]=""; S_DONE[$i]=0; S_RC[$i]=0; i=$((i+1)); done
+
+# On the way out, however the runner ends: any suite still running is stopped,
+# rather than left orphaned and writing to a buffer nobody will read, and this
+# run's own buffers are removed, in one process. On a normal exit nothing is
+# running. It matters when the runner itself dies - an interrupt, or a runner
+# edited under a live run, which bash reads incrementally and will misparse
+# (MT-042 GREEN hit exactly that and left four suites running).
+cleanup() {
+  local j files
+  for j in $ALIVE; do kill "${S_PID[$j]}" 2>/dev/null; done
+  files=(); j=0
+  while [ "$j" -lt "$N" ]; do
+    [ -e "$BUF_DIR/${S_NAME[$j]}.out" ] && files[${#files[@]}]="$BUF_DIR/${S_NAME[$j]}.out"
+    j=$((j+1))
+  done
+  [ "${#files[@]}" -eq 0 ] || rm -f "${files[@]}"
+}
+on_signal() { exit "$1"; }
+ALIVE=""      # glob indices of the suites now running, space-separated
+RUNNING=0
+trap cleanup EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+
+# start <index>   In the background. The redirect is made before the suite's
+# first line runs, so its buffer exists from the start.
+start() {
+  bash "${S_FILE[$1]}" > "$BUF_DIR/${S_NAME[$1]}.out" 2>&1 &
+  S_PID[$1]=$!
+  ALIVE="$ALIVE $1"
+  RUNNING=$((RUNNING+1))
+}
+
+# reap   Collects every job that has exited, each by its own pid, and sets
+# REAPED to how many. `kill -0` fails once the job is gone; `wait <pid>` then
+# returns that job's own status.
+REAPED=0
+reap() {
+  local j still=""
+  REAPED=0
+  for j in $ALIVE; do
+    if kill -0 "${S_PID[$j]}" 2>/dev/null; then
+      still="$still $j"
+    else
+      wait "${S_PID[$j]}"; S_RC[$j]=$?
+      S_DONE[$j]=1
+      RUNNING=$((RUNNING-1)); REAPED=$((REAPED+1))
+    fi
+  done
+  ALIVE="$still"
+}
+
+# wait_until <n>   Returns once at most <n> suites are running, printing every
+# suite that becomes printable on the way. Polls, backing off while nothing
+# changes: see "concurrency" at the top.
+NAP=0.1
+wait_until() {
+  while [ "$RUNNING" -gt "$1" ]; do
+    reap
+    if [ "$REAPED" -gt 0 ]; then
+      flush; NAP=0.1
+    else
+      sleep "$NAP"
+      case "$NAP" in 0.1) NAP=0.2 ;; 0.2) NAP=0.5 ;; 0.5) NAP=1 ;; *) NAP=2 ;; esac
+    fi
+  done
+}
+
+# flush   Prints, in glob order, every finished suite not yet printed whose
+# predecessors have all been printed.
+NEXT=0
+flush() {
+  while [ "$NEXT" -lt "$N" ] && [ "${S_DONE[$NEXT]}" -eq 1 ]; do
+    report "$NEXT"
+    NEXT=$((NEXT+1))
+  done
+}
+
 fails=0; ran=0; floored=0; met=0; executed=0; declared=0
-for suite in "$TESTS_DIR"/*.test.sh; do
-  [ -e "$suite" ] || continue
-  name="${suite##*/}"; name="${name%.test.sh}"
-  [ -n "$ONLY" ] && [ "$ONLY" != "$name" ] && continue
+NL='
+'
+# report <index>   The suite's header, its buffer, and its floor verdict.
+report() {
+  local name="${S_NAME[$1]}" rc="${S_RC[$1]}" out="" bad floor observed
   printf '\n=== %s ===\n' "$name"
 
-  # Captured rather than streamed, because the count is read back out of it -
-  # and reprinted in full immediately, because a failing suite whose output was
-  # swallowed makes every failure a second command to reproduce.
-  out="$(bash "$suite" 2>&1)"; rc=$?
+  # Buffered rather than streamed, because the count is read back out of it -
+  # and printed in full, because a failing suite whose output was swallowed
+  # makes every failure a second command to reproduce. Read by `read -d ''`,
+  # a builtin, where `$(cat)` would be a fork; trailing newlines are then
+  # stripped, which is exactly what the `$(...)` capture it replaces did.
+  IFS= read -r -d '' out < "$BUF_DIR/$name.out"
+  out="${out%"${out##*[!$NL]}"}"
   printf '%s\n' "$out"
 
   bad=0
@@ -242,12 +402,71 @@ for suite in "$TESTS_DIR"/*.test.sh; do
   fi
 
   [ "$bad" -eq 0 ] || fails=$((fails+1))
+}
+
+# --- the start order --------------------------------------------------------
+# Pinned suites first, in glob order; then the rest, largest file first, ties
+# in glob order. One `wc -c` over every file is the only process this costs,
+# and it is skipped when there is nothing to reorder. Each of wc's lines is
+# matched to its file by path, so a file wc could not read sorts last rather
+# than shifting every size after it.
+PINNED=""; POOL=""
+i=0
+while [ "$i" -lt "$N" ]; do
+  case " $SERIAL_SUITES " in
+    *" ${S_NAME[$i]} "*) PINNED="$PINNED $i" ;;
+    *) POOL="$POOL $i" ;;
+  esac
+  i=$((i+1))
 done
 
-if [ "$ran" -eq 0 ]; then
-  printf 'No suites matched%s. Looked in .claude/tests/*.test.sh\n' "${ONLY:+ '$ONLY'}" >&2
-  exit 1
+if [ "$JOBS" -gt 1 ] && [ "$N" -gt 1 ]; then
+  S_SIZE=()
+  i=0; while [ "$i" -lt "$N" ]; do S_SIZE[$i]=0; i=$((i+1)); done
+  SIZES="$(wc -c "${S_FILE[@]}" 2>/dev/null)"
+  i=0
+  while IFS= read -r line; do
+    # wc prints in argument order, so search forward from the last match.
+    j="$i"
+    while [ "$j" -lt "$N" ]; do
+      case "$line" in *" ${S_FILE[$j]}") break ;; esac
+      j=$((j+1))
+    done
+    [ "$j" -lt "$N" ] || continue          # the `total` line, or noise
+    trim "${line% "${S_FILE[$j]}"}"
+    case "$TRIMMED" in ''|*[!0-9]*) ;; *) S_SIZE[$j]="$TRIMMED" ;; esac
+    i=$((j+1))
+  done <<WC_LINES
+$SIZES
+WC_LINES
+  # Insertion sort, descending by size; strict comparison keeps it stable.
+  SORTED=""
+  for i in $POOL; do
+    before=""; after=""; placed=0
+    for j in $SORTED; do
+      if [ "$placed" -eq 0 ] && [ "${S_SIZE[$i]}" -gt "${S_SIZE[$j]}" ]; then
+        after="$after $i"; placed=1
+      fi
+      if [ "$placed" -eq 0 ]; then before="$before $j"; else after="$after $j"; fi
+    done
+    [ "$placed" -eq 1 ] || after="$after $i"
+    SORTED="$before$after"
+  done
+  POOL="$SORTED"
 fi
+
+# --- the run ----------------------------------------------------------------
+for i in $PINNED; do
+  # Nothing else is alive: the pinned suites run before any other starts.
+  start "$i"
+  wait_until 0
+done
+for i in $POOL; do
+  wait_until $((JOBS-1))
+  start "$i"
+done
+wait_until 0
+flush
 
 printf '\n'
 if [ "$floored" -eq 0 ]; then

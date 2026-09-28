@@ -13,6 +13,7 @@ in here is ever committed; only this file and `.gitkeep` are tracked.
 | `mutations/*.new` | `scripts/mutate.sh` | nothing; it is scratch | yes |
 | `mutations/log` | `scripts/mutate.sh` | you, and the story that quotes it | yes |
 | `phase-guard-declined.log` | `.claude/hooks/phase-guard.sh` | you, when the guard looks noisy | yes |
+| `selftest/*.out` | `scripts/selftest.sh` | `scripts/selftest.sh`, to print each suite in glob order and read its floor | yes |
 
 ## The `Hand-editable` column is enforced
 
@@ -64,6 +65,13 @@ single-occurrence match. **A `.bak` left behind means a restore failed.**
 still run code on, it cleans up after itself. Put the file back from the backup,
 check it with `cmp`, then delete the backup. The one path it cannot run code on
 is a kill, and that leaves a `.new` beside the `.bak` - see below.
+
+**`selftest/` is `scripts/selftest.sh`'s output buffers** (MT-042). The self-test
+runs its suites concurrently, so each suite writes to `selftest/<name>.out` and
+the runner prints them in glob order and reads each suite's floor from its own
+file. It removes every file in there on the way out, pass or fail; one that
+survives means a run was killed, and it is safe to delete. A fixture copy of
+the runner writes under its own fixture, never here.
 
 **A `.new` is scratch, not a signal.** `sed` cannot read and write one path, so
 `mutate.sh` builds the mutated text in `mutations/<file>.<stamp>.<pid>.new` and
