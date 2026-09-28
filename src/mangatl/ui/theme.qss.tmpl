@@ -1,0 +1,170 @@
+/*
+ * theme.qss.in - the base (default, non-High-Contrast) stylesheet template.
+ *
+ * Source of values: docs/wiki/design/tokens.toml. Every placeholder names a
+ * token there. The generator renders this file with the authored values into
+ * theme.qss, and copies it verbatim into the package so the running app can
+ * re-render it against a High Contrast palette (tokens.md section 12).
+ *
+ * SEED, written 2026-09-28 by lead-designer before MT-025 entered RED. It
+ * covers only the global chrome every widget inherits. Workspace components
+ * (components.md sections 2-9) are added by the stories that build them.
+ *
+ * Rules for editing this file:
+ *   - comments in slash-star form only; no nested braces;
+ *   - the at-sign appears only in placeholders;
+ *   - pixel values are written as a placeholder followed by px;
+ *   - no overlay or typeset token belongs here: those are painted from Python;
+ *   - no 8-digit colour token belongs here: Qt reads 8-digit hex as AARRGGBB.
+ *
+ * Focus: QSS has no :focus-visible and no reliable outline, so the ring is a
+ * border in the :focus rule (tokens.md section 7, accessibility.md A-13.2).
+ * Focus rules set only border properties and hover/pressed rules set only
+ * ground and text, so the two are additive (A-04).
+ */
+
+/* ---- Ground, text, type, selection ------------------------------------ */
+
+QWidget {
+    color: @{color.text.primary};
+    font-family: @{type.family.ui};
+    font-size: @{type.body.size}px;
+    font-weight: @{type.body.weight};
+    selection-background-color: @{color.surface.selected};
+    selection-color: @{color.text.primary};
+}
+
+QWidget:disabled {
+    color: @{color.text.disabled};
+}
+
+QMainWindow, QDialog {
+    background-color: @{color.surface.base};
+}
+
+/* ---- Tooltip: elevation e2 -------------------------------------------- */
+
+QToolTip {
+    background-color: @{color.surface.overlay};
+    color: @{color.text.primary};
+    border: @{border-width.hairline}px solid @{color.border.default};
+    padding: @{space.s1}px @{space.s2}px;
+}
+
+/* ---- Menu: elevation e2 ----------------------------------------------- */
+
+QMenu {
+    background-color: @{color.surface.overlay};
+    border: @{border-width.hairline}px solid @{color.border.default};
+    padding: @{space.s1}px @{space.s0}px;
+}
+
+QMenu::item {
+    background-color: transparent;
+    color: @{color.text.primary};
+    padding: @{space.s2}px @{space.s3}px;
+}
+
+/* In a QMenu, :selected is the current item - hover and keyboard alike. */
+QMenu::item:selected {
+    background-color: @{color.surface.hover};
+    color: @{color.text.primary};
+}
+
+QMenu::item:disabled {
+    color: @{color.text.disabled};
+}
+
+QMenu::separator {
+    height: @{border-width.hairline}px;
+    background-color: @{color.border.subtle};
+    margin: @{space.s1}px @{space.s2}px;
+}
+
+/* ---- Button: components.md section 1, the secondary variant ----------- */
+/* The other variants need a selector components.md does not yet name.    */
+
+QPushButton {
+    background-color: @{color.surface.raised};
+    color: @{color.text.primary};
+    border: @{border-width.hairline}px solid @{color.border.interactive};
+    border-radius: @{radius.sm}px;
+    padding: @{space.s2}px @{space.s3}px;
+}
+
+QPushButton:hover {
+    background-color: @{color.surface.hover};
+}
+
+QPushButton:pressed {
+    background-color: @{color.surface.pressed};
+}
+
+QPushButton:focus {
+    border: @{focus.width}px solid @{color.focus.ring};
+}
+
+QPushButton:disabled {
+    background-color: @{color.surface.disabled};
+    color: @{color.text.disabled};
+    border-color: @{color.border.default};
+}
+
+/* ---- Text fields ------------------------------------------------------ */
+
+QLineEdit, QPlainTextEdit {
+    background-color: @{color.surface.sunken};
+    color: @{color.text.primary};
+    border: @{border-width.hairline}px solid @{color.border.interactive};
+    border-radius: @{radius.sm}px;
+    padding: @{space.s1}px @{space.s2}px;
+}
+
+QLineEdit:focus, QPlainTextEdit:focus {
+    border: @{focus.width}px solid @{color.focus.ring};
+}
+
+QLineEdit:disabled, QPlainTextEdit:disabled {
+    background-color: @{color.surface.disabled};
+    color: @{color.text.disabled};
+    border-color: @{color.border.default};
+}
+
+/* ---- Scroll bars: no arrows, a handle that clears 3:1 (A-02) ---------- */
+
+QScrollBar:vertical {
+    background: transparent;
+    width: @{space.s3}px;
+    margin: @{space.s0}px;
+    border: none;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: @{space.s3}px;
+    margin: @{space.s0}px;
+    border: none;
+}
+
+QScrollBar::handle:vertical {
+    background-color: @{color.border.interactive};
+    border-radius: @{radius.sm}px;
+    min-height: @{space.s8}px;
+}
+
+QScrollBar::handle:horizontal {
+    background-color: @{color.border.interactive};
+    border-radius: @{radius.sm}px;
+    min-width: @{space.s8}px;
+}
+
+QScrollBar::add-line, QScrollBar::sub-line {
+    width: @{space.s0}px;
+    height: @{space.s0}px;
+    border: none;
+    background: none;
+}
+
+QScrollBar::add-page, QScrollBar::sub-page {
+    background: none;
+}
