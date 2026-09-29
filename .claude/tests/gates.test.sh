@@ -1008,37 +1008,120 @@ describe "the gates refuse to run while a mutation is unaccounted for"
 # reads it, and this is the consumer that matters. Detection, not a lock - the
 # rule this file already holds about project.conf: nothing waits, nothing is
 # held, the run is refused and the reason is printed.
+#
+# MT-047. The refusal must come BEFORE any gate runs - rules.md and
+# .claude/state/README.md both say so. It used to sit after the gate loop, so
+# every gate executed, printed its header and wrote its log, and only then was
+# the run refused. The old assertion here, `assert_not_contains "PASS  unit"`,
+# could not see that: PASS lines are printed only in the summary, which the
+# refusal pre-empts, so it held whether or not the gate ran. These observe
+# execution directly - a marker the gate command itself creates, the
+# `=== gate:` header gates.sh prints before evaluating a gate, and the files in
+# gate-logs/.
 
 write_conf "$FIX" <<'EOF'
-gate     | unit | required | . | printf 'Tests  47 passed (47)\n'
+gate     | unit | required | . | touch gate-ran.marker; printf 'Tests  47 passed (47)\n'
 evidence | unit | Tests +[1-9][0-9]* passed
 EOF
 
-# Stranded the way a killed run strands one: the command makes the target
-# unwritable, so mutate.sh's restore genuinely fails and its sentinel stays.
-printf 'export const clamp = (v) => Math.min(90, v)\n' > "$FIX/src/main.ts"
-( cd "$FIX" && bash scripts/mutate.sh src/main.ts 's/90/-90/' -- chmod 444 src/main.ts ) >/dev/null 2>&1
-chmod 644 "$FIX/src/main.ts" 2>/dev/null
+# A stranded mutation, the way a kill leaves one: a sentinel whose process is
+# gone. Hand-written rather than produced by a real failed restore, because the
+# old way (`chmod 444` as the watched command) depends on chmod making a file
+# unwritable, which it does not reliably do on Windows.
+mt047_sentinel="$FIX/.claude/state/mutations/src_main.ts.mt047.999999.active"
+mt047_strand() {
+  mkdir -p "$FIX/.claude/state/mutations"
+  printf 'pid\t999999\nfile\tsrc/main.ts\n' > "$mt047_sentinel"
+}
+# Fresh observation state before every run: FIX is shared across the suite,
+# so gate-logs/ already holds earlier blocks' logs. Emptied here, anything in
+# it afterwards was created by the run under test.
+mt047_fresh() {
+  rm -f "$FIX/gate-ran.marker" "$FIX/.claude/state/last-gate-run"
+  mkdir -p "$FIX/.claude/state/gate-logs"
+  rm -rf "$FIX/.claude/state/gate-logs/"* "$FIX/.claude/state/gate-logs/".[!.]* 2>/dev/null
+  return 0
+}
+mt047_marker() { if [ -e "$FIX/gate-ran.marker" ]; then echo present; else echo absent; fi; }
+mt047_logs()   { ( cd "$FIX/.claude/state/gate-logs" && find . -type f | sort | tr '\n' ' ' ); }
 
+mt047_strand
+set_phase "$FIX" ""
+
+# The precondition is checked, not assumed: the sentinel above is one --check
+# reports as stranded. If it were not, every refusal assertion below would be
+# testing nothing.
+check_out="$( cd "$FIX" && bash scripts/mutate.sh --check 2>&1 )"; check_rc=$?
+assert_eq       "precondition: mutate.sh --check reports the hand-written sentinel as stranded (exit 1)" "1" "$check_rc"
+assert_contains "precondition: and names the dead process as GONE" "GONE" "$check_out"
+
+# AC-1..AC-3: no arguments, --fast, --gate unit. Four observations each.
+mt047_refused() { # <label> [gates args...]
+  local label="$1"; shift
+  mt047_fresh
+  out="$(gates "$@")"; rc=$?
+  assert_eq           "$label: behind a stranded mutation gates.sh exits 2" "2" "$rc"
+  assert_not_contains "$label: no gate header is printed before the refusal" "=== gate:" "$out"
+  assert_eq           "$label: the gate command never ran (marker file absent)" "absent" "$(mt047_marker)"
+  assert_eq           "$label: nothing under gate-logs/ was created or modified" "" "$(mt047_logs)"
+}
+mt047_refused "AC-1 gates.sh"
+# The refusal still says why, and names the file. (Kept from the chmod-strand
+# version of this block, now against the hand-written sentinel.)
+assert_contains "AC-1 gates.sh: it says the tree may not be the code" "may not be the code you think" "$out"
+assert_contains "AC-1 gates.sh: and names the file that is mutated"   "src/main.ts" "$out"
+mt047_refused "AC-2 gates.sh --fast"      --fast
+mt047_refused "AC-3 gates.sh --gate unit" --gate unit
+
+# AC-4: with a story active, the refusal leaves the story and the gate record
+# alone - byte for byte.
+story "$FIX" T-1 GREEN </dev/null
+set_phase "$FIX" GREEN
+mt047_fresh
+story_before="$(cksum < "$FIX/docs/backlog/stories/T-1.md")"
 out="$(gates)"; rc=$?
-assert_contains "it says the tree may not be the code"  "may not be the code you think" "$out"
-assert_contains "and names the file that is mutated"    "src/main.ts" "$out"
-assert_eq       "and exits non-zero"                    "2" "$rc"
-assert_not_contains "and no gate ran"                   "PASS         unit" "$out"
+assert_eq "AC-4: with a story active the refused run still exits 2" "2" "$rc"
+assert_eq "AC-4: the active story file is byte-identical after a refused run" \
+  "$story_before" "$(cksum < "$FIX/docs/backlog/stories/T-1.md")"
+assert_eq "AC-4: .claude/state/last-gate-run is not created by a refused run" \
+  "absent" "$(if [ -e "$FIX/.claude/state/last-gate-run" ]; then echo present; else echo absent; fi)"
+set_phase "$FIX" ""
 
-# --list and --audit read the manifest and run nothing against the tree, so a
-# stranded mutation is none of their business. A check that refused everything
-# would make the harness unusable at exactly the moment somebody needs it to
-# explain itself.
-out="$(gates --list)"
-assert_contains "--list still works" "unit" "$out"
+# AC-5: --list and --audit read the manifest and run nothing against the tree,
+# so a stranded mutation is none of their business. A check that refused
+# everything would make the harness unusable at exactly the moment somebody
+# needs it to explain itself.
+mt047_fresh
+out="$(gates --list)"; rc=$?
+assert_eq       "AC-5: --list still exits 0 behind a stranded mutation" "0" "$rc"
+assert_contains "AC-5: --list still prints the gate id"                 "unit" "$out"
+assert_eq       "AC-5: --list does not run the gate (marker absent)"   "absent" "$(mt047_marker)"
+mt047_fresh
+out="$(gates --audit)"; rc=$?
+assert_eq       "AC-5: --audit still exits 0 behind a stranded mutation" "0" "$rc"
+assert_contains "AC-5: --audit still prints the gate id"                 "unit" "$out"
+assert_eq       "AC-5: --audit does not run the gate (marker absent)"   "absent" "$(mt047_marker)"
 
-# The negative control. Without this, a check that refused unconditionally
+# AC-6, the negative control. Without it, a gates.sh that refused
+# unconditionally - or a marker gate whose marker could never be written -
 # would satisfy every assertion above.
-cp "$FIX"/.claude/state/mutations/*.bak "$FIX/src/main.ts" 2>/dev/null
-rm -f "$FIX"/.claude/state/mutations/*.active "$FIX"/.claude/state/mutations/*.bak
-out="$(gates)"
-assert_contains "resolved, the gates run again" "PASS         unit" "$out"
+rm -f "$mt047_sentinel"
+mt047_fresh
+out="$(gates)"; rc=$?
+assert_eq       "AC-6: with the sentinel removed the gates run and exit 0" "0" "$rc"
+assert_contains "AC-6: and print the header for the marker gate"          "=== gate: unit" "$out"
+assert_eq       "AC-6: and the gate command ran (marker file present)"    "present" "$(mt047_marker)"
+assert_contains "AC-6: resolved, the gate passes"                         "PASS         unit" "$out"
+rm -f "$FIX/gate-ran.marker"
+
+# AC-7: the specification this block tests. The code moves to meet these two
+# sentences, never the other way; they are pinned so that a later rewrite to
+# describe an after-the-loop placement fails here. Joined across line wraps.
+mt047_prose() { tr '\n' ' ' < "$1" | tr -s ' '; }
+assert_contains "AC-7: rules.md still says the check precedes every gate" \
+  '`gates.sh` runs it before any gate' "$(mt047_prose "$REPO_ROOT/.claude/harness/rules.md")"
+assert_contains "AC-7: state/README.md still says the check precedes every gate" \
+  'runs that before it runs any gate' "$(mt047_prose "$REPO_ROOT/.claude/state/README.md")"
 
 
 # --- the audit's count must be about the thing its sentence names -----------
