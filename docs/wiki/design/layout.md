@@ -44,7 +44,7 @@ at all times", expressed as a stretch factor.
 
 > **Not built yet.** MT-015 shipped a single layout (strip 96, column 340) with
 > no breakpoint, by the user's decision recorded as MT-015 PO-1. This section is
-> built by **MT-047**.
+> built by **MT-048**.
 
 | | < 1440 | ≥ 1440 |
 |---|---|---|
