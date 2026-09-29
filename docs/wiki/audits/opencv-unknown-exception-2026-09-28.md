@@ -165,3 +165,40 @@ rewrite it.
 - [[MT-046]] - *A failing gate's log survives the passing re-run* (chore,
   EPIC-01, harness only). There is still no defect in production or test code
   to fix; the second recommendation above remains unfiled.
+
+## Addendum — recurrence on 2026-09-29 (unit gate, MT-050 RED)
+
+Recorded by the Lead PO while running `gates.sh --fast` at the end of MT-050's RED.
+Not investigated further: MT-050 touches nothing under `src/mangatl/detect/`.
+
+- **Gate:** `unit` (`uv run pytest -q tests/core tests/ui`), not `coverage-core`.
+  The `coverage` gate, run straight after in a fresh process over the same tests,
+  had no detect failures, and a direct re-run of
+  `tests/core/test_detect_postprocess.py tests/core/test_detect_page.py` gave
+  `43 passed`.
+- **Count:** 34 × `cv2.error: Unknown C++ exception from OpenCV code` — 25 in
+  `test_detect_postprocess.py`, 9 in `test_detect_page.py`; the same count as the
+  2026-09-28 incident. First at `src\mangatl\detect\postprocess.py:164`
+  (`cv2.resize` inside `letterbox`).
+- **New evidence the first incident lacked:** the failing log (kept by MT-046 as
+  `.claude/state/gate-logs/unit.failed.log`) **opens** with faulthandler reporting
+  `Windows fatal exception: code 0x8007000e` (E_OUTOFMEMORY as an HRESULT) on the
+  main thread, during collection, at:
+
+  ```
+  platform.py:327 in _wmi_query
+  platform.py:776 in _get_machine_win32
+  platform.py:923 in uname
+  platform.py:987 in system
+  onnxruntime\capi\_pybind_state.py:14 in <module>
+  src\mangatl\detect\session.py:32 in <module>
+  src\mangatl\detect\postprocess.py:56 in <module>
+  ```
+
+  That is, CPython 3.12's WMI-based `platform.system()`, called by the
+  `onnxruntime` import, raised a structured exception that was handled (the run
+  continued) in the same process whose later `cv2` calls all failed. This fits
+  "Decided" point 2 (a Windows structured exception, not a C++ one) and names a
+  concrete candidate for the process-state change: the WMI/COM query at import.
+  It is a lead, not a root cause; the discriminator under "Recommendations" still
+  applies.

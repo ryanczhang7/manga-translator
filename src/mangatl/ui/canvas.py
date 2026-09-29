@@ -18,6 +18,10 @@ one `BubbleMarker` per region, restyled from `LinkState` and never moving the
 viewport; a click (press and release within `SAME_POINT_PX`, so a drag pans
 instead) hit-tests every region at once; hover is reported from mouse moves;
 `reveal` pans by the minimum that brings a region in and **never zooms**.
+
+MT-050 adds Up/Down/Home/End (§4.7): unmodified, they are reported as a
+selection step and never reach `QGraphicsView`, whose default handling would
+scroll the view on top of `reveal`'s minimum pan (§4.5).
 """
 
 from __future__ import annotations
@@ -67,6 +71,15 @@ EMPTY_TITLE = "No chapter loaded"
 EMPTY_ACTION = "Open a folder"
 FAILED_MESSAGE = "This page could not be opened. It will be copied to the output folder unchanged."
 
+#: Unmodified navigation keys on the canvas and the selection step each asks for.
+#: `Qt.Key` is an IntEnum and `QKeyEvent.key()` an int, so the int keys look it up.
+_SELECTION_STEPS: dict[int, str] = {
+    Qt.Key.Key_Up: "previous",
+    Qt.Key.Key_Down: "next",
+    Qt.Key.Key_Home: "first",
+    Qt.Key.Key_End: "last",
+}
+
 
 class PageCanvas(QGraphicsView):
     """The page, zoomable and pannable, or the message saying why there is none."""
@@ -81,6 +94,10 @@ class PageCanvas(QGraphicsView):
     regionHovered = Signal(object)
     #: Enter/Return on the canvas: "take me to this bubble's editor" (§4.7).
     editRequested = Signal()
+    #: Up/Down/Home/End on the canvas: "move the selection" (§4.7). The canvas
+    #: does not own the selection (§4.1); it reports the step and nothing else:
+    #: "previous", "next", "first" or "last".
+    selectionStepRequested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -238,6 +255,15 @@ class PageCanvas(QGraphicsView):
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.editRequested.emit()
+            event.accept()
+            return
+        step = _SELECTION_STEPS.get(event.key())
+        unmodified = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier == (
+            Qt.KeyboardModifier.NoModifier
+        )
+        if step is not None and unmodified:
+            # Never reaches QGraphicsView, which would scroll the view (MT-050 AC-5).
+            self.selectionStepRequested.emit(step)
             event.accept()
             return
         super().keyPressEvent(event)
