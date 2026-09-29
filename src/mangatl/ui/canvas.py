@@ -26,7 +26,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import replace
 
-from PySide6.QtCore import QPoint, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QKeyEvent, QMouseEvent, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QGraphicsPixmapItem,
@@ -222,6 +222,18 @@ class PageCanvas(QGraphicsView):
         self.regionHovered.emit(
             hit_test(self._regions, self.mapToScene(event.position().toPoint()), None)
         )
+
+    def viewportEvent(self, event: QEvent) -> bool:
+        """Clear hover when the pointer leaves the viewport (MT-049).
+
+        `components.md` §4.4: hover "never persists after the pointer leaves".
+        Moves alone cannot say so when the pointer exits straight off a region
+        at the viewport edge. The clear is synchronous, so it lands before any
+        row's Enter on the way in. Nothing else happens on Leave: no reveal.
+        """
+        if event.type() == QEvent.Type.Leave:
+            self.regionHovered.emit(None)
+        return super().viewportEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
