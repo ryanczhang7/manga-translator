@@ -269,21 +269,30 @@ work_count() {
 }
 
 # --- recording ----------------------------------------------------------------
+# The short commit the gates ran against, with a note when the working tree
+# (outside docs/) had uncommitted changes. Shared by record_in_story and the
+# preserved failing log, so the two can never describe the same run differently.
+commit_with_note() {
+  local commit dirty
+  commit="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || printf 'no commit')"
+  dirty=""
+  [ -z "$(git -C "$ROOT" status --porcelain -- . ':!docs' 2>/dev/null)" ] || dirty=" (working tree had uncommitted changes)"
+  printf '%s%s' "$commit" "$dirty"
+}
+
 # Replace the body of the story's "## Gate results" section with a block this
 # script wrote: the marker check-boundaries.sh looks for, the UTC time, the
 # commit, the tree hash of the code the gates saw, and the summary. If the
 # section is missing (an older story file) it is appended.
 record_in_story() { # <story-file> <result-text> <summary-lines>
-  local f="$1" res="$2" body="$3" commit dirty tree block
-  commit="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || printf 'no commit')"
-  dirty=""
-  [ -z "$(git -C "$ROOT" status --porcelain -- . ':!docs' 2>/dev/null)" ] || dirty=" (working tree had uncommitted changes)"
+  local f="$1" res="$2" body="$3" commit tree block
+  commit="$(commit_with_note)"
   tree="$(gate_tree_hash)"
   block="$(printf '%s\n' \
     "$GATE_MARKER" \
     "" \
     "    run:    $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    "    commit: $commit$dirty" \
+    "    commit: $commit" \
     "    tree:   $tree" \
     "    result: $res" \
     "" \
@@ -511,6 +520,7 @@ while IFS= read -r line; do
 
   printf '\n=== gate: %s (%s%s) ===\n%s\n' "$id" "$req" "$escalated" "$cmd"
   log="$LOGDIR/$id.log"
+  started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   start=$(date +%s)
   ( cd "$ROOT/$cwd" && eval "$cmd" ) 2>&1 | tee "$log"
   rc=${PIPESTATUS[0]}
@@ -619,6 +629,25 @@ while IFS= read -r line; do
         results="$results\nWARN         $id (${dur}s, $why, optional) -> $logrel"; warns=$((warns+1))
       fi ;;
   esac
+
+  # --- keep the last non-passing log (MT-046) --------------------------------
+  # <id>.log is overwritten by every run, so the re-run someone starts to see
+  # whether a failure was a flake destroys the only copy of it. Keep the last
+  # run that did not pass, stamped, in <id>.failed.log: one per gate, replaced
+  # whole, never removed. Deliberately not in $results: the gate record is
+  # unchanged by this.
+  if [ "$outcome" != pass ]; then
+    { printf '%s\n' \
+        "# gates.sh: last failing run of gate '$id'" \
+        "# outcome: $outcome" \
+        "# run:     $started" \
+        "# commit:  $(commit_with_note)" \
+        "# tree:    $(gate_tree_hash)" \
+        "# ----"
+      cat "$log"
+    } > "$LOGDIR/$id.failed.log"
+    printf 'failing log kept: .claude/state/gate-logs/%s.failed.log\n' "$id"
+  fi
 done < "$CONF"
 
 [ "$LIST" = 1 ] && exit 0

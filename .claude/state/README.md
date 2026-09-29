@@ -8,6 +8,7 @@ in here is ever committed; only this file and `.gitkeep` are tracked.
 | `current-story.env` | `scripts/phase.sh` | the phase guard, the status line | no |
 | `last-gate-run` | `scripts/gates.sh` | the stop hook | no |
 | `gate-logs/*.log` | `scripts/gates.sh` | you, when a gate fails | yes |
+| `gate-logs/*.failed.log` | `scripts/gates.sh` | you, when a failure did not reproduce | yes |
 | `mutations/*.active` | `scripts/mutate.sh` | `mutate.sh --check`, and `gates.sh` through it | yes |
 | `mutations/*.bak` | `scripts/mutate.sh` | `scripts/mutate.sh`, to restore the file | yes |
 | `mutations/*.new` | `scripts/mutate.sh` | nothing; it is scratch | yes |
@@ -55,6 +56,18 @@ law 3 exists to prevent. `bash scripts/gates.sh` is what writes it.
 
 The `yes` rows are all written by a tool and safe to delete; the next run
 recreates what it needs.
+
+**`gate-logs/<id>.failed.log` is the last run of that gate that did not pass**
+(MT-046). `<id>.log` is overwritten by every run, so the re-run somebody starts to
+see whether a failure was a flake used to destroy the only copy of it. When a
+gate that ran ends in any outcome other than pass, `scripts/gates.sh` replaces
+`<id>.failed.log` whole with a six-line header - the gate, the outcome, the UTC
+time the gate started, the commit (noting uncommitted changes) and the gate tree
+hash - followed by that run's log, byte for byte, and prints
+`failing log kept: <path>`. One file per gate, the last failure only. A pass
+never writes or removes it, and a gate a run does not execute leaves it alone.
+Nothing reads it but a person, which is why it is hand-editable: delete it once
+the cause is understood.
 
 `mutations/` is `scripts/mutate.sh`'s working area, and the backup path is
 explicit rather than `$TMPDIR` because that variable is unset in some of the
