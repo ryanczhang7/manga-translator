@@ -136,6 +136,32 @@ describe "the shipped pair agrees with itself"
 assert_eq "no disagreements" "" "$(problems "$SETTINGS" "$README")"
 
 # ---------------------------------------------------------------------------
+describe "MT-046 AC-7: the preserved failing log has its own row"
+
+# `gate-logs/*.log` already matches `*.failed.log` as a glob, so the check above
+# is satisfied without a row. The row is there to say what the file is and who
+# writes it - so it is asserted by its exact first cell, not by a glob match.
+# Hand-editable `yes` (story PO-2): nothing believes its contents as a verdict,
+# and a deny would also block a Bash `rm` of a stale failure.
+failed_row() { # <readme>   "<written by><TAB><hand-editable>" for the row, or nothing
+  awk -F'|' '
+    /^[[:space:]]*\|/ {
+      p = $2; w = $3; e = $(NF - 1)
+      gsub(/^[ \t`]+|[ \t`]+$/, "", p); gsub(/^[ \t`]+|[ \t`]+$/, "", w); gsub(/^[ \t]+|[ \t]+$/, "", e)
+      if (p == "gate-logs/*.failed.log") { print w "\t" tolower(e); exit }
+    }' "$1"
+}
+assert_eq "README has a gate-logs/*.failed.log row, written by scripts/gates.sh, hand-editable yes" \
+  "scripts/gates.sh${TAB}yes" "$(failed_row "$README")"
+# Control: the reader finds a row it knows is there, so a miss above is the
+# README's and not the parser's.
+_ctl="$(mktemp 2>/dev/null || mktemp -t mt046)"
+sed 's/`gate-logs\/\*\.log`/`gate-logs\/*.failed.log`/' "$README" > "$_ctl"
+assert_eq "control: the same reader finds the existing gate-logs/*.log row, renamed" \
+  "scripts/gates.sh${TAB}yes" "$(failed_row "$_ctl")"
+rm -f "$_ctl"
+
+# ---------------------------------------------------------------------------
 describe "the two files that carry evidence stay denied"
 
 # Stated independently of the README, so that widening the column and the rules

@@ -1459,4 +1459,346 @@ assert_eq "no copy of the sed trim body in gates.sh, doctor.sh or task.sh" \
 
 rm -rf "$_mt040"
 
+
+# =============================================================================
+# MT-046: a failing gate's log survives the passing re-run
+# =============================================================================
+#
+# On 2026-09-28 `coverage-core` failed once with 34 x `cv2.error: Unknown C++
+# exception`, the immediate re-run passed, and in passing it truncated
+# gate-logs/coverage-core.log - the only copy of the failure. The investigation
+# could not pin the cause for that reason alone
+# (docs/wiki/audits/opencv-unknown-exception-2026-09-28.md).
+#
+# So a gate that ran and did not pass - outcome fail, noevidence, environment
+# or blocked - leaves <id>.failed.log: a six-line header, then that run's log
+# byte-for-byte. A pass never writes it, a later pass never touches it, a later
+# non-pass replaces it whole, and a gate that did not run leaves it alone.
+#
+# Its own fixture, not $FIX: every block above has left that one on some branch,
+# with some story and some gate-logs, and the header's commit line has to be
+# pinned against a tree whose state this block alone decides.
+KF="$(make_project_fixture)"
+trap 'rm -rf "$FIX" "$KF"' EXIT
+KLOG="$KF/.claude/state/gate-logs"
+KSNAP="$KF/.claude/state/mt046-snapshot"   # never inside gate-logs/: that is the directory under test
+
+# stdout only - AC-6 is a statement about stdout.
+kgates() { ( cd "$KF" && bash scripts/gates.sh "$@" 2>/dev/null ); }
+kreset() { rm -rf "$KLOG" "$KSNAP"; }
+# kept <out> <id>   How many times stdout carries <id>'s kept line, as a WHOLE line.
+kept() { printf '%s\n' "$1" | grep -cxF -- "failing log kept: .claude/state/gate-logs/$2.failed.log"; }
+# hdr <id> <n>   Line n of <id>.failed.log.
+hdr() { sed -n "$2p" "$KLOG/$1.failed.log" 2>/dev/null; }
+# body_vs_log <id>   The contract's own test of "byte-identical":
+#   tail -n +7 <id>.failed.log | cmp - <id>.log
+body_vs_log() {
+  [ -f "$KLOG/$1.failed.log" ] || { printf 'no %s.failed.log was written' "$1"; return; }
+  if tail -n +7 "$KLOG/$1.failed.log" | cmp -s - "$KLOG/$1.log"; then printf identical; else printf differs; fi
+}
+# same <a> <b>   Whether two files are byte-identical, and which is missing if not.
+same() {
+  [ -f "$1" ] || { printf 'missing: %s' "${1##*/}"; return; }
+  [ -f "$2" ] || { printf 'missing: %s' "${2##*/}"; return; }
+  if cmp -s "$1" "$2"; then printf identical; else printf differs; fi
+}
+# failed_logs   Every *.failed.log in gate-logs/, space-separated, sorted.
+failed_logs() { ( cd "$KLOG" 2>/dev/null && ls -1 | grep '\.failed\.log$' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//' ); }
+# exists <id>
+exists() { [ -f "$KLOG/$1.failed.log" ] && printf yes || printf no; }
+# seed <id>   A preserved file gates.sh did not write, and a snapshot of it.
+seed() {
+  mkdir -p "$KLOG" "$KSNAP"
+  printf '# seeded by gates.test.sh, not by gates.sh\nSEEDED-%s-SENTINEL\n' "$1" > "$KLOG/$1.failed.log"
+  cp "$KLOG/$1.failed.log" "$KSNAP/$1.failed.log"
+}
+# snap <id>   Snapshot what gates.sh wrote, to compare after a later run.
+snap() { mkdir -p "$KSNAP"; cp "$KLOG/$1.failed.log" "$KSNAP/$1.failed.log" 2>/dev/null; }
+# ktree   gate_tree_hash of the fixture, the same function ## Gate results uses.
+ktree() { ( cd "$KF" && CLAUDE_PROJECT_DIR="$KF" bash -c '. .claude/hooks/lib.sh; gate_tree_hash' ); }
+# le <a> <b>   "yes" when timestamp a <= b. The format is ISO-8601 UTC with a
+# fixed width, so string order IS time order.
+le() {
+  if [ -z "$1" ] || [ -z "$2" ]; then printf 'no (a timestamp is missing: [%s] [%s])' "$1" "$2"; return; fi
+  if [[ "$1" < "$2" || "$1" == "$2" ]]; then printf yes; else printf "no ($1 is after $2)"; fi
+}
+# absent_in <id> <needle>   "absent" only when <id>.failed.log EXISTS and does
+# not contain <needle>. A missing file is not evidence that the old run is gone:
+# assert_not_contains on an empty string would pass in RED and prove nothing.
+absent_in() {
+  [ -f "$KLOG/$1.failed.log" ] || { printf 'no %s.failed.log to look in' "$1"; return; }
+  if grep -qF -- "$2" "$KLOG/$1.failed.log"; then printf 'present: %s' "$2"; else printf absent; fi
+}
+
+TS_RE='^# run:     [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+KSHA="$(git -C "$KF" rev-parse --short HEAD)"
+DIRTY=' (working tree had uncommitted changes)'
+
+# ---------------------------------------------------------------------------
+describe "MT-046 AC-1 / AC-6: a required gate that fails keeps its log, stamped"
+
+# The gate prints the time it started. The header's `run:` must be no later
+# than that - captured BEFORE the command, not after it - and the `sleep 1`
+# makes an end-time stamp land strictly after it, so the two are told apart.
+# `lint` runs after `unit` and passes: it bounds where the kept line may print,
+# and it is the passing half of AC-6.
+kreset
+write_conf "$KF" <<'EOF'
+gate     | unit | required | . | date -u +%Y-%m-%dT%H:%M:%SZ; printf 'boom A\nAssertionError: expected 3 to be 4\n'; sleep 1; exit 1
+evidence | unit | Tests +[1-9][0-9]* passed
+gate     | lint | required | . | printf 'Checked 12 files\n'
+evidence | lint | Checked [1-9][0-9]* files
+EOF
+before="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+out="$(kgates)"
+gate_said="$(head -1 "$KLOG/unit.log" 2>/dev/null)"
+
+assert_eq "a failed gate leaves <id>.failed.log"                "yes" "$(exists unit)"
+assert_eq "header line 1 names the gate"  "# gates.sh: last failing run of gate 'unit'" "$(hdr unit 1)"
+assert_eq "header line 2 is the internal outcome, not FAIL"     "# outcome: fail" "$(hdr unit 2)"
+assert_eq "header line 3 is a UTC timestamp in record_in_story's format" \
+  "yes" "$(hdr unit 3 | grep -Eq "$TS_RE" && printf yes || printf "no: [$(hdr unit 3)]")"
+_run="$(hdr unit 3)"; _run="${_run#'# run:     '}"
+assert_eq "the run time is no earlier than gates.sh was started" "yes" "$(le "$before" "$_run")"
+assert_eq "the run time is when the gate STARTED, not when it ended" "yes" "$(le "$_run" "$gate_said")"
+assert_eq "header line 4 is the short commit, noting the dirty tree" \
+  "# commit:  $KSHA$DIRTY" "$(hdr unit 4)"
+assert_eq "header line 5 is the gate tree hash"                 "# tree:    $(ktree)" "$(hdr unit 5)"
+assert_eq "header line 6 closes the header"                     "# ----" "$(hdr unit 6)"
+assert_eq "after the header, the run's log byte-for-byte"       "identical" "$(body_vs_log unit)"
+assert_contains "and it is THIS run's log"                      "boom A" "$(cat "$KLOG/unit.failed.log" 2>/dev/null)"
+assert_eq "exactly one per gate: only unit's, not lint's"       "unit.failed.log" "$(failed_logs)"
+
+assert_eq "stdout says the failing log was kept, once"          "1" "$(kept "$out" unit)"
+assert_eq "and says nothing of the kind for the gate that passed" "0" "$(kept "$out" lint)"
+# Printed after the gate's own header and before the next gate's - not in the
+# summary, which is $results, which is what ## Gate results records.
+_hl="$(printf '%s\n' "$out" | grep -n '^=== gate: unit' | head -1 | cut -d: -f1)"
+_nl="$(printf '%s\n' "$out" | grep -n '^=== gate: lint' | head -1 | cut -d: -f1)"
+_kl="$(printf '%s\n' "$out" | grep -nxF 'failing log kept: .claude/state/gate-logs/unit.failed.log' | head -1 | cut -d: -f1)"
+assert_eq "the kept line sits between unit's header and the next gate's" \
+  "yes" "$([ -n "$_kl" ] && [ -n "$_hl" ] && [ -n "$_nl" ] && [ "$_kl" -gt "$_hl" ] && [ "$_kl" -lt "$_nl" ] && printf yes || printf "no (unit header $_hl, kept line ${_kl:-absent}, lint header $_nl)")"
+# The existing pointer is untouched (gates.test.sh pins the same shape above).
+assert_contains "the summary still points at <id>.log"          "-> .claude/state/gate-logs/unit.log" "$out"
+
+# ---------------------------------------------------------------------------
+describe "MT-046 AC-1 / AC-6: every non-pass outcome, optional gates as well"
+
+# noevidence: exits 0 and misses its evidence. blocked: could not launch.
+# environment: below its floor, and its skipped-when says why. All three
+# optional, so none of them fails the run - "did not pass" is the outcome, not
+# the exit code or the display word (WARN, KNOWN).
+kreset
+write_conf "$KF" <<'EOF'
+gate         | e2e   | optional | . | printf 'No test files found, exiting with code 0\n'
+evidence     | e2e   | Tests +[1-9][0-9]* passed
+gate         | types | optional | . | printf 'error: could not execute process (never executed)\n'; exit 101
+evidence     | types | Tests +[1-9][0-9]* passed
+gate         | cov   | optional | . | printf '1 passed, 25 skipped in 0.46s\n'
+evidence     | cov   | [1-9][0-9]* passed
+floor        | cov   | 26
+skipped-when | cov   | [1-9][0-9]* skipped
+EOF
+out="$(kgates)"
+# The fixture reaches the outcome it claims to, or the rest proves nothing.
+assert_contains "control: e2e is reported as a missing-evidence WARN" "WARN         e2e (" "$out"
+assert_contains "control: types is reported as could-not-launch"      "could not launch" "$out"
+assert_contains "control: cov is reported KNOWN, environment"         "KNOWN        cov (" "$out"
+for _g in e2e:noevidence types:blocked cov:environment; do
+  _id="${_g%%:*}"; _oc="${_g#*:}"
+  assert_eq "optional $_oc gate: header names it"   "# gates.sh: last failing run of gate '$_id'" "$(hdr "$_id" 1)"
+  assert_eq "optional $_oc gate: outcome is $_oc"   "# outcome: $_oc" "$(hdr "$_id" 2)"
+  assert_eq "optional $_oc gate: log byte-for-byte" "identical" "$(body_vs_log "$_id")"
+  assert_eq "optional $_oc gate: kept line, once"   "1" "$(kept "$out" "$_id")"
+done
+assert_eq "one preserved file per non-passing gate" \
+  "cov.failed.log e2e.failed.log types.failed.log" "$(failed_logs)"
+
+# ---------------------------------------------------------------------------
+describe "MT-046 AC-1: a clean tree gets no uncommitted-changes note"
+
+# The note is `git status --porcelain -- . ':!docs'` being non-empty, as in
+# record_in_story. To make it empty the fixture must ignore .claude/state/ -
+# gate-logs/ itself would otherwise be the change - and commit its manifest.
+kreset
+printf '.claude/state/\n' >> "$KF/.gitignore"
+write_conf "$KF" <<'EOF'
+gate     | unit | required | . | printf 'boom CLEAN\n'; exit 1
+evidence | unit | Tests +[1-9][0-9]* passed
+EOF
+git -C "$KF" add -A >/dev/null 2>&1
+git -C "$KF" -c user.email=t@t -c user.name=t commit -qm 'mt-046 clean tree' >/dev/null 2>&1
+_csha="$(git -C "$KF" rev-parse --short HEAD)"
+assert_eq "control: the fixture tree is clean before the run" "" "$(git -C "$KF" status --porcelain -- . ':!docs')"
+out="$(kgates)"
+assert_eq "control: and still clean after it"                 "" "$(git -C "$KF" status --porcelain -- . ':!docs')"
+assert_eq "commit line is the new HEAD, and nothing after it" "# commit:  $_csha" "$(hdr unit 4)"
+assert_eq "tree line is that tree's hash"                     "# tree:    $(ktree)" "$(hdr unit 5)"
+
+# ---------------------------------------------------------------------------
+describe "MT-046 AC-2: a later pass leaves the preserved failure alone"
+
+# Honest in RED: the failing run in THIS test has to create the file first.
+kreset
+write_conf "$KF" <<'EOF'
+gate     | unit | required | . | printf 'boom FIRST-FAILURE\n'; exit 1
+evidence | unit | Tests +[1-9][0-9]* passed
+EOF
+kgates >/dev/null
+assert_eq "the failing run created unit.failed.log" "yes" "$(exists unit)"
+snap unit
+write_conf "$KF" <<'EOF'
+gate     | unit | required | . | printf 'Tests  47 passed (47)\n'
+evidence | unit | Tests +[1-9][0-9]* passed
+EOF
+out="$(kgates)"
+assert_contains "control: the re-run passed"                 "PASS         unit" "$out"
+assert_eq "after the pass, unit.failed.log is byte-for-byte unchanged" \
+  "identical" "$(same "$KSNAP/unit.failed.log" "$KLOG/unit.failed.log")"
+assert_contains "while unit.log holds the passing run"       "Tests  47 passed" "$(cat "$KLOG/unit.log")"
+assert_not_contains "and not the failure"                    "FIRST-FAILURE" "$(cat "$KLOG/unit.log")"
+assert_eq "and the pass printed no kept line"                "0" "$(kept "$out" unit)"
+
+# A preserved file gates.sh did not write this session (an earlier session's).
+kreset; seed unit
+out="$(kgates)"
+assert_eq "a seeded unit.failed.log survives a pass untouched" \
+  "identical" "$(same "$KSNAP/unit.failed.log" "$KLOG/unit.failed.log")"
+
+# ---------------------------------------------------------------------------
+describe "MT-046 AC-3: a second failure replaces the first, whole"
+
+kreset
+write_conf "$KF" <<'EOF'
+gate     | unit | required | . | printf 'boom OLD-RUN-ONE\nold detail line\n'; exit 1
+evidence | unit | Tests +[1-9][0-9]* passed
+EOF
+kgates >/dev/null
+assert_contains "the first failure is kept"  "OLD-RUN-ONE" "$(cat "$KLOG/unit.failed.log" 2>/dev/null)"
+write_conf "$KF" <<'EOF'
+gate     | unit | required | . | printf 'boom NEW-RUN-TWO\n'; exit 1
+evidence | unit | Tests +[1-9][0-9]* passed
+EOF
+out="$(kgates)"
+_body="$(cat "$KLOG/unit.failed.log" 2>/dev/null)"
+assert_contains "the second failure replaces it"            "NEW-RUN-TWO" "$_body"
+assert_eq "none of the first run's output remains"  "absent" "$(absent_in unit OLD-RUN-ONE)"
+assert_eq "not one line of it"                     "absent" "$(absent_in unit "old detail line")"
+assert_eq "one header, not two: replaced, never appended" \
+  "1" "$(grep -c "^# gates.sh: last failing run of gate 'unit'\$" "$KLOG/unit.failed.log" 2>/dev/null || true)"
+assert_eq "header then this run's log, byte-for-byte"      "identical" "$(body_vs_log unit)"
+assert_eq "one preserved copy of unit, and only one"       "unit.failed.log" "$(failed_logs)"
+assert_eq "nothing else in gate-logs/ for unit" \
+  "unit.failed.log unit.log" "$( (cd "$KLOG" 2>/dev/null && ls -1 | grep '^unit\.' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//') )"
+assert_eq "and the kept line again, once"                  "1" "$(kept "$out" unit)"
+
+# A different outcome replaces it too, and the header says which.
+write_conf "$KF" <<'EOF'
+gate     | unit | required | . | printf 'No test files found THIRD-RUN\n'
+evidence | unit | Tests +[1-9][0-9]* passed
+EOF
+kgates >/dev/null
+assert_eq "a noevidence run replaces a fail, and says noevidence" "# outcome: noevidence" "$(hdr unit 2)"
+assert_eq "and the fail's output is gone" "absent" "$(absent_in unit NEW-RUN-TWO)"
+
+# ---------------------------------------------------------------------------
+describe "MT-046 AC-4: a pass never creates the file"
+
+# Passes on arrival in RED - nothing creates the file today. Earned in GATES by
+# DV-1 mutation 2 (preserve on pass too), which must turn these red.
+kreset
+write_conf "$KF" <<'EOF'
+gate     | unit | required | . | printf 'Tests  47 passed (47)\n'
+evidence | unit | Tests +[1-9][0-9]* passed
+EOF
+out="$(kgates)"
+assert_contains "control: a plain pass"                   "PASS         unit" "$out"
+assert_eq "a plain pass creates no *.failed.log"          "" "$(failed_logs)"
+assert_eq "and prints no kept line"                       "0" "$(printf '%s\n' "$out" | grep -c '^failing log kept:')"
+
+# PASS annotated for a missing evidence line (required, bootstrapped).
+kreset
+write_conf "$KF" <<'EOF'
+gate     | unit | required | . | printf 'all good\n'
+EOF
+out="$(kgates)"
+assert_contains "control: a PASS annotated for its missing evidence line" \
+  "-- no evidence line: a vacuous pass would go unnoticed" "$out"
+assert_eq "that pass creates no *.failed.log"             "" "$(failed_logs)"
+assert_eq "and prints no kept line"                       "0" "$(printf '%s\n' "$out" | grep -c '^failing log kept:')"
+
+# PASS annotated for a waiver it no longer needs (optional).
+kreset
+write_conf "$KF" <<'EOF'
+gate     | integration | optional | . | printf 'Tests  3 passed (3)\n'
+evidence | integration | Tests +[1-9][0-9]* passed
+waiver   | integration | the service is not up in CI
+EOF
+out="$(kgates)"
+assert_contains "control: a PASS annotated for an unneeded waiver" "waiver no longer needed" "$out"
+assert_eq "that pass creates no *.failed.log"             "" "$(failed_logs)"
+assert_eq "and prints no kept line"                       "0" "$(printf '%s\n' "$out" | grep -c '^failing log kept:')"
+
+# ---------------------------------------------------------------------------
+describe "MT-046 AC-5: the same under --fast and --gate, and hands off what did not run"
+
+# `lint` always fails if run. Under --fast it is `slow`, under --gate unit it
+# is not selected - either way it does not run, so its seeded preserved file
+# must come through byte-for-byte, and it gets no kept line.
+kconf() { # <unit command>
+  write_conf "$KF" <<EOF
+gate     | unit | required | . | $1
+evidence | unit | Tests +[1-9][0-9]* passed
+gate     | lint | required | . | printf 'boom LINT-SHOULD-NOT-RUN\n'; exit 1
+evidence | lint | Checked [1-9][0-9]* files
+slow     | lint | stands in for the gate --fast leaves out
+EOF
+}
+for _mode in --fast "--gate unit"; do
+  # $_mode is word-split on purpose below: `--gate unit` is two arguments.
+  kreset; seed lint
+  kconf "printf 'boom MODE-OLD\n'; exit 1"
+  out="$(kgates $_mode)"
+  assert_contains "$_mode: control: unit ran" "=== gate: unit" "$out"
+  assert_not_contains "$_mode: control: lint really did not run" "=== gate: lint" "$out"
+  assert_eq "$_mode AC-1: a failing gate leaves <id>.failed.log" "yes" "$(exists unit)"
+  assert_eq "$_mode AC-1: header names the gate"  "# gates.sh: last failing run of gate 'unit'" "$(hdr unit 1)"
+  assert_eq "$_mode AC-1: outcome fail"           "# outcome: fail" "$(hdr unit 2)"
+  assert_eq "$_mode AC-1: commit line"            "# commit:  $(git -C "$KF" rev-parse --short HEAD)$DIRTY" "$(hdr unit 4)"
+  assert_eq "$_mode AC-1: log byte-for-byte"      "identical" "$(body_vs_log unit)"
+  assert_eq "$_mode AC-6: kept line, once"        "1" "$(kept "$out" unit)"
+  assert_eq "$_mode AC-5: lint did not run, so no kept line for it" "0" "$(kept "$out" lint)"
+  assert_eq "$_mode AC-5: lint did not run, so lint.failed.log is untouched" \
+    "identical" "$(same "$KSNAP/lint.failed.log" "$KLOG/lint.failed.log")"
+
+  kconf "printf 'boom MODE-NEW\n'; exit 1"
+  kgates $_mode >/dev/null
+  _body="$(cat "$KLOG/unit.failed.log" 2>/dev/null)"
+  assert_contains "$_mode AC-3: a second failure replaces the first" "MODE-NEW" "$_body"
+  assert_eq "$_mode AC-3: none of the first remains" "absent" "$(absent_in unit MODE-OLD)"
+
+  snap unit
+  kconf "printf 'Tests  47 passed (47)\n'"
+  out="$(kgates $_mode)"
+  assert_eq "$_mode AC-2: a later pass leaves unit.failed.log unchanged" \
+    "identical" "$(same "$KSNAP/unit.failed.log" "$KLOG/unit.failed.log")"
+  assert_contains "$_mode AC-2: while unit.log holds the pass" "Tests  47 passed" "$(cat "$KLOG/unit.log")"
+  assert_eq "$_mode AC-6: no kept line for a pass" "0" "$(kept "$out" unit)"
+
+  kreset
+  out="$(kgates $_mode)"
+  assert_eq "$_mode AC-4: a pass creates no *.failed.log" "" "$(failed_logs)"
+done
+
+# --list and --audit reach no gate at all. Both seeded gates have failing
+# commands, so a mode that ran them would rewrite both files.
+kreset; seed unit; seed lint
+kconf "printf 'boom LIST-AUDIT\n'; exit 1"
+for _mode in --list --audit; do
+  out="$(kgates $_mode)"
+  assert_eq "$_mode leaves unit.failed.log byte-for-byte" "identical" "$(same "$KSNAP/unit.failed.log" "$KLOG/unit.failed.log")"
+  assert_eq "$_mode leaves lint.failed.log byte-for-byte" "identical" "$(same "$KSNAP/lint.failed.log" "$KLOG/lint.failed.log")"
+  assert_eq "$_mode prints no kept line"                  "0" "$(printf '%s\n' "$out" | grep -c '^failing log kept:')"
+done
+
 summary "gates"
