@@ -2,7 +2,7 @@
 id: EPIC-05
 title: The review workspace — the one place a human can catch an error
 status: todo
-stories: [MT-025, MT-015, MT-016, MT-017, MT-018, MT-026, MT-028]
+stories: [MT-025, MT-015, MT-047, MT-016, MT-017, MT-018, MT-026, MT-028]
 ---
 
 ## Goal
@@ -43,6 +43,7 @@ in each story's frontmatter carries the real order.
   the source.
 - **MT-015** — the workspace shell: page canvas with pan and zoom, docked line
   column, page pager. Layout and tokens from `docs/wiki/design/`.
+- **MT-047** — the 1440 px breakpoint, split out of MT-015 (its PO-1).
 - **MT-016** — the bubble-to-line link: selection both ways, hover, off-screen
   handling, overlapping bubbles, keyboard and screen-reader conveyance.
 - **MT-017** — editing: edit, dirty state, revert to proposal, persistence across
