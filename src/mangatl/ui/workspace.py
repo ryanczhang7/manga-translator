@@ -15,7 +15,9 @@ enlarging the window enlarges only the art (MT-015 AC-2).
 from it and neither owns it. Selection restyles the markers, pans the canvas
 by the minimum (never zooming), selects and scrolls to the row and is announced
 through the live region. Hover restyles the markers and the row's ground ONLY:
-it never pans the canvas and never scrolls the list (§4.4).
+it never pans the canvas and never scrolls the list (§4.4). Up/Down/Home/End on
+the canvas (MT-050, §4.7) step the selection through the same controller,
+without wrapping and without moving focus.
 
 The 1440 px breakpoint in `layout.md` is not built yet (MT-015 PO-1, MT-048).
 Header and footer content and wiring this window into `mangatl.app` are later
@@ -249,6 +251,7 @@ class Workspace(QMainWindow):
         self.page_canvas.regionClicked.connect(self.link.select)
         self.page_canvas.regionHovered.connect(self.link.hover)
         self.page_canvas.editRequested.connect(self._edit_selected)
+        self.page_canvas.selectionStepRequested.connect(self._on_selection_step)
         self.translation_column.list.currentRowChanged.connect(self._on_current_row_changed)
         self.translation_column.rowEntered.connect(self.link.hover)
         self.translation_column.rowLeft.connect(self._on_row_left)
@@ -314,6 +317,21 @@ class Workspace(QMainWindow):
 
     def _on_current_row_changed(self, row: int) -> None:
         self.link.select(row if row >= 0 else None)
+
+    def _on_selection_step(self, step: str) -> None:
+        """Up/Down/Home/End on the canvas (MT-050). Clamped, never wrapped; the
+        restyle, reveal, row and announcement follow from `_on_selection_changed`."""
+        count = len(self.page_canvas.markers)
+        current = self.link.state.selected_region_id
+        if count == 0 or current is None:
+            return
+        targets = {
+            "previous": max(current - 1, 0),
+            "next": min(current + 1, count - 1),
+            "first": 0,
+            "last": count - 1,
+        }
+        self.link.select(targets[step])
 
     def _on_row_left(self, region_id: int) -> None:
         # Only the row that is hovered may clear it: leaving one row for the
