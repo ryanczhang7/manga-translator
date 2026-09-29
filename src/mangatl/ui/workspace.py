@@ -10,7 +10,7 @@ and a 44 px footer.
 "the art is the largest thing on screen at all times" made mechanical:
 enlarging the window enlarges only the art (MT-015 AC-2).
 
-The 1440 px breakpoint in `layout.md` is not built yet (MT-015 PO-1, MT-047).
+The 1440 px breakpoint in `layout.md` is not built yet (MT-015 PO-1, MT-048).
 Header and footer content, the column's rows, and wiring this window into
 `mangatl.app` are later stories (PO-4).
 """
