@@ -2,7 +2,7 @@
 id: EPIC-05
 title: The review workspace — the one place a human can catch an error
 status: todo
-stories: [MT-025, MT-015, MT-048, MT-016, MT-017, MT-018, MT-026, MT-028]
+stories: [MT-025, MT-015, MT-048, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-018, MT-026, MT-028]
 ---
 
 ## Goal
@@ -46,6 +46,22 @@ in each story's frontmatter carries the real order.
 - **MT-048** — the 1440 px breakpoint, split out of MT-015 (its PO-1).
 - **MT-016** — the bubble-to-line link: selection both ways, hover, off-screen
   handling, overlapping bubbles, keyboard and screen-reader conveyance.
+- **MT-049** — fix: hover clears when the pointer leaves the canvas (§4.4). MT-016's
+  GREEN phase recorded this gap.
+- **MT-050** — `Up`/`Down`/`Home`/`End` on the canvas move the selection (§4.7), and
+  never scroll the view on their own (MT-016 PO-5).
+- **MT-051** — ordinal badges never overlap: slide clockwise, then fall back to the
+  centroid (§4.2). The placement is a pure function with a hand-computed oracle.
+  Blocked on two design questions (Q2 and Q3 in the story).
+- **MT-052** — the `OffscreenIndicator` and `Ctrl+9` (§4.6; MT-016 PO-3 and PO-5).
+  Blocked on the zoom meaning of `Ctrl+9` and of the indicator click (Q1), and on the
+  page-edge reading (Q4).
+
+MT-049 to MT-052 are MT-016's deferred follow-ups, split four ways because each has a
+different oracle: a hover-state fix, key → selection transitions, a geometric
+placement algorithm, and a new accessible widget with a zoom rule. MT-052 depends on
+MT-049, because the indicator is a child widget of the viewport and entering it sends
+the viewport the `Leave` that MT-049 handles.
 - **MT-017** — editing: edit, dirty state, revert to proposal, persistence across
   reopen, and the unedited-versus-accepted distinction.
 - **MT-018** — run progress and the running cost readout, including its
