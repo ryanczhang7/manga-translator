@@ -2,7 +2,7 @@
 id: EPIC-05
 title: The review workspace — the one place a human can catch an error
 status: todo
-stories: [MT-025, MT-015, MT-048, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-054, MT-055, MT-056, MT-018, MT-057, MT-058, MT-059, MT-026, MT-028]
+stories: [MT-025, MT-015, MT-048, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-054, MT-055, MT-056, MT-018, MT-057, MT-058, MT-059, MT-060, MT-026, MT-028]
 ---
 
 ## Goal
@@ -88,6 +88,9 @@ the viewport the `Leave` that MT-049 handles.
   anthropic and onnxruntime import contracts (MT-059 PO-3), and the story owns
   the worker thread `architecture.md` §6 describes, which MT-018 had attributed
   to MT-015.
+- **MT-060** — MT-017's real-time save-bound test holds on CI hardware. Filed
+  2026-09-30 from a CI failure on MT-056's PR (860 ms against a 750 ms bound on
+  the runner, 0.53 s locally); its Q1 decides what the test should measure.
 
 MT-057 to MT-059 were filed on 2026-09-30 at the user's request (MT-055 Q2):
 after MT-055 a double-clicked app could open a chapter already translated, but
