@@ -158,7 +158,8 @@ def test_storing_a_proposal_needs_no_schema_version_bump() -> None:
     row, and `budget_ceiling_usd REAL` cannot hold the integer micro-dollars
     MT-012 PO-2 settled money on. Nothing about `line.proposed_en` changes."""
     # MT-014 C-7 takes it to 5: `glossary` gains `last_seen_page` and `source`.
-    assert SCHEMA_VERSION == 5
+    # MT-017 C-5 takes it to 6: `line` gains `status`.
+    assert SCHEMA_VERSION == 6
 
 
 def test_the_two_methods_are_named_on_the_project_beside_their_line_siblings() -> None:

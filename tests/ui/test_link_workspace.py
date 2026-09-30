@@ -255,7 +255,7 @@ def test_setting_no_regions_leaves_nothing_selected_and_no_markers_or_rows(
     assert window.link.state.selected_region_id is None
 
 
-def test_each_row_leads_with_its_ordinal_badge_and_has_a_read_only_editor(
+def test_each_row_leads_with_its_ordinal_badge_and_has_an_editable_editor(
     qtbot,  # type: ignore[no-untyped-def]
     project: Project,
 ) -> None:
@@ -268,7 +268,8 @@ def test_each_row_leads_with_its_ordinal_badge_and_has_a_read_only_editor(
         assert row.badge.text() == str(region_id + 1)
         assert row.badge.geometry().x() < row.editor.geometry().x(), "badge is not leading"
         assert row.editor.text() == f"en {region_id}"
-        assert row.editor.isReadOnly()  # PO-1: editing is MT-017
+        # MT-016 PO-1 (read-only) is superseded by MT-017 C-8 / PO-5.
+        assert not row.editor.isReadOnly()
 
 
 # =============================================================================
@@ -894,8 +895,10 @@ def test_showing_a_page_loads_its_stored_regions_as_markers_and_its_lines_as_row
     lst = window.translation_column.list
     assert [lst.item(i).data(Qt.ItemDataRole.AccessibleTextRole) for i in range(lst.count())] == [
         "Bubble 1 of 3. Japanese: こんにちは. English: Hello. machine proposal.",
-        # an ocr_empty line is "not read"; an absent proposal is "not translated"
-        "Bubble 2 of 3. Japanese: not read. English: not translated. machine proposal.",
+        # an ocr_empty line is "not read"; an absent proposal is "not translated";
+        # and since MT-017 (C-2 rule 2, AC-8) an ocr_empty line is failed.
+        "Bubble 2 of 3. Japanese: not read. English: not translated."
+        " translation failed: no text was read in this bubble.",
         "Bubble 3 of 3. Japanese: さようなら. English: Goodbye. machine proposal.",
     ]
     assert window.link.state.selected_region_id == 0

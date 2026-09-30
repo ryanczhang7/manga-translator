@@ -468,7 +468,8 @@ def test_the_schema_version_and_the_two_page_status_values_are_the_pinned_ones()
     # migration in this project to touch a **parent** table with cascading
     # children, and `tests/core/test_schema_v4.py` is where that is tested.
     # MT-014 C-7 takes it to 5: `glossary` gains `last_seen_page` and `source`.
-    assert SCHEMA_VERSION == 5
+    # MT-017 C-5 takes it to 6: `line` gains `status`.
+    assert SCHEMA_VERSION == 6
     assert PAGE_PENDING == "pending"
     assert PAGE_STALE == "stale"
     assert PAGE_PENDING != PAGE_STALE

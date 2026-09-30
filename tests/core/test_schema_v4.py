@@ -437,7 +437,8 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     """
     db_path = project_dir_for(source_dir) / "project.db"
 
-    assert SCHEMA_VERSION == 5
+    # MT-017 C-5 takes it to 6: `line` gains `status`.
+    assert SCHEMA_VERSION == 6
     assert _user_version(db_path) == SCHEMA_VERSION
     assert _raw(db_path, "SELECT schema_version FROM chapter") == [(SCHEMA_VERSION,)]
 
@@ -675,8 +676,10 @@ def test_a_migrated_chapter_table_is_the_same_table_as_a_freshly_created_one(
 #: excluded since MT-014: a v3 file opened today runs the v4 -> v5 step too, and
 #: that step ALTERs `glossary` on purpose (C-7), which rewrites its stored DDL.
 #: What the v5 step does to it is `tests/core/test_schema_v5.py`'s to assert.
+#: `line` is excluded since MT-017 for the same reason: the v5 -> v6 step ALTERs
+#: it (C-5), and `tests/core/test_schema_v6.py` asserts what that step does.
 _UNTOUCHED_BY_THE_V4_STEP = (
-    "SELECT name, sql FROM sqlite_master WHERE name NOT IN ('chapter', 'glossary')"
+    "SELECT name, sql FROM sqlite_master WHERE name NOT IN ('chapter', 'glossary', 'line')"
 )
 
 

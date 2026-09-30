@@ -337,7 +337,8 @@ def test_this_build_writes_and_reads_the_current_schema_version() -> None:
     v1 schema and must still stay that way.
     """
     # MT-014 C-7 takes it to 5: `glossary` gains `last_seen_page` and `source`.
-    assert SCHEMA_VERSION == 5
+    # MT-017 C-5 takes it to 6: `line` gains `status`.
+    assert SCHEMA_VERSION == 6
 
 
 def test_a_freshly_created_project_is_a_current_version_file_with_the_new_column(
@@ -355,8 +356,8 @@ def test_a_freshly_created_project_is_a_current_version_file_with_the_new_column
         pass
     db_path = project_dir_for(source_dir) / "project.db"
 
-    assert _user_version(db_path) == 5
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(5,)]
+    assert _user_version(db_path) == 6
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(6,)]
     columns = {str(row[1]) for row in _raw(db_path, "PRAGMA table_info(line)")}
     assert "ocr_empty" in columns, f"the line table has {sorted(columns)}"
 
@@ -534,7 +535,8 @@ def test_a_version_one_file_is_migrated_in_place_when_it_is_opened(
     # immediately after MT-010's, so a v1 file arrives at the current version in
     # one open. `test_ledger.py` covers the v2 -> v3 step on a file that starts
     # at 2, and `test_schema_v4.py` the v3 -> v4 step on one that starts at 3.
-    assert _user_version(db_path) == 5
+    # MT-017's v5 -> v6 step runs too, so the literal is 6.
+    assert _user_version(db_path) == 6
     after = {str(row[1]) for row in _raw(db_path, "PRAGMA table_info(line)")}
     assert "ocr_empty" in after
     assert before <= after, f"the migration dropped {sorted(before - after)} from the line table"
@@ -700,7 +702,7 @@ def test_a_version_one_file_arrives_at_v5_with_the_same_glossary_table_as_a_fres
         pass
 
     shape = "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('glossary')"
-    assert _user_version(db_path) == 5
+    assert _user_version(db_path) == 6  # MT-017 C-5: the walk now ends at 6
     assert _raw(db_path, shape) == _raw(fresh_db, shape)
     assert _raw(
         db_path, "SELECT term_ja, first_seen_page, last_seen_page, source FROM glossary"

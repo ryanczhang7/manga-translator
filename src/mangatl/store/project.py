@@ -51,7 +51,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from mangatl.domain.line import OcrResult
 from mangatl.domain.money import Usd
@@ -95,7 +95,12 @@ __all__ = [
 #: Version 5 is MT-014's glossary (C-7): `glossary.last_seen_page` and
 #: `glossary.source`, appended by `ALTER TABLE ... ADD COLUMN`. AC-3's
 #: least-recently-seen eviction and PO-3's user-entries-last both sort on them.
-SCHEMA_VERSION: int = 5
+#:
+#: Version 6 is MT-017's review status (C-5): `line.status`, the user's act on a
+#: line, appended by `ALTER TABLE ... ADD COLUMN`. `reverted` must survive a
+#: reopen as something other than `proposed`, and a v5 file has nowhere to
+#: keep the difference.
+SCHEMA_VERSION: int = 6
 
 #: `page.status` as `create_project` writes it: read, hashed, nothing done yet.
 PAGE_PENDING: str = "pending"
@@ -353,6 +358,17 @@ ALTER TABLE glossary ADD COLUMN
 UPDATE glossary SET last_seen_page = first_seen_page;
 """
 
+#: Version 5 to version 6 (MT-017 C-5): `line.status`. `ADD COLUMN` for
+#: `_MIGRATE_TO_V2`'s reason, and the definition is `schema.py`'s verbatim,
+#: CHECK included, for `_MIGRATE_TO_V5`'s: a migrated file refuses
+#: `status = 'proposed'` exactly as a fresh one does. No DEFAULT and no
+#: `UPDATE`: every existing row is NULL, "no user act", which is the truth
+#: about a line no version before this one could record an act on.
+_MIGRATE_TO_V6 = (
+    "ALTER TABLE line ADD COLUMN"
+    " status TEXT CHECK (status IS NULL OR status IN ('accepted', 'edited', 'reverted'))"
+)
+
 #: The migration chain, in order, each step keyed on the version it *produces*.
 #: A step runs when the file found on disk is older than that.
 #:
@@ -367,6 +383,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (3, _MIGRATE_TO_V3),
     (4, _MIGRATE_TO_V4),
     (5, _MIGRATE_TO_V5),
+    (6, _MIGRATE_TO_V6),
 )
 
 
@@ -810,6 +827,17 @@ class Project:
             None if proposed_en is None else str(proposed_en)
             for (proposed_en,) in self._connection.execute(_SELECT_PROPOSED, (page_ordinal,))
         )
+
+    def select(self, sql: str, parameters: Sequence[object] = ()) -> list[tuple[Any, ...]]:
+        """Run one read-only query and return every row, opening **no**
+        transaction - `read_proposed`'s rule, for the store modules beside this
+        one (`store.lines`) that read without writing.
+
+        For `SELECT`s only: a write through here would bypass `transaction()`
+        and its atomicity. Named for that, so a caller reaching for it to write
+        reads wrong at the call site.
+        """
+        return list(self._connection.execute(sql, tuple(parameters)))
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Cursor]:
