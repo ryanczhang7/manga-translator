@@ -202,3 +202,231 @@ Not investigated further: MT-050 touches nothing under `src/mangatl/detect/`.
   concrete candidate for the process-state change: the WMI/COM query at import.
   It is a lead, not a root cause; the discriminator under "Recommendations" still
   applies.
+
+## Addendum — the WMI lead investigated (2026-09-29)
+
+*Run 2026-09-29, 21:30–22:40 local, by Claude Opus 5.5 (`claude-opus-5-5`), in an
+interactive session, not a dispatched agent. Audited at `bfeac64` (main, MT-051
+closed), worktree `angry-sanderson-b090dd`. No story; no source, test or harness
+file was changed. Same machine and versions as above. Scratch scripts were in the
+session scratchpad and are not kept; each is described fully enough to rewrite
+it. W-numbers are this addendum's evidence, and E-numbers are the original's.*
+
+**The question.** Does the WMI/COM query that `onnxruntime` triggers at import
+change process state, for example the FP control word, so that later `cv2` calls
+fail?
+
+### Decided
+
+1. **No. The WMI query does not change the main thread's FP control word, and no
+   FP-control-word state produces the 2026-09-29 pattern.** The query runs on a
+   thread of its own (W1). Across 55 fresh processes the main thread's word never
+   left `0x8001f` (W5, W9). The only FP state that makes `cv2` say "Unknown"
+   (E6: inexact unmasked) instead kills a pytest process outright, whether it is
+   set on the main thread or only on OpenCV's worker threads (W6). The incident's
+   process ran to the end and reported 1031 passes. "Decided" point 5's FP
+   candidate is therefore refuted for this incident. Rests on W1, W5, W6, W9.
+2. **The `0x8007000e` report is a co-symptom, not a demonstrated cause
+   [INFERRED].** Its reading: an `E_OUTOFMEMORY` raised as a first-chance
+   structured exception on CPython's WMI worker thread. faulthandler printed it,
+   COM handled it, and `platform` fell back. So something in that process made
+   an allocation inside COM fail during collection, and the same process's `cv2`
+   calls then failed until it exited, sparing one test (W8). Both point to one
+   process-state fault that was in place by collection time, lasted the whole
+   process, and was absent from the next one. What that fault was remains
+   unknown. Rests on W1, W4, W8.
+3. **It was not commit exhaustion, of the machine or of the process.** The
+   machine never came near its commit limit (W4). Capping the process and
+   exhausting commit at every stage (cv2 import, onnxruntime import, the WMI query
+   itself, the first cv2 calls) produced only clean errors or an outright
+   process death. It never produced "Unknown C++ exception", and it never left
+   cv2 broken once the pressure was released (W3). This extends E7 from "during
+   calls" to "during import and during the WMI query".
+4. **No fix is identified, so no fix story is filed.** Caching `platform.uname()`
+   before the import, or keeping `onnxruntime` out of `postprocess.py`'s import
+   graph, would remove the one line of the log where the fault became visible.
+   It would not remove the fault. Nothing reproduces the failure, so there is no
+   failing test to demand such a change (law 1), and the next recurrence would be
+   harder to read. The same holds for every gate-side mitigation.
+
+### Evidence
+
+- **W0 — the kept log is gone [MEASURED].** `.claude/state/gate-logs/unit.failed.log`
+  in the main checkout now holds MT-051's RED run (`run: 2026-09-30T01:52:14Z`,
+  `commit: c00177e`), which failed on `ZeroDivisionError` in `ui/badges.py`. It
+  replaced the MT-050 log about four hours after the addendum above was written.
+  No file under `.claude/state/` contains `0x8007000e` or `Unknown C++`. MT-046
+  keeps **one** failing log per gate, and every story's RED run of
+  `gates.sh --fast` fails `unit` by design, so an intermittent's log lasts only
+  until the next story reaches RED. Everything below about the incident's log
+  rests on the addendum's description of it.
+- **W1 — where the query runs [READ].** CPython v3.12.14 `PC/_wmimodule.cpp`,
+  `_wmi_exec_query_impl`: the query runs on a thread made by `CreateThread`
+  (`_query_thread`: `CoInitializeEx(STA)`, `CoInitializeSecurity`,
+  `ConnectServer`, `ExecQuery`), and results come back over a pipe. The calling
+  thread releases the GIL, waits up to 1000 ms for COM init and 100 ms for the
+  connection, then 100 ms for the thread to exit, and on timeout it
+  *abandons* the thread. There is no `TerminateThread`. The FP control word and
+  MXCSR are per-thread state, so nothing on that thread can change the main
+  thread's word. faulthandler, which pytest enables, reports every first-chance
+  exception with the high bit set except MSVC C++ (`0xE06D7363`) and CLR
+  (`0xE0434352`) ones, handled or not. On a thread with no Python state it
+  prints the Python threads' stacks, which is why a fault on the WMI worker
+  appears under a traceback that ends in `platform._wmi_query`.
+- **W2 — the log signature, reproduced [MEASURED].** A process assigned to a job
+  object (`ProcessMemoryLimit` 3 GiB) imported `numpy`, filled its commit to
+  leave 4096 KiB of headroom, and ran `import cv2; import onnxruntime`.
+  faulthandler printed `Windows fatal exception: stack overflow` /
+  `Thread 0x… (most recent call first)` over the stack `_wmi_query` ←
+  `_win32_ver` ← `win32_ver` ← `uname` ← `system` ← `onnxruntime\capi\_pybind_state.py:14`.
+  That is the incident's shape, with a different code (`0xC00000FD`, not
+  `0x8007000E`) and a different outcome: the process died, where the incident's
+  process continued.
+- **W3 — commit exhaustion at each stage [MEASURED].** Same job-object harness,
+  one fresh process per point. Headroom *H* was reserved first and released
+  after the fill, then the stage ran and the fill was freed. The process then
+  made 34 × (`resize` INTER_AREA of `1600×1125×3`, `connectedComponentsWithStats`
+  of `240×320`, `dilate`), with inputs allocated before the pressure.
+  - `import cv2`, *H* = 512–65536 KiB (2048–4096 in steps of 128; 25 runs):
+    `DLL load failed … paging file is too small`, `Failed to register type`,
+    `MemoryError`, `SystemError`, or ok.
+  - `import cv2, onnxruntime`, *H* = 512–65536 KiB (36 runs): the same, plus
+    `DLL load failed while importing onnxruntime_pybind11_state` and
+    `bad allocation`. Two processes died: W2 at 4096, and a delay-load failure
+    (`0xC06D007E`) at 15360.
+  - `platform._wmi_query` alone, *H* = 0–6144 KiB (20 runs): `WinError 1455`,
+    `WinError 258` (the 1000 ms timeout, worker abandoned), one stack-overflow
+    death, otherwise ok. Never `0x8007000E`.
+  - cv2 calls under pressure, thread pool cold and warm, *H* = 0–7936 KiB in
+    steps of 256 (64 runs): only `(-4:Insufficient memory)` and `bad allocation`.
+    With a cold pool at 1024–2048 KiB, five processes died of stack overflow on
+    OpenCV's worker threads.
+  - Every process that survived its stage made all 34 × 3 calls without error
+    once the pressure was released, and read `0x8001f`.
+- **W4 — the machine was never short of commit [MEASURED].** Commit limit
+  63.0 GB (32 GB RAM, 29 GB pagefile). Pagefile peak usage since boot
+  (2026-09-28 11:22) was 1314 MB. The System log has no event 2004
+  (Resource-Exhaustion-Detector, low virtual memory) in 14 days. The
+  `Microsoft-Windows-WMI-Activity/Operational` log holds 836 × event 5858 over
+  three days. All of those under this user are `0x80041032` (call cancelled)
+  from other clients' queries, and none is `0x8007000E` or CPython's
+  `Win32_Processor`/`Win32_OperatingSystem` query. The incident's
+  `E_OUTOFMEMORY` never reached the WMI service, so it was raised inside the
+  pytest process.
+- **W5 — the minimal repro [MEASURED].** 40 fresh processes, 20 with
+  `platform.uname()` called before any import and 20 without. Each ran `import
+  cv2` then `import onnxruntime` (47–126 ms), then 2000 × (`resize` +
+  `connectedComponentsWithStats`). Result: 0 errors, and the main thread's
+  `_controlfp(0,0)` read `0x8001f` at every step. A thread created after the
+  import also starts at `0x8001f`.
+- **W6 — what FP state does to a pytest run [MEASURED].** A plugin loaded with
+  `-p` from outside the repo unmasked one exception on the main thread at
+  `pytest_collection_finish` and left it unmasked, under the `unit` command:
+  - inexact: the process died at its first inexact operation, in Python code
+    rather than cv2, with `0xC000008F` and rc 3, before reporting any result
+  - underflow, overflow, zero-divide, invalid: `1176 passed` each, no `Unknown`
+
+  Unmasking inexact only *around* each cv2 call also killed the process, at the
+  first `letterbox`. Clearing the precision mask in MXCSR on only the 12 threads
+  that cv2's first parallel call created (`SetThreadContext`, `0x1F80` →
+  `0x0F80`) killed the process as well, over the two detect files together.
+  None of these gives "run completes, only cv2 tests fail".
+- **W7 — what the query leaves loaded [MEASURED].** `platform.uname()` adds
+  `amsi.dll` and `mpoav.dll` (Microsoft Defender's AMSI provider), plus
+  `clbcatq`, `kernel.appcore`, `uxtheme`, `userenv`, `profapi` and `iphlpapi`,
+  and they stay loaded. The `onnxruntime` import adds `dxgi`, `dxcore`,
+  `directxdatabasehelper`, `setupapi`, `cfgmgr32`, `devobj`, `wintrust`,
+  `crypt32`, `dbghelp`, `powrprof`, `umpdc`, `msvcp140`, `msvcp140_1` and
+  `onnxruntime_providers_shared`. This happens in every run, passing ones
+  included. Defender's in-process provider is a concrete instance of the "AV
+  hooks" candidate, but its presence alone does not tell good runs from bad.
+- **W8 — 34 is 35 minus one [MEASURED].** A plugin that makes `cv2.resize`,
+  `connectedComponentsWithStats`, `dilate` and `findContours` all raise gives
+  35 failures under `unit`: 26 in `test_detect_postprocess.py` and 9 in
+  `test_detect_page.py`. The incident had 25 + 9. Neither test file nor
+  `postprocess.py` has changed since `e9ccfb6` (2026-09-16). In the failing
+  process, then, exactly **one** cv2-reaching test in `test_detect_postprocess.py`
+  passed, and the lost log was the only record of which. The six
+  `resize`-only tests call `postprocess.py:164` or `:256` and never line 340.
+  That makes the 2026-09-28 report ("every one at line 340", 34 failures in a
+  33-test file) internally inconsistent, so its details carry less weight than
+  the 2026-09-29 ones.
+- **W9 — soak [MEASURED].** `uv run pytest -q -p fpwatch -p no:cacheprovider tests/core tests/ui`
+  × 15 sequentially (21:59–22:12), with a plugin that logs the main thread's
+  `_controlfp(0,0)` whenever it differs from the last reading at session start,
+  collection end, and every test's setup and teardown. Result: 15/15
+  `1176 passed` (46–56 s), no `Unknown C++`, no faulthandler output, and exactly
+  one reading per process (`0x8001f`).
+- **W10 — faulthandler sees SEH inside cv2 [MEASURED].** E5 rerun under
+  `faulthandler.enable()` (a `PAGE_NOACCESS` page in a `1600×1125` mask). Each
+  `cv2.error: Unknown C++ exception` came with several
+  `Windows fatal exception: access violation` reports, one per thread that hit
+  the page. W6's FP faults print `code 0xc000008f`. So if the incident's 34
+  failures were access violations or FP faults, the failing log held dozens of
+  faulthandler reports **after** the WMI one. If it held none, the thing cv2's
+  `catch (...)` caught was an exception faulthandler ignores. The likeliest
+  such exception is an MSVC C++ exception of a type derived from neither
+  `cv::Exception` nor `std::exception`. The addendum above says only what the
+  log *opened* with.
+- **W11 — a coincidence, recorded as one [MEASURED].** The System log has DCOM
+  event 10029 (activation of `Windows.Media.Capture.Internal.AppCaptureShell`
+  timed out waiting for `BcastDVRUserService` to stop) about every 4 minutes in
+  three windows since boot: 09-28 17:03–19:38, 09-29 15:15–16:21 and 09-29
+  21:03–22:00. The first incident (MT-025 branch, 16:58–18:50) falls in the
+  first window. The second (MT-050 RED, between 16:15 and 16:44) falls at the
+  end of the second. The third window held clean gate runs (MT-051,
+  21:09–21:14) and the start of W9. Low weight; it is here because capture
+  overlays are among the candidates, and Game Bar capture is one.
+
+### What would have to be true for this to be wrong
+
+- That the WMI query's failure itself broke `cv2`, through a path that a job
+  object cap does not model. For example, a COM allocator returning a bad
+  pointer instead of failing, and `cv2` later touching memory COM had freed.
+  W10's reports would then have shown access violations.
+- That the process's FP state was changed on a thread W6 did not cover, in a way
+  that fails only `cv2` and nothing else. W6 covered the main thread and the
+  threads OpenCV's pool had at the end of collection.
+
+### What was not checked
+
+- The rest of the lost log: whether faulthandler reported anything after the WMI
+  line (W10), and which test was the survivor (W8). Both would narrow the
+  mechanism at once.
+- Python 3.13+, whose `platform` and `_wmi` differ, and any `onnxruntime` build
+  other than 1.30.0 GPU.
+- Which third-party DLLs are injected at the moment of failure. W7 lists what is
+  loaded in a healthy process, and nothing has observed a failing one.
+
+### Recommendations
+
+- **Retention is the blocker.** W0 is the second time the one log that mattered
+  was overwritten, this time *with* MT-046 in place. A harness chore could
+  keep a failing log that contains an unexplained signature
+  (`Windows fatal exception`, `Unknown C++ exception`) under a timestamped name
+  that no later run replaces. Alternatively it could keep the last *N* failing
+  logs per gate instead of one. This changes what `gates.sh` *keeps*, not what it
+  judges. Filed by the Lead PO as the harness chore [[MT-053]]
+  (`docs/backlog/stories/MT-053.md`). It uses signature-triggered retention:
+  `keep-when` lines in `project.conf` name the signatures, a matching failing
+  log is kept under `.claude/state/gate-logs/kept/` with MT-046's stamp plus the
+  signature, and at most 5 are kept per gate. Last-*N* was considered and
+  declined; the story's PO-2 gives the reason. Until MT-053 is DONE, copy the
+  log by hand.
+- **On the next recurrence, before anything else,** copy the failing log out of
+  `.claude/state/`, then read three things from it:
+  - how many `Windows fatal exception` reports follow the first one, and their
+    codes (W10)
+  - which cv2-reaching test in `test_detect_postprocess.py` passed (W8)
+  - the System log around the run: `Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=…}`
+    for 10029 and 2004 (W4, W11)
+- **The first audit's in-process FP discriminator is no longer needed:** W6
+  shows FP state cannot produce this pattern. The in-process evidence worth
+  having now is W10's faulthandler output, which the gate log already captures
+  when it survives.
+
+### Stories filed
+
+- [[MT-053]] - *A failing log with an unexplained signature outlives later
+  failures* (chore, EPIC-01, harness only), filed by the Lead PO from the
+  retention recommendation above. No fix story: no fix was identified.
