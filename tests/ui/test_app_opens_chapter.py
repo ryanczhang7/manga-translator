@@ -20,7 +20,9 @@ no invented metrics.
 - **AC-3 / C-3** - the notice text is spelled out HERE, never read back from
   `NO_PROJECT_NOTICE`: a constant with `mangatl-run` misspelled must fail
   (D-4). "Not silently" is a snapshot of every path under `tmp_path`.
-- **AC-4 / C-2 case 1** - exactly today's `MainWindow`.
+- **AC-4 / C-2 case 1** - the no-argument `MainWindow`. MT-055 changed it
+  deliberately (MT-055 PO-1): it is now the folder intake, pinned here by
+  `_assert_intake_window` and in full in `test_folder_intake.py`.
 - **C-4** - `Workspace.closed`, once per close, after the flush; and the
   window `build_window` made closes its project.
 - **C-5** - `MainWindow(notice=...)`.
@@ -63,7 +65,7 @@ from mangatl.store.project import (
 from mangatl.ui import main_window as main_window_module
 from mangatl.ui import tokens_gen
 from mangatl.ui.canvas import EMPTY, LOADED
-from mangatl.ui.main_window import CANVAS_ACCESSIBLE_NAME, WINDOW_TITLE, MainWindow
+from mangatl.ui.main_window import WINDOW_TITLE, MainWindow
 from mangatl.ui.workspace import Workspace
 
 # --- The chapter on disk -----------------------------------------------------------
@@ -285,26 +287,34 @@ def _assert_notice_label(label: QLabel, text: str) -> None:
     assert label.textFormat() == Qt.TextFormat.PlainText
 
 
-def _assert_empty_window(window: QMainWindow) -> None:
-    """AC-4: exactly MT-001's window."""
+def _assert_intake_window(window: QMainWindow) -> None:
+    """AC-4 as MT-055 changed it (MT-055 AC-1, C-2): the no-argument window is
+    the folder intake in its empty state, with no notice. Imported here, not at
+    module level, so that MT-054's other tests in this file keep running while
+    `mangatl.ui.intake` does not exist."""
+    from mangatl.ui.intake import FolderDropTarget
+
     assert type(window) is MainWindow
     assert window.windowTitle() == WINDOW_TITLE
     central = window.centralWidget()
-    assert central is not None
-    assert type(central) is QWidget
-    assert central.accessibleName() == CANVAS_ACCESSIBLE_NAME
+    assert isinstance(central, FolderDropTarget), f"central widget is {type(central).__name__}"
+    assert central.objectName() == "folder-drop-target"
+    assert central.state == "empty"
+    headline = central.findChild(QLabel, "headline")
+    assert headline is not None
+    assert headline.text() == "Drop a chapter folder here"
     assert window.findChild(QObject, "notice") is None
 
 
 # =============================================================================
-# AC-4 / C-2 case 1: no argument, today's window
+# AC-4 / C-2 case 1: no argument, the folder intake (MT-055)
 # =============================================================================
 
 
-def test_no_argument_builds_the_empty_window_exactly_as_before(qtbot) -> None:  # type: ignore[no-untyped-def]
+def test_no_argument_builds_the_folder_intake_window(qtbot) -> None:  # type: ignore[no-untyped-def]
     window = _build(qtbot, [])
 
-    _assert_empty_window(window)
+    _assert_intake_window(window)
 
 
 def test_the_window_is_returned_not_shown(qtbot, source: Path, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -314,7 +324,7 @@ def test_the_window_is_returned_not_shown(qtbot, source: Path, tmp_path: Path) -
         assert not window.isVisible(), f"build_window({arguments!r}) showed its window"
 
 
-def test_launched_with_no_argument_the_app_shows_the_empty_window(qtbot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_launched_with_no_argument_the_app_shows_the_folder_intake(qtbot, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """AC-4 through `main`: argv is the program name only."""
     built = _capture_windows(qtbot, monkeypatch)
     seen: list[bool] = []
@@ -328,7 +338,7 @@ def test_launched_with_no_argument_the_app_shows_the_empty_window(qtbot, monkeyp
     assert app_module.main(["mangatl"]) == 3
     assert argvs == [["mangatl"]]
     assert len(built) == 1
-    _assert_empty_window(built[0])
+    _assert_intake_window(built[0])
     assert seen == [True], "main did not show the window before exec"
 
 
@@ -646,8 +656,14 @@ def test_the_notice_object_name_is_exported() -> None:
     assert main_window_module.NOTICE_OBJECT_NAME == "notice"
 
 
-def test_notice_none_is_todays_window(qtbot) -> None:  # type: ignore[no-untyped-def]
-    window = MainWindow(notice=None)
+def test_notice_none_with_an_opener_is_the_folder_intake(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """MT-055 C-2: `notice=None` needs an `open_folder`; given one, the window
+    is the intake. (Without one it is a TypeError: `test_folder_intake.py`.)"""
+
+    def never_opens(folder: Path) -> str:
+        raise AssertionError(f"no folder should be opened here, got {folder}")
+
+    window = MainWindow(notice=None, open_folder=never_opens)
     qtbot.addWidget(window)
 
-    _assert_empty_window(window)
+    _assert_intake_window(window)

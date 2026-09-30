@@ -1,17 +1,30 @@
-"""The walking skeleton's window: it opens, it is identifiable, it closes."""
+"""The walking skeleton's window: it opens, it is identifiable, it closes.
+
+MT-055 rewrote the pins of MT-001's bare canvas: with no notice the window is
+the folder intake (`FolderDropTarget`), which needs an `open_folder` (C-2), so
+every `MainWindow()` here is given a stub one. The central widget's accessible
+name is now the drop target's, read out of `accessibility.md` A-08.
+"""
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
+from PySide6.QtGui import QAccessible
 from PySide6.QtWidgets import QMainWindow
 
 from mangatl import app as app_module
-from mangatl.ui.main_window import CANVAS_ACCESSIBLE_NAME, WINDOW_TITLE, MainWindow
+from mangatl.ui.main_window import WINDOW_TITLE, MainWindow
+
+
+def _never_opens(folder: Path) -> str:
+    """A stub `open_folder`: these tests never choose a folder."""
+    raise AssertionError(f"no folder should be opened here, got {folder}")
 
 
 def test_the_window_opens_with_the_application_title(qtbot) -> None:  # type: ignore[no-untyped-def]
-    window = MainWindow()
+    window = MainWindow(open_folder=_never_opens)
     qtbot.addWidget(window)
     window.show()
 
@@ -20,17 +33,21 @@ def test_the_window_opens_with_the_application_title(qtbot) -> None:  # type: ig
     assert window.isVisible()
 
 
-def test_the_central_widget_carries_an_accessible_name(qtbot) -> None:  # type: ignore[no-untyped-def]
-    window = MainWindow()
+def test_the_central_widget_is_the_chapter_folder_button(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """MT-055 AC-1 / A-08: role Button, name "Choose chapter folder"."""
+    window = MainWindow(open_folder=_never_opens)
     qtbot.addWidget(window)
 
     central = window.centralWidget()
     assert central is not None
-    assert central.accessibleName() == CANVAS_ACCESSIBLE_NAME
+    interface = QAccessible.queryAccessibleInterface(central)
+    assert interface is not None
+    assert interface.role() == QAccessible.Role.Button, f"role is {interface.role()!r}"
+    assert interface.text(QAccessible.Text.Name) == "Choose chapter folder"
 
 
 def test_the_window_closes(qtbot) -> None:  # type: ignore[no-untyped-def]
-    window = MainWindow()
+    window = MainWindow(open_folder=_never_opens)
     qtbot.addWidget(window)
     window.show()
     assert window.isVisible()
