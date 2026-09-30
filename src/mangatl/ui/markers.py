@@ -27,7 +27,14 @@ from PySide6.QtWidgets import QGraphicsItem, QStyleOptionGraphicsItem, QWidget
 from mangatl.ui import tokens_gen
 from mangatl.ui.link import OrderedRegion
 
-__all__ = ["BubbleMarker", "MarkerState", "paint_marker", "rgba_colour"]
+__all__ = [
+    "BubbleMarker",
+    "MarkerState",
+    "overlay_pen",
+    "paint_badge",
+    "paint_marker",
+    "rgba_colour",
+]
 
 
 class MarkerState(Enum):
@@ -73,7 +80,8 @@ def rgba_colour(token: str) -> QColor:
     return colour
 
 
-def _pen(token: str, width: int) -> QPen:
+def overlay_pen(token: str, width: int) -> QPen:
+    """A cosmetic, round-joined pen of `width` screen px in the colour `token`."""
     pen = QPen(rgba_colour(token))
     pen.setWidthF(float(width))
     pen.setCosmetic(True)
@@ -100,9 +108,9 @@ def paint_marker(
     if fill is not None:
         painter.fillPath(path, QBrush(rgba_colour(fill)))
     painter.strokePath(
-        path, _pen(tokens_gen.OVERLAY_HALO, core_width + 2 * tokens_gen.OVERLAY_STROKE_HALO)
+        path, overlay_pen(tokens_gen.OVERLAY_HALO, core_width + 2 * tokens_gen.OVERLAY_STROKE_HALO)
     )
-    painter.strokePath(path, _pen(core_colour, core_width))
+    painter.strokePath(path, overlay_pen(core_colour, core_width))
     _paint_badge(painter, region, state, badge_centre)
 
 
@@ -116,7 +124,6 @@ def _paint_badge(
     `color.text.on-accent` numeral. Otherwise: a halo-dark disc outlined and
     numbered in the core colour.
     """
-    core_colour = _STYLE[state][0]
     scale = painter.worldTransform().m11() or 1.0
     size = tokens_gen.OVERLAY_BADGE_SIZE
     gap = tokens_gen.OVERLAY_BADGE_GAP
@@ -129,23 +136,36 @@ def _paint_badge(
             painter.translate(centre)
             circle = QRectF(-size / 2, -size / 2, size, size)
         painter.scale(1.0 / scale, 1.0 / scale)
-        if state is MarkerState.SELECTED:
-            painter.setPen(_pen(tokens_gen.OVERLAY_HALO, tokens_gen.OVERLAY_STROKE_HALO))
-            painter.setBrush(QBrush(rgba_colour(core_colour)))
-            numeral = tokens_gen.COLOR_TEXT_ON_ACCENT
-        else:
-            painter.setPen(_pen(core_colour, tokens_gen.BORDER_WIDTH_HAIRLINE))
-            painter.setBrush(QBrush(rgba_colour(tokens_gen.OVERLAY_HALO)))
-            numeral = core_colour
-        painter.drawEllipse(circle)
-        font = QFont(painter.font())
-        font.setPixelSize(tokens_gen.TYPE_CAPTION_SIZE)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(QPen(rgba_colour(numeral)))
-        painter.drawText(circle, Qt.AlignmentFlag.AlignCenter, str(region.ordinal))
+        paint_badge(painter, circle, region.ordinal, state)
     finally:
         painter.restore()
+
+
+def paint_badge(painter: QPainter, circle: QRectF, ordinal: int, state: MarkerState) -> None:
+    """The disc and its numeral in `circle`, in the painter's current coordinates.
+
+    Selected: filled `overlay.bubble.selected` with a halo ring and a
+    `color.text.on-accent` numeral. Otherwise: a halo-dark disc outlined and
+    numbered in the core colour. Leaves the painter's pen, brush and font
+    changed; callers wrap it in `save`/`restore`. MT-052's off-screen indicator
+    draws its badge with this, SELECTED.
+    """
+    core_colour = _STYLE[state][0]
+    if state is MarkerState.SELECTED:
+        painter.setPen(overlay_pen(tokens_gen.OVERLAY_HALO, tokens_gen.OVERLAY_STROKE_HALO))
+        painter.setBrush(QBrush(rgba_colour(core_colour)))
+        numeral = tokens_gen.COLOR_TEXT_ON_ACCENT
+    else:
+        painter.setPen(overlay_pen(core_colour, tokens_gen.BORDER_WIDTH_HAIRLINE))
+        painter.setBrush(QBrush(rgba_colour(tokens_gen.OVERLAY_HALO)))
+        numeral = core_colour
+    painter.drawEllipse(circle)
+    font = QFont(painter.font())
+    font.setPixelSize(tokens_gen.TYPE_CAPTION_SIZE)
+    font.setBold(True)
+    painter.setFont(font)
+    painter.setPen(QPen(rgba_colour(numeral)))
+    painter.drawText(circle, Qt.AlignmentFlag.AlignCenter, str(ordinal))
 
 
 class BubbleMarker(QGraphicsItem):

@@ -26,6 +26,13 @@ scroll the view on top of `reveal`'s minimum pan (§4.5).
 MT-051 places the ordinal badges so that no two overlap (§4.2): `set_regions`
 and `set_zoom` re-place them with `badges.place_badges` at the current zoom,
 because a badge is a constant size on screen. Panning never re-places.
+
+MT-052 adds the off-screen indicator (§4.6): one `OffscreenIndicator`, a child
+widget of the viewport, shown while the selected region is not fully visible
+and re-pinned after everything that moves the view - including every scroll,
+because a scroll carries the viewport's child widgets with it. Clicking it or
+`Ctrl+9` runs `bring_into_view`: centre the region, zooming out only as far as
+it must to fit the 24 px inset, never in (Q1).
 """
 
 from __future__ import annotations
@@ -34,8 +41,17 @@ import math
 from collections.abc import Sequence
 from dataclasses import replace
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QKeyEvent, QMouseEvent, QPen, QPixmap, QTransform
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QKeyEvent,
+    QMouseEvent,
+    QPen,
+    QPixmap,
+    QResizeEvent,
+    QTransform,
+)
 from PySide6.QtWidgets import (
     QGraphicsPixmapItem,
     QGraphicsRectItem,
@@ -57,6 +73,7 @@ from mangatl.ui.link import (
     pan_to_contain,
 )
 from mangatl.ui.markers import BubbleMarker, MarkerState
+from mangatl.ui.offscreen import INDICATOR_TARGET_PX, OffscreenIndicator, indicator_edge
 
 __all__ = [
     "EMPTY",
@@ -134,6 +151,15 @@ class PageCanvas(QGraphicsView):
         # pointer alike, those reach the viewport only with tracking on.
         self.viewport().setMouseTracking(True)
         self._state = EMPTY
+
+        # Not in the viewport's layout (which manages `message` only), and
+        # hidden explicitly, or it would appear when the canvas is shown.
+        self.offscreen_indicator = OffscreenIndicator(self.viewport())
+        self.offscreen_indicator.hide()
+        self.offscreen_indicator.clicked.connect(self._on_indicator_clicked)
+        # Entering a viewport child sends the viewport no Leave (MT-052 B6,
+        # measured), so MT-049's clear does not run: the canvas clears hover here.
+        self.offscreen_indicator.installEventFilter(self)
         self.set_page(None)
 
     def state(self) -> str:
@@ -158,6 +184,7 @@ class PageCanvas(QGraphicsView):
             self._show_message(FAILED, f"{error}\n{FAILED_MESSAGE}", f"{error}: {FAILED_MESSAGE}")
         else:
             self._show_message(EMPTY, f"{EMPTY_TITLE}\n{EMPTY_ACTION}", EMPTY_TITLE)
+        self._update_indicator()
 
     def zoom(self) -> float:
         """The current zoom factor, 1.0 being one image pixel per screen pixel."""
@@ -168,6 +195,7 @@ class PageCanvas(QGraphicsView):
         clamped = min(max(factor, self.ZOOM_MIN), self.ZOOM_MAX)
         self.setTransform(QTransform.fromScale(clamped, clamped))
         self._place_badges()
+        self._update_indicator()
 
     # --- The link (MT-016) ------------------------------------------------------
 
@@ -182,6 +210,7 @@ class PageCanvas(QGraphicsView):
         self._last_click = None
         self._place_badges()
         self._restyle()
+        self._update_indicator()
 
     def _place_badges(self) -> None:
         """Re-place every badge at the current zoom (MT-051, §4.2).
@@ -205,6 +234,7 @@ class PageCanvas(QGraphicsView):
         """Restyle the markers from `state`. Never moves the viewport."""
         self._link_state = replace(state)
         self._restyle()
+        self._update_indicator()
 
     def reveal(self, region_id: int) -> None:
         """Pan by the minimum that brings the region in with SELECTION_MARGIN_PX.
@@ -213,7 +243,7 @@ class PageCanvas(QGraphicsView):
         transform is never touched: selection does not zoom (§4.5). Deltas are
         whole pixels, because scroll values are.
         """
-        region = next((r for r in self._regions if r.region_id == region_id), None)
+        region = self._region(region_id)
         if region is None:
             return
         mapped = self.mapFromScene(region.bounds()).boundingRect()
@@ -223,6 +253,73 @@ class PageCanvas(QGraphicsView):
         horizontal, vertical = self.horizontalScrollBar(), self.verticalScrollBar()
         horizontal.setValue(horizontal.value() - round(delta.x()))
         vertical.setValue(vertical.value() - round(delta.y()))
+
+    # --- The off-screen indicator (MT-052) --------------------------------------
+
+    def bring_into_view(self, region_id: int) -> None:
+        """Centre the region; zoom out only if it cannot fit the 24 px inset (Q1).
+
+        The zoom is never increased, and the selection is never touched: this is
+        what the indicator's click and `Ctrl+9` do. Unknown ids do nothing.
+        """
+        region = self._region(region_id)
+        if region is None:
+            return
+        bounds = region.bounds()
+        mapped = QRectF(self.mapFromScene(bounds).boundingRect())
+        viewport = self.viewport()
+        room_w = viewport.width() - 2 * SELECTION_MARGIN_PX
+        room_h = viewport.height() - 2 * SELECTION_MARGIN_PX
+        if not (mapped.width() <= room_w and mapped.height() <= room_h):
+            target = self.zoom()
+            if bounds.width() > 0:
+                target = min(target, room_w / bounds.width())
+            if bounds.height() > 0:
+                target = min(target, room_h / bounds.height())
+            self.set_zoom(target)
+        self.centerOn(bounds.center())
+        self._update_indicator()
+
+    def _region(self, region_id: int | None) -> OrderedRegion | None:
+        return next((r for r in self._regions if r.region_id == region_id), None)
+
+    def _update_indicator(self) -> None:
+        """Show and pin the indicator while the selected region is not fully visible."""
+        indicator = self.offscreen_indicator
+        region = self._region(self._link_state.selected_region_id)
+        placement = None
+        if self._state == LOADED and region is not None:
+            placement = indicator_edge(
+                QRectF(self.viewport().rect()),
+                QRectF(self.mapFromScene(region.bounds()).boundingRect()),
+            )
+        if region is None or placement is None:
+            indicator.hide()
+            return
+        edge, centre = placement
+        half = INDICATOR_TARGET_PX / 2
+        indicator.set_target(region.ordinal, edge)
+        indicator.move((centre - QPointF(half, half)).toPoint())
+        indicator.show()
+        indicator.raise_()
+
+    def _on_indicator_clicked(self) -> None:
+        selected = self._link_state.selected_region_id
+        if selected is not None:
+            self.bring_into_view(selected)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self.offscreen_indicator and event.type() == QEvent.Type.Enter:
+            self.regionHovered.emit(None)
+        return super().eventFilter(watched, event)
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:
+        super().scrollContentsBy(dx, dy)  # moves the viewport's child widgets too
+        self._update_indicator()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_indicator()
 
     def _restyle(self) -> None:
         selected = self._link_state.selected_region_id
@@ -280,6 +377,17 @@ class PageCanvas(QGraphicsView):
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.editRequested.emit()
+            event.accept()
+            return
+        if (
+            event.key() == Qt.Key.Key_9
+            and event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+            == Qt.KeyboardModifier.ControlModifier
+        ):
+            # "Bring the selected bubble into view" (A-07); never reaches QGraphicsView.
+            selected = self._link_state.selected_region_id
+            if selected is not None:
+                self.bring_into_view(selected)
             event.accept()
             return
         step = _SELECTION_STEPS.get(event.key())
