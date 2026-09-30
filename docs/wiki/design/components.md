@@ -56,12 +56,35 @@ A dashed region occupying the intake screen's centre column.
 | State | Appearance | Copy |
 |---|---|---|
 | **empty** (default) | 2px dashed `color.border.interactive`, `radius.md`, ground `color.surface.base` | headline (`type.display`) "Drop a chapter folder here"; body (`type.body`, `color.text.secondary`) "Or choose a folder. Pages are processed in filename order."; a `primary` button "Choose folder…" |
-| **hover-valid** (drag carrying a directory) | border 2px solid `color.accent.base`; ground tinted `overlay.fill.hover` | headline "Release to load" |
-| **hover-invalid** (drag carrying files, or a multi-item drag) | border 2px solid `color.status.danger` | headline "Drop a folder, not files"; body names what was dragged |
+| **hover-valid** (drag carrying exactly one local directory) | border 2px solid `color.accent.base`; ground tinted `overlay.fill.hover` | headline "Release to load"; body the folder's name; no affordance text |
+| **hover-invalid** (drag carrying files, or more than one item) | border 2px solid `color.status.danger` | headline "Drop a folder, not files", or "Drop one folder" when every item is a folder; body says what was dragged; no affordance text |
 | **loading** | border 1px `color.border.default`; indeterminate bar; the resolved path in `type.caption` | "Reading folder…" + a `ghost` "Cancel" |
 | **error** | border 2px solid `color.status.danger`; a danger-coloured icon | headline + the specific reason + `secondary` "Choose a different folder" |
 | **populated** | replaced by `ChapterSummary` | — |
 | **disabled** | ground `color.surface.disabled`, border `color.border.default` | only while a run is in progress; body says "A run is in progress." |
+
+**Drag copy** (settled 2026-09-30, MT-056 Q1). A *folder* is a local path that
+is an existing directory when the drag enters; any other local path is a
+*file*. "Several" means two or more.
+
+| Drag | Headline | Body |
+|---|---|---|
+| one folder | "Release to load" | `{name}` |
+| one file | "Drop a folder, not files" | "You are dragging a file: `{name}`." |
+| several files | "Drop a folder, not files" | "You are dragging `{n}` files." |
+| several folders | "Drop one folder" | "You are dragging `{n}` folders. Drop them one at a time." |
+| files and folders | "Drop a folder, not files" | "You are dragging `{f}` file(s) and `{d}` folder(s)." — "1 file", "2 files", "1 folder", "2 folders" |
+
+- `{name}` is the base name, never the full path. A name longer than 40
+  characters shows its first 20, then `…` (U+2026), then its last 19 — 40 in
+  all. Exactly 40 is shown whole. The cut counts characters, not pixels.
+- Several items are counted, never listed.
+- A drag carrying any non-local URL, or no URLs at all (plain text), is
+  **ignored**: not accepted, and the target does not change.
+- The accessible description is the headline and body joined by a newline; the
+  accessible name stays "Choose chapter folder" throughout.
+- When the drag leaves, or an invalid drag is dropped, headline, body,
+  affordance and description return exactly to the previous state.
 
 **The region itself is a focusable button**, role `Button`, accessible name
 "Choose chapter folder", activated by Enter or Space. Drag-and-drop is never the

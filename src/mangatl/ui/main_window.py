@@ -1,10 +1,11 @@
 """The application's window when no chapter is open.
 
 With no `notice` it is the folder intake (MT-055): its whole content is a
-`FolderDropTarget`, and activating it asks `choose_folder` for a folder and
-hands the answer to `open_folder`. The window does not decide what a folder
+`FolderDropTarget`. Activating it asks `choose_folder` for a folder, and
+dropping one folder on it (MT-056) supplies one directly; either way the folder
+goes down one path to `open_folder`. The window does not decide what a folder
 means - `mangatl.app` injects that function, the same one `mangatl <folder>`
-runs, so the picker and the command line cannot drift apart. A window back
+runs, so the picker, the drop and the command line cannot drift apart. A window back
 from it is the opened chapter: it is shown, then this window closes. A string
 back is the reason nothing opened, shown in the target's error state.
 
@@ -67,12 +68,17 @@ class MainWindow(QMainWindow):
         self._choose_folder = choose_folder or choose_folder_dialog
         self._target = FolderDropTarget(self)
         self._target.activated.connect(self._choose)
+        self._target.dropped.connect(self._hand_over)
         self.setCentralWidget(self._target)
 
     def _choose(self) -> None:
         folder = self._choose_folder(self)
         if folder is None:
             return
+        self._hand_over(folder)
+
+    def _hand_over(self, folder: Path) -> None:
+        """The one path a folder takes, chosen or dropped (MT-056 C-2)."""
         outcome = self._open(folder)
         if isinstance(outcome, str):
             self._target.show_error(outcome)
