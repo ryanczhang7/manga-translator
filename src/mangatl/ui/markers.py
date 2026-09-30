@@ -8,7 +8,9 @@ the mechanism, not decoration; MT-016 AC-8 asserts it on captured paint calls.
 Pens are cosmetic, so the outline is the same width on screen at every zoom.
 The ordinal badge is drawn after both outline strokes, at the region's
 top-right (§4.2), at a constant on-screen size for the same reason. Badge
-collision avoidance (§4.2) is not built yet.
+collision avoidance (§4.2) is MT-051's: `mangatl.ui.badges` places the badges,
+the canvas hands each marker its centre (`BubbleMarker.set_badge_centre`), and
+`paint_marker` draws the circle there; with no centre it is MT-016's nominal.
 
 The `overlay.fill.*` tokens are `#RRGGBBAA`; Qt reads an 8-digit string as
 `#AARRGGBB` (MT-025 PO-7), so every token goes through `rgba_colour`.
@@ -18,7 +20,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsItem, QStyleOptionGraphicsItem, QWidget
 
@@ -79,8 +81,18 @@ def _pen(token: str, width: int) -> QPen:
     return pen
 
 
-def paint_marker(painter: QPainter, region: OrderedRegion, state: MarkerState) -> None:
-    """Fill, halo, core, badge - in that order, in scene coordinates."""
+def paint_marker(
+    painter: QPainter,
+    region: OrderedRegion,
+    state: MarkerState,
+    *,
+    badge_centre: QPointF | None = None,
+) -> None:
+    """Fill, halo, core, badge - in that order, in scene coordinates.
+
+    `badge_centre` (scene coordinates) is where the badge was placed (MT-051);
+    None draws it at MT-016's nominal position off the top-right corner.
+    """
     core_colour, core_width, fill = _STYLE[state]
     path = QPainterPath()
     path.addPolygon(region.qpolygon())
@@ -91,15 +103,18 @@ def paint_marker(painter: QPainter, region: OrderedRegion, state: MarkerState) -
         path, _pen(tokens_gen.OVERLAY_HALO, core_width + 2 * tokens_gen.OVERLAY_STROKE_HALO)
     )
     painter.strokePath(path, _pen(core_colour, core_width))
-    _paint_badge(painter, region, state)
+    _paint_badge(painter, region, state, badge_centre)
 
 
-def _paint_badge(painter: QPainter, region: OrderedRegion, state: MarkerState) -> None:
-    """The ordinal in a circle just off the region's top-right corner (§4.2).
+def _paint_badge(
+    painter: QPainter, region: OrderedRegion, state: MarkerState, centre: QPointF | None
+) -> None:
+    """The ordinal in a circle at `centre`, or just off the top-right corner (§4.2).
 
-    Drawn in screen pixels anchored at the corner, so it reads the same at every
-    zoom. Selected: filled `overlay.bubble.selected`, `color.text.on-accent`
-    numeral. Otherwise: a halo-dark disc outlined and numbered in the core colour.
+    Drawn in screen pixels anchored at the centre (or the corner), so it reads
+    the same at every zoom. Selected: filled `overlay.bubble.selected`,
+    `color.text.on-accent` numeral. Otherwise: a halo-dark disc outlined and
+    numbered in the core colour.
     """
     core_colour = _STYLE[state][0]
     scale = painter.worldTransform().m11() or 1.0
@@ -107,9 +122,13 @@ def _paint_badge(painter: QPainter, region: OrderedRegion, state: MarkerState) -
     gap = tokens_gen.OVERLAY_BADGE_GAP
     painter.save()
     try:
-        painter.translate(region.bounds().topRight())
+        if centre is None:
+            painter.translate(region.bounds().topRight())
+            circle = QRectF(gap, -gap - size, size, size)
+        else:
+            painter.translate(centre)
+            circle = QRectF(-size / 2, -size / 2, size, size)
         painter.scale(1.0 / scale, 1.0 / scale)
-        circle = QRectF(gap, -gap - size, size, size)
         if state is MarkerState.SELECTED:
             painter.setPen(_pen(tokens_gen.OVERLAY_HALO, tokens_gen.OVERLAY_STROKE_HALO))
             painter.setBrush(QBrush(rgba_colour(core_colour)))
@@ -136,6 +155,7 @@ class BubbleMarker(QGraphicsItem):
         super().__init__()
         self.region = region
         self._state = MarkerState.IDLE
+        self._badge_centre: QPointF | None = None
         # Clicks and hover are the canvas's (it hit-tests all regions at once).
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.setAcceptHoverEvents(False)
@@ -151,6 +171,15 @@ class BubbleMarker(QGraphicsItem):
         self.setZValue({MarkerState.IDLE: 2, MarkerState.HOVER: 3, MarkerState.SELECTED: 4}[state])
         self.update()
 
+    def set_badge_centre(self, centre: QPointF | None) -> None:
+        """Paint the badge centred on `centre` (scene coordinates); None: nominal.
+
+        `boundingRect` is unchanged: a placed badge is at most gap + size screen
+        px off the outline, which `_SCREEN_PAD / _SMALLEST_ZOOM` already covers.
+        """
+        self._badge_centre = None if centre is None else QPointF(centre)
+        self.update()
+
     def boundingRect(self) -> QRectF:
         pad = _SCREEN_PAD / _SMALLEST_ZOOM
         return self.region.bounds().adjusted(-pad, -pad, pad, pad)
@@ -161,4 +190,4 @@ class BubbleMarker(QGraphicsItem):
         option: QStyleOptionGraphicsItem,
         widget: QWidget | None = None,
     ) -> None:
-        paint_marker(painter, self.region, self._state)
+        paint_marker(painter, self.region, self._state, badge_centre=self._badge_centre)

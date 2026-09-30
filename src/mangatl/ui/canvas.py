@@ -22,6 +22,10 @@ instead) hit-tests every region at once; hover is reported from mouse moves;
 MT-050 adds Up/Down/Home/End (§4.7): unmodified, they are reported as a
 selection step and never reach `QGraphicsView`, whose default handling would
 scroll the view on top of `reveal`'s minimum pan (§4.5).
+
+MT-051 places the ordinal badges so that no two overlap (§4.2): `set_regions`
+and `set_zoom` re-place them with `badges.place_badges` at the current zoom,
+because a badge is a constant size on screen. Panning never re-places.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import replace
 
-from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QKeyEvent, QMouseEvent, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QGraphicsPixmapItem,
@@ -43,6 +47,7 @@ from PySide6.QtWidgets import (
 )
 
 from mangatl.ui import tokens_gen
+from mangatl.ui.badges import place_badges
 from mangatl.ui.link import (
     SAME_POINT_PX,
     SELECTION_MARGIN_PX,
@@ -162,6 +167,7 @@ class PageCanvas(QGraphicsView):
         """Set an absolute, uniform zoom, clamped to [ZOOM_MIN, ZOOM_MAX]."""
         clamped = min(max(factor, self.ZOOM_MIN), self.ZOOM_MAX)
         self.setTransform(QTransform.fromScale(clamped, clamped))
+        self._place_badges()
 
     # --- The link (MT-016) ------------------------------------------------------
 
@@ -174,7 +180,26 @@ class PageCanvas(QGraphicsView):
         for marker in self.markers:
             self._scene.addItem(marker)
         self._last_click = None
+        self._place_badges()
         self._restyle()
+
+    def _place_badges(self) -> None:
+        """Re-place every badge at the current zoom (MT-051, §4.2).
+
+        Badges are a constant size on screen, so they collide in zoomed-scene
+        units and are placed there; each marker gets its centre back in scene
+        coordinates. Only a zoom change or new regions re-place: panning never does.
+        """
+        zoom = self.zoom()
+        placed = place_badges(
+            ((region.region_id, region.polygon) for region in self._regions),
+            zoom=zoom,
+            size=tokens_gen.OVERLAY_BADGE_SIZE,
+            gap=tokens_gen.OVERLAY_BADGE_GAP,
+        )
+        for marker in self.markers:
+            x, y = placed[marker.region.region_id].centre
+            marker.set_badge_centre(QPointF(x / zoom, y / zoom))
 
     def set_link_state(self, state: LinkState) -> None:
         """Restyle the markers from `state`. Never moves the viewport."""
