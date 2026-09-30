@@ -19,32 +19,45 @@ it never pans the canvas and never scrolls the list (§4.4). Up/Down/Home/End on
 the canvas (MT-050, §4.7) step the selection through the same controller,
 without wrapping and without moving focus.
 
+**Review** (MT-017, `components.md` §5-§7). Each row is a `LineEditor` under a
+status gutter - a glyph *and* a colour per status, never colour alone - with
+its Revert / Accept / Retry line controls always visible when they apply, never
+revealed by hover. A row built from a stored line saves through
+`store.lines.commit_line`; replacing the rows (a page change) and closing the
+window both write any pending save first, so neither drops the user's work.
+MT-016 PO-1's read-only editor is superseded: every line is editable (PO-5).
+
 The 1440 px breakpoint in `layout.md` is not built yet (MT-015 PO-1, MT-048).
 Header and footer content and wiring this window into `mangatl.app` are later
-stories; row editing is MT-017 (the editor is read-only, MT-016 PO-1).
+stories (MT-054).
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from PySide6.QtCore import QEvent, QSignalBlocker, Qt, Signal
-from PySide6.QtGui import QEnterEvent, QPixmap
+from PySide6.QtGui import QCloseEvent, QColor, QEnterEvent, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QPushButton,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
+from mangatl.domain.line import Line, LineStatus, effective_text, failure_reason
 from mangatl.domain.page import Chapter
+from mangatl.store.lines import commit_line, read_review_lines
 from mangatl.store.project import Project
+from mangatl.ui import tokens_gen
 from mangatl.ui.canvas import PageCanvas
+from mangatl.ui.line_editor import LineEditor, SaveFn
 from mangatl.ui.link import LinkController, LiveRegion, OrderedRegion
 
 __all__ = [
@@ -54,6 +67,8 @@ __all__ = [
     "COLUMN_MIN_WIDTH",
     "FOOTER_HEIGHT",
     "HEADER_HEIGHT",
+    "STATUS_COLOR_TOKENS",
+    "STATUS_GLYPHS",
     "STRIP_WIDTH",
     "PageStrip",
     "TranslationColumn",
@@ -69,6 +84,34 @@ CANVAS_MIN_WIDTH = 520
 HEADER_HEIGHT = 48
 FOOTER_HEIGHT = 44
 
+#: `components.md` §5's gutter glyphs; `reverted` is a return arrow alone (PO-2).
+#: Pairwise distinct, so colour is never the only cue (accessibility.md A-15.7).
+STATUS_GLYPHS: dict[LineStatus, str] = {
+    "proposed": "\N{WHITE CIRCLE}",
+    "accepted": "\N{HEAVY CHECK MARK}",
+    "edited": "\N{LOWER RIGHT PENCIL}",
+    "reverted": "\N{LEFTWARDS ARROW WITH HOOK}",
+    "failed": "\N{WARNING SIGN}",
+}
+
+#: `components.md` §5's glyph colours, as tokens: resolved through
+#: `tokens_gen.TOKENS`, never spelled here (MT-015 AC-7).
+STATUS_COLOR_TOKENS: dict[LineStatus, str] = {
+    "proposed": "color.text.muted",
+    "accepted": "color.status.success",
+    "edited": "color.accent.base",
+    "reverted": "color.text.secondary",
+    "failed": "color.status.danger",
+}
+
+#: `components.md` §5's per-status phrase in the row's accessible name.
+_STATUS_PHRASES: dict[LineStatus, str] = {
+    "proposed": "machine proposal",
+    "accepted": "accepted",
+    "edited": "edited",
+    "reverted": "edited, then returned to the proposal",
+}
+
 
 class PageStrip(QListWidget):
     """The chapter's pages, one item per page in ordinal order, by filename."""
@@ -80,17 +123,42 @@ class PageStrip(QListWidget):
         self.setFixedWidth(STRIP_WIDTH)
 
 
-def _row_accessible_text(
-    ordinal: int, total: int, japanese: str | None, english: str | None
-) -> str:
-    """`components.md` §5: the row's accessible name, ordinal first."""
+def _row_accessible_text(ordinal: int, total: int, japanese: str | None, line: Line) -> str:
+    """`components.md` §5: the row's accessible name, ordinal first, status last.
+
+    `English:` is the row's shown text, and reads "not translated" exactly when
+    there is neither a proposal nor committed text (MT-016's rule, C-8's RED
+    amendment).
+    """
     ja = japanese if japanese is not None else "not read"
-    en = english if english is not None else "not translated"
-    return f"Bubble {ordinal} of {total}. Japanese: {ja}. English: {en}. machine proposal."
+    if line.proposed_en is None and line.final_en is None:
+        en = "not translated"
+    else:
+        en = effective_text(line)
+    reason = failure_reason(line)
+    phrase = f"translation failed: {reason}" if reason is not None else _STATUS_PHRASES[line.status]
+    return f"Bubble {ordinal} of {total}. Japanese: {ja}. English: {en}. {phrase}."
+
+
+def _unsaved_line(reading_index: int, japanese: str | None, english: str | None) -> Line:
+    """The line MT-016's three-argument rows stand for: a proposal, unreviewed."""
+    return Line(
+        reading_index=reading_index,
+        source_ja=japanese or "",
+        proposed_en=english,
+        final_en=None,
+        status="proposed",
+        edited_at=None,
+    )
 
 
 class TranslationRow(QWidget):
-    """One line: its ordinal badge leading, then its (read-only, PO-1) editor.
+    """One line: `[status gutter][ordinal badge][editor][actions]` (§5 anatomy).
+
+    The gutter, the controls and the caption are the row's and follow the
+    editor's state: re-rendered on every commit and on every save outcome.
+    Which control shows depends on status only - Revert on `edited`, Accept on
+    `proposed`, Retry line on `failed` - and never on hover or selection.
 
     The pointer entering or leaving the row is reported, not acted on; the row's
     hover ground is the dynamic property `hovered`, set from the link state.
@@ -100,21 +168,94 @@ class TranslationRow(QWidget):
 
     entered = Signal(int)
     left = Signal(int)
+    #: Retry line was pressed (PO-4: nothing is connected to it yet).
+    retryRequested = Signal(int)
+    #: The row re-rendered after a commit or a save outcome.
+    rendered = Signal()
 
-    def __init__(self, region_id: int, english: str | None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, region_id: int, line: Line, save: SaveFn | None, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("translationRow")
         self.region_id = region_id
         self.setProperty("hovered", False)
+        self._save_error: str | None = None
+
+        self.gutter = QLabel()
+        self.gutter.setObjectName("rowGutter")
+        self.gutter.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.badge = QLabel(str(region_id + 1))
         self.badge.setObjectName("rowBadge")
         self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.editor = QLineEdit(english or "")
+        self.editor = LineEditor(line, save)
         self.editor.setObjectName("rowEditor")
-        self.editor.setReadOnly(True)
-        layout = QHBoxLayout(self)
-        layout.addWidget(self.badge)
-        layout.addWidget(self.editor, 1)
+        self.error_caption = QLabel()
+        self.error_caption.setObjectName("rowErrorCaption")
+        self.revert_button = self._action("Revert", self.editor.revert)
+        self.accept_button = self._action("Accept", self.editor.accept_line)
+        self.retry_button = self._action("Retry line", self._request_retry)
+
+        # The row must hint no wider than the column (C-8's RED amendment): the
+        # editor takes whatever width is left and claims none, and the caption
+        # sits under the line at the row's full width, clipped rather than
+        # widening the row.
+        self.editor.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.error_caption.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        line_layout = QHBoxLayout()
+        line_layout.setContentsMargins(0, 0, 0, 0)
+        line_layout.addWidget(self.gutter)
+        line_layout.addWidget(self.badge)
+        line_layout.addWidget(self.editor, 1)
+        line_layout.addWidget(self.revert_button)
+        line_layout.addWidget(self.accept_button)
+        line_layout.addWidget(self.retry_button)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(2)
+        layout.addLayout(line_layout)
+        layout.addWidget(self.error_caption)
+
+        self.editor.statusChanged.connect(self._render)
+        self.editor.saveFailed.connect(self._on_save_failed)
+        self.editor.saveSucceeded.connect(self._on_save_succeeded)
+        self._render()
+
+    def _action(self, label: str, act: Callable[[], None]) -> QPushButton:
+        button = QPushButton(label)
+        button.setAccessibleName(label)
+        # The editor takes the whole of any spare width; a control never grows.
+        button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        button.clicked.connect(act)
+        return button
+
+    def _request_retry(self) -> None:
+        self.retryRequested.emit(self.region_id)
+
+    def _on_save_failed(self, reason: str) -> None:
+        self._save_error = reason
+        self._render()
+
+    def _on_save_succeeded(self) -> None:
+        self._save_error = None
+        self._render()
+
+    def _render(self) -> None:
+        status = self.editor.status
+        self.gutter.setText(STATUS_GLYPHS[status])
+        self.gutter.setProperty("status", status)
+        palette = self.gutter.palette()
+        palette.setColor(
+            QPalette.ColorRole.WindowText,
+            QColor(tokens_gen.TOKENS[STATUS_COLOR_TOKENS[status]]),
+        )
+        self.gutter.setPalette(palette)
+        self.revert_button.setVisible(status == "edited")
+        self.accept_button.setVisible(status == "proposed")
+        self.retry_button.setVisible(status == "failed")
+        caption = self._save_error or failure_reason(self.editor.line)
+        self.error_caption.setText(caption or "")
+        self.error_caption.setVisible(caption is not None)
+        self.rendered.emit()
 
     def set_hovered(self, hovered: bool) -> None:
         """Take or drop the hover ground (re-polished so theme.qss sees it)."""
@@ -159,25 +300,59 @@ class TranslationColumn(QWidget):
         regions: Sequence[OrderedRegion],
         japanese: Sequence[str | None],
         english: Sequence[str | None],
+        lines: Sequence[Line | None] | None = None,
+        saves: Sequence[SaveFn | None] | None = None,
     ) -> None:
-        """Replace every row. The three sequences are parallel."""
+        """Replace every row, writing the old rows' pending saves first.
+
+        The sequences are parallel. Without `lines` every row is MT-016's: an
+        unreviewed proposal with nothing behind it to save to. A `None` entry
+        in `lines` is that same line; `saves` defaults to no save for every row.
+        """
+        self.flush()
         with QSignalBlocker(self.list):
             self.list.clear()
             self._rows = []
             total = len(regions)
-            for region, ja, en in zip(regions, japanese, english, strict=True):
-                row = TranslationRow(region.region_id, en)
+            given = lines if lines is not None else [None] * total
+            savers = saves if saves is not None else [None] * total
+            for region, ja, en, line, save in zip(
+                regions, japanese, english, given, savers, strict=True
+            ):
+                shown = line if line is not None else _unsaved_line(region.region_id, ja, en)
+                row = TranslationRow(region.region_id, shown, save)
                 row.entered.connect(self.rowEntered.emit)
                 row.left.connect(self.rowLeft.emit)
                 item = QListWidgetItem()
-                item.setData(
-                    Qt.ItemDataRole.AccessibleTextRole,
-                    _row_accessible_text(region.ordinal, total, ja, en),
-                )
-                item.setSizeHint(row.sizeHint())
                 self.list.addItem(item)
                 self.list.setItemWidget(item, row)
                 self._rows.append(row)
+                self._describe(item, row, region.ordinal, total, ja)
+                row.rendered.connect(
+                    lambda item=item, row=row, ordinal=region.ordinal, ja=ja: self._describe(
+                        item, row, ordinal, total, ja
+                    )
+                )
+
+    def _describe(
+        self, item: QListWidgetItem, row: TranslationRow, ordinal: int, total: int, ja: str | None
+    ) -> None:
+        """The item's accessible name and size, from the row's current state."""
+        item.setData(
+            Qt.ItemDataRole.AccessibleTextRole,
+            _row_accessible_text(ordinal, total, ja, row.editor.line),
+        )
+        # Recomputed on every render: the caption coming or going changes the
+        # row's height.
+        item.setSizeHint(row.sizeHint())
+
+    def flush(self) -> None:
+        """Write every row's pending save now. A field being typed in is left
+        first, which commits it as leaving it would (C-7 row 11)."""
+        for row in self._rows:
+            if row.editor.hasFocus():
+                row.editor.clearFocus()
+            row.editor.flush()
 
     def row(self, region_id: int) -> TranslationRow:
         return self._rows[region_id]
@@ -194,6 +369,16 @@ class TranslationColumn(QWidget):
         """Give only `region_id`'s row its hover ground. Never scrolls."""
         for row in self._rows:
             row.set_hovered(row.region_id == region_id)
+
+
+def _saver(project: Project, page_ordinal: int, reading_index: int) -> SaveFn:
+    """A row's save: its own line, on the page it was loaded from - not
+    whichever page is shown when the save finally runs."""
+
+    def save(text: str | None, status: LineStatus) -> None:
+        commit_line(project, page_ordinal, reading_index, text, status)
+
+    return save
 
 
 class Workspace(QMainWindow):
@@ -287,33 +472,53 @@ class Workspace(QMainWindow):
         regions: Sequence[OrderedRegion],
         japanese: Sequence[str | None],
         english: Sequence[str | None],
+        lines: Sequence[Line | None] | None = None,
     ) -> None:
         """Populate the canvas and the column; hover cleared, and the first
-        region selected (§4.1), or nothing on a page with no regions."""
+        region selected (§4.1), or nothing on a page with no regions.
+
+        Rows set here have nothing behind them to save to; a page shown from
+        the project (`show_page`) saves through the store."""
+        self._set_regions(regions, japanese, english, lines, None)
+
+    def _set_regions(
+        self,
+        regions: Sequence[OrderedRegion],
+        japanese: Sequence[str | None],
+        english: Sequence[str | None],
+        lines: Sequence[Line | None] | None,
+        saves: Sequence[SaveFn | None] | None,
+    ) -> None:
         self.link.hover(None)
         self.link.select(None)
         self.page_canvas.set_regions(regions)
-        self.translation_column.set_rows(regions, japanese, english)
+        self.translation_column.set_rows(regions, japanese, english, lines=lines, saves=saves)
         if regions:
             self.link.select(0)
 
     def _load_regions(self, ordinal: int) -> None:
-        """PO-2: the page's regions, lines and proposals, padded with None."""
+        """PO-2: the page's regions and their review lines (`None` where OCR has
+        not run), each row saving to its own line of *this* page."""
         assert self._project is not None
-        stored = self._project.read_regions(ordinal)
-        lines = self._project.read_lines(ordinal)
-        proposed = self._project.read_proposed(ordinal)
+        # Pending saves first, so what is read below includes them.
+        self.translation_column.flush()
+        project = self._project
+        stored = project.read_regions(ordinal)
+        review = read_review_lines(project, ordinal)
         regions = [
             OrderedRegion(region_id=index, polygon=region.polygon)
             for index, region in enumerate(stored)
         ]
-        japanese: list[str | None] = []
-        english: list[str | None] = []
-        for index in range(len(regions)):
-            line = lines[index] if index < len(lines) else None
-            japanese.append(None if line is None or line.ocr_empty else line.text)
-            english.append(proposed[index] if index < len(proposed) else None)
-        self.set_regions(regions, japanese, english)
+        lines = [review[index] if index < len(review) else None for index in range(len(regions))]
+        japanese = [None if line is None or line.ocr_empty else line.source_ja for line in lines]
+        english = [None if line is None else line.proposed_en for line in lines]
+        saves = [_saver(project, ordinal, index) for index in range(len(regions))]
+        self._set_regions(regions, japanese, english, lines, saves)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Write every pending save before the window goes (C-7), then close."""
+        self.translation_column.flush()
+        super().closeEvent(event)
 
     def _on_current_row_changed(self, row: int) -> None:
         self.link.select(row if row >= 0 else None)

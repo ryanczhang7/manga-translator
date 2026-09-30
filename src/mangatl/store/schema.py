@@ -209,6 +209,14 @@ CREATE TABLE region (
 -- this is the only position in which a file created at version 2 and a version
 -- 1 file migrated to it have the *same* table, rather than the same columns in
 -- a different order (`store.project._migrate_to_current`).
+--
+-- `status` is MT-017's and the reason this schema is at version 6 (C-5): the
+-- user's act on the line - `accepted`, `edited` or `reverted` - and NULL for
+-- "no act". `proposed` and `failed` are derived (`domain.line.derive_status`),
+-- never stored, which is what the CHECK says. Nullable with no DEFAULT because
+-- NULL is exactly what every line written before a user looked at it is.
+-- Declared last for `ocr_empty`'s reason; `store.project._MIGRATE_TO_V6`
+-- repeats the definition verbatim, CHECK included.
 CREATE TABLE line (
     id          INTEGER PRIMARY KEY,
     region_id   INTEGER NOT NULL UNIQUE REFERENCES region(id) ON DELETE CASCADE,
@@ -217,7 +225,8 @@ CREATE TABLE line (
     final_en    TEXT,
     edited_at   TEXT,
     viewed_at   TEXT,
-    ocr_empty   INTEGER NOT NULL DEFAULT 0
+    ocr_empty   INTEGER NOT NULL DEFAULT 0,
+    status      TEXT CHECK (status IS NULL OR status IN ('accepted', 'edited', 'reverted'))
 );
 
 CREATE TABLE run (

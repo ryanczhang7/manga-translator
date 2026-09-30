@@ -2,7 +2,7 @@
 id: EPIC-05
 title: The review workspace — the one place a human can catch an error
 status: todo
-stories: [MT-025, MT-015, MT-048, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-018, MT-026, MT-028]
+stories: [MT-025, MT-015, MT-048, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-054, MT-018, MT-026, MT-028]
 ---
 
 ## Goal
@@ -64,6 +64,8 @@ MT-049, because the indicator is a child widget of the viewport and entering it 
 the viewport the `Leave` that MT-049 handles.
 - **MT-017** — editing: edit, dirty state, revert to proposal, persistence across
   reopen, and the unedited-versus-accepted distinction.
+- **MT-054** — the app opens a chapter in the review workspace (`mangatl <folder>`).
+  Filed at MT-017 PO-1: the done-when's first verb, "open a chapter", had no story.
 - **MT-018** — run progress and the running cost readout, including its
   near-ceiling and aborted states.
 - **MT-026** — Windows High Contrast, part one: token resolution. Pure functions
