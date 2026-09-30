@@ -90,30 +90,145 @@ is an existing directory when the drag enters; any other local path is a
 "Choose chapter folder", activated by Enter or Space. Drag-and-drop is never the
 only path to any behaviour.
 
-**Enumerated error reasons** — each gets its own message, never a generic one:
+**Enumerated error reasons** — each gets its own message, never a generic one.
+The reason is the error state's headline, verbatim, plain text, word-wrapped:
 
-- no `.png`/`.jpg`/`.jpeg` files found → "No page images in *folder*. This tool
-  reads `.png` and `.jpg` files."
-- folder unreadable → "Windows would not let this app read *folder*." + the OS error
-- an image file that will not decode → loads anyway; the bad page is listed in
-  `ChapterSummary` as skipped with its filename
+| Reason | Headline (character-exact) |
+|---|---|
+| no `.png`/`.jpg`/`.jpeg` files directly in the folder | `No page images in {folder}. This tool reads .png and .jpg files.` |
+| folder cannot be listed | `Windows would not let this app read {folder}.` + `\n` + `{os_error}` |
+| a page file that will not decode | `{filename} could not be opened as a page image. Remove or replace it, then choose the folder again.` |
+
+- `{folder}` is the **resolved full path** (`Path.resolve()`), exactly as the
+  existing MT-054/MT-055 texts print it - never the base name, never cut.
+- `{os_error}` is the OS error's `strerror` when it has one, else `str(error)`.
+  It follows the sentence **on its own line**: the two are joined by a single
+  `\n`, nothing else.
+- `{filename}` is the file's name as it is in the folder - base name only, never
+  cut. With several undecodable files it is the **first in processing order**
+  (`order_filenames`), which is `read_chapter`'s `UnreadablePage` rule. No
+  summary is shown and nothing is skipped.
+- The backticks around `.png`/`.jpg` in earlier drafts were formatting, not
+  copy: the label is plain text and shows no backticks.
 - more than 200 images → not an error. A warning in `ChapterSummary`: "That is
   more pages than a chapter. Estimated cost is *$x*." Nothing is blocked.
+  (MT-058.)
+
+> **Amended 2026-09-30 (MT-057, PO-4 and PO-5).** This section used to say an
+> undecodable image "loads anyway" and is listed in `ChapterSummary` as skipped,
+> and gave the order warning a "Use natural order" toggle. Both are withdrawn by
+> the user's decisions. **PO-4:** the store reads a chapter all-or-nothing -
+> `read_chapter` raises `UnreadablePage` on the first undecodable file, because a
+> skipped page would shift every later page's ordinal, and the ordinal is the
+> page's identity for the rest of the product. So the folder is refused, naming
+> the file, and the user fixes the folder. **PO-5:** the store has one order,
+> natural (`order_filenames`), and page ordinals never change after intake; a
+> toggle would need a store change for a hazard whose real harm - a *silently*
+> wrong order - the notice already removes by listing both orders. The PO's
+> draft sentence "…as an image. Remove or replace it and choose the folder
+> again." became "…as a page image. Remove or replace it, then choose…": the
+> interface says *page* (voice.md, Terms) and AC-2 already says "page images".
 
 ### `ChapterSummary`
 
-Folder name (`type.title`), page count, first and last filename, a scrolling row
-of thumbnails in processing order, and the `CostEstimate`. Then a `primary`
-"Start run".
+The **populated** state of the intake screen: it replaces `FolderDropTarget`
+when a chosen folder with no project reads as a chapter. Every figure in it
+comes from `read_chapter` and `order_filenames` - the order shown is the order
+the run uses, by construction.
 
-**Filename-order warning.** If sorting the filenames lexically differs from
-sorting them naturally (`1, 10, 11, 2` vs `1, 2, 10, 11`), the summary shows a
-`color.status.warning` notice with both orders listed explicitly and a toggle
-"Use natural order" (default **on**). This is a real hazard in this domain and
-getting it silently wrong ruins a whole run.
+The designed summary is: folder name, page count, first and last filename, a
+scrolling row of thumbnails in processing order, and the `CostEstimate`, then a
+`primary` "Start run". **MT-057 ships it without the thumbnail row, without
+`CostEstimate` (MT-058) and without "Start run" (MT-059)**, and without the
+loading state; those parts stand as designed for the stories that add them.
+
+**Parts, top to bottom** (MT-057). Every part is a plain-text `QLabel`
+(`Qt.PlainText` set before the text: a folder or file named with `<` is not
+markup), word-wrapped, selectable by mouse only, never a focus stop.
+
+| # | Part | Copy (character-exact) | Token |
+|---|---|---|---|
+| 1 | heading | `{name}` | `type.title`, `color.text.primary` |
+| 2 | page count | `1 page` when there is one page, else `{n} pages` | `type.body`, `color.text.primary` |
+| 3 | first page | `First page: {first}` | `type.body`, `color.text.secondary` |
+| 4 | last page | `Last page: {last}` | `type.body`, `color.text.secondary` |
+| 5 | order notice | see below; present only when the orders differ | see below |
+| 6 | leave | `secondary` button `Choose a different folder` | §1 |
+
+- `{name}` is the folder's **base name** (for a drive root, the path itself),
+  with the **40-character middle cut** of "Drag copy" above (first 20, `…`,
+  last 19). The heading's accessible name is the whole uncut base name.
+- `{n}` is the page count in digits. `{first}` and `{last}` are the first and
+  last entries of `order_filenames`, whole, never cut.
+- **Exactly one page:** parts 3 and 4 are replaced by one line,
+  `Only page: {first}`. No "Last page" line is shown.
+- Spacing: `space.2` below the heading, `space.1` between parts 2-4, `space.4`
+  above the notice, `space.4` between the scroll area and the button.
+
+**Filename-order warning** (part 5). Shown exactly when `sorted(names)` (plain
+string order) differs from `order_filenames(names)`; not shown when they agree -
+`p1 … p9` shows no notice, `p1 … p12` does. Three plain-text lines, in this
+order:
+
+| Line | Copy (character-exact) | Token |
+|---|---|---|
+| lead | `These filenames sort differently as numbers and as text. The run uses natural order.` | `type.body-strong`, `color.text.primary` |
+| natural | `Natural order (used): {natural}` | `type.body`, `color.text.primary` |
+| lexical | `Text order (not used): {lexical}` | `type.body`, `color.text.primary` |
+
+- `{natural}` is every filename in `order_filenames` order; `{lexical}` every
+  filename in `sorted()` order. Separator `", "` (comma, one space). **Every
+  filename is listed, never elided** - 200 pages means 200 names in each line.
+- The lines word-wrap at the column width; the notice grows; the summary scrolls
+  (below). Nothing scrolls horizontally.
+- Ground `color.surface.raised`, 1px border `color.status.warning`, `radius.sm`,
+  padding `space.3`, lines `space.1` apart. No glyph: the lead sentence is the
+  carrier (A-10), the border is emphasis only.
+- There is **no control** in the notice (PO-5). Not dismissible, not role
+  `Alert`, not a live announcement (A-12's list is closed; the summary appearing
+  is the change, and it takes focus - below).
+
+**Layout.** In the intake column (layout.md, "Intake and run screens"). Parts
+1-5 sit in a `QScrollArea`: vertical scroll as needed, horizontal scroll **off**.
+Part 6 is **outside** the scroll area, pinned at its foot, left-aligned, always
+visible however long the lists are.
+
+**Leaving the summary** (settled 2026-09-30, MT-057). MT-057 has no Start
+button, so the only way on is `Choose a different folder`:
+
+- Activating it opens the same folder dialog as the drop target
+  (`choose_folder_dialog`, caption "Choose chapter folder").
+- A folder chosen there goes down the **one** path every chosen folder takes
+  (`MainWindow`'s hand-over, MT-056 C-2): a new summary, the drop target in its
+  error state (which replaces the summary), or the workspace for a folder with a
+  project.
+- Dismissing the dialog changes nothing: the same summary, focus back on the
+  button.
+- **A folder dragged onto the summary is not accepted** in MT-057 - the summary
+  does not accept drops, so the OS shows its no-drop cursor and nothing changes.
+  Out of scope, recorded: the button is the keyboard path and the drop target
+  is the drag path, and a drop onto the summary is a convenience for a later
+  story. Drag-and-drop is still never the only path.
+
+**Accessibility.**
+
+- Focus order: the scroll area, then the button; `Tab`/`Shift+Tab` move between
+  them. When the summary appears, **focus goes to the scroll area**. The scroll
+  area takes `Up`/`Down`/`PageUp`/`PageDown`/`Home`/`End` to scroll, and shows
+  the `color.focus.ring` per A-04. The button takes Enter and Space (§1 states;
+  it has no disabled or loading state here).
+- The scroll area's accessible name is `Chapter summary`; its accessible
+  description is every visible line of parts 1-5 in order, joined by `\n`, with
+  the heading's line as the whole uncut base name. A screen reader landing on it
+  hears the summary, then the notice's three lines exactly as printed.
+- The notice widget's accessible name is its three lines joined by `\n`.
+- Contrast: `color.text.primary` and `.secondary` on `color.surface.base` and
+  `color.surface.raised` clear A-01; `color.status.warning` border on
+  `color.surface.base` clears A-02's 3:1.
 
 - **empty** (folder had zero pages): handled by the drop target's error state, not here.
-- **error**: per-file skip notices inline in the thumbnail row, red-bordered thumbnail plus filename.
+- **error**: none. A folder that cannot be read whole never reaches the summary
+  (PO-4); its reason is the drop target's error state.
 
 ### `CostEstimate`
 
