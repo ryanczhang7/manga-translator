@@ -28,8 +28,9 @@ window both write any pending save first, so neither drops the user's work.
 MT-016 PO-1's read-only editor is superseded: every line is editable (PO-5).
 
 The 1440 px breakpoint in `layout.md` is not built yet (MT-015 PO-1, MT-048).
-Header and footer content and wiring this window into `mangatl.app` are later
-stories (MT-054).
+Header and footer content are later stories. `mangatl.app` opens this window on
+a chapter folder (MT-054) and closes the project on `closed`, which is emitted
+after the pending saves are written.
 """
 
 from __future__ import annotations
@@ -387,6 +388,10 @@ class Workspace(QMainWindow):
     #: `layout.md` "Window": the minimum is enforced, not advisory (AC-4).
     MIN_SIZE: tuple[int, int] = (1100, 720)
 
+    #: Emitted once per close, after every pending save is written (MT-054
+    #: C-4): whoever opened the project closes it on this, never before.
+    closed = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self.setMinimumSize(*self.MIN_SIZE)
@@ -516,9 +521,13 @@ class Workspace(QMainWindow):
         self._set_regions(regions, japanese, english, lines, saves)
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Write every pending save before the window goes (C-7), then close."""
+        """Write every pending save before the window goes (C-7), then close.
+
+        `closed` is the last thing done: a slot that closes the project must
+        find nothing left to write (MT-054 C-4)."""
         self.translation_column.flush()
         super().closeEvent(event)
+        self.closed.emit()
 
     def _on_current_row_changed(self, row: int) -> None:
         self.link.select(row if row >= 0 else None)
