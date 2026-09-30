@@ -2,7 +2,7 @@
 id: EPIC-05
 title: The review workspace — the one place a human can catch an error
 status: todo
-stories: [MT-025, MT-015, MT-048, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-054, MT-018, MT-026, MT-028]
+stories: [MT-025, MT-015, MT-048, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-054, MT-055, MT-056, MT-018, MT-057, MT-058, MT-059, MT-026, MT-028]
 ---
 
 ## Goal
@@ -66,6 +66,35 @@ the viewport the `Leave` that MT-049 handles.
   reopen, and the unedited-versus-accepted distinction.
 - **MT-054** — the app opens a chapter in the review workspace (`mangatl <folder>`).
   Filed at MT-017 PO-1: the done-when's first verb, "open a chapter", had no story.
+- **MT-055** — the no-argument window asks for a folder: the `FolderDropTarget`
+  (components.md §2) as a keyboard-focusable button and a folder dialog. A picked
+  folder behaves exactly as `mangatl <folder>`: the `Workspace`, or the
+  no-project text naming `mangatl-run`. Filed at MT-054 PO-5 — a double-clicked
+  installed app (MT-024) has no argument, so without it no chapter can be opened.
+- **MT-056** — dropping a folder onto that target, with its hover-valid and
+  hover-invalid states. Split from MT-055 (its PO-2) at the seam between the two
+  input mechanisms; the design makes drag never the only path, so MT-055 is
+  complete without it.
+- **MT-057** — a chosen folder of pages with no project shows its
+  `ChapterSummary` (name, page count, first and last page, the filename-order
+  warning, the intake errors) and writes nothing. It replaces MT-055's interim
+  "run `mangatl-run`" outcome, and MT-054's command-line notice with it:
+  `mangatl <folder>` and the picker share one resolution (MT-057 PO-3).
+- **MT-058** — the summary's `CostEstimate` against the budget, including the
+  over-budget state and the >200-page warning.
+- **MT-059** — "Start run": creates the project, runs the pipeline on a worker
+  thread feeding MT-018's panel, and opens the review workspace when the run
+  finishes. `mangatl.app` becomes the third composition root, exempted from the
+  anthropic and onnxruntime import contracts (MT-059 PO-3), and the story owns
+  the worker thread `architecture.md` §6 describes, which MT-018 had attributed
+  to MT-015.
+
+MT-057 to MT-059 were filed on 2026-09-30 at the user's request (MT-055 Q2):
+after MT-055 a double-clicked app could open a chapter already translated, but
+could not translate one. Their open questions were answered by the user on
+2026-09-30 (each story records its decisions); the Lead Designer is asked to
+amend `components.md` §2 to match (MT-057 PO-4 and PO-5, MT-058 PO-1).
+
 - **MT-018** — run progress and the running cost readout, including its
   near-ceiling and aborted states.
 - **MT-026** — Windows High Contrast, part one: token resolution. Pure functions
