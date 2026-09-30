@@ -1,12 +1,17 @@
 """Entry point: `mangatl [<folder>]`.
 
-With no argument it opens MT-001's empty window. With a chapter folder whose
-sibling `<folder>.mtproj` project exists it opens the review `Workspace` on that
-chapter, first page shown (MT-054). Anything else - a folder with no project, a
-path that is not a folder, a project from a newer build, too many arguments -
-opens the same window with a notice saying what is wrong and, where there is
-one, the command that fixes it. Nothing here creates a project: `mangatl-run`
-(MT-006) is the only thing that does.
+With no argument it opens the folder intake (MT-055): a window that asks for a
+chapter folder. With a chapter folder whose sibling `<folder>.mtproj` project
+exists it opens the review `Workspace` on that chapter, first page shown
+(MT-054). Anything else - a folder with no project, a path that is not a
+folder, a project from a newer build, too many arguments - opens a window with
+a notice saying what is wrong and, where there is one, the command that fixes
+it. Nothing here creates a project: `mangatl-run` (MT-006) is the only thing
+that does.
+
+`open_folder` is the one folder -> outcome decision. The command line calls it
+and the intake window is handed it, so a folder picked in the window behaves
+exactly as the same folder named on the command line.
 
 `build_window` is the seam and is tested in process; `main` is a shell over it.
 """
@@ -23,7 +28,7 @@ from mangatl.store.project import SchemaTooNew, open_project, project_dir_for
 from mangatl.ui.main_window import MainWindow
 from mangatl.ui.workspace import Workspace
 
-__all__ = ["build_window", "main"]
+__all__ = ["build_window", "main", "open_folder"]
 
 # The folder is always resolved: the command must work pasted into any shell,
 # from any directory; double quotes because Windows paths carry spaces.
@@ -34,29 +39,38 @@ NO_FOLDER_NOTICE = "No such folder: {folder}"
 USAGE_NOTICE = "mangatl opens one chapter folder:  mangatl <folder>"
 
 
-def build_window(arguments: Sequence[str]) -> QMainWindow:
-    """The window for a command line without the program name, NOT shown."""
-    if not arguments:
-        return MainWindow()
-    if len(arguments) > 1:
-        return MainWindow(notice=USAGE_NOTICE)
-    folder = Path(arguments[0]).resolve()
+def open_folder(folder: Path) -> QMainWindow | str:
+    """The chapter in `folder`, as a `Workspace` NOT shown, or the notice
+    saying why it cannot be opened."""
+    folder = folder.resolve()
     if not folder.is_dir():
-        return MainWindow(notice=NO_FOLDER_NOTICE.format(folder=folder))
+        return NO_FOLDER_NOTICE.format(folder=folder)
     try:
         # `open_project` checks the path before sqlite can create anything, so
         # a folder with no project writes nothing.
         project = open_project(project_dir_for(folder))
     except FileNotFoundError:
-        return MainWindow(notice=NO_PROJECT_NOTICE.format(folder=folder))
+        return NO_PROJECT_NOTICE.format(folder=folder)
     except SchemaTooNew as error:
-        return MainWindow(notice=str(error))
+        return str(error)
     window = Workspace()
     window.load_chapter(project)
     window.page_strip.setCurrentRow(0)
     # The window owns the project from here: closed after the pending saves.
     window.closed.connect(lambda: project.__exit__(None, None, None))
     return window
+
+
+def build_window(arguments: Sequence[str]) -> QMainWindow:
+    """The window for a command line without the program name, NOT shown."""
+    if not arguments:
+        return MainWindow(open_folder=open_folder)
+    if len(arguments) > 1:
+        return MainWindow(notice=USAGE_NOTICE)
+    outcome = open_folder(Path(arguments[0]))
+    if isinstance(outcome, str):
+        return MainWindow(notice=outcome)
+    return outcome
 
 
 def main(argv: list[str] | None = None) -> int:

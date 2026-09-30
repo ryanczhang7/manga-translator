@@ -1,7 +1,12 @@
-"""The application's one window.
+"""The application's window when no chapter is open.
 
-MT-001's walking skeleton: it opens, it is identifiable, and it closes. The
-real workspace - the page canvas with the lines docked beside it - is MT-015.
+With no `notice` it is the folder intake (MT-055): its whole content is a
+`FolderDropTarget`, and activating it asks `choose_folder` for a folder and
+hands the answer to `open_folder`. The window does not decide what a folder
+means - `mangatl.app` injects that function, the same one `mangatl <folder>`
+runs, so the picker and the command line cannot drift apart. A window back
+from it is the opened chapter: it is shown, then this window closes. A string
+back is the reason nothing opened, shown in the target's error state.
 
 With a `notice` (MT-054 C-5) the window says one thing instead: why no chapter
 could be opened, and what to do about it. The notice is the whole content of
@@ -11,31 +16,71 @@ the window, so it is its accessible name, plain text (a folder name holding
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QMainWindow, QWidget
 
-__all__ = ["CANVAS_ACCESSIBLE_NAME", "NOTICE_OBJECT_NAME", "WINDOW_TITLE", "MainWindow"]
+from mangatl.ui.intake import FolderDropTarget, choose_folder_dialog
+
+__all__ = [
+    "NOTICE_OBJECT_NAME",
+    "WINDOW_TITLE",
+    "FolderChooser",
+    "FolderOpener",
+    "MainWindow",
+]
 
 WINDOW_TITLE = "mangatl"
-CANVAS_ACCESSIBLE_NAME = "Page canvas"
 NOTICE_OBJECT_NAME = "notice"
+
+#: A folder to the window that opened it, or the reason nothing opened.
+FolderOpener = Callable[[Path], QMainWindow | str]
+#: The chosen folder, or `None` when the choice was dismissed.
+FolderChooser = Callable[[QWidget], Path | None]
 
 
 class MainWindow(QMainWindow):
-    """The single top-level window."""
+    """The single top-level window before a chapter is open."""
 
-    def __init__(self, notice: str | None = None) -> None:
+    def __init__(
+        self,
+        notice: str | None = None,
+        *,
+        open_folder: FolderOpener | None = None,
+        choose_folder: FolderChooser | None = None,
+    ) -> None:
+        if notice is None and open_folder is None:
+            # A window that can choose a folder and do nothing with it is not
+            # a state this app has (MT-055 C-2).
+            raise TypeError("MainWindow needs a notice or an open_folder")
         super().__init__()
         self.setWindowTitle(WINDOW_TITLE)
+        self.open_folder = open_folder
+        self.opened: QMainWindow | None = None
         if notice is not None:
             self.setCentralWidget(_notice_label(notice, self))
             return
-        canvas = QWidget(self)
-        # An accessible name from the first commit, not retrofitted: the
-        # accessibility floor in docs/wiki/design/accessibility.md applies to
-        # every widget the user can reach, and the canvas is the whole product.
-        canvas.setAccessibleName(CANVAS_ACCESSIBLE_NAME)
-        self.setCentralWidget(canvas)
+        assert open_folder is not None  # the TypeError above
+        self._open: FolderOpener = open_folder
+        self._choose_folder = choose_folder or choose_folder_dialog
+        self._target = FolderDropTarget(self)
+        self._target.activated.connect(self._choose)
+        self.setCentralWidget(self._target)
+
+    def _choose(self) -> None:
+        folder = self._choose_folder(self)
+        if folder is None:
+            return
+        outcome = self._open(folder)
+        if isinstance(outcome, str):
+            self._target.show_error(outcome)
+            return
+        self.opened = outcome
+        # Shown first, so quit-on-last-window-closed never sees zero windows.
+        outcome.show()
+        self.close()
 
 
 def _notice_label(notice: str, parent: QWidget) -> QLabel:
