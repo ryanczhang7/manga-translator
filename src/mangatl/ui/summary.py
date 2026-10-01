@@ -4,6 +4,8 @@
 folder with no project has been read: the folder's name, its page count, its
 first and last page, and - when the filenames sort differently as numbers and
 as text - a notice listing both orders and saying which one the run uses.
+Between the page facts and the notice sits the chapter's `CostEstimate`
+(MT-058), so a long notice cannot push the cost out of sight.
 
 The widget is a view of a `Chapter` and reads nothing from disk: the order it
 shows is `chapter.pages`, which `read_chapter` built in `order_filenames`
@@ -33,10 +35,9 @@ unreadable. The notice's warning border is the one colour set here.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QKeyEvent
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QFrame,
-    QLabel,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -45,7 +46,9 @@ from PySide6.QtWidgets import (
 
 from mangatl.domain.page import Chapter
 from mangatl.ui import tokens_gen
+from mangatl.ui.cost_estimate import CostEstimate
 from mangatl.ui.intake import display_name
+from mangatl.ui.labels import BODY, BODY_STRONG, TITLE, plain_label
 
 __all__ = ["ChapterSummary"]
 
@@ -90,7 +93,7 @@ class ChapterSummary(QWidget):
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
 
-        heading = _label("summary-name", display_name(chapter.source_dir), _TITLE)
+        heading = plain_label("summary-name", display_name(chapter.source_dir), TITLE)
         heading.setAccessibleName(uncut_name)
         column.addWidget(heading)
         column.addSpacing(tokens_gen.SPACE_S2)
@@ -106,8 +109,15 @@ class ChapterSummary(QWidget):
         for index, (name, text) in enumerate(parts):
             if index:
                 column.addSpacing(tokens_gen.SPACE_S1)
-            column.addWidget(_label(name, text, _BODY))
+            column.addWidget(plain_label(name, text, BODY))
             lines.append(text)
+
+        # Part 5 (MT-058): before the notice, so a long notice cannot push the
+        # cost out of sight.
+        self.cost_estimate = CostEstimate(count)
+        column.addSpacing(tokens_gen.SPACE_S4)
+        column.addWidget(self.cost_estimate)
+        lines.extend(self.cost_estimate.lines)
 
         if lexical != natural:
             notice_lines = (
@@ -145,33 +155,6 @@ class _ActivatedByEnter(QPushButton):
         super().keyPressEvent(event)
 
 
-def _font(size: int, weight: int) -> QFont:
-    font = QFont()
-    font.setPixelSize(size)
-    font.setWeight(QFont.Weight(weight))
-    return font
-
-
-_TITLE = (tokens_gen.TYPE_TITLE_SIZE, tokens_gen.TYPE_TITLE_WEIGHT)
-_BODY = (tokens_gen.TYPE_BODY_SIZE, tokens_gen.TYPE_BODY_WEIGHT)
-_BODY_STRONG = (tokens_gen.TYPE_BODY_STRONG_SIZE, tokens_gen.TYPE_BODY_STRONG_WEIGHT)
-
-
-def _label(name: str, text: str, type_: tuple[int, int]) -> QLabel:
-    """A plain, word-wrapped label: selectable with the mouse, never focused."""
-    label = QLabel()
-    label.setObjectName(name)
-    # Before the text, so it is never interpreted as rich text.
-    label.setTextFormat(Qt.TextFormat.PlainText)
-    label.setText(text)
-    label.setWordWrap(True)
-    label.setFont(_font(*type_))
-    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-    # After the flags: mouse selection alone makes a QLabel a click-focus stop.
-    label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-    return label
-
-
 def _order_notice(lines: tuple[str, str, str]) -> QFrame:
     """AC-4's notice: both orders in full and which one the run uses. No
     control - the run always uses natural order (PO-5)."""
@@ -188,7 +171,7 @@ def _order_notice(lines: tuple[str, str, str]) -> QFrame:
     column.setContentsMargins(pad, pad, pad, pad)
     column.setSpacing(tokens_gen.SPACE_S1)
     lead, natural, lexical = lines
-    column.addWidget(_label("order-lead", lead, _BODY_STRONG))
-    column.addWidget(_label("order-natural", natural, _BODY))
-    column.addWidget(_label("order-lexical", lexical, _BODY))
+    column.addWidget(plain_label("order-lead", lead, BODY_STRONG))
+    column.addWidget(plain_label("order-natural", natural, BODY))
+    column.addWidget(plain_label("order-lexical", lexical, BODY))
     return notice

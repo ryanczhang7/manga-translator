@@ -27,7 +27,11 @@ their day.
 ## Numbers
 
 - Money always carries the symbol and two decimals: `$0.83`, never `0.83` or
-  `83¢`. An estimate carries a range and the word *estimated*.
+  `83¢`; thousands take a comma, `$1,200.00`. An estimate carries the word
+  *estimated*. A cost estimate that is not a whole number of cents rounds **up**
+  to the cent. *(Amended 2026-10-01, MT-058 PO-1: this line used to say an
+  estimate carries a range; the pre-run estimate is a single figure -
+  `components.md` §2 `CostEstimate`.)*
 - **Never show `$0.00` for an unmeasured cost.** Unmeasured is `$—` with an
   explanation. A zero the user might act on is worse than an absence.
 - Counts are "12 of 18", not "12/18", in prose; the numeric compact form

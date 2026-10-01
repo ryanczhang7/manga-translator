@@ -607,7 +607,8 @@ def test_every_summary_label_is_plain_word_wrapped_mouse_selectable_and_never_a_
 def test_the_scroll_area_is_named_chapter_summary_and_described_by_its_visible_lines(
     qtbot,  # type: ignore[no-untyped-def]
 ) -> None:
-    """Heading line uncut; the notice as its three lines; not the button."""
+    """Heading line uncut; MT-058's cost estimate after the page facts and
+    before the notice; the notice as its three lines; not the button."""
     names = ("page 9.png", "page 10.png", "page 11.png")
     summary = _bare(qtbot, _chapter(names, Path("C:/manga") / LONG))
 
@@ -620,6 +621,8 @@ def test_the_scroll_area_is_named_chapter_summary_and_described_by_its_visible_l
             "3 pages",
             "First page: page 9.png",
             "Last page: page 11.png",
+            "Estimated for 3 pages: $0.18.",
+            "Budget $2.00.",
             LEAD,
             AC1_NATURAL,
             AC1_LEXICAL,
@@ -630,7 +633,9 @@ def test_the_scroll_area_is_named_chapter_summary_and_described_by_its_visible_l
 def test_a_one_page_summary_is_described_without_first_last_or_notice(qtbot) -> None:  # type: ignore[no-untyped-def]
     summary = _bare(qtbot, _chapter(("cover.png",), Path("C:/manga/One shot")))
 
-    assert _scroll(summary).accessibleDescription() == "One shot\n1 page\nOnly page: cover.png"
+    assert _scroll(summary).accessibleDescription() == (
+        "One shot\n1 page\nOnly page: cover.png\nEstimated for 1 page: $0.06.\nBudget $2.00."
+    )
 
 
 def test_the_scroll_area_scrolls_vertically_only_and_holds_every_part_but_the_button(
