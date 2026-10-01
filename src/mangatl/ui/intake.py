@@ -44,7 +44,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QStyle,
     QStyleOption,
-    QStyleOptionFocusRect,
     QVBoxLayout,
     QWidget,
 )
@@ -121,6 +120,13 @@ class FolderDropTarget(QAbstractButton):
 
     def _show(self, shown: _Shown) -> None:
         self.state = shown.state
+        # theme.qss keys the region's ground and border on this property
+        # (MT-061); a dynamic property change reaches the sheet only once the
+        # widget is re-polished.
+        self.setProperty("state", shown.state)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
         self.headline.setText(shown.headline)
         self.body.setText(shown.body)
         self.body.setVisible(bool(shown.body))
@@ -180,17 +186,13 @@ class FolderDropTarget(QAbstractButton):
 
     def paintEvent(self, event: QPaintEvent) -> None:
         # QAbstractButton paints nothing itself. The style's widget primitive
-        # lets a stylesheet rule for the target draw its ground and border.
+        # lets theme.qss's rule for the target's `state` draw its ground and
+        # border - and, in the empty and error states, the focus ring, so there
+        # is no second focus treatment painted here (MT-061).
         painter = QPainter(self)
         option = QStyleOption()
         option.initFrom(self)
         self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget, option, painter, self)
-        if self.hasFocus():
-            focus = QStyleOptionFocusRect()
-            focus.initFrom(self)
-            self.style().drawPrimitive(
-                QStyle.PrimitiveElement.PE_FrameFocusRect, focus, painter, self
-            )
 
 
 def _local_paths(mime: QMimeData) -> list[Path] | None:

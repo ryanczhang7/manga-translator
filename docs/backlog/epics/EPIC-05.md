@@ -2,7 +2,7 @@
 id: EPIC-05
 title: The review workspace — the one place a human can catch an error
 status: todo
-stories: [MT-025, MT-015, MT-048, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-054, MT-055, MT-056, MT-018, MT-057, MT-058, MT-059, MT-060, MT-026, MT-028]
+stories: [MT-025, MT-015, MT-048, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-054, MT-055, MT-056, MT-018, MT-057, MT-061, MT-058, MT-059, MT-060, MT-026, MT-028]
 ---
 
 ## Goal
@@ -80,6 +80,13 @@ the viewport the `Leave` that MT-049 handles.
   warning, the intake errors) and writes nothing. It replaces MT-055's interim
   "run `mangatl-run`" outcome, and MT-054's command-line notice with it:
   `mangatl <folder>` and the picker share one resolution (MT-057 PO-3).
+- **MT-061** — the app applies the generated `theme.qss` at startup, before the
+  first window, and the intake and `ChapterSummary` take every colour, ground,
+  border and type size from it (the `components.md` §2 rules, added to
+  `theme.qss.in` by the Lead Designer), without losing the status gutter's
+  colours. Filed 2026-09-30 from MT-057's GREEN finding that nothing applied the
+  sheet. The base sheet only; High Contrast stays MT-026/MT-028, which takes
+  over MT-061's one startup call.
 - **MT-058** — the summary's `CostEstimate` against the budget, including the
   over-budget state and the >200-page warning.
 - **MT-059** — "Start run": creates the project, runs the pipeline on a worker

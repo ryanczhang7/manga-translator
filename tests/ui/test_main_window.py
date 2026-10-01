@@ -67,7 +67,12 @@ class _FakeQApplication:
 
     def __init__(self, argv: list[str]) -> None:
         self.argv = argv
+        #: Every sheet `main` sets (MT-061 C-2: it applies the theme first).
+        self.sheets: list[str] = []
         _FakeQApplication.last = self
+
+    def setStyleSheet(self, sheet: str) -> None:
+        self.sheets.append(sheet)
 
     def exec(self) -> int:
         return _FakeQApplication.exit_code

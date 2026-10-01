@@ -244,6 +244,12 @@ class TranslationRow(QWidget):
         status = self.editor.status
         self.gutter.setText(STATUS_GLYPHS[status])
         self.gutter.setProperty("status", status)
+        # theme.qss colours the glyph by `status` (MT-061); without a re-polish
+        # a status change keeps the old rule's colour.
+        self.gutter.style().unpolish(self.gutter)
+        self.gutter.style().polish(self.gutter)
+        # Inert for painting under the application sheet, which wins; kept as
+        # the palette record MT-017's tests and MT-028's High Contrast read.
         palette = self.gutter.palette()
         palette.setColor(
             QPalette.ColorRole.WindowText,

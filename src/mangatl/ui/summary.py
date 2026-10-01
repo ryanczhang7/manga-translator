@@ -26,10 +26,12 @@ area, so it never scrolls away - is the one way out. A `QPushButton` outside a
 dialog does not activate on Return or Enter, only on Space, so the button
 handles those two itself, as `FolderDropTarget` does.
 
-Spacing and type come from the design tokens (`tokens_gen`). Text colour and
-ground are left to the application palette: `theme.qss` is not applied by the
-app yet, and a token text colour painted over an unthemed ground could be
-unreadable. The notice's warning border is the one colour set here.
+Spacing comes from the design tokens (`tokens_gen`) and is set here. Every
+colour, ground, border and type size comes from the application stylesheet
+(`theme.qss`, applied at startup - MT-061), by each part's object name, and
+from nowhere else. The sheet's rules outrank `setFont`, and a colour set on a
+widget would stay authored under High Contrast while the application sheet is
+re-composed (MT-028).
 """
 
 from __future__ import annotations
@@ -48,7 +50,7 @@ from mangatl.domain.page import Chapter
 from mangatl.ui import tokens_gen
 from mangatl.ui.cost_estimate import CostEstimate
 from mangatl.ui.intake import display_name
-from mangatl.ui.labels import BODY, BODY_STRONG, TITLE, plain_label
+from mangatl.ui.labels import plain_label
 
 __all__ = ["ChapterSummary"]
 
@@ -93,7 +95,7 @@ class ChapterSummary(QWidget):
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
 
-        heading = plain_label("summary-name", display_name(chapter.source_dir), TITLE)
+        heading = plain_label("summary-name", display_name(chapter.source_dir))
         heading.setAccessibleName(uncut_name)
         column.addWidget(heading)
         column.addSpacing(tokens_gen.SPACE_S2)
@@ -109,7 +111,7 @@ class ChapterSummary(QWidget):
         for index, (name, text) in enumerate(parts):
             if index:
                 column.addSpacing(tokens_gen.SPACE_S1)
-            column.addWidget(plain_label(name, text, BODY))
+            column.addWidget(plain_label(name, text))
             lines.append(text)
 
         # Part 5 (MT-058): before the notice, so a long notice cannot push the
@@ -161,17 +163,13 @@ def _order_notice(lines: tuple[str, str, str]) -> QFrame:
     notice = QFrame()
     notice.setObjectName("summary-order-notice")
     notice.setAccessibleName("\n".join(lines))
-    notice.setStyleSheet(
-        f"QFrame#summary-order-notice {{"
-        f" border: {tokens_gen.BORDER_WIDTH_HAIRLINE}px solid {tokens_gen.COLOR_STATUS_WARNING};"
-        f" border-radius: {tokens_gen.RADIUS_SM}px; }}"
-    )
     column = QVBoxLayout(notice)
+    # The inset is here, not in theme.qss: QSS padding would add to it.
     pad = tokens_gen.SPACE_S3
     column.setContentsMargins(pad, pad, pad, pad)
     column.setSpacing(tokens_gen.SPACE_S1)
     lead, natural, lexical = lines
-    column.addWidget(plain_label("order-lead", lead, BODY_STRONG))
-    column.addWidget(plain_label("order-natural", natural, BODY))
-    column.addWidget(plain_label("order-lexical", lexical, BODY))
+    column.addWidget(plain_label("order-lead", lead))
+    column.addWidget(plain_label("order-natural", natural))
+    column.addWidget(plain_label("order-lexical", lexical))
     return notice

@@ -30,6 +30,7 @@ from mangatl.domain.page import Chapter
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
 from mangatl.store.project import SchemaTooNew, open_project, project_dir_for
 from mangatl.ui.main_window import MainWindow
+from mangatl.ui.stylesheet import apply_base_stylesheet
 from mangatl.ui.workspace import Workspace
 
 __all__ = ["IntakeError", "build_window", "main", "open_folder"]
@@ -121,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
     """Run the application. Returns the Qt exit code."""
     argv = argv if argv is not None else sys.argv
     app = QApplication(argv)
+    # Before any window is built, so none is ever shown unthemed (MT-061).
+    apply_base_stylesheet(app)
     window = build_window(argv[1:])
     window.show()
     return app.exec()

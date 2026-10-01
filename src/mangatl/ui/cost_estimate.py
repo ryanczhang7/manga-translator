@@ -32,7 +32,7 @@ from PySide6.QtWidgets import QFrame, QVBoxLayout, QWidget
 from mangatl.domain.budget import Budget
 from mangatl.domain.money import Usd
 from mangatl.ui import tokens_gen
-from mangatl.ui.labels import BODY, BODY_STRONG, plain_label
+from mangatl.ui.labels import plain_label
 
 __all__ = ["CostEstimate", "format_usd"]
 
@@ -73,15 +73,14 @@ class CostEstimate(QFrame):
         if self._over_budget:
             budget_line = f"{budget_line} {OVER_BUDGET}"
         parts = [
-            ("cost-estimate", f"Estimated for {pages} {noun}: {shown}.", BODY_STRONG),
-            ("cost-budget", budget_line, BODY),
+            ("cost-estimate", f"Estimated for {pages} {noun}: {shown}."),
+            ("cost-budget", budget_line),
         ]
         if pages > CHAPTER_PAGE_LIMIT:
             parts.append(
                 (
                     "cost-page-warning",
                     f"That is more pages than a chapter. Estimated cost is {shown}.",
-                    BODY,
                 )
             )
 
@@ -89,9 +88,9 @@ class CostEstimate(QFrame):
         pad = tokens_gen.SPACE_S3
         column.setContentsMargins(pad, pad, pad, pad)
         column.setSpacing(tokens_gen.SPACE_S1)
-        for name, text, type_ in parts:
-            column.addWidget(plain_label(name, text, type_))
-        self.lines = tuple(text for _, text, _ in parts)
+        for name, text in parts:
+            column.addWidget(plain_label(name, text))
+        self.lines = tuple(text for _, text in parts)
         self.setAccessibleName("\n".join(self.lines))
 
         border = tokens_gen.COLOR_BORDER_SUBTLE
