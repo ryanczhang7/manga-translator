@@ -19,8 +19,14 @@ estimate of one or more pages can never read `$0.00` (AC-5). It is exact
 
 The over-budget state is carried by the sentence on the budget line
 (`accessibility.md` A-10) and by the frame's warning border; there is no glyph.
-Text colour is left to the application palette, as in `summary.py`, for the
-reason given there.
+
+Spacing comes from the design tokens (`tokens_gen`) and is set here. Every
+colour, ground, border and type size comes from the application stylesheet
+(`theme.qss`, applied at startup - MT-061), by object name, and from nowhere
+else, as in `summary.py` and for the reason given there. The one thing the
+widget tells the sheet is its state: the dynamic property `overBudget`, set
+before the frame is first polished and never changed, which the sheet's
+`[overBudget="true"]` rule turns into the warning border.
 """
 
 from __future__ import annotations
@@ -61,11 +67,14 @@ class CostEstimate(QFrame):
 
     def __init__(self, pages: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName(OBJECT_NAME)
-
         budget = Budget()
         estimate = budget.project((), pages).remaining_chapter
         self._over_budget = estimate > budget.ceiling
+
+        self.setObjectName(OBJECT_NAME)
+        # Read by theme.qss's [overBudget="true"] rule; set before first polish
+        # and never changed, so no re-polish is needed.
+        self.setProperty("overBudget", self._over_budget)
         shown = format_usd(estimate)
 
         noun = "page" if pages == 1 else "pages"
@@ -92,15 +101,6 @@ class CostEstimate(QFrame):
             column.addWidget(plain_label(name, text))
         self.lines = tuple(text for _, text in parts)
         self.setAccessibleName("\n".join(self.lines))
-
-        border = tokens_gen.COLOR_BORDER_SUBTLE
-        if self._over_budget:
-            border = tokens_gen.COLOR_STATUS_WARNING
-        self.setStyleSheet(
-            f"QFrame#{OBJECT_NAME} {{"
-            f" border: {tokens_gen.BORDER_WIDTH_HAIRLINE}px solid {border};"
-            f" border-radius: {tokens_gen.RADIUS_SM}px; }}"
-        )
 
     @property
     def over_budget(self) -> bool:

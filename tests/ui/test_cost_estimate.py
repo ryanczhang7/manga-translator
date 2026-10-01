@@ -38,15 +38,18 @@ story's `## Handoff`. **Timing:** no real-time waits; the slowest test builds
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from decimal import Decimal
+from importlib.resources import files
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QSize, Qt
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QAccessible, QColor, QImage
 from PySide6.QtWidgets import (
     QAbstractButton,
     QAbstractSpinBox,
+    QApplication,
     QFrame,
     QLabel,
     QLineEdit,
@@ -60,7 +63,7 @@ from mangatl import app as app_module
 from mangatl.domain.budget import Budget
 from mangatl.domain.money import Usd
 from mangatl.domain.page import Chapter, Page
-from mangatl.ui import tokens_gen
+from mangatl.ui import tokens, tokens_gen
 from mangatl.ui.cost_estimate import CostEstimate, format_usd
 from mangatl.ui.summary import ChapterSummary
 
@@ -299,20 +302,29 @@ def test_the_shown_figure_follows_the_domains_per_page_estimate(
 # =============================================================================
 
 
+def _assert_styled_by_the_sheet_alone(cost: CostEstimate, pages: int, over: bool) -> None:
+    """C-2 as amended (return 2, MT-061's rule): the widget authors no style;
+    the state reaches `theme.qss` as the dynamic property `overBudget`. The
+    colour itself is pinned as paint, in the section after AC-5."""
+    assert cost.styleSheet() == "", (
+        f"{pages} pages: the estimate authors its own style instead of leaving it "
+        f"to theme.qss: {cost.styleSheet()!r}"
+    )
+    assert cost.property("overBudget") is over, (
+        f"{pages} pages: overBudget property is {cost.property('overBudget')!r}, not {over}"
+    )
+
+
 def _assert_normal(cost: CostEstimate, pages: int) -> None:
     assert cost.over_budget is False, f"{pages} pages read as over budget"
     assert _label(cost, BUDGET).text() == "Budget $2.00.", f"{pages} pages"
-    assert tokens_gen.COLOR_STATUS_WARNING not in cost.styleSheet(), (
-        f"{pages} pages, within budget, are styled with the warning colour"
-    )
+    _assert_styled_by_the_sheet_alone(cost, pages, over=False)
 
 
 def _assert_over(cost: CostEstimate, pages: int) -> None:
     assert cost.over_budget is True, f"{pages} pages did not read as over budget"
     assert _label(cost, BUDGET).text() == f"Budget $2.00. {OVER}", f"{pages} pages"
-    assert tokens_gen.COLOR_STATUS_WARNING in cost.styleSheet(), (
-        f"{pages} pages, over budget, are not styled with the warning colour"
-    )
+    _assert_styled_by_the_sheet_alone(cost, pages, over=True)
 
 
 def test_the_boundary_read_from_the_constants_is_thirty_three_pages() -> None:
@@ -463,6 +475,192 @@ def test_a_sub_cent_estimate_never_reads_zero(
     assert _label(one, ESTIMATE).text() == "Estimated for 1 page: $0.01."
     most = _cost(qtbot, 250)
     assert _label(most, ESTIMATE).text() == "Estimated for 250 pages: $0.01."
+
+
+# =============================================================================
+# AC-3's colour, as paint (C-2 amended, return 2): theme.qss and nowhere else
+# =============================================================================
+#
+# Modelled on MT-061's `test_the_order_notice_is_raised_inside_a_hairline_
+# warning_border` (tests/ui/test_app_theme_paint.py). Its helpers are private
+# to that module (no conftest, `tests` is not a package), so a minimal copy of
+# the four this needs lives here: the application-sheet fixture, the packaged
+# sheet and template, the grab, and the edge run. The rules are scoped to
+# `#chapter-summary`, so the frame is measured inside a real summary built by
+# `app.build_window` from a folder of real PNGs; a standalone `CostEstimate`
+# gets none of them (Design notes, "Theme (MT-061 rule)").
+
+#: components.md section 2 CostEstimate, "How it is rendered": edge per state.
+EDGE_NORMAL = "color.border.subtle"
+EDGE_OVER = "color.status.warning"
+EDGE_WIDTH = "border-width.hairline"
+#: A colour no token uses (asserted below); MT-061's AC-6 sentinel.
+SENTINEL = "#13579B"
+PAINT_WINDOW = QSize(1100, 720)
+
+
+def _token_colour(name: str) -> str:
+    return QColor(tokens_gen.TOKENS[name]).name()
+
+
+def _packaged(resource: str) -> str:
+    return files("mangatl.ui").joinpath(resource).read_text(encoding="utf-8")
+
+
+def _sentinel_theme(token: str) -> str:
+    """The packaged template rendered with `token` = SENTINEL (MT-061 AC-6)."""
+    values = dict(tokens_gen.TOKENS)
+    values[token] = SENTINEL
+    return tokens.render_qss(values, _packaged("theme.qss.tmpl"))
+
+
+@pytest.fixture
+def application_sheet(qapp: QApplication) -> Iterator[Callable[[str], None]]:
+    """Set the real application's sheet; always put `""` back."""
+
+    def apply(sheet: str) -> None:
+        qapp.setStyleSheet(sheet)
+
+    try:
+        yield apply
+    finally:
+        qapp.setStyleSheet("")
+
+
+def _painted_cost_frame(  # type: ignore[no-untyped-def]
+    qtbot, root: Path, pages: int
+) -> tuple[QWidget, CostEstimate, QImage]:
+    """A real summary of `pages` PNGs, shown; the window's pixels over the
+    estimate frame. Zero-padded names, so no order notice moves anything.
+    The window is returned so the caller holds it: qtbot keeps only a weak
+    reference, and the frame's C++ object dies with it."""
+    folder = root / f"{pages} pages"
+    folder.mkdir()
+    png = _png()
+    for i in range(1, pages + 1):
+        (folder / f"p{i:03d}.png").write_bytes(png)
+    window = app_module.build_window([str(folder)])
+    qtbot.addWidget(window)
+    window.resize(PAINT_WINDOW)
+    with qtbot.waitExposed(window):
+        window.show()
+    QApplication.processEvents()
+    QApplication.processEvents()
+    summary = window.centralWidget()
+    assert isinstance(summary, ChapterSummary), f"central is {type(summary).__name__}"
+    cost = summary.cost_estimate
+    assert cost.isVisible() and not cost.visibleRegion().isEmpty(), "the estimate is not on screen"
+    origin = cost.mapTo(window, QPoint(0, 0))
+    return window, cost, window.grab(QRect(origin, cost.size())).toImage()
+
+
+def _edge_colours(image: QImage) -> dict[str, set[str]]:
+    """The colours along the middle line of each edge of the hairline,
+    stopping `radius.sm` + hairline short of the corners."""
+    width = int(tokens_gen.TOKENS[EDGE_WIDTH])
+    inset = int(tokens_gen.TOKENS["radius.sm"]) + width
+    w, h, mid = image.width(), image.height(), width // 2
+
+    def at(x: int, y: int) -> str:
+        return image.pixelColor(x, y).name()
+
+    return {
+        "top": {at(x, mid) for x in range(inset, w - inset)},
+        "bottom": {at(x, h - 1 - mid) for x in range(inset, w - inset)},
+        "left": {at(mid, y) for y in range(inset, h - inset)},
+        "right": {at(w - 1 - mid, y) for y in range(inset, h - inset)},
+    }
+
+
+def _all_edges(colour: str) -> dict[str, set[str]]:
+    return {edge: {colour} for edge in ("top", "bottom", "left", "right")}
+
+
+def test_the_sentinel_and_the_two_edge_colours_are_distinct() -> None:
+    """Without this the paint tests below could not tell the states apart."""
+    used = {v[:7].upper() for v in tokens_gen.TOKENS.values() if str(v).startswith("#")}
+    assert SENTINEL.upper() not in used, f"{SENTINEL} is a token's value"
+    assert _token_colour(EDGE_NORMAL) != _token_colour(EDGE_OVER)
+
+
+def test_an_over_budget_summary_paints_the_estimates_edge_in_the_warning_colour(
+    qtbot,  # type: ignore[no-untyped-def]
+    application_sheet: Callable[[str], None],
+    tmp_path: Path,
+) -> None:
+    """AC-3: 34 pages ($2.04) - every edge of the frame is color.status.warning."""
+    application_sheet(_packaged("theme.qss"))
+    pages = _last_page_inside_budget() + 1
+
+    _window, cost, image = _painted_cost_frame(qtbot, tmp_path, pages)
+
+    assert cost.over_budget is True, "precondition"
+    assert _edge_colours(image) == _all_edges(_token_colour(EDGE_OVER)), (
+        f"{pages} pages, over budget: the estimate's edge is not {EDGE_OVER}"
+    )
+
+
+def test_a_summary_within_budget_paints_the_estimates_edge_in_the_subtle_border(
+    qtbot,  # type: ignore[no-untyped-def]
+    application_sheet: Callable[[str], None],
+    tmp_path: Path,
+) -> None:
+    """AC-3's control: 33 pages ($1.98) - every edge is color.border.subtle."""
+    application_sheet(_packaged("theme.qss"))
+    pages = _last_page_inside_budget()
+
+    _window, cost, image = _painted_cost_frame(qtbot, tmp_path, pages)
+
+    assert cost.over_budget is False, "precondition"
+    assert _edge_colours(image) == _all_edges(_token_colour(EDGE_NORMAL)), (
+        f"{pages} pages, within budget: the estimate's edge is not {EDGE_NORMAL}"
+    )
+
+
+def test_control_without_the_sheet_an_over_budget_edge_is_not_the_warning_colour(
+    qtbot,  # type: ignore[no-untyped-def]
+    application_sheet: Callable[[str], None],
+    tmp_path: Path,
+) -> None:
+    """The warning colour comes from theme.qss: with no application sheet the
+    34-page frame shows Qt's default, not color.status.warning."""
+    application_sheet("")
+    pages = _last_page_inside_budget() + 1
+
+    _window, cost, image = _painted_cost_frame(qtbot, tmp_path, pages)
+
+    assert cost.over_budget is True, "precondition"
+    seen = set().union(*_edge_colours(image).values())
+    assert _token_colour(EDGE_OVER) not in seen, (
+        f"with no application sheet, {pages} pages still paint {EDGE_OVER}: the "
+        f"colour is authored somewhere other than theme.qss (edges {sorted(seen)})"
+    )
+
+
+@pytest.mark.parametrize(
+    ("token", "over"),
+    [(EDGE_NORMAL, False), (EDGE_OVER, True)],
+    ids=["within-budget-edge", "over-budget-edge"],
+)
+def test_the_estimates_edge_follows_its_token_in_the_application_sheet(
+    qtbot,  # type: ignore[no-untyped-def]
+    application_sheet: Callable[[str], None],
+    tmp_path: Path,
+    token: str,
+    over: bool,
+) -> None:
+    """MT-061 AC-6's shape: substitute an unused colour for the state's token
+    in the packaged template; the frame's edge must show it on every side."""
+    application_sheet(_sentinel_theme(token))
+    pages = _last_page_inside_budget() + (1 if over else 0)
+
+    _window, cost, image = _painted_cost_frame(qtbot, tmp_path, pages)
+
+    assert cost.over_budget is over, "precondition"
+    sentinel = QColor(SENTINEL).name()
+    assert _edge_colours(image) == _all_edges(sentinel), (
+        f"with {token} = {sentinel}, the {pages}-page estimate's edge painted something else"
+    )
 
 
 # =============================================================================

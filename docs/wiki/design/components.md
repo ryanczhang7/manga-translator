@@ -416,12 +416,47 @@ never a focus stop).
 | 200 | over-budget | `Estimated for 200 pages: $12.00.` / `Budget $2.00. The estimate is over budget.` |
 | 201 | over-budget | `Estimated for 201 pages: $12.06.` / `Budget $2.00. The estimate is over budget.` / `That is more pages than a chapter. Estimated cost is $12.06.` |
 
-**Box.** Ground as the order notice (`color.surface.raised`, left to the
-application palette while `theme.qss` is unapplied, as MT-057 records),
+**Box.** Ground as the order notice (`color.surface.raised`),
 `radius.sm`, padding `space.3`, lines `space.1` apart, `space.4` above it (below
 part 4) and `space.4` below it (above the notice, when there is one). It spans
 the scroll area's width; every line word-wraps; nothing scrolls horizontally.
 Identical at every window width.
+
+**How it is rendered** *(2026-10-01, the user's decision to adopt MT-061's
+rule for this component).* Every colour, ground, border and type size comes
+from the application stylesheet `theme.qss` (generated from
+`theme.qss.in`), selected by object name, and from nowhere else: the widget
+calls no `setStyleSheet` and no `setFont`. The `space.3` inset and `space.1`
+line gap stay as layout in Python (`setContentsMargins`, `setSpacing`); the
+sheet sets no padding, so the two never add up - the same split as the order
+notice.
+
+| Selector | Sets |
+|---|---|
+| `#chapter-summary QFrame#summary-cost-estimate` | ground `color.surface.raised`; `border-width.hairline` solid `color.border.subtle`; `radius.sm` |
+| `#chapter-summary QFrame#summary-cost-estimate[overBudget="true"]` | `border-width.hairline` solid `color.status.warning` |
+| `#chapter-summary QLabel#cost-estimate` | `type.body-strong`, `color.text.primary` |
+| `#chapter-summary QLabel#cost-budget` | `type.body`, `color.text.secondary` |
+| `#chapter-summary QLabel#cost-page-warning` | `type.body`, `color.text.primary` |
+
+- **The state reaches the sheet as a dynamic property.** The frame carries
+  `overBudget`, a Python `bool` set with `setProperty("overBudget", ...)` in
+  the constructor, immediately after `setObjectName` and **before the frame is
+  first polished** (before it is shown, and before anything calls
+  `ensurePolished`). It is set in **both** states - `False` as well as `True` -
+  and equals the widget's `over_budget`. The widget is built once per summary
+  and the value never changes, so no `unpolish`/`polish` is needed. Qt matches a
+  `bool` property against the string `true`.
+- **Scoped under `#chapter-summary`**, as the order notice is. A `CostEstimate`
+  is only ever shown as part 5 of a `ChapterSummary`. Consequence: a standalone
+  `CostEstimate` with the sheet applied gets none of these rules (it paints Qt's
+  default ground, measured `#efefef`), so tests that measure its paint build it
+  **inside a real summary** (`app.build_window` on a pages folder), exactly as
+  MT-061's order-notice test does. Tests of its copy, state and accessible name
+  may still construct it alone.
+- Specificity: the over-budget rule is (2,1,1), the normal rule (2,0,1), so the
+  warning border wins regardless of file order; both outrank the base `QWidget`
+  rules.
 
 **Accessibility.**
 
@@ -1122,3 +1157,9 @@ apart by colour: the over-budget state is the sentence `The estimate is over
 budget.` on line 2, and the notice is its lead sentence (A-10). Text is
 `WindowText` on `Window`; the copy, the lines and the layout are unchanged. No
 glyph is added under HC, since there is none to distinguish.
+
+This needs **no rule in `theme_hc.qss.in`**: the change is one of value, not of
+rule. The base rules for `#summary-cost-estimate` (both states) and the order
+notice already resolve their tokens through `[hc.map]` (`color.border.subtle`,
+`color.status.warning`, `color.text.*` → `WindowText`; `color.surface.raised` →
+`Window`). The override template is for rule changes only (`tokens.md` §12.1).
