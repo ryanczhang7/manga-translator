@@ -21,10 +21,11 @@ line.
 
 Every label is plain text (a folder named `a<b>c` is not markup), selectable
 with the mouse so a filename can be copied, and never a focus stop: the scroll
-area is the one stop for reading, and the button below it - outside the scroll
-area, so it never scrolls away - is the one way out. A `QPushButton` outside a
-dialog does not activate on Return or Enter, only on Space, so the button
-handles those two itself, as `FolderDropTarget` does.
+area is the one stop for reading, and the two buttons below it - outside the
+scroll area, so they never scroll away - are the ways on (MT-059): "Start run"
+(primary, "Start run anyway" when the estimate is over budget) and "Choose a
+different folder". A `QPushButton` outside a dialog does not activate on
+Return or Enter, only on Space, so both are `ActivatedByEnter`.
 
 Spacing comes from the design tokens (`tokens_gen`) and is set here. Every
 colour, ground, border and type size comes from the application stylesheet
@@ -37,10 +38,9 @@ re-composed (MT-028).
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QFrame,
-    QPushButton,
+    QHBoxLayout,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 
 from mangatl.domain.page import Chapter
 from mangatl.ui import tokens_gen
+from mangatl.ui.buttons import ActivatedByEnter
 from mangatl.ui.cost_estimate import CostEstimate
 from mangatl.ui.intake import display_name
 from mangatl.ui.labels import plain_label
@@ -57,11 +58,11 @@ __all__ = ["ChapterSummary"]
 SUMMARY_OBJECT_NAME = "chapter-summary"
 SCROLL_ACCESSIBLE_NAME = "Chapter summary"
 CHOOSE_OTHER = "Choose a different folder"  # components.md §2, "Leaving the summary"
+START = "Start run"  # components.md §2, part 7 (MT-059)
+START_ANYWAY = "Start run anyway"  # ... when the estimate is over budget
 ORDER_LEAD = "These filenames sort differently as numbers and as text. The run uses natural order."
 NATURAL_PREFIX = "Natural order (used): "
 LEXICAL_PREFIX = "Text order (not used): "
-
-_ACTIVATION_KEYS = (Qt.Key.Key_Return, Qt.Key.Key_Enter)
 
 
 class ChapterSummary(QWidget):
@@ -69,6 +70,8 @@ class ChapterSummary(QWidget):
 
     #: The user asked to choose a different folder; the owner asks the chooser.
     choose_other = Signal()
+    #: The user pressed "Start run"; the owner runs the Start sequence (MT-059).
+    start_requested = Signal()
 
     def __init__(self, chapter: Chapter, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -135,26 +138,29 @@ class ChapterSummary(QWidget):
         self.scroll_area.setWidget(content)
         self.scroll_area.setAccessibleDescription("\n".join(lines))
 
-        self.choose = _ActivatedByEnter(CHOOSE_OTHER, self)
+        # Created before Choose, so Tab goes scroll area -> Start -> Choose (D-1).
+        start_text = START_ANYWAY if self.cost_estimate.over_budget else START
+        self.start = ActivatedByEnter(start_text, self)
+        self.start.setObjectName("summary-start")
+        self.start.setProperty("variant", "primary")
+        self.start.setAccessibleName(start_text)
+        self.start.clicked.connect(self.start_requested.emit)
+
+        self.choose = ActivatedByEnter(CHOOSE_OTHER, self)
         self.choose.setObjectName("summary-choose")
         self.choose.clicked.connect(self.choose_other.emit)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(tokens_gen.SPACE_S2)
+        buttons.addWidget(self.start)
+        buttons.addWidget(self.choose)
+        buttons.addStretch(1)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(0)
         layout.addWidget(self.scroll_area, 1)
         layout.addSpacing(tokens_gen.SPACE_S4)
-        layout.addWidget(self.choose, 0, Qt.AlignmentFlag.AlignLeft)
-
-
-class _ActivatedByEnter(QPushButton):
-    """A push button that Return and Enter activate as Space does: outside a
-    dialog, a `QPushButton` ignores both (measured in MT-057 RED)."""
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.key() in _ACTIVATION_KEYS and not event.isAutoRepeat():
-            self.click()
-            return
-        super().keyPressEvent(event)
+        layout.addLayout(buttons)
 
 
 def _order_notice(lines: tuple[str, str, str]) -> QFrame:

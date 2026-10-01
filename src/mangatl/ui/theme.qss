@@ -86,7 +86,8 @@ QMenu::separator {
 }
 
 /* ---- Button: components.md section 1, the secondary variant ----------- */
-/* The other variants need a selector components.md does not yet name.    */
+/* The bare rule is secondary; primary follows (MT-059). Ghost and        */
+/* destructive still need a selector components.md does not yet name.     */
 
 QPushButton {
     background-color: #262626;
@@ -112,6 +113,31 @@ QPushButton:disabled {
     background-color: #212121;
     color: #737373;
     border-color: #4A4A4A;
+}
+
+/* ---- Button: the primary variant (MT-059, components.md section 1) ---- */
+/* The band is transparent at rest and clipped out of the ground, so the  */
+/* focus ring lands on the window's ground rather than on the accent, and */
+/* focus moves nothing. Each state names the property, so it outranks the */
+/* bare rule's state of the same kind.                                    */
+
+QPushButton[variant="primary"] {
+    background-color: #4CC2FF;
+    color: #06202B;
+    border: 2px solid transparent;
+    background-clip: padding;
+}
+
+QPushButton[variant="primary"]:hover {
+    background-color: #7AD3FF;
+}
+
+QPushButton[variant="primary"]:pressed {
+    background-color: #2FA8E8;
+}
+
+QPushButton[variant="primary"]:focus {
+    border-color: #FFFFFF;
 }
 
 /* ---- Text fields ------------------------------------------------------ */

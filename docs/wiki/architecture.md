@@ -164,6 +164,21 @@ name their collaborators behind plain `Callable`s.
   about whether `ui` may import it, which no story needs answered yet. MT-015 is
   where that question becomes real.
 
+**Third instance: `mangatl.app` (MT-059 PO-3, decided by the user 2026-09-30;
+amended 2026-10-01).** The window's "Start run" needs the real stage list, and
+`ui` may not import `compose`. So `mangatl.app` imports `build_pipeline` and
+`resolve_models_dir` inside two functions (`build_stages`, `resolve_models`) and
+injects them into the window as a `RunSetup`; `ui` never names `compose`. With
+those imports in place `lint-imports` reported `3 kept, 2 broken` - both via
+`mangatl.app -> mangatl.compose` - and removing `"mangatl.app"` from exactly
+the anthropic and onnxruntime `source_modules` returned `5 kept, 0 broken`
+(MT-059 `## Notes`, "C-8 exemption"). The paragraph above that kept `app`
+listed is superseded; `mangatl.ui` stays listed in both, and an import of
+`compose` from any `ui` module still fails `lint` (MT-059 `## Gate probes`).
+The function-body import does not avoid the exemption - import-linter counts it
+- it only keeps `onnxruntime` out of a launch that only reviews a chapter.
+`mangatl.app` stays out of "Nothing imports ui", as before.
+
 **Rejected: making the import invisible.** `importlib.import_module("mangatl.detect.session")`
 would satisfy rule 5 as written, because import-linter cannot follow a string.
 That is working around the boundary with a tool that does not inspect it, and it

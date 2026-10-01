@@ -514,7 +514,12 @@ def test_a_chosen_folder_of_p1_to_p12_shows_the_notice_and_offers_no_order_contr
     assert _label(notice, "order-natural").text() == P12_NATURAL
     assert _label(notice, "order-lexical").text() == P12_LEXICAL
     assert notice.findChildren(QAbstractButton) == [], "the notice has a control"
-    assert [b.objectName() for b in summary.findChildren(QAbstractButton)] == ["summary-choose"]
+    # MT-059 C-2/D-1: the summary's buttons are Start and the way out, compared
+    # as a set - construction order is not a design fact.
+    assert {b.objectName() for b in summary.findChildren(QAbstractButton)} == {
+        "summary-start",
+        "summary-choose",
+    }
 
 
 # =============================================================================
@@ -657,15 +662,21 @@ def test_the_scroll_area_scrolls_vertically_only_and_holds_every_part_but_the_bu
     assert summary.isAncestorOf(button)
 
 
-def test_choose_a_different_folder_is_the_only_button_and_there_is_no_start_button(
+def test_the_summary_has_two_buttons_start_run_and_choose_a_different_folder(
     qtbot,  # type: ignore[no-untyped-def]
 ) -> None:
+    """MT-059 C-2/D-1 rewrote this MT-057 test, which pinned "the only button,
+    no start button": the summary now has exactly two, compared as a set."""
     summary = _bare(qtbot, _chapter(P1_TO_P12))
 
     button = _choose_button(summary)
     assert button.text() == CHOOSE
-    assert summary.findChildren(QAbstractButton) == [button], (
-        f"buttons: {[b.text() for b in summary.findChildren(QAbstractButton)]}"
+    start = summary.findChild(QPushButton, "summary-start")
+    assert start is not None, "the summary has no QPushButton named 'summary-start'"
+    assert start.text() == "Start run"
+    buttons = summary.findChildren(QAbstractButton)
+    assert len(buttons) == 2 and set(buttons) == {start, button}, (
+        f"buttons: {[b.text() for b in buttons]}"
     )
     assert not isinstance(summary, QAbstractButton)
 

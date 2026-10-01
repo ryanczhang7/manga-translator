@@ -237,13 +237,16 @@ def test_the_budget_is_read_only_with_no_field_and_no_control(qtbot) -> None:  #
     assert cost.focusPolicy() == Qt.FocusPolicy.NoFocus, "the estimate frame is a focus stop"
 
 
-def test_the_summary_gains_the_estimate_but_no_button(qtbot) -> None:  # type: ignore[no-untyped-def]
+def test_the_summary_gains_the_estimate_and_the_start_button_but_no_field(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """MT-059 C-2/D-1 rewrote this MT-058 test, which pinned "no button" beyond
+    Choose: the summary's buttons are now Start and Choose, as a set."""
     summary = _summary(qtbot, _chapter(34))
 
     buttons = summary.findChildren(QAbstractButton)
-    assert [b.objectName() for b in buttons] == ["summary-choose"], (
+    assert {b.objectName() for b in buttons} == {"summary-start", "summary-choose"}, (
         f"buttons: {[b.objectName() for b in buttons]}"
     )
+    assert len(buttons) == 2
     assert summary.findChildren(QLineEdit) == [] and summary.findChildren(QAbstractSpinBox) == []
 
 

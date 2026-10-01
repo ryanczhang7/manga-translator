@@ -45,6 +45,14 @@ accessibility.md A-05 for why 28 and not 24).
 Radius `radius.sm`. Padding `space.2` vertical, `space.3` horizontal. Label
 `type.body`.
 
+**Selectors** (MT-059). `secondary` is the bare `QPushButton` rule. `primary`
+is `QPushButton[variant="primary"]` (dynamic property set in the constructor):
+`border: focus.width px solid transparent` with `background-clip: padding`, so
+"no border" at rest and the focus ring lands on the parent ground
+(`surface.base`, 17.04:1) rather than on the accent (≈2.0:1); `:focus` sets
+`border-color` only. `on-accent` label: ≈8.4 / 10.1 / 6.3:1 on base / hover /
+pressed. Under HC the tokens map to §10.1's primary row with no override rule.
+
 ---
 
 ## 2. Chapter intake
@@ -207,7 +215,8 @@ markup), word-wrapped, selectable by mouse only, never a focus stop.
 | 4 | last page | `Last page: {last}` | `type.body`, `color.text.secondary` |
 | 5 | cost estimate | `CostEstimate`, below; always present (MT-058) | see `CostEstimate` |
 | 6 | order notice | see below; present only when the orders differ | see below |
-| 7 | leave | `secondary` button `Choose a different folder` | §1 |
+| 7 | start (MT-059) | `primary` button `summary-start`: `Start run`, or `Start run anyway` when the estimate is over budget | §1 |
+| 8 | leave | `secondary` button `summary-choose`: `Choose a different folder` | §1 |
 
 *Why the estimate sits above the notice rather than at the foot, where the
 original sketch had it:* the notice lists every filename twice, so for a long
@@ -252,11 +261,13 @@ order:
 
 **Layout.** In the intake column (layout.md, "Intake and run screens"). Parts
 1-6 sit in a `QScrollArea`: vertical scroll as needed, horizontal scroll **off**.
-Part 7 is **outside** the scroll area, pinned at its foot, left-aligned, always
-visible however long the lists are.
+Parts 7 and 8 are **outside** the scroll area, one row pinned at its foot,
+left-aligned, start first, `space.2` apart, always visible however long the
+lists are (MT-059).
 
 **Leaving the summary** (settled 2026-09-30, MT-057). MT-057 has no Start
-button, so the only way on is `Choose a different folder`:
+button, so the only way on is `Choose a different folder`. *(MT-059 adds `Start
+run`, which replaces the summary with the run screen, §8.)*
 
 - Activating it opens the same folder dialog as the drop target
   (`choose_folder_dialog`, caption "Choose chapter folder").
@@ -274,11 +285,12 @@ button, so the only way on is `Choose a different folder`:
 
 **Accessibility.**
 
-- Focus order: the scroll area, then the button; `Tab`/`Shift+Tab` move between
-  them. When the summary appears, **focus goes to the scroll area**. The scroll
+- Focus order: the scroll area, then `Start run`, then `Choose a different
+  folder` (MT-059); `Tab`/`Shift+Tab` move between them. When the summary
+  appears, **focus goes to the scroll area**. The scroll
   area takes `Up`/`Down`/`PageUp`/`PageDown`/`Home`/`End` to scroll, and shows
-  the `color.focus.ring` per A-04. The button takes Enter and Space (§1 states;
-  it has no disabled or loading state here).
+  the `color.focus.ring` per A-04. Both buttons take Return, Enter and Space (§1
+  states; neither has a disabled or loading state here).
 - The scroll area's accessible name is `Chapter summary`; its accessible
   description is every visible line of parts 1-6 in order, joined by `\n`, with
   the heading's line as the whole uncut base name. A screen reader landing on it
@@ -930,6 +942,26 @@ go straight to reviewing what did complete:
 
 The budget is a **setting** with a default of $2.00, not a constant. "Change
 budget…" is only an honest action if it exists.
+
+**Failed banner** (MT-059). A `RunAborted` whose reason is neither `budget` nor
+`cancelled`. Same `ErrorBanner` shape and place. `{n}` = ordinal + 1, `{kept}`
+= ordinal, `{reason}` = the runner's reason verbatim (never a traceback):
+
+> **Run stopped at page {n} of {total} — page {n} failed.**
+> {reason}
+> Pages 1–{kept} are translated and can be reviewed and rendered.
+> `[ Review pages 1–{kept} ]`
+
+With `{kept}` = 0 the last line is `No pages were translated.` and there is no
+action. The body is the reason and the survival line joined by `\n`. The
+`CostReadout` is left exactly as it was - `aborted` is the budget's state
+only. When the banner has an action, focus moves to it; it activates on Space,
+Return and Enter. The stepper's failed step state stays designed but unbuilt
+(deferred). A cancellation (`cancelled`) shows no banner.
+
+**The run screen** (MT-059). Started from the intake, the window's central
+widget is the `RunProgressPanel` alone; the title stays `mangatl`; no focus stop
+while running.
 
 ---
 
