@@ -55,11 +55,11 @@ A dashed region occupying the intake screen's centre column.
 
 | State | Appearance | Copy |
 |---|---|---|
-| **empty** (default) | 2px dashed `color.border.interactive`, `radius.md`, ground `color.surface.base` | headline (`type.display`) "Drop a chapter folder here"; body (`type.body`, `color.text.secondary`) "Or choose a folder. Pages are processed in filename order."; a `primary` button "Choose folder…" |
-| **hover-valid** (drag carrying exactly one local directory) | border 2px solid `color.accent.base`; ground tinted `overlay.fill.hover` | headline "Release to load"; body the folder's name; no affordance text |
+| **empty** (default) | 2px dashed `color.border.interactive`, `radius.md`, ground `color.surface.base` | headline (`type.display`, `color.text.primary`) "Drop a chapter folder here"; body (`type.body`, `color.text.secondary`) "Or choose a folder. Pages are processed in filename order."; affordance line "Choose folder…" (`type.body`, `color.text.primary` - a label, not a button: see "The affordance line") |
+| **hover-valid** (drag carrying exactly one local directory) | border 2px solid `color.accent.base`; ground `color.surface.hover` (DQ-1, MT-061) | headline "Release to load"; body the folder's name; no affordance text |
 | **hover-invalid** (drag carrying files, or more than one item) | border 2px solid `color.status.danger` | headline "Drop a folder, not files", or "Drop one folder" when every item is a folder; body says what was dragged; no affordance text |
 | **loading** | border 1px `color.border.default`; indeterminate bar; the resolved path in `type.caption` | "Reading folder…" + a `ghost` "Cancel" |
-| **error** | border 2px solid `color.status.danger`; a danger-coloured icon | headline + the specific reason + `secondary` "Choose a different folder" |
+| **error** | border 2px solid `color.status.danger`, ground `color.surface.base`; a danger-coloured icon (not built - MT-061 out of scope) | headline = the specific reason; affordance line "Choose a different folder" (same treatment as empty's) |
 | **populated** | replaced by `ChapterSummary` | — |
 | **disabled** | ground `color.surface.disabled`, border `color.border.default` | only while a run is in progress; body says "A run is in progress." |
 
@@ -89,6 +89,57 @@ is an existing directory when the drag enters; any other local path is a
 **The region itself is a focusable button**, role `Button`, accessible name
 "Choose chapter folder", activated by Enter or Space. Drag-and-drop is never the
 only path to any behaviour.
+
+**DQ-1 - the hover-valid ground** (settled 2026-09-30, Lead Designer, MT-061).
+The ground is **`color.surface.hover`** (`#303030`), not `overlay.fill.hover`.
+The overlay token cannot be used: it is an overlay token (painted over artwork
+by Python, never by the sheet) and an 8-digit colour, which Qt's stylesheet
+parser reads as `#AARRGGBB` - both forbidden by `theme.qss.in`'s header. Of the
+three options:
+
+- *`color.surface.hover` (chosen).* It is what "hover" means on every other
+  chrome control (§1), it is achromatic (A-11), and it needs no new token and no
+  new `[hc.map]` entry. Under High Contrast it maps to `Window`, so the
+  headline and body stay `WindowText` on `Window` - a pair Windows guarantees.
+  Measured (WCAG 2.x): `text.primary` on it 11.27, `text.secondary` 6.37 (A-01),
+  `accent.base` border on it 6.58 (A-02).
+- *`color.accent.subtle` (rejected).* The closest in hue to the tint, but it
+  maps to `Highlight` under HC, which would put `WindowText` on `Highlight` -
+  the cross product A-15.2 forbids - and needs an HC override rule to undo.
+- *No ground change (rejected).* Defensible under A-10 - the headline wording
+  and the border carry validity - but the ground change is the cheapest extra
+  cue a drag gets, at the size of the whole region, and costs nothing.
+
+A new solid token blending `#4CC2FF` at 10% over `surface.base` (≈`#212D33`)
+was not added: it would be chromatic chrome (A-11 exception), need its own
+`[hc.map]` entry, and buy a 1.21:1 step from `surface.base` against
+`surface.hover`'s 1.29:1 - fainter, for more machinery.
+
+**The affordance line** ("Choose folder…" in empty, "Choose a different
+folder" in error) is a plain `QLabel` (`#affordance`) inside the one button, not
+a `primary` or `secondary` button: PO-5 (MT-055) keeps the region the only focus
+stop and the only Button. It therefore takes **no rule of its own** - the base
+`QWidget` rule gives it `type.body` in `color.text.primary`, which separates it
+from the `color.text.secondary` body line above it. Styling it as a button
+(accent ground, border) was rejected: it would show a control that is not one -
+not a focus stop, not a separate Button to a screen reader - a false affordance.
+(Settled 2026-09-30, MT-061 Design notes item 3.)
+
+**Focus** (A-04, MT-061). The region has one border, so in the two resting
+states (**empty**, **error**) focus replaces it with a `focus.width`
+`color.focus.ring` solid ring; the state stays carried by the headline (A-10).
+In the two drag states (**hover-valid**, **hover-invalid**) the drag border
+wins and no ring is drawn: the drag is transient and its feedback is the thing
+the user is acting on. This is the one place in the intake where focus is not
+additive, and it is because QSS gives a widget one border. The ring is a border
+of the same width as `border-width.emphasis`, so taking focus moves nothing.
+
+**How it is rendered** (MT-061). Rules in `theme.qss.in`, keyed on a dynamic
+property `state` that `intake.py` mirrors from `FolderDropTarget.state` (values
+exactly `empty`, `hover-valid`, `hover-invalid`, `error`) and re-polishes on
+every change. The headline and body are `#folder-drop-target QLabel#headline`
+and `#folder-drop-target QLabel#body`. Every colour and size comes from the
+application sheet; the widget sets none.
 
 **Enumerated error reasons** — each gets its own message, never a generic one.
 The reason is the error state's headline, verbatim, plain text, word-wrapped:
@@ -224,7 +275,21 @@ button, so the only way on is `Choose a different folder`:
 - The notice widget's accessible name is its three lines joined by `\n`.
 - Contrast: `color.text.primary` and `.secondary` on `color.surface.base` and
   `color.surface.raised` clear A-01; `color.status.warning` border on
-  `color.surface.base` clears A-02's 3:1.
+  `color.surface.base` clears A-02's 3:1 (10.54).
+
+**How it is rendered** (MT-061). Every colour and type size comes from the
+application sheet (`theme.qss.in`, "components.md section 2"); `summary.py`
+sets spacing only. Selectors are `#chapter-summary QLabel#<part>` for the
+labels, `#chapter-summary QFrame#summary-order-notice` for the notice (ground,
+border, radius - its `space.3` padding stays as layout margins in Python, so
+the sheet sets none and the two never add up), and
+`#chapter-summary QScrollArea#summary-scroll` with `:focus` for the ring. The
+scroll area's border is `focus.width` transparent at rest, so focus moves no
+text. The scroll area's content widget needs its own ground rule
+(`... > QWidget#qt_scrollarea_viewport > QWidget`, `color.surface.base`):
+`QScrollArea.setWidget` makes it fill from the default palette, which no
+ancestor's stylesheet background reaches, and without the rule it paints Qt's
+light grey (`#EFEFEF`, measured) under `color.text.primary`.
 
 - **empty** (folder had zero pages): handled by the drop target's error state, not here.
 - **error**: none. A folder that cannot be read whole never reaches the summary
@@ -295,6 +360,14 @@ current (3px `color.accent.base` leading bar + `color.surface.selected`) /
 disabled (during a run, non-current rows are not activatable but stay focusable).
 
 Accessible name: "Page 7 of 20, *filename*, 12 of 18 lines reviewed".
+
+**List ground** (MT-061): the strip's viewport is `color.surface.raised`, from
+the base `QAbstractItemView` rule in `theme.qss.in` - the same rule grounds
+`translationList` (§5). Without it an item view fills from the default
+palette's `Base` (white) under the sheet's `color.text.primary`. The per-row
+states above are not yet rules; under the sheet the current and selected rows
+show Qt's own item highlight, with `selection-background-color`
+`color.surface.selected` from the base `QWidget` rule.
 
 ### `ZoomControl`
 
@@ -495,6 +568,11 @@ Qt has no ARIA-live equivalent. The live region is an off-screen `QLabel` whose
 
 Column header: "Page 7 — 18 lines, 12 reviewed".
 
+The populated list's ground is `color.surface.raised` (the base
+`QAbstractItemView` rule, MT-061), which is the ground every row state above
+says "per selection" over, and the ground the §5 glyph colours were measured
+against (`tokens.md` §6).
+
 ### `TranslationRow` anatomy
 
 `[ status gutter ][ ordinal badge ][ line text / editor ][ actions ]`
@@ -514,6 +592,13 @@ Column header: "Page 7 — 18 lines, 12 reviewed".
 
 A row may be `edited` **and** `overflow` at once: the gutter shows both glyphs,
 in that order, and the accessible name mentions both.
+
+**Glyph colour is a stylesheet rule** (MT-061): `QLabel#rowGutter[status="..."]`,
+one rule per status, in `theme.qss.in`. Once the application sheet is applied,
+the base `QWidget { color }` rule overrides any `setPalette` colour on the
+gutter (measured: all five statuses paint `color.text.primary` without the
+rules), so the rules are what carry the colour, and `_render` must re-polish
+the gutter after changing `status` or the selector does not re-match.
 
 `failed` rows additionally show the error text in `type.caption`
 `color.status.danger` and a `secondary` "Retry line".
