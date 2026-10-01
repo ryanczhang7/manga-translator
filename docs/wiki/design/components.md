@@ -163,7 +163,7 @@ The reason is the error state's headline, verbatim, plain text, word-wrapped:
   copy: the label is plain text and shows no backticks.
 - more than 200 images → not an error. A warning in `ChapterSummary`: "That is
   more pages than a chapter. Estimated cost is *$x*." Nothing is blocked.
-  (MT-058.)
+  (MT-058; it is the third line of `CostEstimate`, below.)
 
 > **Amended 2026-09-30 (MT-057, PO-4 and PO-5).** This section used to say an
 > undecodable image "loads anyway" and is listed in `ChapterSummary` as skipped,
@@ -192,8 +192,10 @@ scrolling row of thumbnails in processing order, and the `CostEstimate`, then a
 `primary` "Start run". **MT-057 ships it without the thumbnail row, without
 `CostEstimate` (MT-058) and without "Start run" (MT-059)**, and without the
 loading state; those parts stand as designed for the stories that add them.
+**MT-058 adds `CostEstimate` as part 5**, between the page facts and the order
+notice (amended 2026-10-01; the notice and the button move down one number).
 
-**Parts, top to bottom** (MT-057). Every part is a plain-text `QLabel`
+**Parts, top to bottom** (MT-057, MT-058). Every part is a plain-text `QLabel`
 (`Qt.PlainText` set before the text: a folder or file named with `<` is not
 markup), word-wrapped, selectable by mouse only, never a focus stop.
 
@@ -203,8 +205,16 @@ markup), word-wrapped, selectable by mouse only, never a focus stop.
 | 2 | page count | `1 page` when there is one page, else `{n} pages` | `type.body`, `color.text.primary` |
 | 3 | first page | `First page: {first}` | `type.body`, `color.text.secondary` |
 | 4 | last page | `Last page: {last}` | `type.body`, `color.text.secondary` |
-| 5 | order notice | see below; present only when the orders differ | see below |
-| 6 | leave | `secondary` button `Choose a different folder` | §1 |
+| 5 | cost estimate | `CostEstimate`, below; always present (MT-058) | see `CostEstimate` |
+| 6 | order notice | see below; present only when the orders differ | see below |
+| 7 | leave | `secondary` button `Choose a different folder` | §1 |
+
+*Why the estimate sits above the notice rather than at the foot, where the
+original sketch had it:* the notice lists every filename twice, so for a long
+chapter it is hundreds of names, and an estimate below it would be scrolled out
+of sight on the one screen whose job is to show the cost before it happens. The
+estimate is a fact about the page count (it is that count times a rate), so it
+belongs beside it.
 
 - `{name}` is the folder's **base name** (for a drive root, the path itself),
   with the **40-character middle cut** of "Drag copy" above (first 20, `…`,
@@ -214,9 +224,10 @@ markup), word-wrapped, selectable by mouse only, never a focus stop.
 - **Exactly one page:** parts 3 and 4 are replaced by one line,
   `Only page: {first}`. No "Last page" line is shown.
 - Spacing: `space.2` below the heading, `space.1` between parts 2-4, `space.4`
-  above the notice, `space.4` between the scroll area and the button.
+  above the cost estimate, `space.4` above the notice, `space.4` between the
+  scroll area and the button.
 
-**Filename-order warning** (part 5). Shown exactly when `sorted(names)` (plain
+**Filename-order warning** (part 6). Shown exactly when `sorted(names)` (plain
 string order) differs from `order_filenames(names)`; not shown when they agree -
 `p1 … p9` shows no notice, `p1 … p12` does. Three plain-text lines, in this
 order:
@@ -240,8 +251,8 @@ order:
   is the change, and it takes focus - below).
 
 **Layout.** In the intake column (layout.md, "Intake and run screens"). Parts
-1-5 sit in a `QScrollArea`: vertical scroll as needed, horizontal scroll **off**.
-Part 6 is **outside** the scroll area, pinned at its foot, left-aligned, always
+1-6 sit in a `QScrollArea`: vertical scroll as needed, horizontal scroll **off**.
+Part 7 is **outside** the scroll area, pinned at its foot, left-aligned, always
 visible however long the lists are.
 
 **Leaving the summary** (settled 2026-09-30, MT-057). MT-057 has no Start
@@ -269,9 +280,14 @@ button, so the only way on is `Choose a different folder`:
   the `color.focus.ring` per A-04. The button takes Enter and Space (§1 states;
   it has no disabled or loading state here).
 - The scroll area's accessible name is `Chapter summary`; its accessible
-  description is every visible line of parts 1-5 in order, joined by `\n`, with
+  description is every visible line of parts 1-6 in order, joined by `\n`, with
   the heading's line as the whole uncut base name. A screen reader landing on it
-  hears the summary, then the notice's three lines exactly as printed.
+  hears the summary, then the estimate's two or three lines, then the notice's
+  three lines, each exactly as printed. *(MT-058 changes this description for
+  every chapter, so the two MT-057 tests that pin it whole - in
+  `tests/ui/test_chapter_summary.py`, the "described by its visible lines" and
+  "one-page summary is described" cases - gain the estimate lines in MT-058's
+  RED. They then fail against the MT-057 code, which is the right failure.)*
 - The notice widget's accessible name is its three lines joined by `\n`.
 - Contrast: `color.text.primary` and `.secondary` on `color.surface.base` and
   `color.surface.raised` clear A-01; `color.status.warning` border on
@@ -297,12 +313,171 @@ light grey (`#EFEFEF`, measured) under `color.text.primary`.
 
 ### `CostEstimate`
 
-`type.numeric` figure, `type.caption` qualifier: "Estimated for 20 pages:
-**$1.10 – $1.90**. Budget $2.00." Shown **before** the run, because spend should
-be observable before it happens as well as during. States: `known`,
-`unknown` ("No estimate yet — the first run of a chapter measures it"),
-`over-budget` (the whole block takes `color.status.warning` and the Start button
-label becomes "Start run anyway").
+Shown **before** the run, as part 5 of `ChapterSummary`, because spend should be
+observable before it happens as well as during (`CostReadout`, §8, is the
+*during*).
+
+> **Amended 2026-10-01 (MT-058, PO-1 and PO-2).** This section used to show a
+> range in `type.numeric` with a `type.caption` qualifier - "Estimated for 20
+> pages: **$1.10 – $1.90**. Budget $2.00." - and gave the component an `unknown`
+> state, "No estimate yet — the first run of a chapter measures it". Both are
+> **withdrawn for this screen** by the user's decision of 2026-09-30. **PO-1:**
+> every chapter this screen shows is a folder with no project, so it is always on
+> its first run: the `unknown` state would be the *only* state, and a range needs
+> a rule nobody has stated. The domain has one number for a chapter nothing has
+> been priced in - `BOOTSTRAP_PAGE_ESTIMATE` × pages, which is what the budget
+> guard itself projects before the first call - and the screen and the guard must
+> use **one number**, or they can disagree about whether a chapter fits. So the
+> estimate is that single figure, labelled as an estimate. **PO-2:** the budget is
+> `DEFAULT_CEILING`, $2.00, shown read-only; no budget setting exists yet (§8's
+> "Change budget…" is the same gap). The `type.numeric`/`type.caption` split is
+> withdrawn too: a plain-text label is one font, and this figure is read once in
+> a sentence, not compared in a column or updated live, which is what
+> `type.numeric`'s tabular digits are for. "Start run anyway" stays [[MT-059]]'s,
+> read from the over-budget state below.
+
+**Source of every figure.** The estimate `{x}` is
+`Budget().project((), n).remaining_chapter` (`mangatl.domain.budget`), where `n`
+is the page count; the budget `{b}` is `DEFAULT_CEILING`. Computed in `domain`,
+formatted in `ui`. No money arithmetic in the widget, and no constant re-typed:
+$0.06 and $2.00 are read from `budget.py`.
+
+**Lines, top to bottom.** A `QFrame` holding two or three plain-text labels
+(the `ChapterSummary` rules: `Qt.PlainText`, word-wrapped, selectable by mouse,
+never a focus stop).
+
+| # | Line | Shown | Copy (character-exact) | Token |
+|---|---|---|---|---|
+| 1 | estimate | always | `Estimated for {n} pages: {x}.` — for one page, `Estimated for 1 page: {x}.` | `type.body-strong`, `color.text.primary` |
+| 2 | budget | **normal** state | `Budget {b}.` | `type.body`, `color.text.secondary` |
+| 2 | budget | **over-budget** state | `Budget {b}. The estimate is over budget.` | `type.body`, `color.text.secondary` |
+| 3 | page-count warning | `n > 200` only | `That is more pages than a chapter. Estimated cost is {x}.` | `type.body`, `color.text.primary` |
+
+- `{n}` is the page count in digits, the same number as part 2's `{n} pages`.
+  One page is `1 page`, as part 2 says it.
+- Line 1 says *Estimated*; nothing on this screen presents the figure as a
+  measured cost. Line 3 says *Estimated* again because it repeats the figure.
+
+**Money format** (`{x}` and `{b}`):
+
+- `$`, then the dollars in digits with a `,` every three digits from the right,
+  then `.`, then **exactly two** decimals: `$0.06`, `$1.20`, `$12.06`,
+  `$1,200.00`. Never `str(Usd)`, which prints four places; never `$1.2`.
+- A value that is not a whole number of cents is rounded **up** (toward
+  +infinity) to the next cent: $0.001 → `$0.01`, $1.141 → `$1.15`, $2.0001 →
+  `$2.01`. Three reasons, all load-bearing: it is `budget.py`'s direction (an
+  estimate that errs low lets a run start that it cannot finish); it makes the
+  shown figure exceed `$2.00` **exactly when** the estimate exceeds the budget,
+  so the figure and the over-budget state can never disagree (round-half-even
+  would show `$2.00` for $2.004 and call it over budget); and it makes AC-5 hold
+  by construction - any positive estimate shows at least `$0.01`.
+- Today every `{x}` is a whole number of cents ($0.06 × `n`), so the rounding
+  rule is observable only on the formatter itself; it is pinned there.
+- **Never `$0.00` for a chapter of one or more pages** (§8's rule for
+  `CostReadout`: an unmeasured cost shown as zero is a lie). A chapter of zero
+  pages never reaches the summary (§2, `FolderDropTarget` errors).
+
+**States.**
+
+| State | Trigger | Appearance | Line 2 |
+|---|---|---|---|
+| **normal** | `{x} <= {b}` | 1px `color.border.subtle` border | `Budget {b}.` |
+| **over-budget** | `{x} > {b}` | 1px `color.status.warning` border | `Budget {b}. The estimate is over budget.` |
+
+- The comparison is on the **unrounded** `Usd` values and is **inclusive**, as
+  `Budget.check`'s is: an estimate of exactly $2.00 is normal. With $0.06 and
+  $2.00: 33 pages → `$1.98`, normal; 34 pages → `$2.04`, over-budget. (The
+  boundary is 33.33 pages; tests read it from the two constants.)
+- **Colour is not the only carrier** (`accessibility.md` A-10): the over-budget
+  state is the sentence `The estimate is over budget.` The border is emphasis
+  only. **No glyph** - the same choice as the order notice (part 6): the sentence
+  carries it, and a font glyph in a plain-text label is font-dependent.
+- The border is 1px in both states and the padding is the same, so the state
+  changes nothing's position.
+- The over-budget state is **queryable on the widget** as a boolean, not only
+  readable as a colour: [[MT-059]] reads it to label its Start button "Start run
+  anyway". Nothing is blocked in either state.
+- **Line 3 does not set the state.** The page-count warning is text only. With
+  today's constants every chapter over 200 pages is also over budget (201 pages →
+  `$12.06`), so it shows all three lines in the over-budget frame - each line says
+  one different thing (what it costs, how that compares with the budget, why the
+  page count is unusual) and nothing is said twice except the figure, which line
+  3's copy carries by design. Exactly 200 pages (`$12.00`) is over budget with
+  no line 3.
+
+**Worked examples** (lines joined by `\n`):
+
+| Pages | State | Lines |
+|---|---|---|
+| 1 | normal | `Estimated for 1 page: $0.06.` / `Budget $2.00.` |
+| 20 | normal | `Estimated for 20 pages: $1.20.` / `Budget $2.00.` |
+| 33 | normal | `Estimated for 33 pages: $1.98.` / `Budget $2.00.` |
+| 34 | over-budget | `Estimated for 34 pages: $2.04.` / `Budget $2.00. The estimate is over budget.` |
+| 200 | over-budget | `Estimated for 200 pages: $12.00.` / `Budget $2.00. The estimate is over budget.` |
+| 201 | over-budget | `Estimated for 201 pages: $12.06.` / `Budget $2.00. The estimate is over budget.` / `That is more pages than a chapter. Estimated cost is $12.06.` |
+
+**Box.** Ground as the order notice (`color.surface.raised`),
+`radius.sm`, padding `space.3`, lines `space.1` apart, `space.4` above it (below
+part 4) and `space.4` below it (above the notice, when there is one). It spans
+the scroll area's width; every line word-wraps; nothing scrolls horizontally.
+Identical at every window width.
+
+**How it is rendered** *(2026-10-01, the user's decision to adopt MT-061's
+rule for this component).* Every colour, ground, border and type size comes
+from the application stylesheet `theme.qss` (generated from
+`theme.qss.in`), selected by object name, and from nowhere else: the widget
+calls no `setStyleSheet` and no `setFont`. The `space.3` inset and `space.1`
+line gap stay as layout in Python (`setContentsMargins`, `setSpacing`); the
+sheet sets no padding, so the two never add up - the same split as the order
+notice.
+
+| Selector | Sets |
+|---|---|
+| `#chapter-summary QFrame#summary-cost-estimate` | ground `color.surface.raised`; `border-width.hairline` solid `color.border.subtle`; `radius.sm` |
+| `#chapter-summary QFrame#summary-cost-estimate[overBudget="true"]` | `border-width.hairline` solid `color.status.warning` |
+| `#chapter-summary QLabel#cost-estimate` | `type.body-strong`, `color.text.primary` |
+| `#chapter-summary QLabel#cost-budget` | `type.body`, `color.text.secondary` |
+| `#chapter-summary QLabel#cost-page-warning` | `type.body`, `color.text.primary` |
+
+- **The state reaches the sheet as a dynamic property.** The frame carries
+  `overBudget`, a Python `bool` set with `setProperty("overBudget", ...)` in
+  the constructor, immediately after `setObjectName` and **before the frame is
+  first polished** (before it is shown, and before anything calls
+  `ensurePolished`). It is set in **both** states - `False` as well as `True` -
+  and equals the widget's `over_budget`. The widget is built once per summary
+  and the value never changes, so no `unpolish`/`polish` is needed. Qt matches a
+  `bool` property against the string `true`.
+- **Scoped under `#chapter-summary`**, as the order notice is. A `CostEstimate`
+  is only ever shown as part 5 of a `ChapterSummary`. Consequence: a standalone
+  `CostEstimate` with the sheet applied gets none of these rules (it paints Qt's
+  default ground, measured `#efefef`), so tests that measure its paint build it
+  **inside a real summary** (`app.build_window` on a pages folder), exactly as
+  MT-061's order-notice test does. Tests of its copy, state and accessible name
+  may still construct it alone.
+- Specificity: the over-budget rule is (2,1,1), the normal rule (2,0,1), so the
+  warning border wins regardless of file order; both outrank the base `QWidget`
+  rules.
+
+**Accessibility.**
+
+- Not a focus stop, no control, not role `Alert`, no live announcement: the
+  summary appearing is the change, and focus goes to the scroll area
+  (`ChapterSummary`, Accessibility).
+- The frame's accessible name is its visible lines joined by `\n`, as the order
+  notice's is.
+- Its lines join the scroll area's accessible description **after part 4's lines
+  and before the notice's**, exactly as printed. For a three-page chapter whose
+  orders differ: `{name}` / `3 pages` / `First page: …` / `Last page: …` /
+  `Estimated for 3 pages: $0.18.` / `Budget $2.00.` / the notice's three lines.
+- Contrast: line text as parts 2-4 (A-01); the `color.status.warning` border on
+  `color.surface.base` clears A-02's 3:1; `color.border.subtle` is decorative
+  and carries nothing.
+
+**Not states of this component on this screen:** `unknown` (withdrawn, above),
+loading (the arithmetic is synchronous on a chapter already read), empty (zero
+pages never reaches the summary), error (none: the figure cannot fail), hover /
+focus-visible / active / disabled (not interactive). An estimate learnt from
+earlier chapters, a range, and a budget field are out of scope (MT-058).
 
 ---
 
@@ -970,3 +1145,21 @@ the stylesheet and repaints the canvas, preserving the selected region, the
 column's scroll position, the canvas zoom and pan, and **uncommitted text in an
 open `LineEditor`** (A-15.10). Announced once through the live region; no notice,
 banner or toast.
+
+### 10.9 `ChapterSummary` and `CostEstimate` (§2)
+
+*Added 2026-10-01 (MT-058).* Both bordered boxes in the summary - the order
+notice and the cost estimate - lose their colour: `color.status.warning` and
+`color.border.subtle` both resolve to `WindowText`, so under HC the estimate's
+**normal** and **over-budget** borders are identical, and the order notice's
+border looks like any other. Nothing is lost, because neither box was ever told
+apart by colour: the over-budget state is the sentence `The estimate is over
+budget.` on line 2, and the notice is its lead sentence (A-10). Text is
+`WindowText` on `Window`; the copy, the lines and the layout are unchanged. No
+glyph is added under HC, since there is none to distinguish.
+
+This needs **no rule in `theme_hc.qss.in`**: the change is one of value, not of
+rule. The base rules for `#summary-cost-estimate` (both states) and the order
+notice already resolve their tokens through `[hc.map]` (`color.border.subtle`,
+`color.status.warning`, `color.text.*` → `WindowText`; `color.surface.raised` →
+`Window`). The override template is for rule changes only (`tokens.md` §12.1).

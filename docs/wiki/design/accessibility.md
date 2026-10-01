@@ -169,6 +169,8 @@ shape change or text:
 | row status | a distinct gutter glyph per status (hollow circle / check / pencil / pencil-with-return / triangle / shrink) |
 | page status in the strip | a distinct glyph per status |
 | cost state | the figure, the budget and the projection as text, plus a warning glyph |
+| pre-run cost estimate over budget (`CostEstimate`, MT-058) | the sentence "The estimate is over budget." after the budget; the border is emphasis only |
+| filename-order notice (`ChapterSummary`, MT-057) | its lead sentence; the border is emphasis only |
 | run stage | the step's label and a check or triangle |
 | drop-target validity | the headline changes wording |
 

@@ -10,7 +10,8 @@
  * covers only the global chrome every widget inherits. Workspace components
  * (components.md sections 2-9) are added by the stories that build them.
  * MT-061 added section 2 (intake and ChapterSummary) and the TranslationRow
- * status gutter, at the end of this file.
+ * status gutter, at the end of this file. MT-058 added the CostEstimate
+ * rules inside the ChapterSummary block.
  *
  * Rules for editing this file:
  *   - comments in slash-star form only; no nested braces;
@@ -256,6 +257,7 @@ QScrollBar::add-page, QScrollBar::sub-page {
 /* ---- ChapterSummary --------------------------------------------------- */
 /* Spacing between parts and the notice padding are layout, set in        */
 /* summary.py from space tokens; nothing here sets margin or padding.     */
+/* The same holds for the cost estimate's inset (cost_estimate.py).       */
 
 #chapter-summary QLabel#summary-name {
     color: #EDEDED;
@@ -291,6 +293,45 @@ QScrollBar::add-page, QScrollBar::sub-page {
 
 #chapter-summary QLabel#order-natural,
 #chapter-summary QLabel#order-lexical {
+    color: #EDEDED;
+    font-size: 13px;
+    font-weight: 400;
+}
+
+/* ---- CostEstimate: ChapterSummary part 5 (MT-058) --------------------- */
+/* Ground as the order notice. No padding: the space.3 inset is layout,   */
+/* set in cost_estimate.py, as for the notice. Two states, one border      */
+/* width, so the state moves nothing. The over-budget state is the        */
+/* dynamic property overBudget, a bool that cost_estimate.py sets once,    */
+/* before the frame is first polished, and never changes; Qt matches a    */
+/* bool property against the string true. The over-budget rule is two ids, */
+/* one attribute, one type name, so it outranks the normal rule whatever  */
+/* the order of the file. Colour is emphasis only: the sentence on the    */
+/* budget line carries the state (A-10).                                  */
+
+#chapter-summary QFrame#summary-cost-estimate {
+    background-color: #262626;
+    border: 1px solid #333333;
+    border-radius: 4px;
+}
+
+#chapter-summary QFrame#summary-cost-estimate[overBudget="true"] {
+    border: 1px solid #FFC14D;
+}
+
+#chapter-summary QLabel#cost-estimate {
+    color: #EDEDED;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+#chapter-summary QLabel#cost-budget {
+    color: #B4B4B4;
+    font-size: 13px;
+    font-weight: 400;
+}
+
+#chapter-summary QLabel#cost-page-warning {
     color: #EDEDED;
     font-size: 13px;
     font-weight: 400;
