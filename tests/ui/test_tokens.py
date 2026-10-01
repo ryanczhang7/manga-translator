@@ -58,8 +58,13 @@ DATA_NAMES = ("TOKENS", "HC_PALETTE_ROLE", "HC_OVERRIDE")
 # parser. Read out, not re-derived.
 TOKEN_COUNT = 126
 COLOUR_TOKEN_COUNT = 40
-ORPHAN_COUNT = 100
-BASE_REFERENCED_COUNT = 25
+# MT-061 RED: the Lead Designer's components.md section 2 and section 5 rules in
+# theme.qss.in reference 14 more tokens (25 -> 39), so 13 fewer are orphans
+# (100 -> 87; `border-width.emphasis` was already the HC template's). Re-measured
+# with a separate parser - tomllib, the placeholder regex, comments stripped -
+# which also reproduces MT-025's 25 and 100 from theme.qss.in before MT-061.
+ORPHAN_COUNT = 87
+BASE_REFERENCED_COUNT = 39
 
 PLACEHOLDER = re.compile(r"@\{([^}]+)\}")
 
