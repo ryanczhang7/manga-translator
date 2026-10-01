@@ -10,10 +10,13 @@ Oracle partition (story `## Contract`):
 - **Settled - spelled out here, never imported:** the three empty-state strings
   (`components.md` §2 empty row), "Choose a different folder" (§2 error row),
   role Button and name "Choose chapter folder" (`accessibility.md` A-08), and
-  AC-4's text, which is `mangatl <folder>`'s (MT-054 AC-3) or `SchemaTooNew`'s
-  own message, read from the exception as MT-054's tests do. DV-1 depends on
-  the no-project text being spelled out: a misspelled `NO_PROJECT_NOTICE` in
-  `mangatl.app` must fail the picker's test as well as the command line's.
+  AC-4's error text, or `SchemaTooNew`'s own message, read from the exception
+  as MT-054's tests do. MT-057 (its PO-3) retired AC-4's no-project text, the
+  `mangatl-run` notice: a folder with no project is now read as a chapter, and
+  the AC-4 tests below are MT-057's rewrites (its `## Contract`, "Callers and
+  tests this story rewrites") - an undecodable page is its AC-6 error, and the
+  "named resolved" test uses its AC-2 folder, where `{folder}` appears. Both
+  texts are spelled out here, never read from `mangatl.app`.
 - **Mechanical:** one focus stop and one accessible Button over the target's
   subtree; one chooser call per activation, zero for a right click, `Key_A`,
   `Key_Escape`; one `open_folder` call with the chosen `Path`; the opened window
@@ -73,9 +76,17 @@ TARGET_NAME = "Choose chapter folder"  # accessibility.md A-08
 DIALOG_CAPTION = "Choose chapter folder"  # C-4
 
 
-def _no_project_notice(folder: Path) -> str:
-    """MT-054 AC-3's text: two spaces before `mangatl-run`, the folder resolved."""
-    return f'No project exists for {folder}.\nCreate one by running:  mangatl-run "{folder}"'
+def _no_pages(folder: Path) -> str:
+    """MT-057 AC-2's headline, the folder resolved."""
+    return f"No page images in {folder}. This tool reads .png and .jpg files."
+
+
+def _undecodable(filename: str) -> str:
+    """MT-057 AC-6's sentence (the Lead Designer's)."""
+    return (
+        f"{filename} could not be opened as a page image."
+        " Remove or replace it, then choose the folder again."
+    )
 
 
 SELECTABLE = (
@@ -160,12 +171,23 @@ def source(tmp_path: Path, page_png: bytes, mask_png: bytes) -> Path:
 
 
 @pytest.fixture
-def no_project(tmp_path: Path) -> Path:
-    """A chapter folder with pages and no project. `&` and a space in its name:
-    plain text, and C-3/MT-054's quoting. (No `<`: CI runs on Windows.)"""
+def undecodable(tmp_path: Path) -> Path:
+    """A folder with no project whose one page will not decode: MT-057 AC-6's
+    error state. `&` and a space in its name: plain text. (No `<`: CI runs on
+    Windows.)"""
     folder = tmp_path / "Vol 1 & 2"
     folder.mkdir()
     (folder / "001.png").write_bytes(b"not read")
+    return folder
+
+
+@pytest.fixture
+def no_pages(tmp_path: Path) -> Path:
+    """A folder with no project and no page images: MT-057 AC-2's error state,
+    whose text names the folder."""
+    folder = tmp_path / "Vol 5 & 6"
+    folder.mkdir()
+    (folder / "notes.txt").write_bytes(b"not a page")
     return folder
 
 
@@ -207,11 +229,13 @@ class Chooser:
 class Opener:
     """A `FolderOpener` that records every path and delegates to `delegate`."""
 
-    def __init__(self, delegate: Callable[[Path], QMainWindow | str] | None = None) -> None:
+    def __init__(
+        self, delegate: Callable[[Path], QMainWindow | Chapter | str] | None = None
+    ) -> None:
         self.delegate = delegate
         self.calls: list[Path] = []
 
-    def __call__(self, folder: Path) -> QMainWindow | str:
+    def __call__(self, folder: Path) -> QMainWindow | Chapter | str:
         self.calls.append(folder)
         if self.delegate is None:
             return "stub opener: no folder expected"
@@ -250,7 +274,7 @@ def _intake(
     qtbot,  # type: ignore[no-untyped-def]
     windows: list[QMainWindow],
     chooser: Chooser,
-    opener: Callable[[Path], QMainWindow | str],
+    opener: Callable[[Path], QMainWindow | Chapter | str],
 ) -> MainWindow:
     """The intake window, shown, exposed and active."""
     window = MainWindow(open_folder=opener, choose_folder=chooser)
@@ -667,28 +691,29 @@ def test_the_real_dialog_path_opens_a_picked_chapter_end_to_end(
 
 
 # =============================================================================
-# AC-4: a folder with no project is the error state, with MT-054's text
+# AC-4: a folder that cannot be opened is the error state (texts per MT-057)
 # =============================================================================
 
 
-def test_a_picked_folder_with_no_project_shows_the_command_lines_text(
+def test_a_picked_folder_with_an_undecodable_page_names_it_and_writes_nothing(
     qtbot,  # type: ignore[no-untyped-def]
     windows,
     tmp_path: Path,
-    no_project: Path,
+    undecodable: Path,
 ) -> None:
+    """Was "shows the command line's text" (MT-054's notice); MT-057 AC-6."""
     before = _tree(tmp_path)
     opener = Opener(app_module.open_folder)
-    window = _intake(qtbot, windows, Chooser(no_project), opener)
+    window = _intake(qtbot, windows, Chooser(undecodable), opener)
     target = _target(window)
 
     QTest.mouseClick(target, Qt.MouseButton.LeftButton)
     _settle()
 
-    assert opener.calls == [no_project]
+    assert opener.calls == [undecodable]
     assert window.opened is None
     assert window.isVisible(), "the intake window closed on a folder with no project"
-    _assert_error(target, _no_project_notice(no_project.resolve()))
+    _assert_error(target, _undecodable("001.png"))
     assert _tree(tmp_path) == before, "choosing a folder with no project wrote something"
 
 
@@ -697,42 +722,43 @@ def test_a_relative_picked_folder_is_named_resolved(
     windows,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    no_project: Path,
+    no_pages: Path,
 ) -> None:
-    """The command must work pasted into any shell: the folder is resolved."""
+    """The folder is named whole and resolved, wherever the app was started
+    (MT-057 AC-2, whose text carries `{folder}`)."""
     monkeypatch.chdir(tmp_path)
-    window = _intake(qtbot, windows, Chooser(Path(no_project.name)), app_module.open_folder)
+    window = _intake(qtbot, windows, Chooser(Path(no_pages.name)), app_module.open_folder)
     target = _target(window)
 
     QTest.mouseClick(target, Qt.MouseButton.LeftButton)
     _settle()
 
-    _assert_error(target, _no_project_notice(no_project.resolve()))
+    _assert_error(target, _no_pages(no_pages.resolve()))
 
 
 def test_the_error_state_keeps_one_control_described_by_the_reason(
     qtbot,  # type: ignore[no-untyped-def]
     windows,
-    no_project: Path,
+    undecodable: Path,
 ) -> None:
-    window = _intake(qtbot, windows, Chooser(no_project), app_module.open_folder)
+    window = _intake(qtbot, windows, Chooser(undecodable), app_module.open_folder)
     target = _target(window)
     QTest.mouseClick(target, Qt.MouseButton.LeftButton)
     _settle()
 
     _assert_one_control(target)
     interface = QAccessible.queryAccessibleInterface(target)
-    assert interface.text(QAccessible.Text.Description) == _no_project_notice(no_project.resolve())
+    assert interface.text(QAccessible.Text.Description) == _undecodable("001.png")
 
 
 @pytest.mark.parametrize("how", ["click", "Return", "Space"])
 def test_activating_the_error_state_asks_the_chooser_again(
     qtbot,  # type: ignore[no-untyped-def]
     windows,
-    no_project: Path,
+    undecodable: Path,
     how: str,
 ) -> None:
-    chooser = Chooser(no_project)
+    chooser = Chooser(undecodable)
     window = _intake(qtbot, windows, chooser, app_module.open_folder)
     target = _target(window)
     QTest.mouseClick(target, Qt.MouseButton.LeftButton)
@@ -754,11 +780,11 @@ def test_activating_the_error_state_asks_the_chooser_again(
 def test_a_different_folder_chosen_from_the_error_state_opens_it(
     qtbot,  # type: ignore[no-untyped-def]
     windows,
-    no_project: Path,
+    undecodable: Path,
     source: Path,
 ) -> None:
     opener = Opener(app_module.open_folder)
-    window = _intake(qtbot, windows, Chooser(no_project, source), opener)
+    window = _intake(qtbot, windows, Chooser(undecodable, source), opener)
     target = _target(window)
 
     QTest.mouseClick(target, Qt.MouseButton.LeftButton)
@@ -766,7 +792,7 @@ def test_a_different_folder_chosen_from_the_error_state_opens_it(
     QTest.mouseClick(_part(target, "affordance"), Qt.MouseButton.LeftButton)
     _settle()
 
-    assert opener.calls == [no_project, source]
+    assert opener.calls == [undecodable, source]
     assert isinstance(window.opened, Workspace)
     qtbot.addWidget(window.opened)
     assert window.opened.isVisible()
@@ -843,14 +869,14 @@ def test_dismissing_the_chooser_from_the_error_state_keeps_the_error(
     qtbot,  # type: ignore[no-untyped-def]
     windows,
     tmp_path: Path,
-    no_project: Path,
+    undecodable: Path,
 ) -> None:
     opener = Opener(app_module.open_folder)
-    window = _intake(qtbot, windows, Chooser(no_project, None), opener)
+    window = _intake(qtbot, windows, Chooser(undecodable, None), opener)
     target = _target(window)
     QTest.mouseClick(target, Qt.MouseButton.LeftButton)
     _settle()
-    expected = _no_project_notice(no_project.resolve())
+    expected = _undecodable("001.png")
     _assert_error(target, expected)
     before = _tree(tmp_path)
     top_levels = _visible_top_levels()
@@ -858,7 +884,7 @@ def test_dismissing_the_chooser_from_the_error_state_keeps_the_error(
     QTest.mouseClick(_part(target, "affordance"), Qt.MouseButton.LeftButton)
     _settle()
 
-    assert opener.calls == [no_project], "the dismissal reached open_folder"
+    assert opener.calls == [undecodable], "the dismissal reached open_folder"
     assert window.opened is None
     assert window.isVisible()
     _assert_error(target, expected)

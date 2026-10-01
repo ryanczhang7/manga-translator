@@ -17,9 +17,14 @@ no invented metrics.
   `Enter`, close at once (inside the 500 ms debounce, so only C-4's
   flush-then-close saves it), read the project file with a plain `sqlite3`
   connection, then `main` again with the same folder.
-- **AC-3 / C-3** - the notice text is spelled out HERE, never read back from
-  `NO_PROJECT_NOTICE`: a constant with `mangatl-run` misspelled must fail
-  (D-4). "Not silently" is a snapshot of every path under `tmp_path`.
+- **AC-3 / C-3** - superseded by MT-057 (its PO-3): a folder with no project
+  is no longer a notice naming `mangatl-run`; it is read as a chapter, and
+  `mangatl <folder>` shows the intake window with the summary or an intake
+  error. The two AC-3 tests below are MT-057's rewrites (its `## Contract`,
+  "Callers and tests this story rewrites"): an undecodable page is its AC-6
+  error; a bare `.mtproj` with no `project.db`, over a folder with no page
+  images, is its AC-2 error. The texts are spelled out HERE, never read back
+  from the app. "Not silently" is a snapshot of every path under `tmp_path`.
 - **AC-4 / C-2 case 1** - the no-argument `MainWindow`. MT-055 changed it
   deliberately (MT-055 PO-1): it is now the folder intake, pinned here by
   `_assert_intake_window` and in full in `test_folder_intake.py`.
@@ -85,8 +90,17 @@ NEW_TEXT = "Hi there"
 EDITED_GLYPH = "✎"  # ✎, components.md §5 / MT-017 C-8
 
 
-def _no_project_notice(folder: Path) -> str:
-    return f'No project exists for {folder}.\nCreate one by running:  mangatl-run "{folder}"'
+def _no_pages(folder: Path) -> str:
+    """MT-057 AC-2's headline, the folder resolved."""
+    return f"No page images in {folder}. This tool reads .png and .jpg files."
+
+
+def _undecodable(filename: str) -> str:
+    """MT-057 AC-6's sentence (the Lead Designer's)."""
+    return (
+        f"{filename} could not be opened as a page image."
+        " Remove or replace it, then choose the folder again."
+    )
 
 
 def _no_folder_notice(folder: Path) -> str:
@@ -529,16 +543,32 @@ def test_closed_is_emitted_once_per_close_and_after_the_pending_save(
 
 
 # =============================================================================
-# AC-3 / C-2 case 3: a folder with no project says so and creates nothing
+# AC-3 / C-2 case 3, as MT-057 rewrote it: no project -> the folder is read
 # =============================================================================
 
 
-def test_a_folder_with_no_project_says_so_and_names_the_command_that_makes_one(
+def _assert_intake_error(window: QMainWindow, text: str) -> None:
+    """MT-057 C-3: the intake window, its drop target in the error state with
+    `text` as the headline - not MT-054's notice window."""
+    from mangatl.ui.intake import FolderDropTarget
+
+    assert type(window) is MainWindow, f"build_window returned a {type(window).__name__}"
+    assert window.windowTitle() == WINDOW_TITLE
+    assert window.findChild(QObject, "notice") is None, "MT-054's notice window was built"
+    central = window.centralWidget()
+    assert isinstance(central, FolderDropTarget), f"central widget is {type(central).__name__}"
+    headline = central.findChild(QLabel, "headline")
+    assert headline is not None
+    assert (central.state, headline.text()) == ("error", text)
+
+
+def test_a_folder_with_no_project_and_an_undecodable_page_shows_the_intake_error_naming_it(
     qtbot,  # type: ignore[no-untyped-def]
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Given relatively, shown resolved: the command works from any directory."""
+    """MT-057 AC-6 on the command line (was MT-054 AC-3's notice). Given
+    relatively; nothing written - no `.mtproj`, every byte as it was."""
     folder = tmp_path / "Vol 1 & 2"
     folder.mkdir()
     (folder / "001.png").write_bytes(b"not read")
@@ -547,18 +577,18 @@ def test_a_folder_with_no_project_says_so_and_names_the_command_that_makes_one(
 
     window = _build(qtbot, ["Vol 1 & 2"])
 
-    resolved = folder.resolve()
-    assert type(window) is MainWindow
-    assert window.windowTitle() == WINDOW_TITLE
-    _assert_notice_label(_notice(window), _no_project_notice(resolved))
+    _assert_intake_error(window, _undecodable("001.png"))
     assert _tree(tmp_path) == before, "launching on a folder with no project wrote something"
+    assert (folder / "001.png").read_bytes() == b"not read"
 
 
 def test_an_empty_project_directory_without_a_project_file_is_no_project(
     qtbot,  # type: ignore[no-untyped-def]
     tmp_path: Path,
 ) -> None:
-    """C-2 case 3 is decided by `project.db`, not by the `.mtproj` directory."""
+    """C-2 case 3 is decided by `project.db`, not by the `.mtproj` directory:
+    a bare `.mtproj` over a folder with no page images is MT-057 AC-2, and the
+    `.mtproj` still holds nothing afterwards."""
     folder = tmp_path / "chapter"
     folder.mkdir()
     (tmp_path / "chapter.mtproj").mkdir()
@@ -566,9 +596,14 @@ def test_an_empty_project_directory_without_a_project_file_is_no_project(
 
     window = _build(qtbot, [str(folder)])
 
-    assert type(window) is MainWindow
-    _assert_notice_label(_notice(window), _no_project_notice(folder.resolve()))
+    _assert_intake_error(window, _no_pages(folder.resolve()))
     assert _tree(tmp_path) == before
+    assert list((tmp_path / "chapter.mtproj").iterdir()) == []
+
+
+def test_the_no_project_notice_is_gone_from_the_app_module() -> None:
+    """MT-057 C-2 / PO-3: `NO_PROJECT_NOTICE` is deleted, not left unused."""
+    assert not hasattr(app_module, "NO_PROJECT_NOTICE"), "NO_PROJECT_NOTICE still exists"
 
 
 def test_the_app_module_does_not_import_create_project() -> None:

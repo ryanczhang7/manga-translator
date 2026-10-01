@@ -3,7 +3,8 @@
 Covers AC-1 (order, at the filesystem boundary), AC-2 (suffix filtering, exact
 membership, no descent into subdirectories), AC-3 (`NoPagesFound`), AC-4 (the
 `Page` fields, from real bytes), AC-5 (`UnreadablePage`, both PO-3 fixtures)
-and AC-6 (the input folder is never written to). AC-7 is a `domain` test and
+and AC-6 (the input folder is never written to). MT-057 C-1 adds
+`UnreadablePage.filename`, asserted beside AC-5's message tests. AC-7 is a `domain` test and
 lives in `test_page.py` (`## Contract` PO-4).
 
 Every fixture byte string used here is a plain `bytes` value from `conftest.py`
@@ -211,6 +212,26 @@ def test_the_raise_names_the_specific_corrupt_file_not_the_first_file_in_the_fol
 
     assert corrupt_name in str(excinfo.value)
     assert "p1.png" not in str(excinfo.value)
+    # MT-057 C-1: the name is an attribute, so the UI never parses the message.
+    assert excinfo.value.filename == corrupt_name
+
+
+def test_with_two_corrupt_files_the_raise_carries_the_first_in_reading_order_as_its_filename(
+    tmp_path: Path, png_bytes: Callable[..., bytes], garbage_bytes: bytes
+) -> None:
+    """MT-057 C-1: `UnreadablePage.filename` is the base name of the first
+    undecodable file in `order_filenames` order - `p2.png`, where both lexical
+    and NTFS listing order (`p1, p10, p2, p3`) would reach `p10.png` first."""
+    (tmp_path / "p1.png").write_bytes(png_bytes(7, 3))
+    (tmp_path / "p2.png").write_bytes(garbage_bytes)
+    (tmp_path / "p3.png").write_bytes(png_bytes(7, 3))
+    (tmp_path / "p10.png").write_bytes(garbage_bytes)
+
+    with pytest.raises(UnreadablePage) as excinfo:
+        read_chapter(tmp_path)
+
+    assert excinfo.value.filename == "p2.png"
+    assert str(excinfo.value).startswith("cannot decode page p2.png: "), str(excinfo.value)
 
 
 def test_the_raise_names_the_underlying_decode_failure_not_only_the_filename(

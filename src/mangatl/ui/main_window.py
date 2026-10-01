@@ -1,13 +1,17 @@
 """The application's window when no chapter is open.
 
-With no `notice` it is the folder intake (MT-055): its whole content is a
-`FolderDropTarget`. Activating it asks `choose_folder` for a folder, and
-dropping one folder on it (MT-056) supplies one directly; either way the folder
-goes down one path to `open_folder`. The window does not decide what a folder
-means - `mangatl.app` injects that function, the same one `mangatl <folder>`
-runs, so the picker, the drop and the command line cannot drift apart. A window back
-from it is the opened chapter: it is shown, then this window closes. A string
-back is the reason nothing opened, shown in the target's error state.
+With no `notice` it is the folder intake (MT-055): its whole content is one
+view, `centralWidget()`, which is either a `FolderDropTarget` or - once a
+folder of pages with no project has been read (MT-057) - that chapter's
+`ChapterSummary`. Activating the target asks `choose_folder` for a folder,
+dropping one folder on it (MT-056) supplies one directly, and the summary's
+"Choose a different folder" asks the same chooser; every way, the folder goes
+down one path to `open_folder`. The window does not decide what a folder means
+- `mangatl.app` injects that function, the same one `mangatl <folder>` runs, so
+the picker, the drop and the command line cannot drift apart. A window back
+from it is the opened chapter: it is shown, then this window closes. A
+`Chapter` back is a folder with no project: its summary is shown. A string back
+is the reason nothing opened, shown in the target's error state.
 
 With a `notice` (MT-054 C-5) the window says one thing instead: why no chapter
 could be opened, and what to do about it. The notice is the whole content of
@@ -23,7 +27,9 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QMainWindow, QWidget
 
+from mangatl.domain.page import Chapter
 from mangatl.ui.intake import FolderDropTarget, choose_folder_dialog
+from mangatl.ui.summary import ChapterSummary
 
 __all__ = [
     "NOTICE_OBJECT_NAME",
@@ -36,8 +42,9 @@ __all__ = [
 WINDOW_TITLE = "mangatl"
 NOTICE_OBJECT_NAME = "notice"
 
-#: A folder to the window that opened it, or the reason nothing opened.
-FolderOpener = Callable[[Path], QMainWindow | str]
+#: A folder to the window that opened it, the chapter it would become, or the
+#: reason it is neither.
+FolderOpener = Callable[[Path], QMainWindow | Chapter | str]
 #: The chosen folder, or `None` when the choice was dismissed.
 FolderChooser = Callable[[QWidget], Path | None]
 
@@ -66,22 +73,53 @@ class MainWindow(QMainWindow):
         assert open_folder is not None  # the TypeError above
         self._open: FolderOpener = open_folder
         self._choose_folder = choose_folder or choose_folder_dialog
-        self._target = FolderDropTarget(self)
-        self._target.activated.connect(self._choose)
-        self._target.dropped.connect(self._hand_over)
-        self.setCentralWidget(self._target)
+        self.setCentralWidget(self._new_target())
+
+    def show_summary(self, chapter: Chapter) -> None:
+        """Replace the current view with `chapter`'s summary, focus on its
+        scroll area so arrows and Page keys read it at once."""
+        summary = ChapterSummary(chapter, self)
+        summary.choose_other.connect(self._choose)
+        self.setCentralWidget(summary)
+        summary.scroll_area.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def show_error(self, text: str) -> None:
+        """The drop target's error state with `text` as its headline: the
+        target already showing, or a new one in place of a summary."""
+        target = self.centralWidget()
+        if not isinstance(target, FolderDropTarget):
+            target = self._new_target()
+            self.setCentralWidget(target)
+        target.show_error(text)
+
+    def _new_target(self) -> FolderDropTarget:
+        """A drop target wired to the chooser and to the hand-over - the same
+        wiring whether it is the first view or one put back after a summary."""
+        target = FolderDropTarget(self)
+        target.activated.connect(self._choose)
+        target.dropped.connect(self._hand_over)
+        return target
 
     def _choose(self) -> None:
         folder = self._choose_folder(self)
         if folder is None:
+            # Dismissed: nothing changes, and a summary's button gets focus
+            # back from wherever the dialog left it.
+            current = self.centralWidget()
+            if isinstance(current, ChapterSummary):
+                current.choose.setFocus(Qt.FocusReason.OtherFocusReason)
             return
         self._hand_over(folder)
 
     def _hand_over(self, folder: Path) -> None:
-        """The one path a folder takes, chosen or dropped (MT-056 C-2)."""
+        """The one path a folder takes, chosen, dropped or chosen from a
+        summary (MT-056 C-2, MT-057 C-4)."""
         outcome = self._open(folder)
+        if isinstance(outcome, Chapter):
+            self.show_summary(outcome)
+            return
         if isinstance(outcome, str):
-            self._target.show_error(outcome)
+            self.show_error(outcome)
             return
         self.opened = outcome
         # Shown first, so quit-on-last-window-closed never sees zero windows.
