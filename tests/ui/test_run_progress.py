@@ -534,27 +534,39 @@ def test_a_budget_abort_puts_the_cost_readout_in_its_aborted_state(qtbot) -> Non
     assert panel.cost_readout.state() == "aborted"
 
 
-@pytest.mark.parametrize(
-    ("reason", "ordinal"),
-    [(CANCELLED, None), ("RuntimeError: the model returned nothing", 4)],
-)
-def test_an_abort_for_any_other_reason_shows_no_budget_banner(
-    qtbot,  # type: ignore[no-untyped-def]
-    reason: str,
-    ordinal: int | None,
-) -> None:
-    """Cancelled and failed runs are MT-059's states, not a budget banner."""
+def test_a_cancelled_run_shows_no_banner(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """MT-059 D-4: a cancel (only ever a window close) shows nothing."""
     panel = _panel(qtbot)
 
     _feed(
         panel,
         RunStarted(run_id=1, page_count=20),
         PageStarted(ordinal=4),
-        RunAborted(reason=reason, ordinal=ordinal),
+        RunAborted(reason=CANCELLED, ordinal=None),
     )
 
     assert panel.banner is None
     assert panel.findChildren(ErrorBanner) == []
+
+
+def test_a_failed_run_shows_the_failed_banner_not_the_budget_one(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """MT-059 C-5 rewrote this case, which MT-018 pinned as "no banner" because
+    the failed state was MT-059's. It is now built (copy in
+    `test_run_failed_state.py`); what stays from MT-018 is that it is not the
+    budget banner and does not put the readout in the budget's `aborted` state."""
+    panel = _panel(qtbot)
+
+    _feed(
+        panel,
+        RunStarted(run_id=1, page_count=20),
+        PageStarted(ordinal=4),
+        RunAborted(reason="RuntimeError: the model returned nothing", ordinal=4),
+    )
+
+    banner = panel.banner
+    assert isinstance(banner, ErrorBanner), "no banner for a failed run"
+    assert "budget" not in banner.headline.text(), banner.headline.text()
+    assert panel.cost_readout.state() != "aborted"
 
 
 # =============================================================================
@@ -563,12 +575,13 @@ def test_an_abort_for_any_other_reason_shows_no_budget_banner(
 
 _UI = Path(progress_module.__file__).parent
 
+#: The abort reasons the panel branches on (MT-059 C-5 added CANCELLED to
+#: MT-018's BUDGET); the runner's constants, never re-spelled.
+_REASONS = {"BUDGET", "CANCELLED"}
 
-@pytest.mark.parametrize("module", ["progress.py", "cost_readout.py"])
-def test_the_run_widgets_import_nothing_from_store_or_translate_and_only_budget_from_pipeline(
-    module: str,
-) -> None:
-    tree = ast.parse((_UI / module).read_text(encoding="utf-8"))
+
+def _reaching_past_the_stream(source: str) -> list[str]:
+    tree = ast.parse(source)
     offending: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -583,6 +596,31 @@ def test_the_run_widgets_import_nothing_from_store_or_translate_and_only_budget_
                 offending.append(node.module)
             elif node.module.startswith("mangatl.pipeline"):
                 imported = [alias.name for alias in node.names]
-                if (node.module, imported) != ("mangatl.pipeline.runner", ["BUDGET"]):
+                if node.module != "mangatl.pipeline.runner" or not set(imported) <= _REASONS:
                     offending.append(f"from {node.module} import {', '.join(imported)}")
+    return offending
+
+
+def test_control_the_boundary_check_flags_anything_but_the_two_reasons() -> None:
+    planted = "\n".join(
+        (
+            "from mangatl.pipeline.runner import BUDGET, CANCELLED",
+            "from mangatl.pipeline.runner import BUDGET, run_chapter",
+            "from mangatl.pipeline.stage import Stage",
+            "import mangatl.store.project",
+        )
+    )
+
+    assert _reaching_past_the_stream(planted) == [
+        "from mangatl.pipeline.runner import BUDGET, run_chapter",
+        "from mangatl.pipeline.stage import Stage",
+        "mangatl.store.project",
+    ]
+
+
+@pytest.mark.parametrize("module", ["progress.py", "cost_readout.py"])
+def test_the_run_widgets_import_nothing_from_store_or_translate_and_only_reasons_from_pipeline(
+    module: str,
+) -> None:
+    offending = _reaching_past_the_stream((_UI / module).read_text(encoding="utf-8"))
     assert offending == [], f"{module} reaches past the event stream: {offending}"

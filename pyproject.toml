@@ -257,7 +257,7 @@ forbidden_modules = ["mangatl.ui"]
 [[tool.importlinter.contracts]]
 name = "Only translate imports anthropic"
 type = "forbidden"
-# **Ten entries, and `mangatl.cli` is deliberately not one of them.** MT-044
+# **Nine entries; `mangatl.cli` and `mangatl.app` are deliberately not among them.** MT-044
 # (PO-1) is the second instance of `architecture.md` §3 rule 5's composition-root
 # exception, exactly as the onnxruntime contract below is the first: something
 # has to construct the `Anthropic` client for `partial(translate_page, client)`,
@@ -266,14 +266,19 @@ type = "forbidden"
 # contract through `mangatl.cli -> mangatl.compose`, and removing that single
 # name returns `5 kept, 0 broken` with the construction still in place.
 # `allow_indirect_imports` is NOT added: it would stop import-linter reporting
-# the chain for all ten modules still listed, including `mangatl.pipeline`,
+# the chain for all nine modules still listed, including `mangatl.pipeline`,
 # whose `pipeline -> translate -> anthropic` chain is the one MT-011 C-1 is
-# built around - strictly worse than removing one name. `mangatl.app` stays
-# listed (MT-036 PO-2): an exemption is earned by a gate that fails, not
-# anticipated. `mangatl.compose` is already in the "Nothing imports ui"
-# contract above, so this does not become a back door out of that one either.
+# built around - strictly worse than removing one name. `mangatl.app` is the
+# third instance (MT-059 PO-3, C-8): the window's composition root, whose
+# `build_stages` imports `mangatl.compose` inside its body. Earned, not
+# anticipated: with that import in place this contract broke on
+# `mangatl.app -> mangatl.compose -> anthropic`, and removing the one name
+# returned `5 kept, 0 broken` (MT-059 `## Notes`, "C-8 exemption").
+# `mangatl.ui` stays listed, so the window itself still cannot reach `compose`
+# (MT-059 `## Gate probes`). `mangatl.compose` is already in the "Nothing
+# imports ui" contract above, so this does not become a back door out of that
+# one either.
 source_modules = [
-    "mangatl.app",
     "mangatl.domain",
     "mangatl.store",
     "mangatl.detect",
@@ -289,7 +294,7 @@ forbidden_modules = ["anthropic"]
 [[tool.importlinter.contracts]]
 name = "Only detect, ocr and clean import onnxruntime"
 type = "forbidden"
-# **Eight entries, and `mangatl.cli` is deliberately not one of them.** MT-036
+# **Seven entries; `mangatl.cli` and `mangatl.app` are deliberately not among them.** MT-036
 # (AC-1, PO-1, PO-2) amends `architecture.md` §3 rule 5 with the composition-root
 # exception: something has to construct the runtime, `mangatl.compose` is that
 # something and `mangatl.cli` imports it. Measured before it was written - one
@@ -297,10 +302,14 @@ type = "forbidden"
 # name returns `5 kept, 0 broken` with the import still in place.
 # `allow_indirect_imports` is NOT added: it would stop import-linter reporting
 # the chain through `detect.session`, which is the whole of what this contract
-# catches, for all eight modules still listed. `mangatl.app` stays listed (PO-2):
-# an exemption is earned by a gate that fails, not anticipated.
+# catches, for all seven modules still listed. `mangatl.app` is the third
+# instance (MT-059 PO-3, C-8): its `resolve_models` and `build_stages` import
+# `mangatl.compose` inside their bodies, and with them in place this contract
+# broke on `mangatl.app -> mangatl.compose`, on to `onnxruntime` through a
+# `*.session` module; removing the one name returned `5 kept, 0 broken` (MT-059
+# `## Notes`, "C-8 exemption"). `mangatl.ui` stays listed: the window injects
+# the stage list and never imports `compose` (MT-059 `## Gate probes`).
 source_modules = [
-    "mangatl.app",
     "mangatl.domain",
     "mangatl.store",
     "mangatl.translate",

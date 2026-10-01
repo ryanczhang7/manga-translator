@@ -198,7 +198,15 @@ def test_the_entry_point_may_still_open_the_window_it_exists_to_open() -> None:
 
 
 def test_only_translate_may_import_anthropic() -> None:
-    # MT-044 PO-1: **ten** entries, `mangatl.cli` removed and nothing else.
+    # MT-059 PO-3 (C-8): **nine** entries. `mangatl.app` came out as the third
+    # instance of the composition-root exception: the window's composition
+    # root, whose `build_stages` imports `mangatl.compose` inside its body, so
+    # this contract broke on `mangatl.app -> mangatl.compose -> anthropic`.
+    # `mangatl.ui` stays listed - the window is handed its stage list and never
+    # reaches `compose` (MT-059 `## Gate probes`).
+    #
+    # MT-044 PO-1 (before that): **ten** entries, `mangatl.cli` removed and
+    # nothing else.
     # `compose.build_pipeline` must construct the `Anthropic` client to bind
     # `partial(translate_page, client)` into the stage list (C-13).
     # `mangatl.compose` is already absent from this list - but `mangatl.cli`
@@ -215,7 +223,7 @@ def test_only_translate_may_import_anthropic() -> None:
     #
     # Removing that one name returned `Contracts: 5 kept, 0 broken` with the
     # probe still in place. This mirrors
-    # `test_the_composition_root_is_exempt_from_onnx_and_the_window_entry_point_is_not`
+    # `test_the_composition_roots_are_exempt_from_onnx_and_the_window_is_not`
     # exactly: MT-036 made the identical move for the onnxruntime contract, and
     # `architecture.md` §3 rule 5's composition-root exception is the precedent.
     #
@@ -227,7 +235,6 @@ def test_only_translate_may_import_anthropic() -> None:
     assert contract.get("type") == "forbidden"
     assert _modules(contract, "forbidden_modules") == ["anthropic"]
     assert _modules(contract, "source_modules") == [
-        "mangatl.app",
         "mangatl.bench",
         "mangatl.clean",
         "mangatl.detect",
@@ -248,11 +255,15 @@ def test_only_translate_may_import_anthropic() -> None:
 def test_the_composition_root_is_exempt_from_anthropic_and_the_pipeline_is_not() -> None:
     """MT-044 PO-1, stated as the decision rather than as one list.
 
-    Only the module that *constructs* the client, and the entry point that
-    imports it, come out of this contract: `mangatl.compose` was already absent
-    and `mangatl.cli` joins it. `mangatl.app` stays listed for MT-036 PO-2's
-    reason - `app.py` imports `mangatl.ui.main_window` and nothing else, so it
-    needs no exemption and will not be given one in advance.
+    Only the module that *constructs* the client, and the entry points that
+    import it, come out of this contract: `mangatl.compose` was already absent
+    and `mangatl.cli` joins it. `mangatl.app` joined them under MT-059 PO-3
+    (C-8), the third composition-root instance: until then it imported
+    `mangatl.ui.main_window` and nothing else and so, by MT-036 PO-2's rule,
+    stayed listed; MT-059's `build_stages` imports `mangatl.compose`, and the
+    exemption was earned by the contract breaking, not anticipated. The window
+    itself, `mangatl.ui`, stays confined - it is handed its stage list and
+    never reaches `compose`.
 
     What is lost, stated honestly: `mangatl.cli` may now import
     `mangatl.translate` directly and this contract will not complain. What is
@@ -274,9 +285,14 @@ def test_the_composition_root_is_exempt_from_anthropic_and_the_pipeline_is_not()
         "mangatl.pipeline was exempted from the anthropic confinement; that chain"
         " is the one MT-011 C-1 and MT-044 PO-1 both exist to keep reportable"
     )
-    assert "mangatl.app" in confined, (
-        "mangatl.app was exempted from the anthropic confinement without a story"
-        " that needed it (MT-036 PO-2's rule, applied to this contract)"
+    assert "mangatl.app" not in confined, (
+        "mangatl.app is confined from anthropic, but it is the window's"
+        " composition root and imports mangatl.compose (MT-059 PO-3, C-8)"
+    )
+    assert "mangatl.ui" in confined, (
+        "mangatl.ui was exempted from the anthropic confinement; only the"
+        " composition root mangatl.app is (MT-059 PO-3) - the window is handed"
+        " its stage list and must not reach compose"
     )
     assert "mangatl.compose" in _contract(UI).get("source_modules", []), (
         "the composition root's exemption from the anthropic contract must not"
@@ -285,17 +301,23 @@ def test_the_composition_root_is_exempt_from_anthropic_and_the_pipeline_is_not()
 
 
 def test_only_detect_ocr_and_clean_may_import_onnxruntime() -> None:
-    # MT-036 AC-1: **eight** entries, `mangatl.cli` removed and nothing else.
+    # MT-059 PO-3 (C-8): **seven** entries. `mangatl.app` came out as the third
+    # instance of the composition-root exception: its `resolve_models` and
+    # `build_stages` import `mangatl.compose` inside their bodies, so this
+    # contract broke on `mangatl.app -> mangatl.compose -> ... onnxruntime`.
+    # `mangatl.ui` stays listed (asserted below by name).
+    #
+    # MT-036 AC-1 (before that): **eight** entries, `mangatl.cli` removed and
+    # nothing else.
     # `architecture.md` §3's "composition-root exception to rule 5" carries the
     # measurement - one top-level import in `cli.py` breaks this contract and
     # removing that single name returns `5 kept, 0 broken` with the import still
     # in place. `allow_indirect_imports` is deliberately NOT added: it would
-    # weaken the rule for all eight of the modules still listed here.
+    # weaken the rule for all seven of the modules still listed here.
     contract = _contract(ONNX)
     assert contract.get("type") == "forbidden"
     assert _modules(contract, "forbidden_modules") == ["onnxruntime"]
     assert _modules(contract, "source_modules") == [
-        "mangatl.app",
         "mangatl.bench",
         "mangatl.domain",
         "mangatl.pipeline",
@@ -311,23 +333,33 @@ def test_only_detect_ocr_and_clean_may_import_onnxruntime() -> None:
     )
 
 
-def test_the_composition_root_is_exempt_from_onnx_and_the_window_entry_point_is_not() -> None:
-    """MT-036 AC-1 and PO-2, stated as the decision rather than as two lists.
+def test_the_composition_roots_are_exempt_from_onnx_and_the_window_is_not() -> None:
+    """MT-036 AC-1 and PO-2, amended by MT-059 PO-3, stated as the decision.
 
-    Only the two modules that *construct* sessions come out of contract 5:
-    `mangatl.compose`, which is the composition root, and `mangatl.cli`, which
-    imports it. `mangatl.app` stays listed - nothing in it needs a session, and
-    MT-015 amends this again if and when it does, having to say why `compose`
-    was not enough. An exemption is earned by a gate that fails, not
-    anticipated.
+    Renamed by MT-059 (was `..._exempt_from_onnx_and_the_window_entry_point_is_not`):
+    the entry point `mangatl.app` is now exempt, so the old name described the
+    opposite of what the test pins.
+
+    Only the modules that *construct* sessions, or are the composition roots
+    that import the module that does, come out of contract 5: `mangatl.compose`,
+    `mangatl.cli` (MT-036) and `mangatl.app` (MT-059 PO-3, C-8 - its
+    `resolve_models` and `build_stages` import `compose`; the exemption was
+    earned by the contract breaking, not anticipated, which is MT-036 PO-2's
+    rule kept rather than dropped). The window layer, `mangatl.ui`, stays
+    confined: it is handed its stage list and never imports `compose`.
     """
     confined = _contract(ONNX).get("source_modules", [])
 
     assert "mangatl.compose" not in confined
     assert "mangatl.cli" not in confined
-    assert "mangatl.app" in confined, (
-        "mangatl.app was exempted from the onnxruntime confinement without a story"
-        " that needed it (MT-036 PO-2)"
+    assert "mangatl.app" not in confined, (
+        "mangatl.app is confined from onnxruntime, but it is the window's"
+        " composition root and imports mangatl.compose (MT-059 PO-3, C-8)"
+    )
+    assert "mangatl.ui" in confined, (
+        "mangatl.ui was exempted from the onnxruntime confinement; only the"
+        " composition root mangatl.app is (MT-059 PO-3) - the window is handed"
+        " its stage list and must not reach compose"
     )
 
 

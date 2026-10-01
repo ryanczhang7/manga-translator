@@ -63,8 +63,14 @@ COLOUR_TOKEN_COUNT = 40
 # (100 -> 87; `border-width.emphasis` was already the HC template's). Re-measured
 # with a separate parser - tomllib, the placeholder regex, comments stripped -
 # which also reproduces MT-025's 25 and 100 from theme.qss.in before MT-061.
-ORPHAN_COUNT = 87
-BASE_REFERENCED_COUNT = 39
+# MT-059 RED: the Lead Designer's `QPushButton[variant="primary"]` rules (story
+# D-1, components.md section 1) reference three tokens neither template used -
+# `color.accent.hover`, `color.accent.pressed`, `color.text.on-accent` - so 39 ->
+# 42 and 87 -> 84. Re-measured in RED: `load_tokens` plus the placeholder regex
+# over theme.qss.in and theme_hc.qss.in gives 39/87 today and 42/84 with D-1's
+# four rules appended (accent.base, focus.width, focus.ring already counted).
+ORPHAN_COUNT = 84
+BASE_REFERENCED_COUNT = 42
 
 PLACEHOLDER = re.compile(r"@\{([^}]+)\}")
 

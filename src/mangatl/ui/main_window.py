@@ -13,6 +13,15 @@ from it is the opened chapter: it is shown, then this window closes. A
 `Chapter` back is a folder with no project: its summary is shown. A string back
 is the reason nothing opened, shown in the target's error state.
 
+The summary's "Start run" (MT-059) runs the chapter, in `mangatl-run`'s order:
+the models folder from the injected `RunSetup` (none: AC-7's sentence, and
+nothing is created), the project beside the folder, the stage list, then a
+`RunController` on a worker thread whose events drive the `RunProgressPanel`
+that becomes the window's content. A finished run - or "Review pages 1-N"
+after an abort - goes down the same folder path to the `Workspace`. Closing
+the window mid-run cancels the run and waits for the worker first. The window
+never imports the composition root: `mangatl.app` injects the stage builder.
+
 With a `notice` (MT-054 C-5) the window says one thing instead: why no chapter
 could be opened, and what to do about it. The notice is the whole content of
 the window, so it is its accessible name, plain text (a folder name holding
@@ -24,11 +33,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Slot
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QLabel, QMainWindow, QWidget
 
 from mangatl.domain.page import Chapter
+from mangatl.pipeline.runner import RUN_FINISHED, RunOutcome
+from mangatl.store.project import create_project, project_dir_for
 from mangatl.ui.intake import FolderDropTarget, choose_folder_dialog
+from mangatl.ui.progress import RunProgressPanel
+from mangatl.ui.run import NO_MODELS, RunController, RunSetup
 from mangatl.ui.summary import ChapterSummary
 
 __all__ = [
@@ -58,6 +72,7 @@ class MainWindow(QMainWindow):
         *,
         open_folder: FolderOpener | None = None,
         choose_folder: FolderChooser | None = None,
+        run_setup: RunSetup | None = None,
     ) -> None:
         if notice is None and open_folder is None:
             # A window that can choose a folder and do nothing with it is not
@@ -67,6 +82,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(WINDOW_TITLE)
         self.open_folder = open_folder
         self.opened: QMainWindow | None = None
+        # `None`: a window nobody gave a models folder has none (C-3).
+        self._run_setup = run_setup
+        self._run_folder: Path | None = None
+        self.run: RunController | None = None
+        self.run_panel: RunProgressPanel | None = None
+        self._closed = False
         if notice is not None:
             self.setCentralWidget(_notice_label(notice, self))
             return
@@ -80,8 +101,63 @@ class MainWindow(QMainWindow):
         scroll area so arrows and Page keys read it at once."""
         summary = ChapterSummary(chapter, self)
         summary.choose_other.connect(self._choose)
+        summary.start_requested.connect(lambda: self._start(chapter))
         self.setCentralWidget(summary)
         summary.scroll_area.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """A run in progress is cancelled and waited for before the window
+        goes, so its worker has closed its project (C-4, AC-6)."""
+        self._closed = True
+        if self.run is not None and self.run.is_running():
+            self.run.cancel()
+            self.run.wait()
+        super().closeEvent(event)
+
+    def _start(self, chapter: Chapter) -> None:
+        """The Start sequence, in `mangatl-run`'s order: models, then create,
+        then build, then run (C-3) - "read" is `chapter`, already read. Nothing
+        is created without a models folder (AC-7)."""
+        setup = self._run_setup
+        models = setup.resolve_models() if setup is not None else None
+        if setup is None or models is None:
+            self.show_error(NO_MODELS)
+            return
+        project_dir = project_dir_for(chapter.source_dir)
+        # Closed again here: the worker opens its own, as a `Project` crosses
+        # no thread (C-1).
+        with create_project(chapter, project_dir):
+            pass
+        stages = setup.build_stages(models)
+
+        panel = RunProgressPanel()
+        # The summary is deleted with its focused button; focus must not be
+        # left on it (D-2). The panel has no focus stop while running, so the
+        # window itself holds focus until a banner's action takes it.
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.setCentralWidget(panel)
+        self.run_panel = panel
+        self._run_folder = chapter.source_dir
+        self.run = RunController(project_dir, stages, self)
+        self.run.event.connect(panel.on_event)
+        self.run.ended.connect(self._run_ended)
+        panel.review_requested.connect(self._review)
+        self.run.start()
+
+    @Slot(object)
+    def _run_ended(self, outcome: RunOutcome) -> None:
+        """A finished run opens the review; any other outcome leaves the panel
+        saying why (C-3)."""
+        if outcome.outcome == RUN_FINISHED:
+            self._review()
+
+    @Slot()
+    def _review(self) -> None:
+        """The chapter's `Workspace`, down the one folder path (MT-056 C-2) -
+        unless the window has closed, after which nothing opens (C-4)."""
+        if not self._closed:
+            assert self._run_folder is not None  # set by _start, the only way here
+            self._hand_over(self._run_folder)
 
     def show_error(self, text: str) -> None:
         """The drop target's error state with `text` as its headline: the

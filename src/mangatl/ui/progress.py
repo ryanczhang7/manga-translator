@@ -3,8 +3,9 @@
 `components.md` §8 `RunProgressPanel` and `PageStageStepper`, and §9
 `ErrorBanner` for the budget abort. The panel is fed the run's typed events
 (`architecture.md` §6) through `on_event` and never calls into the pipeline,
-the translator or the store; the one name it takes from `pipeline` is the abort
-reason `BUDGET`, imported so it cannot drift from the runner's spelling.
+the translator or the store; the only names it takes from `pipeline` are the
+abort reasons `BUDGET` and `CANCELLED`, imported so they cannot drift from the
+runner's spelling.
 
 **Pages are 0-based ordinals** (`domain/page.py`) and shown 1-based. A page is
 *completed* when, after its `PageStarted`, the next `PageStarted`, `PageSkipped`
@@ -23,6 +24,12 @@ be able to go straight to reviewing what did complete. It has one action,
 Its accessible role is `Alert` (§9), given through an accessibility factory
 because a `QFrame` has no way to declare a role of its own.
 
+**Any other abort but a cancel is the failed state** (MT-059 C-5, D-3): the
+same banner, naming the page that failed and holding the runner's reason
+verbatim, and the cost readout left exactly as it was. A cancel - only ever
+the window closing - shows nothing (D-4). Whenever a banner has an action, the
+action takes focus and activates on Return and Enter as well as Space.
+
 Every colour and type size comes from the application stylesheet by object
 name and dynamic property (MT-061's rule); spacing comes from the tokens.
 """
@@ -31,7 +38,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAccessible, QAccessibleEvent, QAccessibleInterface
 from PySide6.QtWidgets import (
     QAccessibleWidget,
@@ -55,8 +62,9 @@ from mangatl.domain.events import (
     StageFinished,
 )
 from mangatl.domain.money import Usd
-from mangatl.pipeline.runner import BUDGET
+from mangatl.pipeline.runner import BUDGET, CANCELLED
 from mangatl.ui import tokens_gen
+from mangatl.ui.buttons import ActivatedByEnter
 from mangatl.ui.cost_estimate import format_usd
 from mangatl.ui.cost_readout import CostReadout
 from mangatl.ui.labels import plain_label
@@ -179,7 +187,7 @@ class ErrorBanner(QFrame):
         # tests read it so; it shadows `QWidget.actions()` (the QAction list),
         # which nothing in this app calls on a banner and Qt never calls from Python.
         self.actions: tuple[QPushButton, ...] = tuple(  # type: ignore[assignment]
-            QPushButton(text) for text in actions
+            ActivatedByEnter(text) for text in actions
         )
         self.setAccessibleName(f"{headline} {body}")
 
@@ -279,6 +287,8 @@ class RunProgressPanel(QWidget):
             self.cost_readout.set_state(event.spent, event.ceiling, event.projection)
         elif event.reason == BUDGET:
             self._budget_abort(event)
+        elif event.reason != CANCELLED:
+            self._failed(event)
         self._show_times()
 
     def _start(self, page_count: int) -> None:
@@ -307,23 +317,43 @@ class RunProgressPanel(QWidget):
         remaining = (self._completed_ms // self._completed) * left
         self.remaining_label.setText(f"Remaining about {format_duration(remaining)}")
 
+    def _kept(self, event: RunAborted) -> int:
+        # The stopped page is `ordinal`; every page before it was kept.
+        return event.ordinal if event.ordinal is not None else self._completed + self._skipped
+
     def _budget_abort(self, event: RunAborted) -> None:
-        # The refused page is `ordinal`; every page before it was kept.
-        kept = event.ordinal if event.ordinal is not None else self._completed + self._skipped
+        kept = self._kept(event)
         headline = (
             f"Run stopped at page {kept + 1} of {self._page_count} \N{EM DASH} "
             f"the {format_usd(self._ceiling)} budget was reached."
         )
+        self._show_banner(headline, "", kept)
+        self.cost_readout.mark_aborted()
+
+    def _failed(self, event: RunAborted) -> None:
+        """D-3: the runner's reason verbatim; the cost readout is not touched -
+        `aborted` means the budget was reached and nothing else."""
+        kept = self._kept(event)
+        headline = (
+            f"Run stopped at page {kept + 1} of {self._page_count} \N{EM DASH} "
+            f"page {kept + 1} failed."
+        )
+        self._show_banner(headline, event.reason + "\n", kept)
+
+    def _show_banner(self, headline: str, lead: str, kept: int) -> None:
+        """The banner at the top of the panel: `lead`, then what survived, and
+        - when a page did - the one action, which takes focus (D-3)."""
         if kept:
             body = f"Pages 1\N{EN DASH}{kept} are translated and can be reviewed and rendered."
             actions: tuple[str, ...] = (f"Review pages 1\N{EN DASH}{kept}",)
         else:
             body, actions = "No pages were translated.", ()
-        banner = ErrorBanner(headline, body, actions, self)
+        banner = ErrorBanner(headline, lead + body, actions, self)
         for button in banner.actions:
             button.clicked.connect(lambda: self.review_requested.emit(kept))
         self._column.insertWidget(0, banner)
         banner.show()
         self.banner = banner
         banner.announce()
-        self.cost_readout.mark_aborted()
+        if banner.actions:
+            banner.actions[0].setFocus(Qt.FocusReason.OtherFocusReason)
