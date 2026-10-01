@@ -18,7 +18,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mangatl.domain.budget import Projection
+from mangatl.domain.money import Usd
+
 __all__ = [
+    "CallPriced",
     "PageSkipped",
     "PageStarted",
     "RunAborted",
@@ -62,6 +66,21 @@ class PageSkipped:
 
 
 @dataclass(frozen=True)
+class CallPriced:
+    """The page with this ordinal made a priced call, and the bill is recorded.
+
+    The numbers are the ledger's, read after the call's row was written (MT-063):
+    `spent` is the chapter's total across every run, `ceiling` the chapter's
+    ceiling, and `projection` covers the pages *after* this one.
+    """
+
+    ordinal: int
+    spent: Usd
+    ceiling: Usd
+    projection: Projection
+
+
+@dataclass(frozen=True)
 class RunAborted:
     """The run stopped early.
 
@@ -85,4 +104,6 @@ class RunFinished:
 #: Every event a run can emit. A plain union alias: a `TYPE_CHECKING` guard or a
 #: `sys.version_info` branch here would be an uncovered branch in a module that
 #: carries a 100% line-and-branch bar.
-RunEvent = RunStarted | PageStarted | StageFinished | PageSkipped | RunAborted | RunFinished
+RunEvent = (
+    RunStarted | PageStarted | StageFinished | CallPriced | PageSkipped | RunAborted | RunFinished
+)

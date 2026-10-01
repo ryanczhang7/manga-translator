@@ -91,7 +91,9 @@ class _Chapter:
 
     def context(self, ordinal: int) -> PageContext:
         page = next(page for page in self.project.pages() if page.ordinal == ordinal)
-        return PageContext(project=self.project, page=page, run_id=self.run_id)
+        return PageContext(
+            project=self.project, page=page, run_id=self.run_id, emit=lambda _event: None
+        )
 
     def page_bytes(self, ordinal: int) -> bytes:
         page = next(page for page in self.project.pages() if page.ordinal == ordinal)

@@ -289,6 +289,11 @@ def _always() -> bool:
     return True
 
 
+def _discard(event: RunEvent) -> None:
+    """MT-063: `PageContext.emit` is required with no default. The pass-through
+    stage emits nothing, so the contexts built by hand here discard."""
+
+
 # -- helpers -------------------------------------------------------------------
 
 
@@ -426,7 +431,13 @@ def test_an_event_cannot_be_mutated_after_it_is_emitted() -> None:
         event.ordinal = 2  # type: ignore[misc]
 
 
-def test_the_run_event_union_names_all_six_event_types_and_no_others() -> None:
+def test_the_run_event_union_names_all_seven_event_types_and_no_others() -> None:
+    # MT-063 added `CallPriced` to the union (its `## Contract`); this set was
+    # six until then. Imported here rather than at the top of the file so that,
+    # while `CallPriced` does not exist, only this test fails rather than every
+    # test in the file (MT-063 `## Handoff: RED -> GREEN`).
+    from mangatl.domain.events import CallPriced
+
     assert set(get_args(RunEvent)) == {
         RunStarted,
         PageStarted,
@@ -434,6 +445,7 @@ def test_the_run_event_union_names_all_six_event_types_and_no_others() -> None:
         PageSkipped,
         RunAborted,
         RunFinished,
+        CallPriced,
     }
 
 
@@ -1079,10 +1091,19 @@ def test_the_pass_through_stage_asks_the_store_whether_a_page_is_already_done(
     with _new_project(source_dir) as project:
         pages = project.pages()
         run_id = _open_run(project)
-        assert stage.is_done(PageContext(project=project, page=pages[0], run_id=run_id)) is False
+        assert (
+            stage.is_done(PageContext(project=project, page=pages[0], run_id=run_id, emit=_discard))
+            is False
+        )
         _mark_done(project, 0)
-        assert stage.is_done(PageContext(project=project, page=pages[0], run_id=run_id)) is True
-        assert stage.is_done(PageContext(project=project, page=pages[1], run_id=run_id)) is False
+        assert (
+            stage.is_done(PageContext(project=project, page=pages[0], run_id=run_id, emit=_discard))
+            is True
+        )
+        assert (
+            stage.is_done(PageContext(project=project, page=pages[1], run_id=run_id, emit=_discard))
+            is False
+        )
 
 
 def test_the_pass_through_stage_writes_nothing_of_its_own(
@@ -1093,7 +1114,7 @@ def test_the_pass_through_stage_writes_nothing_of_its_own(
 
     with _new_project(source_dir) as project:
         page = project.pages()[0]
-        context = PageContext(project=project, page=page, run_id=_open_run(project))
+        context = PageContext(project=project, page=page, run_id=_open_run(project), emit=_discard)
         assert PassThroughStage().run(context) is None
         assert project.page_status(0) == PAGE_PENDING
 

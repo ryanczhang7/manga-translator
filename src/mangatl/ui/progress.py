@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 
 from mangatl.domain.budget import DEFAULT_CEILING
 from mangatl.domain.events import (
+    CallPriced,
     PageSkipped,
     PageStarted,
     RunAborted,
@@ -274,6 +275,8 @@ class RunProgressPanel(QWidget):
         elif isinstance(event, RunFinished):
             self._complete_current()
             self.overall.setValue(self._page_count)
+        elif isinstance(event, CallPriced):
+            self.cost_readout.set_state(event.spent, event.ceiling, event.projection)
         elif event.reason == BUDGET:
             self._budget_abort(event)
         self._show_times()

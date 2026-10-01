@@ -118,7 +118,9 @@ class _Fixture:
 
     def page_context(self, ordinal: int) -> PageContext:
         page = next(page for page in self.project.pages() if page.ordinal == ordinal)
-        return PageContext(project=self.project, page=page, run_id=self.run_id)
+        return PageContext(
+            project=self.project, page=page, run_id=self.run_id, emit=lambda _event: None
+        )
 
     def region(self, x0: int, y0: int, x1: int, y1: int, confidence: float) -> RawRegion:
         """One region at a rectangle. `confidence` is exactly representable in

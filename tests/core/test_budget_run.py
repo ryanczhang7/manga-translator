@@ -359,7 +359,7 @@ class _Fixture:
 
     def context(self, ordinal: int, run_id: int) -> PageContext:
         page = next(page for page in self.project.pages() if page.ordinal == ordinal)
-        return PageContext(project=self.project, page=page, run_id=run_id)
+        return PageContext(project=self.project, page=page, run_id=run_id, emit=lambda _event: None)
 
     def open_run(self) -> int:
         with self.project.transaction() as cursor:
@@ -832,7 +832,9 @@ def test_the_page_context_carries_the_run_and_has_no_default_for_it(
     """
     fields = dataclasses.fields(PageContext)
 
-    assert [field.name for field in fields] == ["project", "page", "run_id"]
+    # MT-063 appended a fourth required field, `emit`, after `run_id`; its own
+    # no-default check lives in `tests/core/test_call_priced.py`.
+    assert [field.name for field in fields] == ["project", "page", "run_id", "emit"]
     run_id_field = next(field for field in fields if field.name == "run_id")
     assert run_id_field.default is dataclasses.MISSING, (
         "PageContext.run_id has a default, so a stage can record a ledger row"

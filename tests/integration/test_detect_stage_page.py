@@ -139,7 +139,7 @@ def test_the_real_chain_reaches_the_store_in_reading_order(
     # at all. A stale two-argument call here would therefore pass every gate and
     # surface months later as a collection error on the GPU suite.
     DetectStage(detect=detector).run(
-        PageContext(project=project, page=page, run_id=_open_run(project))
+        PageContext(project=project, page=page, run_id=_open_run(project), emit=lambda _event: None)
     )
 
     stored = project.read_regions(page.ordinal)

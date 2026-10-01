@@ -53,6 +53,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from mangatl.domain.budget import Budget
+from mangatl.domain.events import CallPriced
 from mangatl.domain.glossary import PromptContext, mark_seen, merge
 from mangatl.domain.line import OcrResult
 from mangatl.domain.rates import price
@@ -158,7 +159,7 @@ class TranslateStage:
         The scans are read-only to this app (`architecture.md` §5): the page file
         is read and nothing beside it is written.
 
-        **Four orderings here are the substance of MT-044 C-7, not its shape.**
+        **The orderings here are the substance of MT-044 C-7, not its shape.**
 
         1. **The guard is before `self.translate(...)`**, which is AC-2 and the
            whole of `architecture.md` D6: "a guard that notices the overrun
@@ -191,6 +192,13 @@ class TranslateStage:
            idempotent, whereas the other order marks the page done with its
            names never recorded. A wordless page still runs it - `mark_seen`
            over empty text changes nothing and nothing was proposed.
+        6. **`CallPriced` is emitted right after `record_call`** (MT-063), and
+           before the glossary and the proposals, with every number read from
+           the ledger *after* the write: `spent` is `chapter_total`, and the
+           projection covers `pages_remaining(ctx) - 1` pages - those after
+           this one, so on the last page nothing remains. A page with no call,
+           a refused page and an unpriceable one (clause 3) emit nothing,
+           because no bill was recorded.
 
         The request's context is built from the store before the call (C-8):
         page 1 gets `EMPTY_CONTEXT`, every later page the glossary and the
@@ -217,6 +225,16 @@ class TranslateStage:
                 ctx.page.ordinal,
                 result.call.request_id,
                 price(result.call.model_id, result.usage),
+            )
+            ctx.emit(
+                CallPriced(
+                    ordinal=ctx.page.ordinal,
+                    spent=chapter_total(ctx.project),
+                    ceiling=budget.ceiling,
+                    projection=budget.project(
+                        chapter_call_costs(ctx.project), pages_remaining(ctx) - 1
+                    ),
+                )
             )
         _update_glossary(ctx, result, ocr_results)
         ctx.project.write_proposed(ctx.page.ordinal, result.lines)

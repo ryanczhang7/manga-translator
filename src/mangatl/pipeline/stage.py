@@ -22,10 +22,12 @@ into the import graph of every run, including the zero-stage ones
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
 from mangatl.domain.budget import Decision
+from mangatl.domain.events import RunEvent
 from mangatl.domain.page import Page
 from mangatl.store.project import PAGE_DONE, Project
 
@@ -43,11 +45,17 @@ class PageContext:
     does. `DetectStage`, `OcrStage` and `PassThroughStage` do not read it; the
     field is here because this is what the runner hands every stage, and a
     second context type for one stage would be worse.
+
+    `emit` is the run's own event sink, **required and with no default**
+    (MT-063, for `run_id`'s reason): a default no-op would let a stage built
+    without one stay silent, and the cost readout would read `$—` through a
+    whole paid run with every test green. Only `TranslateStage` emits today.
     """
 
     project: Project
     page: Page
     run_id: int
+    emit: Callable[[RunEvent], None]
 
 
 class BudgetRefused(Exception):
