@@ -9,6 +9,8 @@
  * SEED, written 2026-09-28 by lead-designer before MT-025 entered RED. It
  * covers only the global chrome every widget inherits. Workspace components
  * (components.md sections 2-9) are added by the stories that build them.
+ * MT-061 added section 2 (intake and ChapterSummary) and the TranslationRow
+ * status gutter, at the end of this file.
  *
  * Rules for editing this file:
  *   - comments in slash-star form only; no nested braces;
@@ -130,6 +132,17 @@ QLineEdit:disabled, QPlainTextEdit:disabled {
     border-color: #4A4A4A;
 }
 
+/* ---- Item views: list grounds, MT-061 --------------------------------- */
+/* Without this an item view's viewport fills from the default palette's  */
+/* Base role, white, under the QWidget rule's light text. On a scroll     */
+/* area the background property paints the viewport. surface.raised is   */
+/* the panel ground of components.md section 3, translation column and    */
+/* page strip.                                                            */
+
+QAbstractItemView {
+    background-color: #262626;
+}
+
 /* ---- Scroll bars: no arrows, a handle that clears 3:1 (A-02) ---------- */
 
 QScrollBar:vertical {
@@ -167,4 +180,170 @@ QScrollBar::add-line, QScrollBar::sub-line {
 
 QScrollBar::add-page, QScrollBar::sub-page {
     background: none;
+}
+
+/* ====================================================================== */
+/* components.md section 2 - chapter intake (MT-061)                      */
+/* ====================================================================== */
+/*
+ * Why every part names its own type size and weight: the QWidget rule above
+ * sets font-size and font-weight, and a stylesheet wins over setFont. A part
+ * whose size differs from type.body must say so here or it renders at body
+ * size. Every selector below carries at least one id, so it outranks the
+ * QWidget rule (one type name) and the QWidget:disabled rule (one type name,
+ * one pseudo-state) whatever the order of the file.
+ *
+ * Labels set no ground: a QLabel does not fill its background, so the ground
+ * of the region or frame behind it shows through.
+ */
+
+/* ---- FolderDropTarget: one rule per value of the dynamic property ----- */
+/* state. intake.py mirrors FolderDropTarget.state into it and re-polishes */
+/* on every change; the values are exactly empty, hover-valid,             */
+/* hover-invalid and error. With no state property nothing matches and no  */
+/* region is drawn, so a missing mirror fails visibly.                     */
+
+#folder-drop-target[state="empty"] {
+    background-color: #1C1C1C;
+    border: 2px dashed #7A7A7A;
+    border-radius: 6px;
+}
+
+/* DQ-1: the ground is surface.hover, not overlay.fill.hover. */
+#folder-drop-target[state="hover-valid"] {
+    background-color: #303030;
+    border: 2px solid #4CC2FF;
+    border-radius: 6px;
+}
+
+#folder-drop-target[state="hover-invalid"] {
+    background-color: #1C1C1C;
+    border: 2px solid #FF7A7A;
+    border-radius: 6px;
+}
+
+#folder-drop-target[state="error"] {
+    background-color: #1C1C1C;
+    border: 2px solid #FF7A7A;
+    border-radius: 6px;
+}
+
+/* Focus, A-04. The region has one border, so in the two resting states   */
+/* the ring takes it. One id, one attribute, one pseudo-state: it outranks */
+/* the state rules above regardless of order. It does not match the two   */
+/* hover states, so drag feedback is never hidden by focus. components.md  */
+/* section 2, Focus.                                                       */
+#folder-drop-target[state="empty"]:focus,
+#folder-drop-target[state="error"]:focus {
+    border: 2px solid #FFFFFF;
+}
+
+#folder-drop-target QLabel#headline {
+    color: #EDEDED;
+    font-size: 20px;
+    font-weight: 600;
+}
+
+#folder-drop-target QLabel#body {
+    color: #B4B4B4;
+    font-size: 13px;
+    font-weight: 400;
+}
+
+/* The affordance label takes no rule of its own: the QWidget rule gives  */
+/* it type.body in color.text.primary. components.md section 2.           */
+
+/* ---- ChapterSummary --------------------------------------------------- */
+/* Spacing between parts and the notice padding are layout, set in        */
+/* summary.py from space tokens; nothing here sets margin or padding.     */
+
+#chapter-summary QLabel#summary-name {
+    color: #EDEDED;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+#chapter-summary QLabel#summary-count {
+    color: #EDEDED;
+    font-size: 13px;
+    font-weight: 400;
+}
+
+#chapter-summary QLabel#summary-first,
+#chapter-summary QLabel#summary-last,
+#chapter-summary QLabel#summary-only {
+    color: #B4B4B4;
+    font-size: 13px;
+    font-weight: 400;
+}
+
+#chapter-summary QFrame#summary-order-notice {
+    background-color: #262626;
+    border: 1px solid #FFC14D;
+    border-radius: 4px;
+}
+
+#chapter-summary QLabel#order-lead {
+    color: #EDEDED;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+#chapter-summary QLabel#order-natural,
+#chapter-summary QLabel#order-lexical {
+    color: #EDEDED;
+    font-size: 13px;
+    font-weight: 400;
+}
+
+/* The scroll area is the summary's reading stop. Its border is always    */
+/* focus.width wide, transparent at rest, so taking focus repaints the    */
+/* ring without moving any line of text.                                  */
+#chapter-summary QScrollArea#summary-scroll {
+    background-color: #1C1C1C;
+    border: 2px solid transparent;
+}
+
+#chapter-summary QScrollArea#summary-scroll:focus {
+    border: 2px solid #FFFFFF;
+}
+
+/* The scroll area's content widget. QScrollArea.setWidget turns on its    */
+/* autoFillBackground, and it fills from the default palette, which a      */
+/* stylesheet background on an ancestor does not reach: without this rule  */
+/* the summary paints Qt's light grey under color.text.primary. The        */
+/* content widget has no object name; qt_scrollarea_viewport is the name   */
+/* QAbstractScrollArea gives its viewport. The two child steps match the   */
+/* content widget only - never the labels, the notice or the scroll bars.  */
+#chapter-summary QScrollArea#summary-scroll > QWidget#qt_scrollarea_viewport > QWidget {
+    background-color: #1C1C1C;
+}
+
+/* ====================================================================== */
+/* components.md section 5 - TranslationRow status gutter (MT-061)        */
+/* ====================================================================== */
+/* Only because the QWidget rule's color would otherwise replace the      */
+/* gutter's setPalette colour (a stylesheet wins over a palette). Keyed   */
+/* on the existing status property; workspace.py re-polishes the gutter   */
+/* after setting it. Tokens are workspace.STATUS_COLOR_TOKENS. Not a      */
+/* section 5 redesign: the rest of the row is a later story.             */
+
+QLabel#rowGutter[status="proposed"] {
+    color: #949494;
+}
+
+QLabel#rowGutter[status="accepted"] {
+    color: #6FD08C;
+}
+
+QLabel#rowGutter[status="edited"] {
+    color: #4CC2FF;
+}
+
+QLabel#rowGutter[status="reverted"] {
+    color: #B4B4B4;
+}
+
+QLabel#rowGutter[status="failed"] {
+    color: #FF7A7A;
 }
