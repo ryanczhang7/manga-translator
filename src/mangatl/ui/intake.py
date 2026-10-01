@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-__all__ = ["DIALOG_CAPTION", "FolderDropTarget", "choose_folder_dialog"]
+__all__ = ["DIALOG_CAPTION", "FolderDropTarget", "choose_folder_dialog", "display_name"]
 
 TARGET_OBJECT_NAME = "folder-drop-target"
 TARGET_ACCESSIBLE_NAME = "Choose chapter folder"  # accessibility.md A-08
@@ -151,7 +151,7 @@ class FolderDropTarget(QAbstractButton):
         self._before_drag = self._current()
         if len(paths) == 1 and paths[0].is_dir():
             self._drag_folder = paths[0]
-            self._show(_Shown(HOVER_VALID, HEADLINE_VALID, _display_name(paths[0]), ""))
+            self._show(_Shown(HOVER_VALID, HEADLINE_VALID, display_name(paths[0]), ""))
             event.acceptProposedAction()
             return
         headline, body = _refusal(paths)
@@ -210,7 +210,7 @@ def _refusal(paths: list[Path]) -> tuple[str, str]:
     files = len(paths) - folders
     if folders == 0:
         if files == 1:
-            return HEADLINE_NOT_FILES, f"You are dragging a file: {_display_name(paths[0])}."
+            return HEADLINE_NOT_FILES, f"You are dragging a file: {display_name(paths[0])}."
         return HEADLINE_NOT_FILES, f"You are dragging {files} files."
     if files == 0:
         return HEADLINE_ONE_FOLDER, f"You are dragging {folders} folders. Drop them one at a time."
@@ -224,9 +224,10 @@ def _count(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
-def _display_name(path: Path) -> str:
+def display_name(path: Path) -> str:
     """The base name - the path itself for a drive root (PO-3) - cut in the
-    middle when longer than `NAME_LIMIT` characters: first 20, `…`, last 19."""
+    middle when longer than `NAME_LIMIT` characters: first 20, `…`, last 19.
+    Shared with `ChapterSummary`'s heading, so the cut is one rule (MT-057)."""
     name = path.name or str(path)
     if len(name) > NAME_LIMIT:
         return name[:20] + "…" + name[-19:]

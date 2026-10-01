@@ -12,8 +12,11 @@ Oracle partition (story `## Contract`):
   "Drop one folder" and the body forms with their singulars), the truncation
   rule (first 20 + U+2026 + last 19, only above 40 characters), the drive-root
   name (`str(path)`, PO-3), the accessible name "Choose chapter folder"
-  (A-08), MT-055's empty and error texts, the no-project text and the
-  `SchemaTooNew` message (read from the exception, as MT-055's tests do).
+  (A-08), MT-055's empty and error texts, MT-057's AC-6 sentence (which
+  replaced MT-054's no-project text for a dropped folder with no project, per
+  MT-057's `## Contract` rewrite list) and the `SchemaTooNew` message (read
+  from the exception, as MT-055's tests do). MT-057 also adds the dropped path
+  of its AC-1: a dropped folder of pages shows the chapter summary.
 - **Mechanical:** `acceptDrops()`; `isAccepted()` after every enter and drop;
   `state`; restore of every observable on leave and after an invalid drop,
   from the empty AND the error state; `dropped` emissions (one per valid drop,
@@ -85,11 +88,9 @@ RELEASE = "Release to load"
 NOT_FILES = "Drop a folder, not files"
 ONE_FOLDER = "Drop one folder"
 
-#: The error state a drag may start from: MT-054 AC-3's shape, two lines.
-ERROR_TEXT = (
-    "No project exists for C:\\manga\\Vol 3.\n"
-    'Create one by running:  mangatl-run "C:\\manga\\Vol 3"'
-)
+#: The error state a drag may start from: MT-057 AC-3's shape, two lines (it
+#: was MT-054's retired no-project notice; any two-line reason would do).
+ERROR_TEXT = "Windows would not let this app read C:\\manga\\Vol 3.\nAccess is denied."
 
 WEB = "https://example.com/page.png"
 
@@ -103,9 +104,12 @@ assert (len(LONG), len(LONG_CUT)) == (41, 40)
 assert LONG[:20] + "\u2026" + LONG[-19:] == LONG_CUT
 
 
-def _no_project_notice(folder: Path) -> str:
-    """MT-054 AC-3's text: two spaces before `mangatl-run`, the folder resolved."""
-    return f'No project exists for {folder}.\nCreate one by running:  mangatl-run "{folder}"'
+def _undecodable(filename: str) -> str:
+    """MT-057 AC-6's sentence (the Lead Designer's)."""
+    return (
+        f"{filename} could not be opened as a page image."
+        " Remove or replace it, then choose the folder again."
+    )
 
 
 def _settle() -> None:
@@ -160,8 +164,9 @@ def source(tmp_path: Path, page_png: bytes) -> Path:
 
 
 @pytest.fixture
-def no_project(tmp_path: Path) -> Path:
-    """A chapter folder with pages and no project; `&` and a space in its name."""
+def undecodable(tmp_path: Path) -> Path:
+    """A folder with no project whose one page will not decode (MT-057 AC-6);
+    `&` and a space in its name."""
     folder = tmp_path / "Vol 1 & 2"
     folder.mkdir()
     (folder / "001.png").write_bytes(b"not read")
@@ -219,14 +224,14 @@ class Opener:
 
     def __init__(
         self,
-        delegate: Callable[[Path], QMainWindow | str] | None = None,
+        delegate: Callable[[Path], QMainWindow | Chapter | str] | None = None,
         reason: str = "stub opener: no folder expected",
     ) -> None:
         self.delegate = delegate
         self.reason = reason
         self.calls: list[Path] = []
 
-    def __call__(self, folder: Path) -> QMainWindow | str:
+    def __call__(self, folder: Path) -> QMainWindow | Chapter | str:
         self.calls.append(folder)
         if self.delegate is None:
             return self.reason
@@ -281,7 +286,7 @@ def _show(qtbot, windows: list[QMainWindow], window: QMainWindow) -> None:  # ty
 def _intake(
     qtbot,  # type: ignore[no-untyped-def]
     windows: list[QMainWindow],
-    opener: Callable[[Path], QMainWindow | str],
+    opener: Callable[[Path], QMainWindow | Chapter | str],
     chooser: Chooser,
 ) -> MainWindow:
     window = MainWindow(open_folder=opener, choose_folder=chooser)
@@ -636,7 +641,7 @@ def test_an_invalid_drop_on_the_window_opens_nothing_and_writes_nothing(
     qtbot,  # type: ignore[no-untyped-def]
     windows: list[QMainWindow],
     tmp_path: Path,
-    no_project: Path,
+    undecodable: Path,
     source: Path,
 ) -> None:
     """Two folders, each of which would do something if handed over."""
@@ -646,7 +651,7 @@ def test_an_invalid_drop_on_the_window_opens_nothing_and_writes_nothing(
     target = _target(window)
     before = _snapshot(target)
     tree = _tree(tmp_path)
-    mime = _local(source, no_project)
+    mime = _local(source, undecodable)
     assert not _enter(target, mime).isAccepted(), "precondition: two folders were accepted"
 
     _drop_directly(target, mime)
@@ -806,23 +811,25 @@ def test_a_dropped_folder_with_a_project_opens_the_review_workspace(
     assert not window.isVisible(), "the intake window is still open"
 
 
-def test_a_dropped_folder_with_no_project_shows_the_command_lines_text_and_writes_nothing(
+def test_a_dropped_folder_with_an_undecodable_page_names_it_and_writes_nothing(
     qtbot,  # type: ignore[no-untyped-def]
     windows: list[QMainWindow],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    no_project: Path,
+    undecodable: Path,
 ) -> None:
+    """MT-057 AC-6, dropped path (was MT-054's no-project text)."""
     tree = _tree(tmp_path)
     window, opener = _real_intake(qtbot, windows, monkeypatch)
     target = _target(window)
 
-    _drop_folder(target, no_project)
+    _drop_folder(target, undecodable)
 
-    assert opener.calls == [no_project]
+    assert opener.calls == [undecodable]
     assert window.opened is None
     assert window.isVisible(), "the intake window closed on a folder with no project"
-    text = _no_project_notice(no_project.resolve())
+    assert window.findChild(QWidget, "chapter-summary") is None, "a summary was created"
+    text = _undecodable("001.png")
     snap = _snapshot(target)
     assert snap["state"] == "error"
     assert snap["headline"] == text
@@ -830,6 +837,42 @@ def test_a_dropped_folder_with_no_project_shows_the_command_lines_text_and_write
     assert snap["affordance"] == AFFORDANCE_ERROR
     assert snap["description"] == text
     assert _tree(tmp_path) == tree, "dropping a folder with no project wrote something"
+
+
+def test_a_dropped_folder_of_pages_shows_its_chapter_summary_and_writes_nothing(
+    qtbot,  # type: ignore[no-untyped-def]
+    windows: list[QMainWindow],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    page_png: bytes,
+) -> None:
+    """MT-057 AC-1, dropped path: the drop shares the chooser's hand-over.
+    Natural order (`p9, p10`) differs from lexical and listing order."""
+    from mangatl.ui.summary import ChapterSummary  # MT-057; absent until its GREEN
+
+    folder = _folder(tmp_path, "Chapter 12")
+    for name in ("p10.png", "p9.png"):
+        (folder / name).write_bytes(page_png)
+    tree = _tree(tmp_path)
+    window, opener = _real_intake(qtbot, windows, monkeypatch)
+
+    _drop_folder(_target(window), folder)
+
+    assert opener.calls == [folder]
+    assert window.opened is None
+    assert window.isVisible(), "the intake window closed on a folder of pages"
+    summary = window.centralWidget()
+    assert isinstance(summary, ChapterSummary), f"central widget is {type(summary).__name__}"
+    texts = [
+        label.text() if label is not None else None
+        for label in (
+            summary.findChild(QLabel, name)
+            for name in ("summary-name", "summary-count", "summary-first", "summary-last")
+        )
+    ]
+    assert texts == ["Chapter 12", "2 pages", "First page: p9.png", "Last page: p10.png"]
+    assert _tree(tmp_path) == tree, "dropping a folder of pages wrote something"
+    assert not folder.with_name("Chapter 12.mtproj").exists()
 
 
 def test_a_dropped_project_from_a_newer_build_shows_its_message(

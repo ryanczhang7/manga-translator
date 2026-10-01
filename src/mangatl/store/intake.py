@@ -45,7 +45,14 @@ class UnreadablePage(Exception):
     rather than returning a partial chapter: a partial chapter would give every
     later page a wrong ordinal, and the ordinal is the page's identity for the
     rest of the product.
+
+    `filename` is that file's base name, carried as data so a caller that
+    names the file (the intake window, MT-057 AC-6) never parses the message.
     """
+
+    def __init__(self, message: str, *, filename: str) -> None:
+        super().__init__(message)
+        self.filename = filename
 
 
 def read_chapter(source_dir: Path) -> Chapter:
@@ -74,7 +81,9 @@ def read_chapter(source_dir: Path) -> Chapter:
                 img.load()
                 width, height = img.size
         except OSError as error:
-            raise UnreadablePage(f"cannot decode page {filename}: {error}") from error
+            raise UnreadablePage(
+                f"cannot decode page {filename}: {error}", filename=filename
+            ) from error
         pages.append(
             Page(
                 ordinal=ordinal,
