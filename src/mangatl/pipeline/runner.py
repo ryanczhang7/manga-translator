@@ -121,7 +121,7 @@ def run_chapter(
         if cancelled():
             progress.reason = CANCELLED
             break
-        ctx = PageContext(project=project, page=page, run_id=run_id)
+        ctx = PageContext(project=project, page=page, run_id=run_id, emit=emit)
         if not _run_page(project, ctx, stages, emit, cancelled, progress):
             break
         progress.pages_done += 1
