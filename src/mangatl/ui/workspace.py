@@ -52,12 +52,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mangatl.domain.budget import DEFAULT_CEILING
 from mangatl.domain.line import Line, LineStatus, effective_text, failure_reason
 from mangatl.domain.page import Chapter
+from mangatl.store import ledger
 from mangatl.store.lines import commit_line, read_review_lines
 from mangatl.store.project import Project
 from mangatl.ui import tokens_gen
 from mangatl.ui.canvas import PageCanvas
+from mangatl.ui.cost_readout import CostReadout
 from mangatl.ui.line_editor import LineEditor, SaveFn
 from mangatl.ui.link import LinkController, LiveRegion, OrderedRegion
 
@@ -408,6 +411,12 @@ class Workspace(QMainWindow):
         self.header = QWidget()
         self.header.setObjectName("workspaceHeader")
         self.header.setFixedHeight(HEADER_HEIGHT)
+        # The chapter's cost after the run (MT-018 AC-9), at the header's end.
+        self.cost_readout = CostReadout()
+        header_row = QHBoxLayout(self.header)
+        header_row.setContentsMargins(tokens_gen.SPACE_S4, 0, tokens_gen.SPACE_S4, 0)
+        header_row.addStretch(1)
+        header_row.addWidget(self.cost_readout)
         self.footer = QWidget()
         self.footer.setObjectName("workspaceFooter")
         self.footer.setFixedHeight(FOOTER_HEIGHT)
@@ -453,7 +462,13 @@ class Workspace(QMainWindow):
         self.translation_column.rowLeft.connect(self._on_row_left)
 
     def load_chapter(self, project: Project) -> None:
-        """List the project's pages in the strip; nothing is selected yet."""
+        """List the project's pages in the strip; nothing is selected yet.
+
+        The header's cost readout shows the chapter's total as final, or `$—`
+        when no call was priced - keyed on a call existing, not on the total
+        being non-zero (MT-018 AC-9)."""
+        spent = ledger.chapter_total(project) if ledger.chapter_call_costs(project) else None
+        self.cost_readout.show_final(spent, project.budget_ceiling() or DEFAULT_CEILING)
         self._project = project
         self._chapter = project.chapter
         self._page_ordinal = None

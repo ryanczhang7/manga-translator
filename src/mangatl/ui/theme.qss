@@ -11,7 +11,8 @@
  * (components.md sections 2-9) are added by the stories that build them.
  * MT-061 added section 2 (intake and ChapterSummary) and the TranslationRow
  * status gutter, at the end of this file. MT-058 added the CostEstimate
- * rules inside the ChapterSummary block.
+ * rules inside the ChapterSummary block. MT-018 added section 8 (run
+ * progress, CostReadout) and the section 9 ErrorBanner, at the end.
  *
  * Rules for editing this file:
  *   - comments in slash-star form only; no nested braces;
@@ -387,4 +388,122 @@ QLabel#rowGutter[status="reverted"] {
 
 QLabel#rowGutter[status="failed"] {
     color: #FF7A7A;
+}
+
+/* ====================================================================== */
+/* components.md section 8 - run progress and CostReadout (MT-018)        */
+/* ====================================================================== */
+/* Colour only. The type that section 8 names - type.numeric and     */
+/* type.numeric-lead in family.mono, type.caption - is NOT set yet:   */
+/* every token it would reference is an orphan today, and             */
+/* tests/ui/test_tokens.py pins the referenced and orphan counts      */
+/* (39, 87): adding them is a RED change to those two constants.     */
+/* Until then these labels take the QWidget rule: type.body.          */
+/* Spacing is layout, set in progress.py and cost_readout.py.         */
+
+#run-progress QProgressBar#run-overall {
+    background-color: #141414;
+    border: none;
+    border-radius: 4px;
+}
+
+#run-progress QProgressBar#run-overall::chunk {
+    background-color: #4CC2FF;
+    border-radius: 4px;
+}
+
+/* ---- PageStageStepper: one rule per value of the dynamic property ----- */
+/* stepState, which progress.py sets on each step label and re-polishes.  */
+/* The text carries the state too (a check when done, a marker when       */
+/* active), so colour is never the only carrier (A-10).                    */
+
+QLabel#stage-step[stepState="pending"] {
+    color: #949494;
+}
+
+QLabel#stage-step[stepState="active"] {
+    color: #4CC2FF;
+}
+
+QLabel#stage-step[stepState="done"] {
+    color: #6FD08C;
+}
+
+/* ---- CostReadout: keyed on the dynamic property costState ------------- */
+/* cost_readout.py mirrors CostReadout.state() into costState on the       */
+/* readout and re-polishes the readout, the figure, the glyph and the      */
+/* meter on every change. Every state rule is two ids and one attribute,  */
+/* so it outranks the resting rule whatever the order of the file. The    */
+/* glyph and the text carry the state; colour is emphasis (A-10).         */
+
+#cost-readout QLabel#cost-figure {
+    color: #EDEDED;
+}
+
+#cost-readout QLabel#cost-budget-label {
+    color: #949494;
+}
+
+#cost-readout QLabel#cost-projection {
+    color: #B4B4B4;
+}
+
+#cost-readout QLabel#cost-glyph {
+    color: #FFC14D;
+}
+
+#cost-readout QProgressBar#cost-meter {
+    background-color: #141414;
+    border: none;
+}
+
+#cost-readout QProgressBar#cost-meter::chunk {
+    background-color: #949494;
+}
+
+#cost-readout[costState="unknown"] QProgressBar#cost-meter {
+    border: 1px solid #4A4A4A;
+}
+
+#cost-readout[costState="approaching"] QProgressBar#cost-meter::chunk {
+    background-color: #FFC14D;
+}
+
+#cost-readout[costState="exceeded"] QLabel#cost-figure,
+#cost-readout[costState="exceeded"] QLabel#cost-glyph {
+    color: #FF7A7A;
+}
+
+#cost-readout[costState="exceeded"] QProgressBar#cost-meter::chunk,
+#cost-readout[costState="aborted"] QProgressBar#cost-meter::chunk {
+    background-color: #FF7A7A;
+}
+
+/* ====================================================================== */
+/* components.md section 9 - ErrorBanner (MT-018)                         */
+/* ====================================================================== */
+/* The danger variant, the only one built so far. The leading bar is      */
+/* border-width.emphasis: section 9 says 3px and no token holds 3.        */
+
+QFrame#error-banner {
+    background-color: #262626;
+    border: 1px solid #FF7A7A;
+    border-left: 2px solid #FF7A7A;
+    border-radius: 4px;
+}
+
+QFrame#error-banner QLabel#banner-glyph {
+    color: #FF7A7A;
+}
+
+QFrame#error-banner QLabel#banner-headline {
+    color: #EDEDED;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QFrame#error-banner QLabel#banner-body {
+    color: #EDEDED;
+    font-size: 13px;
+    font-weight: 400;
 }
