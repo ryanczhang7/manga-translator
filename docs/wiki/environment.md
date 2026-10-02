@@ -306,6 +306,17 @@ is committing it; see MT-037 `## Out of scope`. This is step 2 of the BLOCKED
 playbook — supply what the environment lacks — and not step 3: quoting a CI log
 would certify nothing here, because CI is the weaker machine.
 
+**From MT-019, the integration suite also needs a Japanese system font:**
+Yu Gothic Medium, `C:/Windows/Fonts/YuGothM.ttc` (face index 0), which ships
+with Windows 10 and 11 and is present on the development machine (checked
+2026-10-02: PIL reports `('Yu Gothic', 'Medium')`). MT-019's AC-6 and AC-7
+render Japanese text onto crops of the spike scans at test time; no Japanese
+font is vendored in the repository, and none should be for a test. Where the
+file is absent those tests skip, which the `skipped-when` line reports as
+`KNOWN` or `BLOCKED` exactly as for missing scans. Pillow here has no libraqm
+(`PIL.features.check("raqm")` is `False`), so the tests lay vertical text out
+glyph by glyph rather than with `direction="ttb"`.
+
 ### Installer signing
 
 Not an environment prerequisite, but it lands in MT-024: an unsigned PyInstaller
