@@ -2,7 +2,7 @@
 id: EPIC-02
 title: A chapter goes in and a chapter comes out
 status: todo
-stories: [MT-004, MT-005, MT-006]
+stories: [MT-004, MT-005, MT-006, MT-064]
 ---
 
 ## Goal
@@ -42,6 +42,10 @@ and replacing one input scan invalidates only that page.
   comes out, the sibling output folder is written atomically per page, and a
   headless CLI entry point makes the three stories above something the user can
   actually run.
+- **MT-064** — MT-006's whole-run headless check (AC-9, mechanism 1) holds in
+  any test order: the run moves into a fresh interpreter, because pytest-qt's
+  application outlives `tests/ui`. Filed 2026-10-01 from MT-062's GATES; the
+  subprocess approach is the user's decision.
 
 ## Amendment, 2026-09-15 — the done-when had no entry point
 
