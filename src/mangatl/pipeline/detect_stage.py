@@ -51,6 +51,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from mangatl.domain.events import RegionsDetected
 from mangatl.domain.reading_order import sort_regions
 from mangatl.domain.region import RawRegion
 from mangatl.pipeline.stage import PageContext
@@ -98,6 +99,11 @@ class DetectStage:
         regions = self.detect(image_bytes)
         ordered = sort_regions(regions)
         ctx.project.write_regions(ctx.page.ordinal, ordered)
+        # After the write, so a consumer reading the store on receipt sees these
+        # regions; from `ordered`, so the order is the stored reading order (MT-062).
+        ctx.emit(
+            RegionsDetected(ordinal=ctx.page.ordinal, polygons=tuple(r.polygon for r in ordered))
+        )
 
     def is_done(self, ctx: PageContext) -> bool:
         """Whether this page already has regions in the store."""

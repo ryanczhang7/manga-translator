@@ -941,6 +941,84 @@ def test_the_run_screen_is_the_progress_panel_alone_under_the_same_title(
     gate.release.set()
 
 
+def test_the_run_screen_shows_the_chapters_page_and_its_markers_once_detected(
+    qtbot,  # type: ignore[no-untyped-def]
+    world: World,
+    tmp_path: Path,
+    mask_png: bytes,
+) -> None:
+    """**MT-062 AC-4** (with AC-1 end to end), through this file's real Start
+    path: `MainWindow` builds the panel with the summary's `Chapter` (MT-062
+    C-5), and the stage list holds a REAL `DetectStage` over a fake detector, so
+    the `RegionsDetected` crossing the thread is the one the stage emits.
+
+    The run is held on page 0's second stage (after detection) so the run
+    screen is still up when it is looked at. The detector hands the regions over
+    left first; reading order is right first (MT-009), so the first marker is
+    the right-hand ring.
+
+    Geometry, by hand: the pages are 60 x 80, so s = min(118/60, 158/80) = 59/30;
+    the page is 118 x 157.333.., at (1, 1.333..). Page point (40, 5) maps to
+    (1 + 40 * 59/30, 4/3 + 5 * 59/30) = (79.666.., 11.1666..).
+
+    Imported inside the test (the precedent is `test_pipeline.py`'s union test)
+    so that while `mangatl.ui.run_thumbnail` does not exist only this test fails,
+    not the whole of MT-059's file.
+    """
+    from mangatl.pipeline.detect_stage import DetectStage
+    from mangatl.ui.run_thumbnail import RunThumbnail
+
+    page_colour = "#3060c0"
+    folder = tmp_path / "Chapter 7"
+    folder.mkdir()
+    for index in range(2):
+        image = QImage(60, 80, QImage.Format.Format_RGB32)
+        image.fill(QColor(page_colour if index == 0 else "#30a050"))
+        assert image.save(str(folder / f"{index + 1:02d}.png"), "PNG")
+    right = ((40, 5), (55, 5), (55, 20), (40, 20), (40, 5))
+    left = ((5, 5), (20, 5), (20, 20), (5, 20), (5, 5))
+
+    def detector(image_bytes: bytes) -> Sequence[RawRegion]:
+        return [
+            RawRegion(polygon=ring, mask=mask_png, confidence=1.0, kind="bubble")
+            for ring in (left, right)
+        ]
+
+    gate = Gate()
+    world.gates.append(gate)
+    calls = Calls()
+    builder = Builder(
+        [DetectStage(detect=detector), FakeStage("translate", calls, _on_page(0, gate))]
+    )
+    window = _window(qtbot, world, folder.resolve(), RunSetup(_models(tmp_path), builder))
+
+    _press_start(window)
+
+    panel = _panel(window)
+    thumb = getattr(panel, "thumbnail", None)
+    assert isinstance(thumb, RunThumbnail), (
+        f"the run screen's panel has thumbnail {thumb!r}: the window did not hand it the chapter"
+    )
+    qtbot.waitUntil(gate.entered.is_set, timeout=RUN_MS)
+    qtbot.waitUntil(lambda: len(thumb.markers()) == 2, timeout=RUN_MS)
+
+    assert thumb.accessibleName() == "Page 1: 2 text regions found"
+    first = thumb.markers()[0][0]
+    assert (first.x(), first.y()) == pytest.approx((239 / 3, 67 / 6), abs=1e-9), (
+        "the first marker is not the right-hand ring mapped onto the 60 x 80 page's rect"
+    )
+    rendered = QImage(120, 160, QImage.Format.Format_ARGB32)
+    rendered.setDevicePixelRatio(1.0)
+    rendered.fill(QColor("#ff00ff"))
+    thumb.render(rendered)
+    assert QColor(rendered.pixel(60, 120)).name() == page_colour, (
+        "the thumbnail is not showing page 1 of the chapter that was started"
+    )
+
+    gate.release.set()
+    _wait_workspace(qtbot, window)
+
+
 # =============================================================================
 # AC-4: RunFinished opens the Workspace; nothing is rendered
 # =============================================================================

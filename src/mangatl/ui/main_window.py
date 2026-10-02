@@ -130,7 +130,7 @@ class MainWindow(QMainWindow):
             pass
         stages = setup.build_stages(models)
 
-        panel = RunProgressPanel()
+        panel = RunProgressPanel(chapter=chapter)
         # The summary is deleted with its focused button; focus must not be
         # left on it (D-2). The panel has no focus stop while running, so the
         # window itself holds focus until a banner's action takes it.

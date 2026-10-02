@@ -25,6 +25,7 @@ __all__ = [
     "CallPriced",
     "PageSkipped",
     "PageStarted",
+    "RegionsDetected",
     "RunAborted",
     "RunEvent",
     "RunFinished",
@@ -81,6 +82,20 @@ class CallPriced:
 
 
 @dataclass(frozen=True)
+class RegionsDetected:
+    """The page with this ordinal has been detected and its regions stored.
+
+    `polygons` are the regions' outlines in page pixels, closed rings, in the
+    reading order they were stored in (MT-062). Polygons rather than
+    `RawRegion`s: a region's mask is a page-sized image, and this crosses a
+    thread to a widget that only draws outlines.
+    """
+
+    ordinal: int
+    polygons: tuple[tuple[tuple[int, int], ...], ...]
+
+
+@dataclass(frozen=True)
 class RunAborted:
     """The run stopped early.
 
@@ -105,5 +120,12 @@ class RunFinished:
 #: `sys.version_info` branch here would be an uncovered branch in a module that
 #: carries a 100% line-and-branch bar.
 RunEvent = (
-    RunStarted | PageStarted | StageFinished | CallPriced | PageSkipped | RunAborted | RunFinished
+    RunStarted
+    | PageStarted
+    | RegionsDetected
+    | StageFinished
+    | CallPriced
+    | PageSkipped
+    | RunAborted
+    | RunFinished
 )

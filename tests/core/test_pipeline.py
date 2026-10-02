@@ -431,12 +431,13 @@ def test_an_event_cannot_be_mutated_after_it_is_emitted() -> None:
         event.ordinal = 2  # type: ignore[misc]
 
 
-def test_the_run_event_union_names_all_seven_event_types_and_no_others() -> None:
+def test_the_run_event_union_names_all_eight_event_types_and_no_others() -> None:
     # MT-063 added `CallPriced` to the union (its `## Contract`); this set was
-    # six until then. Imported here rather than at the top of the file so that,
-    # while `CallPriced` does not exist, only this test fails rather than every
-    # test in the file (MT-063 `## Handoff: RED -> GREEN`).
-    from mangatl.domain.events import CallPriced
+    # six until then. MT-062 added `RegionsDetected` (its C-1, C-6), making it
+    # eight. Both are imported here rather than at the top of the file so that,
+    # while one does not exist, only this test fails rather than every test in
+    # the file (MT-063 `## Handoff: RED -> GREEN`).
+    from mangatl.domain.events import CallPriced, RegionsDetected
 
     assert set(get_args(RunEvent)) == {
         RunStarted,
@@ -446,6 +447,7 @@ def test_the_run_event_union_names_all_seven_event_types_and_no_others() -> None
         RunAborted,
         RunFinished,
         CallPriced,
+        RegionsDetected,
     }
 
 
@@ -986,17 +988,23 @@ def test_a_page_interrupted_after_detection_resumes_into_ocr_without_detecting_a
     )
     assert regions_on_page_zero == seeded, "the skipped detect stage rewrote the page anyway"
     assert [result.text for result in lines_on_page_zero] == ["line-0", "line-1"]
+    # MT-062 C-2/C-6: `DetectStage` now emits `RegionsDetected` after its write,
+    # so each page it *ran* on gains one between `PageStarted` and its
+    # `StageFinished`. Page 0's detection was skipped, so page 0 gains none.
     assert _projected(events) == [
         ("RunStarted", None, None),
         ("PageStarted", 0, None),
         ("StageFinished", 0, "ocr"),
         ("PageStarted", 1, None),
+        ("RegionsDetected", 1, None),
         ("StageFinished", 1, "detect"),
         ("StageFinished", 1, "ocr"),
         ("PageStarted", 2, None),
+        ("RegionsDetected", 2, None),
         ("StageFinished", 2, "detect"),
         ("StageFinished", 2, "ocr"),
         ("PageStarted", 3, None),
+        ("RegionsDetected", 3, None),
         ("StageFinished", 3, "detect"),
         ("StageFinished", 3, "ocr"),
         ("RunFinished", None, None),

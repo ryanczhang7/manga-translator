@@ -30,6 +30,11 @@ verbatim, and the cost readout left exactly as it was. A cancel - only ever
 the window closing - shows nothing (D-4). Whenever a banner has an action, the
 action takes focus and activates on Return and Enter as well as Space.
 
+**The current page is shown when the panel is given the `Chapter`** (MT-062):
+a `RunThumbnail` beside the stepper, fed the page image from the chapter's own
+folder on `PageStarted` and its region outlines on a `RegionsDetected` for that
+page. The `Chapter` is domain data; the panel still reads nothing from the store.
+
 Every colour and type size comes from the application stylesheet by object
 name and dynamic property (MT-061's rule); spacing comes from the tokens.
 """
@@ -55,6 +60,7 @@ from mangatl.domain.events import (
     CallPriced,
     PageSkipped,
     PageStarted,
+    RegionsDetected,
     RunAborted,
     RunEvent,
     RunFinished,
@@ -62,12 +68,14 @@ from mangatl.domain.events import (
     StageFinished,
 )
 from mangatl.domain.money import Usd
+from mangatl.domain.page import Chapter
 from mangatl.pipeline.runner import BUDGET, CANCELLED
 from mangatl.ui import tokens_gen
 from mangatl.ui.buttons import ActivatedByEnter
 from mangatl.ui.cost_estimate import format_usd
 from mangatl.ui.cost_readout import CostReadout
 from mangatl.ui.labels import plain_label
+from mangatl.ui.run_thumbnail import RunThumbnail
 
 __all__ = [
     "ESTIMATING",
@@ -221,10 +229,19 @@ class RunProgressPanel(QWidget):
     #: The count N of kept pages, pages 1..N, when the user asks to review them.
     review_requested = Signal(int)
 
-    def __init__(self, ceiling: Usd = DEFAULT_CEILING, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        ceiling: Usd = DEFAULT_CEILING,
+        parent: QWidget | None = None,
+        *,
+        chapter: Chapter | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("run-progress")
         self._ceiling = ceiling
+        self._chapter = chapter
+        #: The ordinal of the last `PageStarted`: the page the thumbnail shows.
+        self._shown: int | None = None
         self._page_count = 0
         self._current: int | None = None
         self._current_ms = 0
@@ -241,6 +258,9 @@ class RunProgressPanel(QWidget):
         self.overall.setTextVisible(False)
         self.overall_label = plain_label("run-overall-label", "")
         self.stepper = PageStageStepper()
+        #: The current page and its markers (MT-062); `None` without a chapter,
+        #: which has no page images to show.
+        self.thumbnail: RunThumbnail | None = None if chapter is None else RunThumbnail()
         self.elapsed_label = plain_label("run-elapsed", "")
         self.remaining_label = plain_label("run-remaining", "")
         self.cost_readout = CostReadout()
@@ -257,7 +277,13 @@ class RunProgressPanel(QWidget):
         self._column.setSpacing(tokens_gen.SPACE_S3)
         self._column.addWidget(self.overall_label)
         self._column.addWidget(self.overall)
-        self._column.addWidget(self.stepper)
+        current_page = QHBoxLayout()
+        current_page.setObjectName("run-current-page")
+        current_page.setSpacing(tokens_gen.SPACE_S4)
+        if self.thumbnail is not None:
+            current_page.addWidget(self.thumbnail)
+        current_page.addWidget(self.stepper, 0, Qt.AlignmentFlag.AlignTop)
+        self._column.addLayout(current_page)
         self._column.addLayout(times)
         self._column.addWidget(self.cost_readout)
         self._column.addStretch(1)
@@ -273,6 +299,11 @@ class RunProgressPanel(QWidget):
             self.overall.setValue(event.ordinal)
             self.overall_label.setText(f"Page {event.ordinal + 1} of {self._page_count}")
             self.stepper.start()
+            self._show_page(event.ordinal)
+        elif isinstance(event, RegionsDetected):
+            # Before the `RunAborted` fall-through below, which reads `reason`.
+            if self.thumbnail is not None and event.ordinal == self._shown:
+                self.thumbnail.set_regions(event.polygons)
         elif isinstance(event, StageFinished):
             self._elapsed_ms += event.elapsed_ms
             self._current_ms += event.elapsed_ms
@@ -290,6 +321,16 @@ class RunProgressPanel(QWidget):
         elif event.reason != CANCELLED:
             self._failed(event)
         self._show_times()
+
+    def _show_page(self, ordinal: int) -> None:
+        """The thumbnail shows page `ordinal`, read from the chapter's own folder."""
+        if self._chapter is None or self.thumbnail is None:
+            return
+        page = next(page for page in self._chapter.pages if page.ordinal == ordinal)
+        self._shown = ordinal
+        self.thumbnail.show_page(
+            ordinal, self._chapter.source_dir / page.filename, page.width, page.height
+        )
 
     def _start(self, page_count: int) -> None:
         self._page_count = page_count
