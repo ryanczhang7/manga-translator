@@ -438,6 +438,15 @@ QLabel#rowGutter[status="failed"] {
     border-radius: 4px;
 }
 
+/* ---- RunThumbnail (MT-062): the current page, markers drawn on it ----- */
+/* Ground and 1 px frame only; radius 0. The page image and the markers   */
+/* are painted by run_thumbnail.py inside the 1 px-inset content box.     */
+
+#run-thumbnail {
+    background-color: #141414;
+    border: 1px solid #333333;
+}
+
 /* ---- PageStageStepper: one rule per value of the dynamic property ----- */
 /* stepState, which progress.py sets on each step label and re-polishes.  */
 /* The text carries the state too (a check when done, a marker when       */

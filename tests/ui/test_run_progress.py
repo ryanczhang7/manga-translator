@@ -618,7 +618,9 @@ def test_control_the_boundary_check_flags_anything_but_the_two_reasons() -> None
     ]
 
 
-@pytest.mark.parametrize("module", ["progress.py", "cost_readout.py"])
+#: MT-062 AC-4 added `run_thumbnail.py`: the thumbnail reads the page image from
+#: the `Chapter`'s folder, never from the project store.
+@pytest.mark.parametrize("module", ["progress.py", "cost_readout.py", "run_thumbnail.py"])
 def test_the_run_widgets_import_nothing_from_store_or_translate_and_only_reasons_from_pipeline(
     module: str,
 ) -> None:

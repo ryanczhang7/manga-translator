@@ -888,7 +888,7 @@ reviewed. Render anyway?" with the unreviewed lines listed by page.
 - **Overall**: determinate bar, `color.accent.base` fill on `color.surface.sunken`,
   `motion.easing.linear`, label "Page 7 of 20" in `type.numeric`.
 - **Current page**: the page thumbnail with markers appearing as they are
-  detected, beside a `PageStageStepper`.
+  detected, beside a `PageStageStepper` - see `RunThumbnail` below.
 - **Elapsed** and **estimated remaining**, `type.numeric`. The estimate appears
   only after **3** pages complete; before that, "estimating…". A confident wrong
   number is worse than none.
@@ -899,6 +899,37 @@ reviewed. Render anyway?" with the unreviewed lines listed by page.
 
 States: `idle` (hidden) / `running` / `paused` (not in v1) / `finished` /
 `stopped-by-user` / `stopped-by-budget` / `failed`.
+
+### `RunThumbnail` (MT-062)
+
+- **Placement**: row `run-current-page` in the panel column where the stepper
+  was: thumbnail left, `PageStageStepper` right, top-aligned, `space.4` apart.
+- **Box**: `run-thumbnail`, fixed **120 × 160 px**; ground
+  `color.surface.sunken`, `border.width.hairline` `color.border.subtle`, radius 0
+  (stylesheet rule `#run-thumbnail`). 160 px ≈ 2.2× the `PageStrip`'s 72 px, in a
+  ≤ 720 px column; 3:4 fits a single page.
+- **Image**: the page's own `width × height` (from the `Chapter`, never the decoded
+  image) scaled by `s = min(118/w, 158/h)` into the 1 px-inset content box
+  `(1, 1, 118, 158)`, centred, smooth-scaled; painting clipped to that box.
+  Polygon points map as `rect.topLeft() + p·s`.
+- **Markers**: outline only - no fill, no ordinal badge, no states, no dimming
+  (illegible at ≈1/10 scale, and the thumbnail is not interactive). A-06 holds
+  unchanged: all halo strokes (`overlay.halo`, `overlay.stroke.core-idle +
+  2·overlay.stroke.halo` = 6 px) then all core strokes (`overlay.bubble.idle`,
+  `overlay.stroke.core-idle` = 2 px), cosmetic, round join. No animation.
+- **States**: empty frame before the first page (keeps the layout still) →
+  `PageStarted` shows the page, markers cleared → `RegionsDetected` for that
+  page replaces the markers; for any other page, nothing. Run end, abort and
+  skips change nothing: the last page stays in view. An undecodable image
+  leaves the frame empty, markers still drawn on the page rect, and never
+  raises an `ErrorBanner`.
+- **Accessibility**: role `Graphic`, `Qt.NoFocus`. Name (set by the thumbnail
+  itself, `show_page` being given the ordinal - MT-062 PO-4): `No page started` / `Page {n}: detecting text
+  regions…` (U+2026) / `Page {n}: {k} text regions found` / `Page {n}: 1 text
+  region found` / `Page {n}: no text regions found`; no live announcement.
+  Description `The page image could not be opened.` while the image failed to
+  decode, empty otherwise.
+- **High Contrast**: frame follows §10.2 panels; markers unchanged (A-15).
 
 ### `PageStageStepper`
 
