@@ -2,7 +2,7 @@
 id: EPIC-06
 title: Cleaning and typesetting — the pages come out looking like a release
 status: todo
-stories: [MT-019, MT-020, MT-021, MT-027]
+stories: [MT-019, MT-065, MT-020, MT-021, MT-027]
 ---
 
 ## Goal
@@ -31,7 +31,10 @@ anywhere on the page.
 ## Stories
 
 - **MT-019** — inpainting: erase within the mask, reconstruct the interior
-  including screentone and hatching.
+  including screentone and hatching. The logic and the model session only.
+- **MT-065** — the clean stage: a run stores a cleaned image for every page,
+  resumes and invalidates like the other stages. Split out of MT-019 by the
+  user on 2026-10-02 (MT-019 PO-2).
 - **MT-020** — typesetting: real glyph metrics, line breaking, fitting into the
   region polygon, italic and bold for emphasis.
 - **MT-021** — bake and export: atomic per-page writes to `<input>_en/`, same

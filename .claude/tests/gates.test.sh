@@ -743,11 +743,13 @@ real_conf_value() { # <kind> <gate id>
   grep -E "^[[:space:]]*$1[[:space:]]*\|[[:space:]]*$2[[:space:]]*\|" "$REAL_CONF" \
     | head -1 | cut -d'|' -f3- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
-# 26 is settled: the collected count of `tests/integration -m "gpu or network"`,
+# 39 is settled (raised from 26 by MT-019, which added 13 GPU tests to
+# `tests/integration -m "gpu or network"`; observed `40 passed` in its stamped
+# record, one of which never skips). 26 was the collected count of that suite,
 # observed as `26 passed` in MT-036's stamped record and as `1 passed, 25
 # skipped` in MT-037 PO-1. Not re-derived here.
-assert_eq "the manifest gives integration a floor of 26" \
-  "26" "$(real_conf_value floor integration)"
+assert_eq "the manifest gives integration a floor of 39" \
+  "39" "$(real_conf_value floor integration)"
 # `skipped` and NOT `deselected`, exactly. A skip is the tests deciding at call
 # time that their inputs are absent; a deselection is the gate's own marker
 # expression, which is a change to the manifest and therefore a regression. A
