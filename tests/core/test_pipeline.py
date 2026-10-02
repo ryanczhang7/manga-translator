@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import sqlite3
 import subprocess
 import sys
@@ -46,7 +47,6 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
-from PySide6.QtWidgets import QApplication
 
 from mangatl.domain.events import (
     PageSkipped,
@@ -95,13 +95,17 @@ _PASSTHROUGH = "passthrough"
 #: accident.
 _BOOM = "boom-on-page-3"
 
-# A fresh interpreter importing `mangatl.pipeline.runner` is one process start
-# and one import. Measured in RED on this machine at 0.13-0.25 s over three
-# spawns, and by the PO before dispatch at 0.387 s; at MT-005's observed ~3.3x
-# for an instrumented CI run that is ~1.3 s. 60 s is ~46x that headroom, which
-# is the right shape for a budget whose failure mode is a wedged subprocess
-# rather than a slow one. Nothing about the chapter scales this, so it is a
-# constant rather than an expression over the page count.
+# Budgets each of the two fresh-interpreter spawns in this file (AC-9 below).
+# Mechanism 2's child is one process start and one import: measured in MT-006's
+# RED on this machine at 0.13-0.25 s over three spawns, and by the PO before
+# dispatch at 0.387 s. The whole-run child (MT-064) is a process start, the
+# `PySide6.QtCore` and runner imports and a four-page one-stage run: measured by
+# the PO at MT-064's PLANNED at 0.601, 0.478 and 0.419 s, against 0.410, 0.334
+# and 0.313 s for a Mechanism-2 equivalent in the same session. At MT-005's
+# observed ~3.3x for an instrumented CI run the slower child is ~2 s, so 60 s is
+# ~30x headroom - the right shape for a budget whose failure mode is a wedged
+# subprocess rather than a slow one. The page count is a fixed four-page fixture,
+# not a workload a later story scales, so this stays a constant.
 _SUBPROCESS_TIMEOUT_S = 60.0
 
 # -- projection ----------------------------------------------------------------
@@ -1182,45 +1186,119 @@ def test_a_run_that_aborts_also_leaves_the_source_folder_untouched(
 
 # -- AC-9: the run is headless ------------------------------------------------
 
+#: The program Mechanism 1's fresh interpreter runs (MT-064 `## Contract` C-2).
+#: A string constant rather than a file under `tests/`, so pytest never collects
+#: it and `tests/` need not be a package. `PySide6.QtCore` is imported FIRST, so
+#: a pipeline that would use Qt only "if it is already loaded" is exercised. The
+#: child asserts nothing: it reports one JSON object on its last stdout line and
+#: the parent makes every judgement, so a failure reads as a pytest assertion
+#: with a message rather than as a child traceback.
+_WHOLE_RUN_CHILD = """\
+import json
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import QCoreApplication
+
+from mangatl.pipeline.runner import run_chapter
+from mangatl.store.intake import read_chapter
+from mangatl.store.project import PAGE_DONE, create_project, project_dir_for
+
+seen = []
+
+
+class Stage:
+    name = "passthrough"
+
+    def run(self, ctx):
+        seen.append(QCoreApplication.instance() is None)
+
+    def is_done(self, ctx):
+        return ctx.project.page_status(ctx.page.ordinal) == PAGE_DONE
+
+
+source = Path(sys.argv[1])
+events = []
+before = QCoreApplication.instance() is None
+with create_project(read_chapter(source), project_dir_for(source)) as project:
+    outcome = run_chapter(project, [Stage()], events.append, lambda: False)
+after = QCoreApplication.instance() is None
+
+print(json.dumps({
+    "pytestqt_loaded": "pytestqt" in sys.modules,
+    "before": before,
+    "seen": seen,
+    "after": after,
+    "projection": [
+        [type(e).__name__, getattr(e, "ordinal", None), getattr(e, "stage", None)]
+        for e in events
+    ],
+    "outcome": outcome.outcome,
+}))
+"""
+
 
 def test_a_whole_run_executes_with_no_qt_application_in_existence(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
-    # Mechanism 1 of `## Contract` PO-3. NOT "PySide6 is absent from
-    # sys.modules": `pytest-qt` loads 18 PySide6 modules at plugin load for
-    # every pytest session, including a Qt-free file under `tests/core`
-    # (measured by the PO before dispatch, re-measured in RED: 18 modules,
-    # `pytestqt loaded: True`). What is measurably false here and measurably
-    # true under `tests/ui` is that a QApplication has been *constructed*.
+    # Mechanism 1 of MT-006 `## Contract` PO-3, as replaced by MT-064. NOT
+    # "PySide6 is absent from sys.modules": `pytest-qt` loads 18 PySide6 modules
+    # at plugin load for every pytest session, including a Qt-free file under
+    # `tests/core` (measured in MT-006: 18 modules, `pytestqt loaded: True`), and
+    # this child imports `PySide6.QtCore` on purpose. The claim is that the run
+    # neither *constructs* nor *needs* a Qt application object; whether it
+    # *imports* Qt is Mechanism 2's separate claim, below.
     #
-    # ORDER-DEPENDENT, measured in RED: `QApplication.instance()` is `None`
-    # under `pytest tests/core tests/ui` - the order every gate command in
-    # project.conf uses - and is NOT None under `pytest tests/ui tests/core`,
-    # because pytest-qt's application outlives the suite that built it. That is
-    # exactly what makes the assertion discriminate rather than be trivially
-    # true everywhere, and it is why the subprocess test below exists as the
-    # order-independent half.
+    # Why a fresh interpreter: pytest-qt's QApplication outlives the `tests/ui`
+    # test that built it, so an in-process check of `instance() is None` failed
+    # on correct code whenever any `tests/ui` test ran first in the same process
+    # (MT-064 `## Context`). The user chose a subprocess over asserting "the
+    # instance is unchanged by the run", because that version passes a pipeline
+    # that silently relies on an application already existing - MT-064's control
+    # M3, which this test catches on `returncode` even when the parent holds one.
+    # `QCoreApplication.instance()` is the base-class accessor: it returns a
+    # QCoreApplication, QGuiApplication or QApplication alike (verified in
+    # MT-064's RED), and does not pull `QtWidgets` into the child.
     source_dir = _build_source(tmp_path, png_bytes)
-    seen: list[object] = []
 
-    assert QApplication.instance() is None, (
-        "a QApplication already existed before this run; if `tests/ui` now runs"
-        " first, fix the ordering rather than deleting this assertion"
+    result = subprocess.run(
+        [sys.executable, "-c", _WHOLE_RUN_CHILD, str(source_dir)],
+        capture_output=True,
+        text=True,
+        timeout=_SUBPROCESS_TIMEOUT_S,
+        check=False,
     )
-    with _new_project(source_dir) as project:
-        stage = _RecordingStage(on_run=lambda _ctx: seen.append(QApplication.instance()))
-        events, outcome = _run(project, [stage])
 
-    assert seen == [None] * _PAGE_COUNT, "the run constructed a Qt application object"
-    assert QApplication.instance() is None
-    assert _projected(events) == _ONE_STAGE_PROJECTION
-    assert outcome.outcome == RUN_FINISHED
+    assert result.returncode == 0, (
+        f"the whole run crashed in a fresh interpreter (does it need a Qt application?):\n"
+        f"{result.stderr}"
+    )
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report["pytestqt_loaded"] is False, (
+        "pytest-qt was loaded in the child, so the interpreter is not fresh and the"
+        " check is coupled to test order again"
+    )
+    assert report["before"] is True, "a Qt application existed before the run started"
+    assert report["seen"] == [True] * _PAGE_COUNT, (
+        "a Qt application existed at a stage invocation, or the stage did not run once"
+        f" per page: {report['seen']}"
+    )
+    assert report["after"] is True, "the run left a Qt application object behind"
+    assert [tuple(p) for p in report["projection"]] == _ONE_STAGE_PROJECTION, (
+        "the headless run did not emit the full one-stage event stream"
+    )
+    assert report["outcome"] == RUN_FINISHED, "the headless run did not finish"
 
 
 def test_a_fresh_interpreter_importing_the_runner_loads_no_pyside_module() -> None:
-    # Mechanism 2 of `## Contract` PO-3, and exactly one such test: measured at
-    # 0.387 s per spawn by the PO and 0.13-0.25 s in RED on this machine, which
-    # is ~1.3 s instrumented on CI. One is affordable; one per module is not.
+    # Mechanism 2 of MT-006 `## Contract` PO-3. One of TWO fresh-interpreter
+    # spawns in this file since MT-064 (MT-006 said "exactly one", for cost, not
+    # as a design rule). Measured at MT-064's PLANNED: ~0.3-0.4 s for this child
+    # and ~0.4-0.6 s for the whole-run child, at most ~2 s instrumented on CI. They
+    # are not merged to save that: the whole-run child imports `PySide6.QtCore`
+    # by design, so it cannot also count PySide6 modules, and a merged test would
+    # lose the split between "imports no Qt" (here) and "constructs and needs no
+    # Qt application" (above) that MT-064 AC-3 pins.
     #
     # Not redundant with `lint-imports` contract 3: that contract forbids
     # importing OUR `ui` package, and this catches an import of Qt by any route
