@@ -20,8 +20,8 @@ The module is deliberately in two halves:
   only thing that can show the composition is wired correctly.
 
 **This module imports `onnxruntime` at import time**, transitively through
-`mangatl.detect.page` and `mangatl.ocr.page`. That is accepted rather than
-overlooked (PO-9): deferring the imports into `build_pipeline` would not avoid
+`mangatl.detect.page`, `mangatl.ocr.page` and `mangatl.clean.page`. That is
+accepted rather than overlooked (PO-9): deferring the imports into `build_pipeline` would not avoid
 the rule-5 exemption, because import-linter reports function-body imports too.
 Importing the runtime is not loading a model.
 
@@ -36,7 +36,7 @@ still confined, and `pipeline -> translate -> anthropic` is still caught.
 `%APPDATA%\\mangatl\\settings.json` is MT-024's. Measured: with
 `ANTHROPIC_API_KEY` absent, `Anthropic()` constructs successfully and leaves
 `api_key` as `None`, raising at request time rather than at construction. So
-`mangatl-run` on a keyless machine still starts, still detects and still OCRs,
+`mangatl-run` on a keyless machine still starts, still detects, cleans and OCRs,
 and fails on the first page that needs a call - reaching the user as
 `run aborted: <error>` through the runner's general arm rather than as a
 traceback out of this function. That is the behaviour to expect, not a defect,
@@ -55,6 +55,8 @@ from pathlib import Path
 
 from anthropic import Anthropic
 
+from mangatl.clean.page import clean_page_image
+from mangatl.clean.session import load_inpainter
 from mangatl.detect.page import detect_page_regions
 from mangatl.detect.session import load_detector
 from mangatl.ocr.page import transcribe_page_regions
@@ -65,6 +67,7 @@ from mangatl.translate.client import translate_page
 
 __all__ = [
     "DETECTOR_FILENAME",
+    "INPAINTER_FILENAME",
     "MODELS_ENV",
     "OCR_SUBDIR",
     "PROVIDER_PREFERENCE",
@@ -81,6 +84,11 @@ MODELS_ENV: str = "MANGATL_MODELS"
 
 #: The detector graph, directly under the models directory (C-6).
 DETECTOR_FILENAME: str = "comic-text-detector.onnx"
+
+#: The inpainting graph, directly under the models directory, beside the
+#: detector (MT-065 C-7). `lama_fp32.onnx`, never `lama.onnx` (MT-002 audit,
+#: E3/E4).
+INPAINTER_FILENAME: str = "lama_fp32.onnx"
 
 #: The subdirectory holding the OCR export. A *directory* rather than three
 #: paths, because `load_ocr` takes one: the encoder and the decoder are one
@@ -149,7 +157,7 @@ def build_pipeline(models_dir: Path, *, translate: bool = True) -> tuple[Stage, 
 
     The one function in the project that may construct an inference session or
     an API client, and the reason this module exists. Everything it does is
-    wiring: the sessions are `detect`'s and `ocr`'s, the client is
+    wiring: the sessions are `detect`'s, `clean`'s and `ocr`'s, the client is
     `anthropic`'s, the binding is `functools.partial`, and the order of the
     stages is `pipeline.stages.build_stages`'s. Nothing here decides anything a
     stage decides.
@@ -162,7 +170,7 @@ def build_pipeline(models_dir: Path, *, translate: bool = True) -> tuple[Stage, 
     **`translate` is keyword-only and defaults to `True`** (C-14). Translating
     is what the tool is for, so `mangatl-run --no-translate` is an opt-out a
     user types and never a state the program drifts into. Under the flag the
-    weights still load - the run still detects and still transcribes - and
+    weights still load - the run still detects, cleans and transcribes - and
     **no `Anthropic` is constructed at all**, not constructed and discarded:
     `Anthropic()` succeeds with no key and raises only at request time, so a
     client built and dropped here is invisible to every run that completes and
@@ -170,15 +178,17 @@ def build_pipeline(models_dir: Path, *, translate: bool = True) -> tuple[Stage, 
     `build_stages`', not assembled here (MT-036 C-1: the list is a pipeline
     fact), so `None` is the whole of what this function decides.
 
-    Layout is C-6: the detector directly under `models_dir`, the OCR export in
-    `OCR_SUBDIR`.
+    Layout is C-6: the detector and the inpainter (`INPAINTER_FILENAME`, MT-065
+    C-7) directly under `models_dir`, the OCR export in `OCR_SUBDIR`.
     """
     ocr_dir = models_dir / OCR_SUBDIR
     detector = load_detector(models_dir / DETECTOR_FILENAME, PROVIDER_PREFERENCE)
     ocr = load_ocr(ocr_dir, PROVIDER_PREFERENCE)
     vocab = load_vocab(ocr_dir / VOCAB_FILENAME)
+    inpainter = load_inpainter(models_dir / INPAINTER_FILENAME, PROVIDER_PREFERENCE)
     return build_stages(
         partial(detect_page_regions, detector),
+        partial(clean_page_image, inpainter),
         partial(transcribe_page_regions, ocr, vocab),
         partial(translate_page, Anthropic()) if translate else None,
     )

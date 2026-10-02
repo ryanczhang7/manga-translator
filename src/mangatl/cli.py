@@ -23,8 +23,9 @@ decided there is no silent default, and accepted that `mangatl-run` now fails on
 a machine with no weights where it used to write an empty translation.
 
 **MT-044: the run translates, so `--no-translate` is the way to run without
-paying for it.** The flag asks the composition root for a detect-and-OCR stage
-list, and with it no API client is constructed and nothing is billed. It is an
+paying for it.** The flag asks the composition root for a detect, clean and OCR
+stage list (MT-065 PO-1: cleaning is local and free, so the flag keeps it),
+and with it no API client is constructed and nothing is billed. It is an
 opt-out the user types: without it, a machine with no `ANTHROPIC_API_KEY` still
 aborts on the first page that needs a call, because a run that quietly did not
 translate is the failure mode EPIC-04's budget work exists to make visible
@@ -77,7 +78,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--no-translate",
         action="store_true",
-        help="detect and transcribe only; make no API calls and spend nothing",
+        help="detect, clean and transcribe only; make no API calls and spend nothing",
     )
     arguments = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     source_dir: Path = arguments.folder

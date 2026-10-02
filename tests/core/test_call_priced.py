@@ -137,6 +137,13 @@ class _Detector:
         )
 
 
+#: MT-065 C-1 (a): `build_stages` takes a required cleaner, second. The page's
+#: own bytes are a decodable image of the page's own size, which is all
+#: `Project.write_cleaned` checks; nothing in this file is about cleaning.
+def _cleaner(image_bytes: bytes, regions: Sequence[RawRegion]) -> bytes:
+    return image_bytes
+
+
 def _transcriber(image_bytes: bytes, regions: Sequence[RawRegion]) -> Sequence[OcrResult]:
     return tuple(OcrResult(text=f"ja-{index}") for index in range(len(regions)))
 
@@ -215,7 +222,7 @@ class _Fixture:
         events: list[RunEvent] = []
         run_chapter(
             self.project,
-            build_stages(_Detector(self.mask), _transcriber, _Translator(script)),
+            build_stages(_Detector(self.mask), _cleaner, _transcriber, _Translator(script)),
             events.append,
             _never,
         )
@@ -378,7 +385,8 @@ def test_each_priced_page_emits_one_call_priced_after_its_start_and_before_trans
 ) -> None:
     """AC-1's "when the call is recorded, then an event ... is emitted", as the
     stream a real run produces. Per page k the order is exactly PageStarted(k),
-    detect, ocr, CallPriced(k), translate."""
+    detect, clean, ocr, CallPriced(k), translate - `clean` since MT-065 C-6,
+    which puts it after detect and before OCR (PO-3)."""
     events = fixture.run()
 
     per_page = [
@@ -392,6 +400,7 @@ def test_each_priced_page_emits_one_call_priced_after_its_start_and_before_trans
         for row in (
             ("PageStarted", k, None),
             ("StageFinished", k, "detect"),
+            ("StageFinished", k, "clean"),
             ("StageFinished", k, "ocr"),
             ("CallPriced", k, None),
             ("StageFinished", k, _TRANSLATE),

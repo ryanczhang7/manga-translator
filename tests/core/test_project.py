@@ -78,7 +78,8 @@ _SOURCE_PAGES: tuple[tuple[str, int, int], ...] = (
 # independent things to be true about.
 _REPLACEMENT_SIZE = (31, 7)
 
-# The seven tables of `architecture.md` §4 and the columns it names. Asserted as
+# The seven tables of `architecture.md` §4, plus MT-065's `cleaned_page`, and the
+# columns they carry. Asserted as
 # a SUBSET of what the schema carries: an extra column is the implementer's
 # choice, a missing one is a defect that AC-4 and AC-6 would otherwise report as
 # an OperationalError from somewhere unrelated.
@@ -172,6 +173,9 @@ _SCHEMA_COLUMNS: dict[str, frozenset[str]] = {
             "source",
         }
     ),
+    # MT-065 C-2: one encoded cleaned image per page. `test_schema_v7.py` pins
+    # the shape, the cascade from `page` and the migration.
+    "cleaned_page": frozenset({"page_id", "image_blob"}),
 }
 
 _TABLES: tuple[str, ...] = tuple(_SCHEMA_COLUMNS)
@@ -402,7 +406,7 @@ def _artefacts_by_ordinal(project: Project) -> dict[int, list[tuple[int, bytes, 
 
 
 def _table_counts(project: Project) -> dict[str, int]:
-    """Row counts for all seven tables, so an orphan row anywhere is visible.
+    """Row counts for every table, so an orphan row anywhere is visible.
 
     AC-5 needs this rather than a per-page query: a region written against a
     page row that was itself rolled back belongs to no page, so nothing keyed by
@@ -469,7 +473,8 @@ def test_the_schema_version_and_the_two_page_status_values_are_the_pinned_ones()
     # children, and `tests/core/test_schema_v4.py` is where that is tested.
     # MT-014 C-7 takes it to 5: `glossary` gains `last_seen_page` and `source`.
     # MT-017 C-5 takes it to 6: `line` gains `status`.
-    assert SCHEMA_VERSION == 6
+    # MT-065 C-2 takes it to 7: `cleaned_page`.
+    assert SCHEMA_VERSION == 7
     assert PAGE_PENDING == "pending"
     assert PAGE_STALE == "stale"
     assert PAGE_PENDING != PAGE_STALE

@@ -27,8 +27,19 @@ forbid one that proves the wiring without them, and the three loaders are the
 whole of what needs stubbing to get there. The real model still gets its smoke
 test in `tests/integration`, where AC-6's "the run completes" clause lives.
 
-What these tests do NOT constrain: how `build_pipeline` orders its three loads,
-*how* it produces a two-stage list under `translate=False` (C-14 pins the
+**MT-065 AC-6/AC-7 add a fourth loader and a fourth stage.** `build_pipeline`
+now also loads the inpainter - `load_inpainter` on `lama_fp32.onnx` directly
+under the models directory - under **both** values of `translate`, and binds it
+into a `CleanStage` through `clean_page_image` (C-7). The `loaders` fixture
+replaces `load_inpainter` too, with a recorder returning a fake
+`InpaintSession` that counts its `run` calls (MT-019 C-2's convention), so
+"the clean stage is bound to the loaded session" is asserted by behaviour - the
+stage's callable is run and the fake's counter moves - and not only by type.
+The full list is detect, clean, OCR, translate; under the flag it is detect,
+clean, OCR (PO-1, the user's decision; PO-3 the order).
+
+What these tests do NOT constrain: how `build_pipeline` orders its four loads,
+*how* it produces the short list under `translate=False` (C-14 pins the
 signature and the outcome, not the body - a conditional tuple, a second builder
 and an optional parameter on `build_stages` are all equally acceptable), whether
 `resolve_models_dir` expands `~` or resolves symlinks, what `ModelsNotFound`
@@ -41,12 +52,19 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
+import numpy as np
 import pytest
+from numpy.typing import NDArray
+from PIL import Image
 
 from mangatl.compose import (
     DETECTOR_FILENAME,
+    INPAINTER_FILENAME,
     MODELS_ENV,
     OCR_SUBDIR,
     PROVIDER_PREFERENCE,
@@ -54,7 +72,9 @@ from mangatl.compose import (
     build_pipeline,
     resolve_models_dir,
 )
+from mangatl.domain.region import RawRegion
 from mangatl.ocr.session import DECODER_FILENAME, ENCODER_FILENAME, VOCAB_FILENAME
+from mangatl.pipeline.clean_stage import CleanStage
 from mangatl.pipeline.detect_stage import DetectStage
 from mangatl.pipeline.ocr_stage import OcrStage
 from mangatl.pipeline.translate_stage import TranslateStage
@@ -84,8 +104,10 @@ def test_the_composition_root_exports_exactly_what_the_contract_names() -> None:
     # test and the linter agree rather than compete. Do not re-add `sorted(`.
     import mangatl.compose as module
 
+    # MT-065 C-7 adds `INPAINTER_FILENAME`, in RUF022's order.
     assert module.__all__ == [
         "DETECTOR_FILENAME",
+        "INPAINTER_FILENAME",
         "MODELS_ENV",
         "OCR_SUBDIR",
         "PROVIDER_PREFERENCE",
@@ -107,6 +129,12 @@ def test_the_models_directory_layout_is_the_one_c6_draws() -> None:
     # exists here rather than three separate paths.
     assert DETECTOR_FILENAME == "comic-text-detector.onnx"
     assert OCR_SUBDIR == "manga-ocr"
+
+
+def test_the_inpainter_is_lama_fp32_never_lama() -> None:
+    # MT-065 AC-6 names the file, so the literal is spelled here. `lama.onnx`
+    # is the export MT-002 E3/E4 measured and rejected; C-7.
+    assert INPAINTER_FILENAME == "lama_fp32.onnx"
 
 
 def test_the_three_ocr_filenames_are_referenced_and_never_respelled() -> None:
@@ -226,19 +254,43 @@ def test_the_pipeline_builders_only_positional_argument_is_the_models_directory(
 # -- MT-044 AC-6: `--no-translate`, at the seam that decides both halves -------
 
 
+@dataclass
+class _FakeInpaintSession:
+    """An `InpaintSession` that counts its `run` calls (MT-065 C-7).
+
+    MT-019 C-2's convention: `run(image, mask)` returns `image * 255`, the
+    model-scale composite of an export that changed nothing, and
+    `get_providers()` reports the CPU. The count is the whole point: it is what
+    shows the composed clean stage reaches *this* session and not another.
+    """
+
+    runs: int = 0
+
+    def run(self, image: NDArray[np.float32], mask: NDArray[np.float32]) -> NDArray[np.float32]:
+        self.runs += 1
+        return (image * 255.0).astype(np.float32)
+
+    def get_providers(self) -> Sequence[str]:
+        return ["CPUExecutionProvider"]
+
+
 class _Loaders:
-    """The three weight loaders `build_pipeline` calls, replaced at its own names.
+    """The four weight loaders `build_pipeline` calls, replaced at its own names.
 
     Nothing here loads anything: each call records the path it was handed and
-    returns a sentinel that only has to be identifiable. That is what puts
-    AC-6 - a criterion about *which stages get built* - inside `tests/core`,
-    which three required gates read, with no weights on the machine and no GPU.
+    returns a sentinel that only has to be identifiable - except the
+    inpainter's, which returns a counting fake session, because MT-065 C-7
+    asserts the clean stage by running it. That is what puts AC-6 - a
+    criterion about *which stages get built* - inside `tests/core`, which three
+    required gates read, with no weights on the machine and no GPU.
     """
 
     def __init__(self) -> None:
         self.detector_paths: list[Path] = []
         self.ocr_dirs: list[Path] = []
         self.vocab_paths: list[Path] = []
+        self.inpainter_loads: list[tuple[Path, tuple[str, ...]]] = []
+        self.inpainters: list[_FakeInpaintSession] = []
 
     def load_detector(self, path: Path, providers: tuple[str, ...]) -> object:
         self.detector_paths.append(path)
@@ -251,6 +303,12 @@ class _Loaders:
     def load_vocab(self, path: Path) -> object:
         self.vocab_paths.append(path)
         return f"vocab({path})"
+
+    def load_inpainter(self, path: Path, providers: Sequence[str]) -> _FakeInpaintSession:
+        self.inpainter_loads.append((path, tuple(providers)))
+        session = _FakeInpaintSession()
+        self.inpainters.append(session)
+        return session
 
 
 class _ClientSpy:
@@ -291,6 +349,9 @@ def loaders(monkeypatch: pytest.MonkeyPatch) -> _Loaders:
     monkeypatch.setattr("mangatl.compose.load_detector", stubs.load_detector)
     monkeypatch.setattr("mangatl.compose.load_ocr", stubs.load_ocr)
     monkeypatch.setattr("mangatl.compose.load_vocab", stubs.load_vocab)
+    # MT-065 C-1 (b): without this every `build_pipeline` call in the file
+    # reaches the real onnxruntime on an empty directory.
+    monkeypatch.setattr("mangatl.compose.load_inpainter", stubs.load_inpainter)
     return stubs
 
 
@@ -324,13 +385,15 @@ def weights_dir(tmp_path: Path) -> Path:
     return directory
 
 
-def test_the_no_translate_flag_builds_detect_and_ocr_only_and_constructs_no_client(
+def test_the_no_translate_flag_builds_detect_clean_and_ocr_and_constructs_no_client(
     weights_dir: Path, loaders: _Loaders, client_spy: _ClientSpy, keyless: None
 ) -> None:
-    """**AC-6**, first and second clauses, at the one place both are decided.
+    """**MT-044 AC-6**, first and second clauses, at the one place both are
+    decided - **as MT-065 AC-7 amends the first**: the flagged list is detect,
+    clean, OCR (`## Amendments` A-1 of MT-065; it was "detect and OCR only").
 
-    *Holds detect and OCR only* is asserted by type and by length, the way
-    `test_stages.py` asserts the three-stage list: a list that lost or gained a
+    *The list* is asserted by type and by length, the way
+    `test_stages.py` asserts the four-stage list: a list that lost or gained a
     stage still satisfies every assertion about the ones it kept, so the count
     is not decoration. The stage classes are imported rather than named by
     string - `"detect"` and `"ocr"` are `test_stages.py`'s literals and C-6's,
@@ -346,19 +409,24 @@ def test_the_no_translate_flag_builds_detect_and_ocr_only_and_constructs_no_clie
     The two loader assertions are what stops the whole thing passing for the
     wrong reason: a `build_pipeline` that refused the flag by building *nothing*
     would satisfy the first three and is not a pipeline. With the flag the
-    weights still load, because the run still detects and still transcribes.
+    weights still load, because the run still detects, cleans and transcribes
+    (the inpainter's load under the flag is the parametrised test below).
     """
     stages = build_pipeline(weights_dir, translate=False)
 
-    assert [type(stage) for stage in stages] == [DetectStage, OcrStage], (
+    assert [type(stage) for stage in stages] == [DetectStage, CleanStage, OcrStage], (
         f"--no-translate built {[type(stage).__name__ for stage in stages]};"
-        " AC-6 says detect and OCR only"
+        " MT-065 AC-7 says detect, clean, OCR"
     )
-    assert len(stages) == 2, (
+    assert len(stages) == 3, (
         f"the flagged stage list holds {len(stages)} stages; a list that kept a"
-        " third one satisfies every type assertion about the first two"
+        " fourth one satisfies every type assertion about the first three"
     )
-    assert [stage.name for stage in stages] == [DetectStage.name, OcrStage.name]
+    assert [stage.name for stage in stages] == [
+        DetectStage.name,
+        CleanStage.name,
+        OcrStage.name,
+    ]
     assert client_spy.clients == [], (
         f"--no-translate constructed {len(client_spy.clients)} Anthropic"
         " client(s). C-13 measured that construction succeeds with no key and"
@@ -390,14 +458,21 @@ def test_the_unflagged_build_still_translates_and_constructs_exactly_one_client(
     builds three stages and one client. Earned with two mutations of the exact
     production behaviour it claims to pin - the client construction in
     `compose.py` and the translate stage in `stages.py` - both reverted, both
-    pasted into `## Regressions` R-10.
+    pasted into `## Regressions` R-10. (That was MT-044's arrival. MT-065
+    makes the list four stages, so in MT-065's RED it is red by assertion.)
     """
     stages = build_pipeline(weights_dir)
 
-    assert [type(stage) for stage in stages] == [DetectStage, OcrStage, TranslateStage], (
+    assert [type(stage) for stage in stages] == [
+        DetectStage,
+        CleanStage,
+        OcrStage,
+        TranslateStage,
+    ], (
         f"the unflagged stage list is {[type(stage).__name__ for stage in stages]};"
-        " AC-4 is detect, then OCR, then translate, and C-14 leaves it alone"
+        " MT-065 AC-7 is detect, clean, OCR, translate"
     )
+    assert len(stages) == 4
     assert len(client_spy.clients) == 1, (
         f"the unflagged build constructed {len(client_spy.clients)} clients"
         " through mangatl.compose.Anthropic. Exactly one is C-13; zero means the"
@@ -430,8 +505,69 @@ def test_the_flagged_build_needs_no_api_key_in_the_environment(
     """
     stages = build_pipeline(weights_dir, translate=False)
 
-    assert len(stages) == 2
+    assert len(stages) == 3
     assert _API_KEY_ENV not in os.environ, "the premise of this test was not established"
+
+
+# -- MT-065 AC-6/AC-7: the clean stage, built from `load_inpainter` ------------
+
+
+@pytest.mark.parametrize("translate", [True, False], ids=["translating", "no-translate"])
+def test_the_inpainter_is_loaded_once_from_lama_fp32_in_the_models_directory(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    keyless: None,
+    translate: bool,
+) -> None:
+    """**MT-065 AC-6** (C-7): `load_inpainter` on `lama_fp32.onnx` directly
+    under the models directory, with the interim provider preference - and
+    under **both** values of `translate`, because `--no-translate` still
+    cleans (AC-7, PO-1). The file name is the literal, spelled here because
+    AC-6 names it (DV-6 turns this red)."""
+    build_pipeline(weights_dir, translate=translate)
+
+    assert loaders.inpainter_loads == [(weights_dir / "lama_fp32.onnx", PROVIDER_PREFERENCE)], (
+        f"the inpainter loads were {loaders.inpainter_loads}; AC-6 is exactly one,"
+        " from <models>/lama_fp32.onnx, with PROVIDER_PREFERENCE"
+    )
+
+
+@pytest.mark.parametrize("translate", [True, False], ids=["translating", "no-translate"])
+def test_the_clean_stage_runs_the_loaded_inpainter_through_clean_page_image(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    keyless: None,
+    translate: bool,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """**MT-065 AC-6**, behaviourally (C-7): the `CleanStage`'s callable, handed
+    a small PNG page and one region with a non-empty mask, returns a PNG of the
+    page's size, and the session `load_inpainter` returned is the one that ran.
+    A stage bound to anything else - a second session, a lambda, the identity -
+    leaves the counter at zero."""
+    stages = build_pipeline(weights_dir, translate=translate)
+    (clean_stage,) = [stage for stage in stages if isinstance(stage, CleanStage)]
+    (session,) = loaders.inpainters
+    width, height = 64, 48
+    region = RawRegion(
+        polygon=((10, 10), (20, 10), (20, 20), (10, 20), (10, 10)),
+        mask=one_bit_png(width, height, [(10, 10, 20, 20)]),
+        confidence=0.5,
+        kind="bubble",
+    )
+    assert session.runs == 0
+
+    cleaned = clean_stage.clean(png_bytes(width, height, (30, 60, 90)), [region])
+
+    assert session.runs >= 1, (
+        "the composed clean stage did not run the session load_inpainter returned"
+    )
+    assert cleaned[:8] == b"\x89PNG\r\n\x1a\n", "the composed cleaner did not return a PNG"
+    with Image.open(BytesIO(cleaned)) as image:
+        assert image.size == (width, height)
 
 
 # -- C-2: resolving the models directory, every branch -------------------------

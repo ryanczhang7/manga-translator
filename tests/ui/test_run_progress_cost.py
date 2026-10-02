@@ -252,6 +252,11 @@ def test_a_real_run_drives_the_panels_cost_readout_page_by_page(qtbot, tmp_path:
         ring = ((0, 0), (4, 0), (4, 4), (0, 4), (0, 0))
         return (RawRegion(polygon=ring, mask=mask, confidence=1.0, kind="bubble"),)
 
+    def clean(image_bytes: bytes, regions: Sequence[RawRegion]) -> bytes:
+        # MT-065 C-1 (a): the required cleaner; the page's own bytes are a
+        # decodable image of its own size, all `write_cleaned` checks.
+        return image_bytes
+
     def transcribe(image_bytes: bytes, regions: Sequence[RawRegion]) -> Sequence[OcrResult]:
         return tuple(OcrResult(text=f"ja-{index}") for index in range(len(regions)))
 
@@ -264,7 +269,9 @@ def test_a_real_run_drives_the_panels_cost_readout_page_by_page(qtbot, tmp_path:
             figures.append(panel.cost_readout.figure.text())
 
     with create_project(read_chapter(source_dir), project_dir_for(source_dir)) as project:
-        run_chapter(project, build_stages(detect, transcribe, _Translator()), emit, lambda: False)
+        run_chapter(
+            project, build_stages(detect, clean, transcribe, _Translator()), emit, lambda: False
+        )
 
     assert figures == ["$0.04", "$0.10", "$0.14"], (
         "the panel's cost readout did not follow the chapter's spend through the run"
