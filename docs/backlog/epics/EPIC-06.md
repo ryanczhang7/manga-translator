@@ -34,7 +34,8 @@ anywhere on the page.
   including screentone and hatching. The logic and the model session only.
 - **MT-065** — the clean stage: a run stores a cleaned image for every page,
   resumes and invalidates like the other stages. Split out of MT-019 by the
-  user on 2026-10-02 (MT-019 PO-2).
+  user on 2026-10-02 (MT-019 PO-2). `--no-translate` runs clean too (user,
+  2026-10-02, MT-065 PO-1).
 - **MT-020** — typesetting: real glyph metrics, line breaking, fitting into the
   region polygon, italic and bold for emphasis.
 - **MT-021** — bake and export: atomic per-page writes to `<input>_en/`, same

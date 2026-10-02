@@ -221,6 +221,9 @@ llm_call   id, run_id, page_id, request_id, model_id,
 
 glossary   id, chapter_id, term_ja, term_en, note, first_seen_page
            -- continuity across pages: names, honorifics, place names
+
+cleaned_page  page_id, image_blob
+           -- the page with its regions erased (MT-065, schema v7); one per page
 ```
 
 Notes that are decisions, not description:
@@ -238,6 +241,16 @@ Notes that are decisions, not description:
 - **`page.sha256`** is what makes resume safe: if the user replaces a scan, the
   hash changes and that page's downstream state is invalidated rather than
   silently reused.
+- **`cleaned_page.image_blob` lives in the database, not in files beside it**
+  (MT-065 PO-2). Every invalidation in this project is a `DELETE` inside the
+  transaction of the write that makes the derived state stale, and a blob keeps
+  the cleaned page inside that discipline; a file under `<input>.mtproj/` would
+  have to be kept in step with its row across a crash. It is an *encoded* image
+  - the cleaner's PNG, or a regionless page's source bytes verbatim - and never
+  a lossy re-encode. It is per page, not per region, so `write_regions` and
+  `refresh_from_source` delete it explicitly rather than by cascade. Cost: about
+  1-2 MB per page (measured on the 1125×1600 fixture scans), and the space a
+  deleted blob frees stays in the file until a `VACUUM`.
 
 ## 5. Where state lives
 
