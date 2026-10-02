@@ -27,20 +27,19 @@ Two halves:
    closed, `open_project` reopens the same directory, and a fresh `Workspace`
    reads the rows back.
 
-**Timing.** One test (AC-1's) waits real time, bounded by the literal
-`500 + 250` ms; everything else is synchronous. The page PNG is small (600 x
-800), encoded once per session. No `pytest-timeout` exists in this project.
+**Timing.** One test (AC-1's) waits real time, for liveness only (MT-060: the
+500 ms bound is read off the save timer); everything else is synchronous. The
+page PNG is small (600 x 800), encoded once per session. No `pytest-timeout` exists in this project.
 """
 
 from __future__ import annotations
 
 import sqlite3
-import time
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QSize, Qt
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QObject, QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
@@ -92,7 +91,7 @@ REASON_UNTRANSLATED = "no translation was returned"
 
 # --- Settled number: AC-1 --------------------------------------------------------
 DESIGN_SAVE_BOUND_MS = 500
-SLACK_MS = 250  # event-loop scheduling slack, named (story Contract, oracle table)
+SLACK_MS = 250  # sizes the liveness wait only (MT-060): 4 * (500 + 250) ms
 
 # --- Fixture ----------------------------------------------------------------------
 STATUSES = ("proposed", "accepted", "edited", "reverted", "failed")
@@ -186,6 +185,14 @@ def _focus(qtbot, widget: QWidget) -> None:  # type: ignore[no-untyped-def]
 def _key(widget: QWidget, key: Qt.Key, modifiers: Qt.KeyboardModifier = NO) -> None:
     QTest.keyClick(widget, key, modifiers)
     _settle()
+
+
+def _save_timer(editor: QObject) -> QTimer:
+    """MT-060 C-2: a `LineEditor` owns exactly one `QTimer` - its save timer. Were
+    there more, "the" save timer would be a guess, so this fails rather than picks."""
+    timers = editor.findChildren(QTimer)
+    assert len(timers) == 1, f"expected the editor to own one QTimer, found {len(timers)}"
+    return timers[0]
 
 
 def _type(widget: QWidget, text: str) -> None:
@@ -631,29 +638,36 @@ def _editor(window: Workspace, index: int):  # type: ignore[no-untyped-def]
     return window.translation_column.row(index).editor
 
 
-def test_an_edit_is_in_the_project_file_within_500_ms_of_enter(
+def test_enter_starts_a_single_shot_save_of_at_most_500_ms_that_reaches_the_project_file(
     qtbot,  # type: ignore[no-untyped-def]
     project: Project,
     chapter_dir: Path,
 ) -> None:
-    """AC-1, observed as the criterion states it: a second connection to the
-    project file sees the new text within the literal 500 ms, plus named
-    event-loop slack. No flush is called."""
+    """AC-1 as a fact of the code (MT-060 C-1, C-4): right after Enter the
+    editor's save timer is active, single-shot and set to no more than the
+    literal 500 ms, and nothing is on disk yet; then, with no flush, a second
+    connection to the project file sees the new text. The wall clock bounds only
+    that liveness - the event loop's own latency is Qt's, not this product's."""
     window = _showing(qtbot, project)
     editor = _editor(window, 0)
     _focus(qtbot, editor)
     _type(editor, "Hi there.")
     QTest.keyClick(editor, Qt.Key.Key_Return)
-    committed = time.monotonic()
+    timer = _save_timer(editor)
+
+    assert timer.isActive(), "Enter did not start the save timer"
+    assert timer.isSingleShot(), "the save timer repeats: it should fire once per commit"
+    assert timer.interval() <= DESIGN_SAVE_BOUND_MS, (
+        f"the save timer waits {timer.interval()} ms, over the design's {DESIGN_SAVE_BOUND_MS} ms"
+    )
+    assert _on_disk(chapter_dir, 0)[0] != ("Hi there.", "edited"), "saved inline, not by the timer"
 
     qtbot.waitUntil(
         lambda: _on_disk(chapter_dir, 0)[0] == ("Hi there.", "edited"),
         timeout=4 * (DESIGN_SAVE_BOUND_MS + SLACK_MS),
     )
-    elapsed_ms = (time.monotonic() - committed) * 1000
 
     assert editor.status == "edited"
-    assert elapsed_ms <= DESIGN_SAVE_BOUND_MS + SLACK_MS, f"on disk {elapsed_ms:.0f} ms after Enter"
 
 
 def test_changing_page_writes_a_pending_save_before_the_rows_are_replaced(

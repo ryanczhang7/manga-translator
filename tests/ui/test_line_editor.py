@@ -24,9 +24,11 @@ field gets WRONG, so none of these tests can pass on an unmodified QLineEdit):
 
 **Timing.** Every test here is synchronous except the three that pin C-7's
 save timer (AC-1's 500 ms), which wait real time: at most ~0.8 s each when the
-implementation is right. `SLACK_MS` is event-loop scheduling slack, named and
-not tuned. No `pytest-timeout` exists in this project; the waits carry their
-own explicit timeouts.
+implementation is right. Since MT-060 none of them asserts wall-clock latency:
+the bound is read off the save timer (active, single-shot, interval <= 500,
+not restarted), and the wall clock bounds only liveness, under the generous
+`4 * (DESIGN_SAVE_BOUND_MS + SLACK_MS)` wait. No `pytest-timeout` exists in
+this project; the waits carry their own explicit timeouts.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit, QVBoxLayout, QWidget
@@ -46,7 +48,14 @@ from mangatl.ui.line_editor import SAVE_DEBOUNCE_MS, LineEditor
 
 # --- Settled numbers ------------------------------------------------------------
 DESIGN_SAVE_BOUND_MS = 500  # AC-1 / components.md §6 "debounced 500ms" - a literal
-SLACK_MS = 250  # event-loop scheduling slack, named (story Contract, oracle table)
+SLACK_MS = 250  # sizes the liveness waits only (MT-060): 4 * (500 + 250) ms
+#: MT-060 C-1: the gap between the two commits of the no-restart test.
+SECOND_COMMIT_AFTER_MS = 300
+#: MT-060 C-1: how far `remainingTime()` may read above the true remainder. It is
+#: an integer of milliseconds (rounding: 1 ms), and on Windows a timer can fall
+#: back to the 15.6 ms system tick; measured locally 0 ms over in 40 runs. A
+#: restart reads ~500, far above 500 - 300 + 20.
+TIMER_GRAIN_MS = 20
 
 # --- Fixture text -------------------------------------------------------------
 #: A proposal whose O2 form is not itself: NFD accent, double space, trailing space.
@@ -142,6 +151,15 @@ def _rig(qtbot, line: Line, save: _Save | None = None, *, no_save: bool = False)
 def _key(rig: _Rig, key: Qt.Key, modifiers: Qt.KeyboardModifier = NO) -> None:
     QTest.keyClick(rig.editor, key, modifiers)
     _settle()
+
+
+def _save_timer(editor: LineEditor) -> QTimer:
+    """MT-060 C-2: the editor's one `QTimer` child is its save timer. RED found
+    exactly one; were there more, "the" save timer would be a guess, so this
+    fails rather than picks."""
+    timers = editor.findChildren(QTimer)
+    assert len(timers) == 1, f"expected the editor to own one QTimer, found {len(timers)}"
+    return timers[0]
 
 
 def _type(rig: _Rig, text: str) -> None:
@@ -601,40 +619,64 @@ def test_the_save_bound_is_no_more_than_the_500_ms_the_design_settles() -> None:
     assert SAVE_DEBOUNCE_MS <= DESIGN_SAVE_BOUND_MS
 
 
-def test_a_commit_is_saved_without_any_flush_within_the_bound_plus_slack(
+def test_a_commit_starts_a_single_shot_save_timer_of_at_most_500_ms_that_saves_without_a_flush(
     qtbot,  # type: ignore[no-untyped-def]
 ) -> None:
+    """AC-1 as a fact of the code (MT-060 C-1, C-4): Enter starts the editor's
+    save timer - active, single-shot, interval no more than the literal 500 ms -
+    and its firing saves, with no flush. The wall clock bounds only liveness."""
     rig = _rig(qtbot, _line("proposed"))
     _type(rig, EDITED)
     QTest.keyClick(rig.editor, Qt.Key.Key_Return)
-    committed = time.monotonic()
+    timer = _save_timer(rig.editor)
+
+    assert timer.isActive(), "Enter did not start the save timer"
+    assert timer.isSingleShot(), "the save timer repeats: it should fire once per commit"
+    assert timer.interval() <= DESIGN_SAVE_BOUND_MS, (
+        f"the save timer waits {timer.interval()} ms, over the design's {DESIGN_SAVE_BOUND_MS} ms"
+    )
 
     qtbot.waitUntil(lambda: rig.save.calls != [], timeout=4 * (DESIGN_SAVE_BOUND_MS + SLACK_MS))
-    elapsed_ms = (time.monotonic() - committed) * 1000
 
     assert rig.save.calls == [(EDITED, "edited")]
-    assert elapsed_ms <= DESIGN_SAVE_BOUND_MS + SLACK_MS, f"saved {elapsed_ms:.0f} ms after Enter"
 
 
 def test_a_second_commit_does_not_restart_the_save_timer(qtbot) -> None:  # type: ignore[no-untyped-def]
     """C-7: an upper bound on data loss, not a debounce a fast typist can
-    postpone forever. The first commit starts the timer; a second one 300 ms
-    later is carried by the same firing, still within the first commit's
-    bound. A restarting debounce would fire at ~800 ms."""
+    postpone forever. The first commit starts the timer; a second one at least
+    `SECOND_COMMIT_AFTER_MS` later is carried by the same firing. Read off the
+    timer (MT-060 C-1): a restart resets `remainingTime` to ~500 ms; no restart
+    leaves at most what was left before the second commit.
+
+    The gap is a BLOCKING sleep, and the second commit is sent with no event
+    processing (`QTest` key clicks dispatch directly; they do not spin the loop),
+    so the timer cannot fire before the second commit however long the runner
+    stalls. Any stall only lowers `remainingTime` - to 0 when overdue - so both
+    bounds are one-sided against noise."""
     rig = _rig(qtbot, _line("proposed"))
     _type(rig, "first")
     QTest.keyClick(rig.editor, Qt.Key.Key_Return)
-    first_commit = time.monotonic()
-    qtbot.wait(300)
-    _commit(rig, "second")
+    timer = _save_timer(rig.editor)
+    time.sleep(SECOND_COMMIT_AFTER_MS / 1000)  # blocks the event loop: nothing can fire
+    assert timer.isActive(), "the first commit did not leave the save timer running"
+    before_ms = timer.remainingTime()
+    rig.editor.selectAll()
+    QTest.keyClicks(rig.editor, "second")
+    QTest.keyClick(rig.editor, Qt.Key.Key_Return)  # no _settle: the loop stays still
+    after_ms = timer.remainingTime()
+
+    assert timer.isActive(), "the second commit stopped the save timer"
+    assert after_ms <= before_ms + TIMER_GRAIN_MS, (
+        f"{before_ms} ms were left on the save timer before the second commit and"
+        f" {after_ms} ms after it: the second commit restarted it"
+    )
+    assert after_ms <= DESIGN_SAVE_BOUND_MS - SECOND_COMMIT_AFTER_MS + TIMER_GRAIN_MS, (
+        f"{after_ms} ms left on the save timer {SECOND_COMMIT_AFTER_MS} ms after the first commit"
+    )
 
     qtbot.waitUntil(lambda: rig.save.calls != [], timeout=4 * (DESIGN_SAVE_BOUND_MS + SLACK_MS))
-    elapsed_ms = (time.monotonic() - first_commit) * 1000
 
     assert rig.save.calls == [("second", "edited")], "the timer's firing carries the latest commit"
-    assert elapsed_ms <= DESIGN_SAVE_BOUND_MS + SLACK_MS, (
-        f"saved {elapsed_ms:.0f} ms after the FIRST commit: the timer was restarted"
-    )
 
 
 def test_flush_writes_the_pending_save_at_once(qtbot) -> None:  # type: ignore[no-untyped-def]
