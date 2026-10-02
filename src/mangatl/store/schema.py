@@ -55,7 +55,7 @@ supplies it, because a writer forced to invent a value stores a lie:
 
 from __future__ import annotations
 
-__all__ = ["CHAPTER_DDL", "DDL", "LLM_CALL_DDL"]
+__all__ = ["CHAPTER_DDL", "CLEANED_PAGE_DDL", "DDL", "LLM_CALL_DDL"]
 
 #: The chapter table, as its own string because **two** callers create it
 #: (MT-044 C-12, for MT-012 RED-A5's reason): `DDL` below, for a fresh file, and
@@ -145,6 +145,27 @@ BEFORE DELETE ON llm_call
 BEGIN
     SELECT RAISE(ABORT, 'llm_call is append-only');
 END;
+"""
+
+#: One page's cleaned image (MT-065 C-2), as its own string because **two**
+#: callers create it: `DDL` below, for a fresh file, and
+#: `store.project._MIGRATE_TO_V7`, which *is* this string. One definition is
+#: what makes `sqlite_master.sql` byte-identical between a fresh version 7 file
+#: and a migrated one.
+#:
+#: `page_id` is the primary key - one image per page at most, and a rowid alias,
+#: so no autoindex. **`image_blob` is an encoded image and not always a PNG**
+#: (MT-065 PO-4): the cleaner's PNG for a page with regions, the source scan's
+#: own bytes, verbatim, for a page without. A reader decodes it with PIL and
+#: `.convert("RGB")`. There is no `ON DELETE` from `region`: the image belongs
+#: to the page and exists for pages with no regions, so invalidation is an
+#: explicit `DELETE` in `write_regions` and `refresh_from_source` (C-3), and the
+#: cascade here covers only the page row itself going.
+CLEANED_PAGE_DDL: str = """
+CREATE TABLE cleaned_page (
+    page_id    INTEGER PRIMARY KEY REFERENCES page(id) ON DELETE CASCADE,
+    image_blob BLOB    NOT NULL
+);
 """
 
 #: Every table of `architecture.md` §4, its foreign keys, and the UNIQUE keys
@@ -260,5 +281,10 @@ CREATE TABLE glossary (
     source          TEXT    NOT NULL DEFAULT 'model' CHECK (source IN ('model', 'user')),
     UNIQUE (chapter_id, term_ja)
 );
+
+-- The cleaned page, MT-065's and the reason this schema is at version 7:
+-- `CLEANED_PAGE_DDL` above. Appended **last**, after `glossary`, so a fresh file
+-- and a migrated one create it in the same position.
 """
+    + CLEANED_PAGE_DDL
 )

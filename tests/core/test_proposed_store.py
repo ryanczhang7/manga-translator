@@ -159,7 +159,8 @@ def test_storing_a_proposal_needs_no_schema_version_bump() -> None:
     MT-012 PO-2 settled money on. Nothing about `line.proposed_en` changes."""
     # MT-014 C-7 takes it to 5: `glossary` gains `last_seen_page` and `source`.
     # MT-017 C-5 takes it to 6: `line` gains `status`.
-    assert SCHEMA_VERSION == 6
+    # MT-065 C-2 takes it to 7: `cleaned_page`.
+    assert SCHEMA_VERSION == 7
 
 
 def test_the_two_methods_are_named_on_the_project_beside_their_line_siblings() -> None:

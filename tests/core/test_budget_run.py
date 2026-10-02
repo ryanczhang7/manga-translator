@@ -418,7 +418,9 @@ def _run_chapter(fixture: _Fixture, *, ceiling_micro: int | None) -> _Run:
 
     outcome = run_chapter(
         fixture.project,
-        build_stages(detector, transcriber, translator),
+        # MT-065 C-1 (a): the required cleaner. The page's own bytes are a
+        # decodable image of its own size, which is all `write_cleaned` checks.
+        build_stages(detector, lambda image_bytes, regions: image_bytes, transcriber, translator),
         events.append,
         _never,
     )

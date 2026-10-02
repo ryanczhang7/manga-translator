@@ -442,9 +442,10 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     """
     # MT-014 C-7 takes it to 5: `glossary` gains `last_seen_page` and `source`.
     # MT-017 C-5 takes it to 6: `line` gains `status`.
-    assert SCHEMA_VERSION == 6
-    assert _user_version(db_path) == 6
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(6,)]
+    # MT-065 C-2 takes it to 7: `cleaned_page`.
+    assert SCHEMA_VERSION == 7
+    assert _user_version(db_path) == 7
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(7,)]
 
 
 def test_the_ledger_stores_integer_micro_dollars_and_carries_no_real_cost_column(

@@ -52,11 +52,22 @@ expensive:
   regions at all.
 
 So `--no-translate` is the flag, and what this file exercises end to end is
-argument parsing, the composition root, the real detector and OCR sessions,
-**the detect and OCR stages**, the runner and the store. Not the translate
+argument parsing, the composition root, the real detector, inpainter and OCR
+sessions, **the detect, clean and OCR stages**, the runner and the store. Not the translate
 stage: `test_the_no_translate_run_wrote_no_proposal_and_billed_nothing` below
 is what pins that its absence is deliberate and complete rather than an
 aborted call. The translate stage's own end-to-end proof is MT-038's.
+
+-- MT-065: the flagged run cleans too ------------------------------------------
+
+**MT-065 AC-7 (PO-1, the user's decision): `--no-translate` still cleans.** So
+from MT-065 on, `build_pipeline(..., translate=False)` also loads
+`lama_fp32.onnx` and the run inpaints every page with regions - which is why
+`models_dir` links the LaMa export in as `compose.INPAINTER_FILENAME`, and why
+`test_every_page_has_a_cleaned_image_that_changed_only_inside_its_erase_mask`
+is here (C-10): the one place the composed cleaner runs on real weights and real
+regions. It is a smoke assertion, not a quality one - cleaning quality is
+MT-019's AC-6/AC-7 in `test_clean_page.py`.
 
 **Timing.** There is no `pytest-timeout` in this project and no per-test timeout
 exists, so there is no budget in this file to size - the note
@@ -69,13 +80,18 @@ hook* here needs one, sized from a CI log rather than from this machine.
 from __future__ import annotations
 
 import sqlite3
+from io import BytesIO
 from pathlib import Path
 
+import numpy as np
 import pytest
+from numpy.typing import NDArray
+from PIL import Image
 from test_ocr_session import _GROUND_TRUTH, _accuracy, _normalised
 
+from mangatl.clean.mask import erase_mask
 from mangatl.cli import main
-from mangatl.compose import DETECTOR_FILENAME, OCR_SUBDIR
+from mangatl.compose import DETECTOR_FILENAME, INPAINTER_FILENAME, OCR_SUBDIR
 from mangatl.domain.reading_order import sort_regions
 from mangatl.ocr.page import OCR_MIN_ACCURACY
 from mangatl.ocr.session import DECODER_FILENAME, ENCODER_FILENAME, VOCAB_FILENAME
@@ -90,6 +106,9 @@ _DETECTOR_SRC = (
 )
 _ONNX_DIR = _SPIKES / "MT-002" / "models" / "manga-ocr-base-ONNX" / "onnx"
 _VOCAB_SRC = _SPIKES / "MT-002" / "models" / "manga-ocr-base" / "vocab.txt"
+#: The inpainter MT-002 E3/E4 chose and MT-019 smoke-tests: `lama_fp32.onnx`,
+#: never `lama.onnx`. Linked in under `compose.INPAINTER_FILENAME` (MT-065 C-10).
+_LAMA_SRC = _SPIKES / "MT-002" / "models" / "LaMa-ONNX" / "lama_fp32.onnx"
 
 #: The chapter, in filename order - which `read_chapter` makes intake order, and
 #: intake order is ordinal order. Five pages (C-7).
@@ -121,19 +140,22 @@ def _link_or_copy(source: Path, target: Path) -> None:
 
 @pytest.fixture(scope="module")
 def models_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A directory laid out exactly the way C-6 draws it.
+    """A directory laid out exactly the way C-6 draws it, plus MT-065's LaMa.
 
-    `<models>/comic-text-detector.onnx` and `<models>/manga-ocr/{encoder,
-    decoder,vocab}`. The four names come from `compose` and `ocr.session`'s own
-    exported constants - re-spelling them here would let this test keep passing
-    against a `build_pipeline` looking for something else.
+    `<models>/comic-text-detector.onnx`, `<models>/lama_fp32.onnx` (MT-065
+    C-7) and `<models>/manga-ocr/{encoder,decoder,vocab}`. The five names come
+    from `compose` and `ocr.session`'s own exported constants - re-spelling
+    them here would let this test keep passing against a `build_pipeline`
+    looking for something else.
     """
     for source in (_DETECTOR_SRC, _ONNX_DIR / ENCODER_FILENAME, _ONNX_DIR / DECODER_FILENAME):
         _require(source)
     _require(_VOCAB_SRC)
+    _require(_LAMA_SRC)
 
     directory = tmp_path_factory.mktemp("models")
     _link_or_copy(_DETECTOR_SRC, directory / DETECTOR_FILENAME)
+    _link_or_copy(_LAMA_SRC, directory / INPAINTER_FILENAME)
     ocr_dir = directory / OCR_SUBDIR
     ocr_dir.mkdir()
     _link_or_copy(_ONNX_DIR / ENCODER_FILENAME, ocr_dir / ENCODER_FILENAME)
@@ -169,8 +191,8 @@ def completed_run(chapter_dir: Path, models_dir: Path) -> int:
     `main([...])` in process rather than the console script, for the reason
     `test_cli.py` gives: shelling out tests the installer. This is the only
     place in the suite where the whole thing runs - argument parsing, the
-    composition root, real sessions, the runner, the detect and OCR stages and
-    the store.
+    composition root, real sessions, the runner, the detect, clean and OCR
+    stages and the store.
 
     **`--no-translate` (MT-044 AC-6, C-14).** The module docstring says why in
     full: five paid API calls on every smoke run, on a `gpu`-marked suite that
@@ -458,3 +480,67 @@ def test_the_no_translate_run_wrote_no_proposal_and_billed_nothing(
         f"{len(proposed)} of {len(_CHAPTER)} pages have lines at all, so the"
         " assertion above could be vacuously true for the missing ones"
     )
+
+
+# -- MT-065 C-10: every page cleaned, and only inside its erase mask ----------
+
+
+def _decoded(image_bytes: bytes) -> NDArray[np.uint8]:
+    """C-2's reading of the column: PIL, `.convert("RGB")`, whatever the format."""
+    with Image.open(BytesIO(image_bytes)) as image:
+        return np.asarray(image.convert("RGB"), dtype=np.uint8)
+
+
+def test_every_page_has_a_cleaned_image_that_changed_only_inside_its_erase_mask(
+    completed_run: int, chapter_dir: Path
+) -> None:
+    """**MT-065 C-10**, the real path of AC-1 and AC-2.
+
+    Every page of the run has a `cleaned_page` row whose decoded size is the
+    page's `(width, height)`. For every page with regions, the decoded cleaned
+    image equals the decoded source **exactly** outside
+    `erase_mask(read_regions(ordinal), size)` - MT-019 AC-4, surviving the
+    composed cleaner's PNG encode (DV-8 turns this red with a JPEG encode) -
+    and differs from it somewhere inside, so the real inpainter ran.
+
+    The blobs are read through a plain `sqlite3` connection, this file's
+    convention; the regions through the store, because `erase_mask` takes
+    `RawRegion`s.
+    """
+    assert completed_run == 0, "the flagged run did not complete; see the first test"
+
+    rows = _query(
+        chapter_dir,
+        "SELECT page.ordinal, page.filename, page.width, page.height, cleaned_page.image_blob"
+        " FROM page LEFT JOIN cleaned_page ON cleaned_page.page_id = page.id"
+        " ORDER BY page.ordinal",
+    )
+    uncleaned = [str(filename) for _o, filename, _w, _h, blob in rows if blob is None]
+    assert uncleaned == [], f"{uncleaned} have no cleaned image after a finished run"
+
+    with open_project(project_dir_for(chapter_dir)) as project:
+        regions = {int(row[0]): project.read_regions(int(row[0])) for row in rows}
+
+    findings: list[str] = []
+    for ordinal, filename, width, height, blob in rows:
+        size = (int(width), int(height))
+        cleaned = _decoded(bytes(blob))  # type: ignore[arg-type]
+        source = _decoded((chapter_dir / str(filename)).read_bytes())
+        if (cleaned.shape[1], cleaned.shape[0]) != size:
+            findings.append(f"{filename}: cleaned is {cleaned.shape[1]}x{cleaned.shape[0]}")
+            continue
+        if not regions[int(ordinal)]:
+            if not np.array_equal(cleaned, source):
+                findings.append(f"{filename}: no regions, but the cleaned image differs")
+            continue
+        mask = erase_mask(regions[int(ordinal)], size)
+        differs = (cleaned != source).any(axis=2)
+        outside = int(np.count_nonzero(differs & ~mask))
+        inside = int(np.count_nonzero(differs & mask))
+        if outside:
+            findings.append(f"{filename}: {outside} pixels outside the erase mask changed")
+        if inside == 0:
+            findings.append(f"{filename}: nothing inside the erase mask changed")
+
+    assert findings == [], findings
+    assert len(rows) == len(_CHAPTER)

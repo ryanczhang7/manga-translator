@@ -50,15 +50,18 @@ import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal, cast
+
+from PIL import Image, UnidentifiedImageError
 
 from mangatl.domain.line import OcrResult
 from mangatl.domain.money import Usd
 from mangatl.domain.page import Chapter, Page
 from mangatl.domain.region import RawRegion
 from mangatl.store.intake import read_chapter
-from mangatl.store.schema import CHAPTER_DDL, DDL, LLM_CALL_DDL
+from mangatl.store.schema import CHAPTER_DDL, CLEANED_PAGE_DDL, DDL, LLM_CALL_DDL
 
 __all__ = [
     "PAGE_DONE",
@@ -100,7 +103,12 @@ __all__ = [
 #: line, appended by `ALTER TABLE ... ADD COLUMN`. `reverted` must survive a
 #: reopen as something other than `proposed`, and a v5 file has nowhere to
 #: keep the difference.
-SCHEMA_VERSION: int = 6
+#:
+#: Version 7 is MT-065's cleaned page (C-2): the `cleaned_page` table, one
+#: encoded image per page. A migrated file has it empty, so every page is
+#: not-yet-cleaned and the next run cleans it without re-running any other
+#: stage.
+SCHEMA_VERSION: int = 7
 
 #: `page.status` as `create_project` writes it: read, hashed, nothing done yet.
 PAGE_PENDING: str = "pending"
@@ -223,6 +231,26 @@ _SELECT_PROPOSED = (
     " JOIN page ON page.id = region.page_id"
     " WHERE page.ordinal = ? ORDER BY region.reading_index"
 )
+
+# MT-065 C-3. An upsert on the primary key: a second clean of a page replaces
+# its image and leaves one row.
+_UPSERT_CLEANED = (
+    "INSERT INTO cleaned_page (page_id, image_blob) VALUES (?, ?)"
+    " ON CONFLICT (page_id) DO UPDATE SET image_blob = excluded.image_blob"
+)
+_SELECT_CLEANED = (
+    "SELECT cleaned_page.image_blob FROM cleaned_page"
+    " JOIN page ON page.id = cleaned_page.page_id WHERE page.ordinal = ?"
+)
+# Does not read the blob: `CleanStage.is_done` asks this twice per page.
+_HAS_CLEANED = (
+    "SELECT 1 FROM cleaned_page"
+    " JOIN page ON page.id = cleaned_page.page_id WHERE page.ordinal = ? LIMIT 1"
+)
+# The invalidation both `write_regions` and `refresh_from_source` run, inside
+# their own transaction (C-3, PO-5): explicit, not a cascade from `region`,
+# because the image exists for pages with no regions.
+_DELETE_CLEANED = "DELETE FROM cleaned_page WHERE page_id = ?"
 
 #: Version 1 to version 2 (MT-010 PO-3). `ALTER TABLE ... ADD COLUMN` rather
 #: than the "new table, copy the rows, drop the old one" recipe, and that choice
@@ -369,6 +397,12 @@ _MIGRATE_TO_V6 = (
     " status TEXT CHECK (status IS NULL OR status IN ('accepted', 'edited', 'reverted'))"
 )
 
+#: Version 6 to version 7 (MT-065 C-2): the `cleaned_page` table. The **same
+#: string** as the fresh schema's, not a verbatim repeat as `_MIGRATE_TO_V5`
+#: is, so `sqlite_master.sql` is byte-identical between a fresh file and a
+#: migrated one. Kept to exactly one line: DV-5 anchors on it.
+_MIGRATE_TO_V7: str = CLEANED_PAGE_DDL
+
 #: The migration chain, in order, each step keyed on the version it *produces*.
 #: A step runs when the file found on disk is older than that.
 #:
@@ -384,6 +418,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (4, _MIGRATE_TO_V4),
     (5, _MIGRATE_TO_V5),
     (6, _MIGRATE_TO_V6),
+    (7, _MIGRATE_TO_V7),
 )
 
 
@@ -563,6 +598,16 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _image_size(page_ordinal: int, image: bytes) -> tuple[int, int]:
+    """`image`'s `(width, height)` from its header, or `ValueError` naming the
+    page when the bytes are not an image PIL can identify."""
+    try:
+        with Image.open(BytesIO(image)) as decoded:
+            return decoded.size
+    except UnidentifiedImageError as error:
+        raise ValueError(f"cleaned image for page {page_ordinal} is not an image") from error
+
+
 def _read_chapter(connection: sqlite3.Connection) -> Chapter:
     """Rebuild the `Chapter` from the file, reading every field it stores."""
     row = connection.execute("SELECT source_dir FROM chapter").fetchone()
@@ -684,6 +729,9 @@ class Project:
             page_id = cursor.execute(
                 "SELECT id FROM page WHERE ordinal = ?", (page_ordinal,)
             ).fetchone()[0]
+            # Unconditional (MT-065 C-3): the same regions found again still
+            # invalidate, because this cannot know the cleaner would agree.
+            cursor.execute(_DELETE_CLEANED, (page_id,))  # invalidate: re-detection
             for reading_index, region in enumerate(regions):
                 cursor.execute(
                     _UPSERT_REGION,
@@ -728,6 +776,43 @@ class Project:
                 _SELECT_REGIONS, (page_ordinal,)
             )
         )
+
+    def write_cleaned(self, page_ordinal: int, image: bytes) -> None:
+        """Store one page's cleaned image, replacing any previous one (MT-065 C-3).
+
+        `image` is stored exactly as handed over - an encoded image, PNG from the
+        cleaner or the source scan's own bytes for a page with no regions
+        (PO-4). It must decode as an image (header only) whose `(width, height)`
+        is the page's stored size; otherwise **`ValueError` naming the ordinal,
+        with nothing written** - and nothing deleted, since the refusal comes
+        before the upsert and rolls the transaction back. That check is what
+        gives AC-1's "the size of the source page" a mechanism: a mis-bound
+        cleaner is refused by name rather than stored.
+
+        Opens its own `transaction()`, so like `write_regions` it refuses a
+        caller already holding one.
+        """
+        with self.transaction() as cursor:
+            page_id, width, height = cursor.execute(
+                "SELECT id, width, height FROM page WHERE ordinal = ?", (page_ordinal,)
+            ).fetchone()
+            size = _image_size(page_ordinal, image)
+            if size != (int(width), int(height)):
+                raise ValueError(
+                    f"cleaned image for page {page_ordinal} is {size[0]}x{size[1]};"
+                    f" the page is {width}x{height}"
+                )
+            cursor.execute(_UPSERT_CLEANED, (page_id, image))
+
+    def read_cleaned(self, page_ordinal: int) -> bytes | None:
+        """One page's stored cleaned image, byte for byte, or `None` if it has
+        none. Opens no transaction (`read_proposed`'s rule)."""
+        row = self._connection.execute(_SELECT_CLEANED, (page_ordinal,)).fetchone()
+        return None if row is None else bytes(row[0])
+
+    def has_cleaned(self, page_ordinal: int) -> bool:
+        """Whether a cleaned image is stored for the page, without reading it."""
+        return self._connection.execute(_HAS_CLEANED, (page_ordinal,)).fetchone() is not None
 
     def write_lines(self, page_ordinal: int, results: Sequence[OcrResult]) -> None:
         """Store one page's transcriptions, positionally against reading order.
@@ -921,6 +1006,7 @@ class Project:
                         (current.sha256, current.width, current.height, PAGE_STALE, page_id),
                     )
                 cursor.execute("DELETE FROM region WHERE page_id = ?", (page_id,))
+                cursor.execute(_DELETE_CLEANED, (page_id,))  # invalidate: refresh
 
         self._chapter = _read_chapter(self._connection)
         return tuple(stale)

@@ -438,7 +438,8 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     db_path = project_dir_for(source_dir) / "project.db"
 
     # MT-017 C-5 takes it to 6: `line` gains `status`.
-    assert SCHEMA_VERSION == 6
+    # MT-065 C-2 takes it to 7: `cleaned_page`.
+    assert SCHEMA_VERSION == 7
     assert _user_version(db_path) == SCHEMA_VERSION
     assert _raw(db_path, "SELECT schema_version FROM chapter") == [(SCHEMA_VERSION,)]
 
@@ -474,7 +475,8 @@ def test_the_chapter_ddl_is_its_own_string_with_two_callers(fresh: Project) -> N
     """
     import mangatl.store.schema as module
 
-    assert module.__all__ == ["CHAPTER_DDL", "DDL", "LLM_CALL_DDL"]
+    # MT-065 C-2 adds `CLEANED_PAGE_DDL`, the second shared definition.
+    assert module.__all__ == ["CHAPTER_DDL", "CLEANED_PAGE_DDL", "DDL", "LLM_CALL_DDL"]
     assert "budget_ceiling_micro_usd" in module.CHAPTER_DDL
     assert "budget_ceiling_usd" not in module.DDL, (
         "the REAL ceiling column is still in the shipped schema; C-12 replaces"
@@ -678,8 +680,11 @@ def test_a_migrated_chapter_table_is_the_same_table_as_a_freshly_created_one(
 #: What the v5 step does to it is `tests/core/test_schema_v5.py`'s to assert.
 #: `line` is excluded since MT-017 for the same reason: the v5 -> v6 step ALTERs
 #: it (C-5), and `tests/core/test_schema_v6.py` asserts what that step does.
+#: `cleaned_page` is excluded since MT-065: the v6 -> v7 step creates it on
+#: purpose (C-2), and `tests/core/test_schema_v7.py` asserts what that step does.
 _UNTOUCHED_BY_THE_V4_STEP = (
-    "SELECT name, sql FROM sqlite_master WHERE name NOT IN ('chapter', 'glossary', 'line')"
+    "SELECT name, sql FROM sqlite_master"
+    " WHERE name NOT IN ('chapter', 'cleaned_page', 'glossary', 'line')"
 )
 
 

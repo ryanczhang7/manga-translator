@@ -1,8 +1,11 @@
 """`mangatl.pipeline.stages`: the stage list, built without a model in sight.
 
-**MT-036 AC-2, and MT-044 AC-4.** MT-035 shipped `DetectStage`, MT-010 shipped
-`OcrStage` and MT-011 shipped `TranslateStage`, all three correct and none of
-them in any stage list until the story that put it there. `build_stages` is the
+**MT-036 AC-2, MT-044 AC-4, and MT-065 AC-6/AC-7.** MT-035 shipped
+`DetectStage`, MT-010 shipped `OcrStage`, MT-011 shipped `TranslateStage` and
+MT-065 ships `CleanStage`, each correct and none of them in any stage list until
+the story that put it there. **MT-065 C-6 makes the list detect, clean, OCR,
+translate** (PO-3), with `clean` a required second parameter, and the
+`--no-translate` list detect, clean, OCR (PO-1, the user's decision). `build_stages` is the
 list, and the reason it is a module of its own in `pipeline` rather than four
 lines of the composition root is MT-036 C-1: *the list is a pipeline fact, the
 sessions are not*. That is what makes every assertion below runnable in
@@ -12,15 +15,18 @@ weights and **no API key**.
 Two conventions here are load-bearing rather than stylistic:
 
 - **The order is asserted twice: once by name and once by behaviour.**
-  `(DetectStage, OcrStage, TranslateStage)` is a tuple comparison anyone can
-  read, and it is also the weaker of the two: a list built in the wrong order is
-  still a list of the right three things. `OcrStage.run` reads
+  `(DetectStage, CleanStage, OcrStage, TranslateStage)` is a tuple comparison
+  anyone can read, and it is also the weaker of the two: a list built in the
+  wrong order is still a list of the right four things. `OcrStage.run` reads
   `ctx.project.read_regions(...)` and `TranslateStage.run` reads
   `ctx.project.read_lines(...)`, so any earlier position for either reads the
   *previous* run's rows on a resume and nothing at all on a fresh page - which
   is MT-036 C-1's own justification, now true twice over, and is visible only by
-  running the built list over a real store. Both are here because only the
-  second survives someone deciding the order is cosmetic.
+  running the built list over a real store. `CleanStage.run` reads
+  `read_regions(...)` too, and does not call its cleaner for a page with none
+  (MT-065 AC-2), so clean before detect is a list that cleans nothing on a
+  fresh page. Both are here because only the second survives someone deciding
+  the order is cosmetic.
 - **The module's own imports are read out of its AST**, the idiom
   `tests/core/test_detect_stage.py` set for the same seam. "Asserted without
   loading a model" is a claim about what this module may import, and a
@@ -29,11 +35,15 @@ Two conventions here are load-bearing rather than stylistic:
   imports `mangatl.compose` and therefore `onnxruntime`.
 
 What these tests do NOT constrain: whether `build_stages` is a function or a
-callable object, whether the three stages are constructed positionally or by
+callable object, whether the stages are constructed positionally or by
 keyword, and what `Stage`'s concrete implementations do beyond what MT-035,
-MT-010 and MT-011 already pinned. The return *type* is `tuple[Stage, ...]`, so a
-fourth stage is a one-line change in GREEN's file and only the count and order
-assertions here object - which is the point of them.
+MT-010, MT-011 and MT-065 already pinned. The return *type* is
+`tuple[Stage, ...]`, so a fifth stage is a one-line change in GREEN's file and
+only the count and order assertions here object - which is the point of them.
+
+**The cleaner double returns the page's own bytes** (MT-065 C-1 (a)): that is a
+decodable image of the page's own size, which `Project.write_cleaned` checks,
+and nothing here is about what cleaning does - `test_clean_stage.py` is.
 
 **No ledger row is written from this file.** The `_Translator` double returns
 `call=None`, the domain's own "no API call was made", so `TranslateStage.run`
@@ -44,6 +54,7 @@ where the same double carries a real `CallInfo`.
 from __future__ import annotations
 
 import ast
+import inspect
 import sqlite3
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -52,6 +63,7 @@ from typing import TYPE_CHECKING
 from mangatl.domain.line import OcrResult
 from mangatl.domain.region import RawRegion
 from mangatl.domain.translation import TokenUsage, TranslationResult
+from mangatl.pipeline.clean_stage import CleanStage
 from mangatl.pipeline.detect_stage import DetectStage
 from mangatl.pipeline.ocr_stage import OcrStage
 from mangatl.pipeline.runner import RUN_FINISHED, run_chapter
@@ -68,11 +80,12 @@ _SOURCE_PAGES: tuple[tuple[str, int, int], ...] = (
     ("p2.png", 13, 29),
 )
 
-#: MT-036 C-1 and MT-011 C-1 pin the three names the events carry. Spelled out
+#: MT-036 C-1, MT-011 C-1 and MT-065 C-5 pin the four names the events carry. Spelled out
 #: here rather than read off the classes, so a stage renamed in
 #: `detect_stage.py` shows up as a change to the pipeline's vocabulary instead
 #: of agreeing with itself.
 _DETECT = "detect"
+_CLEAN = "clean"
 _OCR = "ocr"
 _TRANSLATE = "translate"
 
@@ -117,6 +130,23 @@ class _Transcriber:
     def __call__(self, image_bytes: bytes, regions: Sequence[RawRegion]) -> Sequence[OcrResult]:
         self.region_counts.append(len(regions))
         return tuple(OcrResult(text=f"text-{index}") for index in range(len(regions)))
+
+
+class _Cleaner:
+    """A `PageCleaner` that records how many regions it was handed and returns
+    the page's own bytes.
+
+    The recording is the behavioural order test's, one stage earlier: a list
+    that cleans before it detects hands this nothing on a fresh page - or, since
+    `CleanStage` skips the cleaner for a page with no regions, never calls it.
+    """
+
+    def __init__(self) -> None:
+        self.region_counts: list[int] = []
+
+    def __call__(self, image_bytes: bytes, regions: Sequence[RawRegion]) -> bytes:
+        self.region_counts.append(len(regions))
+        return image_bytes
 
 
 class _EmptyDetector:
@@ -194,27 +224,33 @@ def _raw(db_path: Path, sql: str) -> list[tuple[object, ...]]:
 # -- AC-2: the list itself ------------------------------------------------------
 
 
-def test_the_stage_list_is_detect_then_ocr_then_translate_and_holds_nothing_else(
+def test_the_stage_list_is_detect_then_clean_then_ocr_then_translate_and_nothing_else(
     one_bit_png: Callable[..., bytes],
 ) -> None:
-    """**MT-044 AC-4**, first clause: `(DetectStage, OcrStage, TranslateStage)`,
-    in that order.
+    """**MT-065 AC-6/AC-7** (C-6): `(DetectStage, CleanStage, OcrStage,
+    TranslateStage)`, in that order.
 
-    MT-036 AC-2 asserted the first two. MT-011 shipped `TranslateStage` wired to
-    nothing and said so in its own close-out; MT-044 C-6 is the line that wires
-    it, and the translate stage goes **last** because it reads the lines the OCR
-    stage wrote.
+    MT-036 AC-2 asserted detect and OCR; MT-044 C-6 wired translate **last**
+    because it reads the lines the OCR stage wrote. MT-065 PO-3 puts clean
+    second: after detect, whose regions it reads, and before OCR, so every
+    local, free stage runs ahead of the paid one.
     """
     detector = _Detector(_mask(one_bit_png))
+    cleaner = _Cleaner()
     transcriber = _Transcriber()
     translator = _Translator()
 
-    stages = build_stages(detector, transcriber, translator)
+    stages = build_stages(detector, cleaner, transcriber, translator)
 
-    assert [type(stage) for stage in stages] == [DetectStage, OcrStage, TranslateStage], (
+    assert [type(stage) for stage in stages] == [
+        DetectStage,
+        CleanStage,
+        OcrStage,
+        TranslateStage,
+    ], (
         f"the stage list is {[type(stage).__name__ for stage in stages]};"
-        " AC-4 pins detect, then OCR, then translate, and the order is semantic -"
-        " each stage reads out of the store what the one before it wrote"
+        " MT-065 C-6 pins detect, clean, OCR, translate, and the order is"
+        " semantic - each stage reads out of the store what an earlier one wrote"
     )
 
 
@@ -223,7 +259,7 @@ def test_the_stage_list_is_a_tuple_rather_than_a_mutable_sequence(
 ) -> None:
     """C-1 says `tuple`, and a list here would let a caller append a stage to
     the pipeline's own definition after it was built."""
-    stages = build_stages(_Detector(_mask(one_bit_png)), _Transcriber(), _Translator())
+    stages = build_stages(_Detector(_mask(one_bit_png)), _Cleaner(), _Transcriber(), _Translator())
 
     assert type(stages) is tuple, f"build_stages returned a {type(stages).__name__}"
 
@@ -232,10 +268,11 @@ def test_each_stage_is_named_the_way_the_events_will_report_it(
     one_bit_png: Callable[..., bytes],
 ) -> None:
     """AC-2's second clause. The names are what `StageFinished.stage` carries
-    and what MT-018's progress readout will show a user."""
-    stages = build_stages(_Detector(_mask(one_bit_png)), _Transcriber(), _Translator())
+    and what MT-018's progress readout will show a user - which ignores
+    `"clean"` by design (MT-065 PO-6)."""
+    stages = build_stages(_Detector(_mask(one_bit_png)), _Cleaner(), _Transcriber(), _Translator())
 
-    assert [stage.name for stage in stages] == [_DETECT, _OCR, _TRANSLATE]
+    assert [stage.name for stage in stages] == [_DETECT, _CLEAN, _OCR, _TRANSLATE]
 
 
 def test_each_stage_holds_the_callable_it_was_given_and_not_the_other_one(
@@ -243,20 +280,25 @@ def test_each_stage_holds_the_callable_it_was_given_and_not_the_other_one(
 ) -> None:
     """AC-2's third clause and AC-4's, asserted by identity.
 
-    Three *different* callables, and `is` rather than `==`: a builder that
+    Four *different* callables, and `is` rather than `==`: a builder that
     constructed its own detector, or that wired the transcriber into two
-    stages, would satisfy a looser check. C-6 is explicit that the translator is
-    a **required** third parameter and not one defaulting to `None` - a default
-    gives the project two stage lists, one that translates and one that silently
-    does not, and the one a forgetful composition root gets is the second.
+    stages, would satisfy a looser check. MT-044 C-6 is explicit that the
+    translator is a **required** parameter and not one defaulting to `None` - a
+    default gives the project two stage lists, one that translates and one that
+    silently does not - and MT-065 C-6 makes the cleaner required for the same
+    reason.
     """
     detector = _Detector(_mask(one_bit_png))
+    cleaner = _Cleaner()
     transcriber = _Transcriber()
     translator = _Translator()
 
-    detect_stage, ocr_stage, translate_stage = build_stages(detector, transcriber, translator)
+    detect_stage, clean_stage, ocr_stage, translate_stage = build_stages(
+        detector, cleaner, transcriber, translator
+    )
 
     assert detect_stage.detect is detector
+    assert clean_stage.clean is cleaner
     assert ocr_stage.transcribe is transcriber
     assert translate_stage.translate is translator
 
@@ -266,17 +308,49 @@ def test_every_stage_in_the_list_satisfies_the_stage_protocol(
 ) -> None:
     """`Stage` is a `Protocol`, so there is no base class to assert against; the
     three members the runner calls are the whole of it."""
-    stages = build_stages(_Detector(_mask(one_bit_png)), _Transcriber(), _Translator())
+    stages = build_stages(_Detector(_mask(one_bit_png)), _Cleaner(), _Transcriber(), _Translator())
 
-    assert len(stages) == 3, (
+    assert len(stages) == 4, (
         f"the stage list holds {len(stages)} stages;"
-        " AC-4 says detect, OCR and translate, and a list that lost one still"
-        " satisfies every type and name assertion about the ones it kept"
+        " MT-065 C-6 says detect, clean, OCR and translate, and a list that lost"
+        " one still satisfies every type and name assertion about the ones it kept"
     )
     for stage in stages:
         assert isinstance(stage.name, str) and stage.name
         assert callable(stage.run)
         assert callable(stage.is_done)
+
+
+def test_without_a_translator_the_list_is_detect_then_clean_then_ocr(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """**MT-065 AC-7** at the builder (C-6): `translate=None` - `mangatl-run
+    --no-translate` - still cleans (PO-1, the user's decision). By type, by
+    name and by length: a list that dropped the clean stage under the flag
+    satisfies every assertion about the two it kept (DV-7)."""
+    cleaner = _Cleaner()
+
+    stages = build_stages(_Detector(_mask(one_bit_png)), cleaner, _Transcriber(), None)
+
+    assert [type(stage) for stage in stages] == [DetectStage, CleanStage, OcrStage], (
+        f"the --no-translate list is {[type(stage).__name__ for stage in stages]};"
+        " MT-065 AC-7 says detect, clean, OCR"
+    )
+    assert [stage.name for stage in stages] == [_DETECT, _CLEAN, _OCR]
+    assert len(stages) == 3
+    clean_stage = stages[1]
+    assert isinstance(clean_stage, CleanStage)
+    assert clean_stage.clean is cleaner
+
+
+def test_the_cleaner_is_a_required_second_parameter_with_no_default() -> None:
+    """MT-065 C-6: positional in stage order, and no default - a default would
+    give the project a stage list that silently does not clean."""
+    parameters = inspect.signature(build_stages).parameters
+
+    assert list(parameters) == ["detect", "clean", "transcribe", "translate"]
+    assert parameters["clean"].default is inspect.Parameter.empty
+    assert parameters["translate"].default is inspect.Parameter.empty
 
 
 def test_the_module_exports_the_builder_and_nothing_else() -> None:
@@ -318,6 +392,7 @@ def test_the_stage_list_module_imports_nothing_that_reaches_onnxruntime() -> Non
         name
         for name in imported
         for root in (
+            "mangatl.clean",
             "mangatl.detect",
             "mangatl.ocr",
             "mangatl.compose",
@@ -331,9 +406,10 @@ def test_the_stage_list_module_imports_nothing_that_reaches_onnxruntime() -> Non
     assert forbidden == [], (
         f"{forbidden} is imported by mangatl.pipeline.stages. Contract 5 forbids"
         " mangatl.pipeline from reaching onnxruntime even indirectly, and every"
-        " module in mangatl.detect and mangatl.ocr reaches it. The stage list"
-        " names its collaborators behind PageDetector and PageTranscriber; the"
-        " sessions belong to mangatl.compose (C-1, C-2)."
+        " module in mangatl.detect, mangatl.ocr and mangatl.clean reaches it."
+        " The stage list names its collaborators behind PageDetector,"
+        " PageCleaner and PageTranscriber; the sessions belong to"
+        " mangatl.compose (MT-036 C-1, C-2; MT-065 C-5)."
     )
 
 
@@ -363,16 +439,26 @@ def test_the_built_order_lets_each_stage_read_what_the_one_before_it_wrote(
     source_dir = _build_source(tmp_path, png_bytes)
     db_path = project_dir_for(source_dir) / "project.db"
     detector = _Detector(_mask(one_bit_png))
+    cleaner = _Cleaner()
     transcriber = _Transcriber()
     translator = _Translator()
 
     with _new_project(source_dir) as project:
         outcome = run_chapter(
-            project, build_stages(detector, transcriber, translator), lambda event: None, _never
+            project,
+            build_stages(detector, cleaner, transcriber, translator),
+            lambda event: None,
+            _never,
         )
 
     assert outcome.outcome == RUN_FINISHED
     assert detector.calls == len(_SOURCE_PAGES)
+    assert cleaner.region_counts == [2, 2], (
+        f"the cleaner was handed {cleaner.region_counts} regions per page instead"
+        " of [2, 2]: clean ran before the regions it reads out of the store had"
+        " been written (MT-065 C-6)"
+    )
+    assert _raw(db_path, "SELECT count(*) FROM cleaned_page") == [(len(_SOURCE_PAGES),)]
     assert transcriber.region_counts == [2, 2], (
         "the transcriber was handed"
         f" {transcriber.region_counts} regions per page instead of [2, 2]: OCR ran"
@@ -423,12 +509,13 @@ def test_a_page_with_no_regions_at_all_gets_no_proposal_and_does_not_fail_the_ru
     """
     source_dir = _build_source(tmp_path, png_bytes)
     db_path = project_dir_for(source_dir) / "project.db"
+    cleaner = _Cleaner()
     translator = _Translator()
 
     with _new_project(source_dir) as project:
         outcome = run_chapter(
             project,
-            build_stages(_EmptyDetector(), _Transcriber(), translator),
+            build_stages(_EmptyDetector(), cleaner, _Transcriber(), translator),
             lambda event: None,
             _never,
         )
@@ -442,3 +529,14 @@ def test_a_page_with_no_regions_at_all_gets_no_proposal_and_does_not_fail_the_ru
     )
     assert _raw(db_path, "SELECT count(*) FROM region") == [(0,)]
     assert _raw(db_path, "SELECT count(*) FROM line") == [(0,)]
+    # MT-065 AC-2 through the real list: no regions, no cleaner call, and every
+    # page still has a cleaned image - its own scan, verbatim (PO-4).
+    assert cleaner.region_counts == []
+    stored = _raw(
+        db_path,
+        "SELECT page.filename, cleaned_page.image_blob"
+        " FROM cleaned_page JOIN page ON page.id = cleaned_page.page_id ORDER BY page.ordinal",
+    )
+    assert stored == [
+        (filename, (source_dir / filename).read_bytes()) for filename, _w, _h in _SOURCE_PAGES
+    ]
