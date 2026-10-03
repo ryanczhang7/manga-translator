@@ -20,8 +20,13 @@ a = Analysis(
     pathex=[SRC],
     binaries=[],
     # Model weights are added here by MT-024, once MT-002 has decided what the
-    # inference runtime is. Nothing to carry yet.
-    datas=[],
+    # inference runtime is.
+    datas=[
+        # MT-020 (C-7): the four lettering faces and OFL.txt, to the place
+        # `mangatl.typeset.font.FONT_DIR` resolves to inside the frozen package.
+        # The OFL requires the licence to travel with the fonts; never subset.
+        (os.path.join(SRC, "mangatl", "typeset", "fonts"), "mangatl/typeset/fonts"),
+    ],
     hiddenimports=["mangatl.ui.main_window"],
     hookspath=[],
     hooksconfig={},

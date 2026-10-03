@@ -58,6 +58,17 @@ dependencies = [
     # needed or wanted. The floor is a release carrying `output_config.format`
     # and adaptive thinking, which C-5 pins the call shape on.
     "anthropic>=0.75,<1",
+    # Added by MT-020 (C-8), the first story that reads a font. `typeset.font`
+    # loads the four vendored Shantell Sans faces and `typeset.measure` reads
+    # cmap, hmtx and ink bounds (BoundsPen over the glyph set, so the faces'
+    # CFF outlines need no `glyf`). Named in stack.md §3 for exactly this.
+    "fonttools>=4.50,<5",
+    # Added by MT-020 (C-8, PO-4): `typeset.fit` insets the bubble polygon with
+    # an inward `buffer` and tests line boxes with `covers`. Detector polygons are
+    # raw `findContours` rings, not convex, so an exact offset and covered-by
+    # without a geometry library would be a story of its own. 2.x for the
+    # vectorised GEOS API and immutable geometries.
+    "shapely>=2,<3",
 ]
 
 [project.scripts]
@@ -152,6 +163,15 @@ ignore_missing_imports = true
 # absent: opencv-python-headless does ship stubs and type-checks clean.
 [[tool.mypy.overrides]]
 module = ["onnxruntime.*"]
+ignore_missing_imports = true
+
+# fonttools 4.66.1 and shapely 2.1.2 ship no `py.typed` marker (checked on the
+# installed wheels, MT-020), so both are `import-untyped` under --strict.
+# Narrowed to the two third-party packages: `mangatl.typeset` is the only
+# importer, and everything it hands on - `Face`, `RunMetrics`, `TypesetBlock` -
+# is typed here.
+[[tool.mypy.overrides]]
+module = ["fontTools.*", "shapely.*"]
 ignore_missing_imports = true
 
 # --- pytest ------------------------------------------------------------------
