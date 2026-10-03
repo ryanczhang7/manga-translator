@@ -21,3 +21,9 @@
 *.webp binary
 *.woff2 binary
 *.pdf  binary
+*.otf  binary
+*.ttf  binary
+
+# Vendored upstream font files (MT-020, C-7): byte for byte, SHA-256 pinned by a
+# test, so git must never rewrite their line endings - including the licence.
+src/mangatl/typeset/fonts/** -text

@@ -493,6 +493,32 @@ principle applies to the PyInstaller spec: **`.claude/`, `docs/`, `scripts/` and
 `.github/` never enter the shipped build.** The packaging story asserts that
 with a test over the built tree, not with a comment in the spec file.
 
+### The lettering font, vendored (MT-020)
+
+`typeset-font.md` §2 requires the story that vendors the font to record what it
+vendored. Shantell Sans 1.011, SIL Open Font License 1.1, from the upstream
+release `https://github.com/arrowtype/shantell-sans/releases/tag/1.011`, asset
+`Shantell_Sans_1.011.zip` (17,472,855 bytes, SHA-256
+`7562b90399eae6339f89079c917235823fca1cabda3bab624bbacaefa7abe558`). The
+static `Normal` instances (Informality 0, Bounce 0) are CFF-outlined OTFs. They
+are vendored **byte for byte under their archive names** (MT-020 PO-8), and the
+licence is vendored unmodified as `OFL.txt`. Everything lives in
+`src/mangatl/typeset/fonts/`, which PyInstaller ships to
+`mangatl/typeset/fonts` (`packaging/mangatl.spec`):
+
+| vendored as | archive path (under `Shantell Sans 1.011/`) | bytes | SHA-256 |
+|---|---|---|---|
+| `Shantell_Sans-Normal-Regular.otf` | `Desktop/Static/Shantell_Sans-Normal-Regular.otf` | 272,568 | `a340af0fb6f614f4a7d2c692dc0486fc4aaf5cf1028929dbf3e741b6574623b2` |
+| `Shantell_Sans-Normal-Regular_Italic.otf` | `Desktop/Static/Shantell_Sans-Normal-Regular_Italic.otf` | 280,444 | `c3375c19f8ac44302cd233998a6331bd28abed40dc079d093185b1a8eabd4777` |
+| `Shantell_Sans-Normal-Bold.otf` | `Desktop/Static/Shantell_Sans-Normal-Bold.otf` | 261,572 | `7b446a4d2f0e31d08692339cf019b3321e612a6dd28bd679979fad809548ed2c` |
+| `Shantell_Sans-Normal-Bold_Italic.otf` | `Desktop/Static/Shantell_Sans-Normal-Bold_Italic.otf` | 265,312 | `4198e1360a37ad1934b1c3288e3fa559cbea8cd6b115af80b7d7ea5e6b919c2f` |
+| `OFL.txt` | `2 - License.txt` | 4,397 | `ebfce7d104d597c385b71e9fbf8f0e2034e73320f857086105dc265b82c05caa` |
+
+`tests/core/test_typeset_font.py` pins each hash, and `.gitattributes` marks the
+directory `-text` so git never rewrites a byte. **Never subset or modify these
+files** (Reserved Font Name, `typeset-font.md` §5). A replacement font is a new
+story with a new table.
+
 ## 9. What this architecture deliberately cannot do
 
 Carried from the brief's non-goals so that a later reader does not mistake an
