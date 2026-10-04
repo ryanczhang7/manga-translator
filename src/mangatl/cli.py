@@ -132,6 +132,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         f" {report.unreviewed_lines} lines unreviewed;"
         f" {report.pages_uncleaned} pages not cleaned"
     )
+    # MT-027 PO-2: a font folder in settings that could not be used is said
+    # once, last, on stdout - the bake itself still succeeded.
+    if report.font_fallback != "none":
+        print(f"font override not used: {report.font_detail}; lettered in {report.font_family}")
     return _OK
 
 

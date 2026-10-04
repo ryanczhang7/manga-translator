@@ -639,7 +639,14 @@ class Workspace(QMainWindow):
     def _on_render_baked(self, report: BakeReport) -> None:
         pages = report.pages_written
         noun = "page" if pages == 1 else "pages"
-        self._end_render(f"Rendered {pages} {noun} to {self._render_output}.")
+        sentence = f"Rendered {pages} {noun} to {self._render_output}."
+        if report.font_fallback != "none":
+            # MT-027 PO-2: said beside the render, not in a banner.
+            sentence += (
+                f" Lettered in {report.font_family} because the font folder in settings"
+                f" could not be used: {report.font_detail}."
+            )
+        self._end_render(sentence)
 
     def _on_render_failed(self, reason: str) -> None:
         self._end_render(f"Render failed: {reason}")
