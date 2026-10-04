@@ -42,7 +42,7 @@ from pathlib import Path
 
 from mangatl.compose import MODELS_ENV, ModelsNotFound, build_pipeline, resolve_models_dir
 from mangatl.domain.events import PageSkipped, PageStarted, RunEvent
-from mangatl.pipeline.export import write_output_folder
+from mangatl.pipeline.bake import bake_chapter
 from mangatl.pipeline.runner import RUN_FINISHED, run_chapter
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
 from mangatl.store.project import ProjectExists, create_project, open_project, project_dir_for
@@ -123,9 +123,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         outcome = run_chapter(project, stages, _reporter(filenames), _never)
         if outcome.outcome != RUN_FINISHED:
             return _fail(f"run aborted: {outcome.aborted_reason}")
-        write_output_folder(project, output_dir)
+        report = bake_chapter(project, output_dir)
 
-    print(f"{len(filenames)} pages written to {output_dir}")
+    # MT-021 C-7: one line, the report's counts, and no page filename in it.
+    print(
+        f"{report.pages_written} pages written to {output_dir};"
+        f" {report.regions_empty} regions left empty;"
+        f" {report.unreviewed_lines} lines unreviewed;"
+        f" {report.pages_uncleaned} pages not cleaned"
+    )
     return _OK
 
 
