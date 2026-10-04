@@ -1623,12 +1623,23 @@ def test_control_the_scan_finds_a_planted_name(tmp_path: Path) -> None:
     assert _mentions([planted], KEY) == ["planted.py"]
 
 
-@pytest.mark.parametrize("name", [KEY, "write_output_folder"])
+@pytest.mark.parametrize("name", [KEY])
 def test_no_window_code_names_the_api_key_or_the_output_writer(name: str) -> None:
     paths = _window_code()
     assert any(p.name == "run.py" for p in paths), "precondition: mangatl/ui/run.py is scanned"
 
     assert _mentions(paths, name) == []
+
+
+@pytest.mark.parametrize("name", ["bake_chapter", "preview_bake"])
+def test_only_the_render_controller_names_the_bake(name: str) -> None:
+    """MT-066 C-5 (PO-3), replacing MT-059's retired `write_output_folder` case:
+    Start run still renders nothing, and `mangatl/ui/bake.py` is the only window
+    code that names the bake - in `ui/*.py` and `app.py`."""
+    paths = _window_code()
+    assert any(p.name == "run.py" for p in paths), "precondition: mangatl/ui/run.py is scanned"
+
+    assert _mentions(paths, name) == ["bake.py"]
 
 
 def test_a_fake_stage_list_satisfies_the_stage_protocol() -> None:

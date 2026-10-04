@@ -22,6 +22,12 @@ is removed in a `finally`. Any exception propagates unwrapped: no report is
 returned for a failed bake, and what was written before it stays whole.
 
 The source folder is only ever read (AC-7).
+
+**Before the bake** (MT-066 C-1), `preview_bake` states what the Render dialog
+says: the output folder, the page count, and which lines are unreviewed,
+`failed` or overflowing. It only reads. Which lines get set - and so which can
+overflow - is decided by `_set_blocks`, the one rule `bake_chapter` sets them
+by, so the dialog and the output cannot disagree.
 """
 
 from __future__ import annotations
@@ -47,7 +53,17 @@ from mangatl.typeset.fit import TypesetBlock, typeset
 from mangatl.typeset.font import Faces, load_faces
 from mangatl.typeset.render import bake_page
 
-__all__ = ["BakeReport", "bake_chapter"]
+__all__ = [
+    "BakePreview",
+    "BakeReport",
+    "LineRef",
+    "bake_chapter",
+    "output_dir_for",
+    "preview_bake",
+]
+
+#: `<source>_en` (`architecture.md` §5).
+_OUTPUT_SUFFIX = "_en"
 
 #: Suffix of the half-written file, inside the output folder so that
 #: `os.replace` stays a same-filesystem rename.
@@ -66,6 +82,73 @@ class BakeReport:
     regions_empty: int
     unreviewed_lines: int
     pages_uncleaned: int
+
+
+@dataclass(frozen=True)
+class LineRef:
+    """One line of the chapter: its page's 0-based ordinal and its 0-based
+    place in reading order."""
+
+    page_ordinal: int
+    reading_index: int
+
+
+@dataclass(frozen=True)
+class BakePreview:
+    """What a bake of the chapter would do, stated before it runs (MT-066 C-1).
+
+    Every tuple is in `(page_ordinal, reading_index)` order. `unreviewed`
+    agrees with `BakeReport.unreviewed_lines`, and `page_count` with
+    `BakeReport.pages_written`.
+    """
+
+    output_dir: Path
+    page_count: int
+    total_lines: int
+    unreviewed: tuple[LineRef, ...]
+    failed: tuple[LineRef, ...]
+    overflowing: tuple[LineRef, ...]
+
+
+def output_dir_for(source_dir: Path) -> Path:
+    """The folder a chapter bakes into: `<source>_en`, beside the source."""
+    return source_dir.with_name(source_dir.name + _OUTPUT_SUFFIX)
+
+
+def preview_bake(project: Project) -> BakePreview:
+    """State what `bake_chapter` would do to `project`, writing nothing.
+
+    A line overflows when `bake_chapter` would set it (`_set_blocks`) and its
+    block does not fit; a line on an uncleaned page is never set, so never
+    overflows.
+    """
+    faces = load_faces()
+    pages = project.pages()
+    total = 0
+    unreviewed: list[LineRef] = []
+    failed: list[LineRef] = []
+    overflowing: list[LineRef] = []
+    for page in pages:
+        page_regions = project.read_regions(page.ordinal)
+        lines = read_review_lines(project, page.ordinal)
+        present = [(index, line) for index, line in enumerate(lines) if line is not None]
+        total += len(present)
+        unreviewed += [LineRef(page.ordinal, i) for i, line in present if line.status == "proposed"]
+        failed += [LineRef(page.ordinal, i) for i, line in present if line.status == "failed"]
+        if page_regions and project.has_cleaned(page.ordinal):
+            overflowing += [
+                LineRef(page.ordinal, index)
+                for index, block in _set_blocks(page_regions, lines, faces)
+                if block.overflowed
+            ]
+    return BakePreview(
+        output_dir=output_dir_for(project.chapter.source_dir),
+        page_count=len(pages),
+        total_lines=total,
+        unreviewed=tuple(unreviewed),
+        failed=tuple(failed),
+        overflowing=tuple(overflowing),
+    )
 
 
 def bake_chapter(project: Project, output_dir: Path) -> BakeReport:
@@ -91,7 +174,7 @@ def bake_chapter(project: Project, output_dir: Path) -> BakeReport:
         if page_regions and cleaned is None:
             uncleaned += 1
         if cleaned is not None:
-            blocks = _blocks(page_regions, lines, faces)
+            blocks = [block for _, block in _set_blocks(page_regions, lines, faces)]
             regions_empty += len(page_regions) - len(blocks)
             payload = _bake(cleaned, page_regions, blocks, page.filename)
         _write_atomically(output_dir / page.filename, payload)
@@ -105,13 +188,15 @@ def bake_chapter(project: Project, output_dir: Path) -> BakeReport:
     )
 
 
-def _blocks(
+def _set_blocks(
     page_regions: Sequence[RawRegion], lines: Sequence[Line | None], faces: Faces
-) -> list[TypesetBlock]:
-    """One block per region with text to set, in reading order (C-4)."""
+) -> list[tuple[int, TypesetBlock]]:
+    """`(reading_index, block)` for each region with text to set, in reading
+    order (C-4). The one rule for which lines a bake sets: `preview_bake`'s
+    overflow count reads it too (MT-066 C-1)."""
     return [
-        typeset(effective_text(line), region.polygon, faces)
-        for region, line in zip(page_regions, lines, strict=True)
+        (index, typeset(effective_text(line), region.polygon, faces))
+        for index, (region, line) in enumerate(zip(page_regions, lines, strict=True))
         if line is not None and line.status != "failed" and effective_text(line).strip()
     ]
 

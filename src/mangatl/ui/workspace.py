@@ -27,19 +27,31 @@ revealed by hover. A row built from a stored line saves through
 window both write any pending save first, so neither drops the user's work.
 MT-016 PO-1's read-only editor is superseded: every line is editable (PO-5).
 
+**Render** (MT-066, `components.md` §3, §7, §9). The footer holds the render
+status and, at its right end, the primary "Render pages". Render writes any
+pending save, then counts on a worker (`BakeController.preview`) and opens
+`BakeConfirmDialog` on the result; confirming writes pending saves again and
+renders on a worker. While either step runs the button is *loading* (§1): it
+keeps its width and its focus and ignores activation. Focus returns to it
+explicitly whenever the dialog closes, because the offscreen platform does not
+reactivate the window by itself. The end of a render, finished or failed, is
+stated in the footer and announced.
+
 The 1440 px breakpoint in `layout.md` is not built yet (MT-015 PO-1, MT-048).
-Header and footer content are later stories. `mangatl.app` opens this window on
-a chapter folder (MT-054) and closes the project on `closed`, which is emitted
-after the pending saves are written.
+`mangatl.app` opens this window on a chapter folder (MT-054) and closes the
+project on `closed`, which is emitted after a render in flight has finished and
+the pending saves are written.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from typing import Any
 
 from PySide6.QtCore import QEvent, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QEnterEvent, QPalette, QPixmap
 from PySide6.QtWidgets import (
+    QDialog,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -55,12 +67,17 @@ from PySide6.QtWidgets import (
 from mangatl.domain.budget import DEFAULT_CEILING
 from mangatl.domain.line import Line, LineStatus, effective_text, failure_reason
 from mangatl.domain.page import Chapter
+from mangatl.pipeline.bake import BakePreview, BakeReport
 from mangatl.store import ledger
 from mangatl.store.lines import commit_line, read_review_lines
-from mangatl.store.project import Project
+from mangatl.store.project import Project, project_dir_for
 from mangatl.ui import tokens_gen
+from mangatl.ui.bake import BakeController
+from mangatl.ui.bake_dialog import BakeConfirmDialog
+from mangatl.ui.buttons import ActivatedByEnter
 from mangatl.ui.canvas import PageCanvas
 from mangatl.ui.cost_readout import CostReadout
+from mangatl.ui.labels import plain_label
 from mangatl.ui.line_editor import LineEditor, SaveFn
 from mangatl.ui.link import LinkController, LiveRegion, OrderedRegion
 
@@ -115,6 +132,11 @@ _STATUS_PHRASES: dict[LineStatus, str] = {
     "edited": "edited",
     "reverted": "edited, then returned to the proposal",
 }
+
+#: `components.md` §3's primary footer action, and its §1 loading state.
+_RENDER_TEXT = "Render pages"
+_RENDER_LOADING_TEXT = "\N{MIDDLE DOT}" * 3
+_RENDER_LOADING_NAME = "Render pages, working"
 
 
 class PageStrip(QListWidget):
@@ -407,6 +429,10 @@ class Workspace(QMainWindow):
         self._chapter: Chapter | None = None
         self._project: Project | None = None
         self._page_ordinal: int | None = None
+        self._render_controller: BakeController | None = None
+        self._render_output = ""
+        #: The Render dialog last opened, kept after it closes; `None` before.
+        self.bake_dialog: BakeConfirmDialog | None = None
 
         self.header = QWidget()
         self.header.setObjectName("workspaceHeader")
@@ -420,6 +446,16 @@ class Workspace(QMainWindow):
         self.footer = QWidget()
         self.footer.setObjectName("workspaceFooter")
         self.footer.setFixedHeight(FOOTER_HEIGHT)
+        # How the last render ended, then Render pages at the footer's end (§3).
+        self.render_status = plain_label("renderStatus", "")
+        self.render_button = ActivatedByEnter(_RENDER_TEXT)
+        self.render_button.setObjectName("renderButton")
+        self.render_button.setProperty("variant", "primary")
+        self._set_render_loading(False)
+        footer_row = QHBoxLayout(self.footer)
+        footer_row.setContentsMargins(tokens_gen.SPACE_S4, 0, tokens_gen.SPACE_S4, 0)
+        footer_row.addWidget(self.render_status, 1)
+        footer_row.addWidget(self.render_button)
 
         self.page_strip = PageStrip()
         self.page_canvas = PageCanvas()
@@ -460,6 +496,7 @@ class Workspace(QMainWindow):
         self.translation_column.list.currentRowChanged.connect(self._on_current_row_changed)
         self.translation_column.rowEntered.connect(self.link.hover)
         self.translation_column.rowLeft.connect(self._on_row_left)
+        self.render_button.clicked.connect(self._render_pages)
 
     def load_chapter(self, project: Project) -> None:
         """List the project's pages in the strip; nothing is selected yet.
@@ -541,11 +578,85 @@ class Workspace(QMainWindow):
         saves = [_saver(project, ordinal, index) for index in range(len(regions))]
         self._set_regions(regions, japanese, english, lines, saves)
 
-    def closeEvent(self, event: QCloseEvent) -> None:
-        """Write every pending save before the window goes (C-7), then close.
+    def render(self, *args: Any, **kwargs: Any) -> None:
+        """Render pages (MT-066 C-4) when called bare; `QWidget.render` otherwise.
 
-        `closed` is the last thing done: a slot that closes the project must
-        find nothing left to write (MT-054 C-4)."""
+        The contract names the command `render()`, which shadows Qt's
+        paint-into-a-device `render(target, ...)` - a call the theme tests make
+        on this window. Any argument at all means Qt's."""
+        if args or kwargs:
+            super().render(*args, **kwargs)
+            return
+        self._render_pages()
+
+    def _render_pages(self) -> None:
+        """Write pending saves, then count on a worker; the dialog opens when
+        the counts arrive. Before `load_chapter`, and while a step is running,
+        it does nothing."""
+        if self._chapter is None or self.render_button.property("loading"):
+            return
+        # First, so an edit typed and not yet saved is counted as reviewed.
+        self.translation_column.flush()
+        controller = BakeController(project_dir_for(self._chapter.source_dir), self)
+        controller.previewed.connect(self._on_render_previewed)
+        controller.baked.connect(self._on_render_baked)
+        controller.failed.connect(self._on_render_failed)
+        self._render_controller = controller
+        self._set_render_loading(True)
+        controller.preview()
+
+    def _set_render_loading(self, loading: bool) -> None:
+        """§1's loading state: `···` at the rest width, focus kept, ", working"."""
+        button = self.render_button
+        # The rest width, held while the shorter indicator shows (no reflow).
+        button.setMinimumWidth(button.width() if loading else 0)
+        button.setProperty("loading", loading)
+        button.setText(_RENDER_LOADING_TEXT if loading else _RENDER_TEXT)
+        button.setAccessibleName(_RENDER_LOADING_NAME if loading else _RENDER_TEXT)
+        button.style().unpolish(button)
+        button.style().polish(button)
+
+    def _on_render_previewed(self, preview: BakePreview) -> None:
+        self._set_render_loading(False)
+        self._render_output = str(preview.output_dir)
+        if self.bake_dialog is not None:
+            self.bake_dialog.deleteLater()
+        self.bake_dialog = BakeConfirmDialog(preview, self)
+        self.bake_dialog.finished.connect(self._on_bake_dialog_finished)
+        self.bake_dialog.open()
+
+    def _on_bake_dialog_finished(self, result: int) -> None:
+        # Explicitly, and the window first: offscreen, nothing is active once
+        # the dialog hides, and setFocus alone lands nowhere (C-2's amendment).
+        self.activateWindow()
+        self.render_button.setFocus(Qt.FocusReason.OtherFocusReason)
+        if result != QDialog.DialogCode.Accepted.value or self._render_controller is None:
+            return
+        self.translation_column.flush()
+        self._set_render_loading(True)
+        self._render_controller.bake()
+
+    def _on_render_baked(self, report: BakeReport) -> None:
+        pages = report.pages_written
+        noun = "page" if pages == 1 else "pages"
+        self._end_render(f"Rendered {pages} {noun} to {self._render_output}.")
+
+    def _on_render_failed(self, reason: str) -> None:
+        self._end_render(f"Render failed: {reason}")
+
+    def _end_render(self, sentence: str) -> None:
+        self.render_status.setText(sentence)
+        self.live_region.announce(sentence)
+        self._set_render_loading(False)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Wait for a render in flight, write every pending save (C-7), then close.
+
+        A render cannot be cancelled, and the project is closed on `closed`,
+        so the wait comes first. `closed` is the last thing done: a slot that
+        closes the project must find nothing left to write (MT-054 C-4)."""
+        if self._render_controller is not None:
+            self._render_controller.wait()
         self.translation_column.flush()
         super().closeEvent(event)
         self.closed.emit()
