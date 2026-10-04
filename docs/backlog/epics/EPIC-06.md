@@ -2,7 +2,7 @@
 id: EPIC-06
 title: Cleaning and typesetting — the pages come out looking like a release
 status: todo
-stories: [MT-019, MT-065, MT-020, MT-021, MT-027]
+stories: [MT-019, MT-065, MT-020, MT-021, MT-066, MT-027]
 ---
 
 ## Goal
@@ -39,7 +39,10 @@ anywhere on the page.
 - **MT-020** — typesetting: real glyph metrics, line breaking, fitting into the
   region polygon, italic and bold for emphasis.
 - **MT-021** — bake and export: atomic per-page writes to `<input>_en/`, same
-  filenames, same order.
+  filenames, same order. The `mangatl` command line bakes through it (MT-021
+  PO-3).
+- **MT-066** — the workspace's Render command and `BakeConfirmDialog`. Split out
+  of MT-021 by the user on 2026-10-03 (MT-021 PO-2).
 - **MT-027** — the app-wide lettering-font override, and what happens when the
   configured font is missing, unparseable, or short of the glyphs and styles
   comic lettering needs. Last in the epic because it records its fallback on
