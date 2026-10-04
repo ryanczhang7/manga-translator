@@ -44,14 +44,17 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 
+from mangatl.app_paths import settings_path
 from mangatl.clean.mask import erase_mask
 from mangatl.domain.line import Line, effective_text
 from mangatl.domain.region import RawRegion
 from mangatl.store.lines import read_review_lines
 from mangatl.store.project import Project
+from mangatl.store.settings import lettering_font_dir
 from mangatl.typeset.fit import TypesetBlock, typeset
-from mangatl.typeset.font import Faces, load_faces
+from mangatl.typeset.font import FONT_FAMILY, Faces, FallbackReason, load_faces
 from mangatl.typeset.render import bake_page
+from mangatl.typeset.resolve import FaceResolution, resolve_faces
 
 __all__ = [
     "BakePreview",
@@ -82,6 +85,13 @@ class BakeReport:
     regions_empty: int
     unreviewed_lines: int
     pages_uncleaned: int
+    #: MT-027 AC-7: the family the chapter was lettered in, and - when a
+    #: configured font folder could not be used - why. The defaults are "no
+    #: override, nothing went wrong", so a report of the four counts alone
+    #: still means what it meant before.
+    font_family: str = FONT_FAMILY
+    font_fallback: FallbackReason = "none"
+    font_detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -121,8 +131,11 @@ def preview_bake(project: Project) -> BakePreview:
     A line overflows when `bake_chapter` would set it (`_set_blocks`) and its
     block does not fit; a line on an uncleaned page is never set, so never
     overflows.
+
+    Lines are measured in the faces the settings name when the call starts
+    (MT-027 PO-3), as `bake_chapter` would letter them.
     """
-    faces = load_faces()
+    faces = _resolve_faces().faces
     pages = project.pages()
     total = 0
     unreviewed: list[LineRef] = []
@@ -157,12 +170,18 @@ def bake_chapter(project: Project, output_dir: Path) -> BakeReport:
     `unreviewed_lines` counts every `proposed` line in the chapter;
     `regions_empty` counts regions left without text on pages actually baked
     (C-4, PO-6). Exceptions - an `OSError`, a `MissingGlyph` - propagate.
+
+    The faces are resolved once, before anything is written, and letter every
+    page and region (MT-027 AC-8); a configured font folder that cannot be
+    used falls back to the shipped faces and is recorded on the report, never
+    raised (AC-7).
     """
+    resolution = _resolve_faces()
+    faces = resolution.faces
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
 
-    faces = load_faces()
     source_dir = project.chapter.source_dir
     written = regions_empty = unreviewed = uncleaned = 0
     for page in project.pages():
@@ -185,7 +204,22 @@ def bake_chapter(project: Project, output_dir: Path) -> BakeReport:
         regions_empty=regions_empty,
         unreviewed_lines=unreviewed,
         pages_uncleaned=uncleaned,
+        font_family=resolution.family,
+        font_fallback=resolution.fallback,
+        font_detail=resolution.detail,
     )
+
+
+def _resolve_faces() -> FaceResolution:
+    """The faces `settings.json` names, read now (MT-027 PO-1).
+
+    A settings file that cannot be read is a loud fallback, reusing
+    `missing_path` (row 1b, PO-4): the shipped faces, and the reason why.
+    """
+    configured = lettering_font_dir(settings_path())
+    if isinstance(configured, str):
+        return FaceResolution(load_faces(), "default", FONT_FAMILY, "missing_path", configured)
+    return resolve_faces(configured)
 
 
 def _set_blocks(
