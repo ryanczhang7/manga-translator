@@ -84,6 +84,18 @@ def test_a_folder_under_the_home_directory_is_expanded(tmp_path: Path) -> None:
     assert lettering_font_dir(settings) == Path("~/fonts/comic").expanduser()
 
 
+def test_a_settings_file_saved_with_a_utf8_bom_is_read_as_if_it_had_none(tmp_path: Path) -> None:
+    # PO-8: older Notepad prefixes the file with EF BB BF. Written as bytes so the
+    # BOM is unambiguous; `_write` takes text and would leave it to an encoding name.
+    folder = tmp_path / "My Fonts" / "Comic"
+    settings = tmp_path / "settings.json"
+    settings.write_bytes(
+        b"\xef\xbb\xbf" + json.dumps({"lettering_font_dir": str(folder)}).encode("utf-8")
+    )
+
+    assert lettering_font_dir(settings) == Path(str(folder))
+
+
 # --- row 1b: a settings file the app cannot use is reported, not ignored ------------
 
 

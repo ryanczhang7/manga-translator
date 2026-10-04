@@ -25,9 +25,12 @@ def lettering_font_dir(settings_file: Path) -> Path | str | None:
     | absent; key absent; ``null``; ``""`` | ``None`` |
     | a non-empty string | ``Path(value).expanduser()`` |
     | unreadable, not JSON, not an object, not a string | ``"{file} could not be read: {why}"`` |
+
+    A leading UTF-8 BOM (``EF BB BF``, as older Notepad saves) is skipped, as if
+    it were not there (PO-8); it is not "unreadable".
     """
     try:
-        text = settings_file.read_text(encoding="utf-8")
+        text = settings_file.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError) as error:
