@@ -505,7 +505,21 @@ isort re-classifies it *in the test files* and I001 fires. That failure is a
 coincidence of this layout, not the reach assertion doing its job; suppress I001
 and ruff is green. Do not read it as evidence that the gate is watching `src/`.
 
+**Matcher shape changed by MT-067 (2026-10-04).** The blocks above are the
+historical record and still show `grep -qE`; `project.conf` is authoritative and
+now ends the reach assertion in `grep -E "src.mangatl.*[.]py" > /dev/null`.
+`grep -q` leaves at its first match while `ruff --show-files` is still writing,
+and `gates.sh` keeps `pipefail`, so a long enough file list would fail this
+required gate on a clean tree. Do not copy the old shape back.
+
 ### Discovery lines
+
+**Matcher shape changed by MT-067 (2026-10-04).** Every line below is now written
+`grep [-E] PATTERN > /dev/null` in `project.conf`, which is authoritative; the
+block is the historical proposal. The `grep -q` form made `doctor.sh` report
+`ui-tests` MISSING on a 1277-test suite: grep left at the first test id, pytest
+failed writing the rest (EINVAL, exit 120, on Windows), and `doctor.sh`'s
+`pipefail` turned that into the pipeline's status.
 
 ```
 discovery | core-tests  | . | uv run pytest --collect-only -q tests/core | grep -qE "[1-9][0-9]* tests? collected"
