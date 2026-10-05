@@ -71,6 +71,10 @@ __all__ = [
     "regions_from_detection",
 ]
 
+# MT-069: survive a lost thread-pool completion port - see `mangatl.clean.mask`
+# (not imported here: `detect` and `clean` are independent siblings).
+cv2.setNumThreads(-1)
+
 #: The probability above which a pixel is text.
 #:
 #: Derived in MT-007 GREEN against the real `seg` head, measured **inside the

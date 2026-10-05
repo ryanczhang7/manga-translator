@@ -39,6 +39,9 @@ __all__ = [
     "clean_page",
 ]
 
+# MT-069: survive a lost thread-pool completion port - see `mangatl.clean.mask`.
+cv2.setNumThreads(-1)
+
 #: AC-6's bound: mean absolute residual, in 8-bit levels, over the pixels the
 #: rendered text changed, cleaned composite against the untouched scan (C-5,
 #: C-9). Measured in MT-019 GREEN at `MASK_DILATION_PX = 2`: cleaned **1.003**

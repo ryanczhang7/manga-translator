@@ -21,6 +21,19 @@ from mangatl.domain.region import RawRegion
 
 __all__ = ["MASK_DILATION_PX", "erase_mask"]
 
+# MT-069: survive a lost thread-pool completion port. OpenCV's ConcRT backend
+# attaches a thread on its first parallel call through the *default* scheduler,
+# and that attach calls `SetThreadpoolWait`, which raises 0xC000070A for the life
+# of the process once the default Windows thread pool has lost its I/O completion
+# port (audit MT-068, Decided 1, E3-E5). Any explicit `setNumThreads` before the
+# first parallel call makes OpenCV create and attach to a scheduler of its own,
+# which never takes that path (E9; MT-069 C-4 amended, PO-3). `-1` is OpenCV's
+# "reset to the system default": the explicit scheduler, at exactly the thread
+# count OpenCV would have chosen on this machine, so nothing goes serial. It is
+# process-wide and idempotent; every module that imports cv2 makes the same call
+# so that no import order leaves a cv2 caller uncontained.
+cv2.setNumThreads(-1)
+
 #: Radius, in pixels, of the elliptical dilation applied to the union of region
 #: masks: a mask that hugs the glyphs leaves an anti-aliased halo; too wide and
 #: the bubble's outline is eaten. Measured in MT-019 GREEN (`## Notes`, C-7)
