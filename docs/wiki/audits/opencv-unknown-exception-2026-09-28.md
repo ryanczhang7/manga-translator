@@ -430,3 +430,24 @@ fail?
 - [[MT-053]] - *A failing log with an unexplained signature outlives later
   failures* (chore, EPIC-01, harness only), filed by the Lead PO from the
   retention recommendation above. No fix story: no fix was identified.
+
+## Addendum - mechanism found (MT-068, 2026-10-05)
+
+The 2026-10-05 recurrence kept its log, and the MT-068 spike reproduced it. See
+[[MT-068-cv2-parallel-failure]] (`docs/wiki/audits/MT-068-cv2-parallel-failure.md`),
+which supersedes this audit's Decided 5 ("best explanation") and the first
+addendum's Decided 2 ("what that fault was remains unknown").
+
+The structured exception is `0xC000070A` (`STATUS_THREADPOOL_HANDLE_EXCEPTION`).
+`SetThreadpoolWait` raises it when ConcRT attaches a thread to a process whose
+default thread pool has lost its I/O completion port. In the probes, the stray
+`CloseHandle` that closed the port came from CPython 3.12's `_wmi` worker thread,
+abandoned by a slow query during `onnxruntime`'s import, reading a handle from a
+dead stack frame. That this is what happened in the incidents is inferred, not
+observed.
+
+This audit's E7/W3 (memory pressure never gives "Unknown") and W6 (FP state is not
+the cause) stand. W10's question is answered: faulthandler did show the SEH, 176
+times.
+
+The fix stories are MT-069 and MT-070.
