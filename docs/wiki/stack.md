@@ -2,7 +2,8 @@
 
 > **Verified in part, on 2026-09-12, by story MT-001 (bootstrap), on the
 > development machine** (Windows 11 Home 10.0.26200, Ryzen 5 7600X, RTX 5070,
-> uv 0.12.13, CPython 3.12.14).
+> uv 0.12.13, CPython 3.12.14; the interpreter is CPython 3.13.15 since MT-070,
+> 2026-10-05 - see §3 *Runtime and packaging*).
 >
 > **What was verified:** every version in §3 *Runtime and packaging* and
 > *Development tooling* is now what `uv.lock` actually locked, not a candidate.
@@ -85,7 +86,7 @@ story that first calls it.
 
 | Thing | Locked version | Candidate at planning | Why — tied to a constraint |
 |---|---|---|---|
-| Python | **3.12.14** (`.python-version` pins `3.12`; `requires-python = "==3.12.*"`) | 3.12.x | The ML and Qt wheel ecosystem is Python. 3.12 rather than 3.13 because `onnxruntime` and `PySide6` wheel availability has historically lagged a release behind, and this project cannot afford a "no wheel for your Python" stall on the machine it must install cleanly on. |
+| Python | **3.13.15** (`.python-version` pins `3.13`; `requires-python = ">=3.13,<3.14"`, locked `==3.13.*`). **Changed from 3.12.14 by MT-070, 2026-10-05.** | 3.12.x | The ML and Qt wheel ecosystem is Python. **Why 3.13, not 3.12:** CPython 3.12's `_wmi.exec_query` (reached by every first `platform.system()`, including `onnxruntime`'s at import) hands its worker thread a pointer into the caller's stack; when the WMI connect is slow the caller times out and returns, and the worker later `CloseHandle`s whatever sits in the dead slot - measured closing a live `File` handle and, in the MT-068 audit (E7, E8, E10), the default thread pool's I/O completion port, which breaks every later parallel cv2 call. Upstream fixed it in GH-134313 (gh-130727), backported to 3.13 (#134396) and 3.14 (#134397), **never to 3.12**. `tests/core/test_wmi_handle_ownership.py` pins it. **Wheel availability, the original reason for 3.12, re-measured 2026-10-05:** on 3.13 / `x86_64-pc-windows-msvc` with `--only-binary :all:` every locked package resolves as a prebuilt wheel at the same version as the 3.12 lock (`numpy` 2.5.3, `onnxruntime-gpu` 1.30.0, `opencv-python-headless` 5.0.0.93, `pyside6`/`-addons`/`-essentials` 6.9.3); `uv lock` on 3.13 changed no package version (67 packages before and after). Not 3.14: the fix is in both, and 3.13 is the smallest step that carries it. |
 | `uv` | **0.12.13** | 0.8.x | Single self-contained binary; manages the interpreter *and* the venv, so the user installs one thing. Also the only reliable way to invoke Python on Windows from bash — see §7. The candidate was four minor versions stale; `winget` installed 0.12.13 and nothing depended on the difference. |
 | PySide6 | **6.9.3** (`pyside6-essentials`, `pyside6-addons`, `shiboken6` all 6.9.3) | 6.8.x (Qt 6.8 LTS) | The "photo editor, not a dashboard" workspace is a `QGraphicsView`/`QGraphicsScene` with pan, zoom and overlay items — a solved problem in Qt and a from-scratch project in most alternatives. LGPL, so redistributable in an installer without a commercial Qt licence. **Not the 6.8 LTS the plan named**: `>=6.8,<6.10` resolved to 6.9.3. Qt 6.9 is not an LTS line. If LTS turns out to matter for the installer story, pin it there and say why — nothing measured so far needs it. |
 | PyInstaller | **6.22.3** (+ `pyinstaller-hooks-contrib` 2026.7) | 6.x | Produces a one-folder Windows build carrying the interpreter, the venv and the `.onnx` weights. This is the *only* thing that satisfies "must not require the user to manage Python environments, model weights or GPU setup by hand". **Measured 2026-09-12:** 34 s and a 111 MB `dist/mangatl/` with PySide6 alone and no weights. |
