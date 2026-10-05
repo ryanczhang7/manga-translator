@@ -5,10 +5,15 @@ verify it. Written by `/setup-environment` on 2026-09-12 against
 `docs/wiki/stack.md` and the `python-uv-pyside6` stack profile.*
 
 **Status: done on the development machine, 2026-09-12.** `uv` 0.12.13 and
-CPython 3.12.14 are installed, and **since MT-001 landed the project itself is
+CPython 3.12.14 were installed, and **since MT-001 landed the project itself is
 installed too** — `uv sync --all-extras` resolves 35 packages against a committed
 `uv.lock`. `scripts/doctor.sh` reports the project toolchain `ok` and four of
 five *test discovery* checks passing.
+
+**Interpreter changed, 2026-10-05 (MT-070):** the project now runs on CPython
+**3.13.15** (`.python-version` `3.13`), because 3.12's `_wmi` closes handles it
+does not own - see `stack.md` §3 *Runtime and packaging*. `uv sync` fetches it
+on a fresh machine; on this one `uv python install 3.13` was needed once.
 
 **The fifth, `providers`, reports `MISSING` and is expected to.** It runs
 `uv run python -c "import onnxruntime ..."`, and **no inference runtime is
@@ -24,7 +29,7 @@ Nothing else goes on the system.
 
 ## 1. Required
 
-The stack is Python 3.12 + `uv` + PySide6 + ONNX Runtime. Almost none of it is a
+The stack is Python 3.13 + `uv` + PySide6 + ONNX Runtime. Almost none of it is a
 system install: every gate command in `.claude/harness/project.conf` begins
 `uv run`, which resolves to the project's own virtual environment. So the
 system-level requirement list is short.
@@ -34,7 +39,7 @@ system-level requirement list is short.
 | `git` | any recent | the harness itself; `check-boundaries.sh` | system |
 | `bash` | 5.x | every harness script | system (Git for Windows) |
 | **`uv`** | **0.12.x** | **every gate and task** — `format`, `lint`, `typecheck`, `unit`, `coverage`, `coverage-core`, `integration`, `build`, and the `install`/`dev`/`test` tasks all invoke `uv run` | **system — the only thing you must install** |
-| CPython | 3.12.x | the interpreter the project runs on | **project — installed and pinned by `uv`, not by you** |
+| CPython | 3.13.x (3.12.x before MT-070) | the interpreter the project runs on | **project — installed and pinned by `uv`, not by you** |
 | NVIDIA driver | ≥ 566 for Blackwell / sm_120 | the CUDA execution provider used by detection, OCR and inpainting (MT-002, MT-007, MT-010, MT-019) | system — **already present** |
 | Everything else | per `uv.lock` | ruff, mypy, pytest, coverage, import-linter, PySide6, onnxruntime, PyInstaller | project — `uv sync` |
 
@@ -55,7 +60,7 @@ Ryzen 5 7600X, 32 GB RAM):
 | `winget` | present |
 | **GPU** | **NVIDIA GeForce RTX 5070, 12227 MiB, driver 591.86** — comfortably above the sm_120 floor; no CUDA Toolkit install is needed, ONNX Runtime ships its own CUDA libraries |
 | `uv` | **0.12.13** — installed 2026-09-12 via `winget`, at `AppData\Local\Microsoft\WinGet\Packages\astral-sh.uv_Microsoft.Winget.Source_8wekyb3d8bbwe\uv.exe` |
-| CPython | **3.12.14** — uv-managed, at `AppData\Roaming\uv\python\cpython-3.12.14-windows-x86_64-none\python.exe` |
+| CPython | **3.13.15** — uv-managed, at `AppData\Roaming\uv\python\cpython-3.13.15-windows-x86_64-none\python.exe`; the project interpreter since MT-070 (2026-10-05). 3.12.14 is still installed beside it and is no longer used. |
 | `python` / `python3` (system) | **not real** — the Microsoft Store alias shim only, and deliberately still that way; see §5 |
 | `py` launcher | not present |
 | `scoop` | not present |
@@ -74,7 +79,7 @@ winget install --id astral-sh.uv --exact --source winget
 Then **open a new shell** — see §5 on PATH — and let `uv` fetch the interpreter:
 
 ```bash
-uv python install 3.12
+uv python install 3.13
 ```
 
 That is the whole system-level setup. The project's own dependencies are
@@ -102,8 +107,8 @@ uv --version
 ```bash
 uv python list --only-installed
 ```
-→ at least one `cpython-3.12.*` entry with a real path under
-`AppData\Roaming\uv\python\`. An empty list means `uv python install 3.12` has
+→ at least one `cpython-3.13.*` entry with a real path under
+`AppData\Roaming\uv\python\`. An empty list means `uv python install 3.13` has
 not run.
 
 ```bash
@@ -258,6 +263,11 @@ work. Treat this message as noise unless something downstream actually fails. If
 it ever does, enabling Developer Mode (*Settings → System → For developers*) and
 re-running `uv python install 3.12` is the fix — not tried here, because nothing
 needed it.
+
+**Same again for 3.13, 2026-10-05 (MT-070).** `uv python install 3.13` (and
+`--reinstall`) downloaded 3.13.15 and printed the same `Missing expected target
+directory` error. `uv python find 3.13` resolved the 3.13.15 interpreter,
+and `uv lock`, `uv sync` and the `--fast` gates all ran on it.
 
 ### CUDA
 

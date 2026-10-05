@@ -6,7 +6,7 @@
 name = "mangatl"
 version = "0.1.0"
 description = "Local-first Japanese manga chapter translator"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.13,<3.14"
 license = "MIT"
 readme = "README.md"
 
@@ -103,7 +103,7 @@ packages = ["src/mangatl"]
 # --- ruff: linter AND formatter ---------------------------------------------
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py313"
 src = ["src", "tests"]
 # MEASURED 2026-09-12, ruff 0.16.7: `ruff format .` reported **115 files**, not
 # 17. ruff now formats Python code blocks inside **Markdown**, and 98 of those
@@ -142,7 +142,7 @@ known-first-party = ["mangatl"]
 
 # --- mypy --------------------------------------------------------------------
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.13"
 mypy_path = "src"
 packages = ["mangatl"]
 strict = true
