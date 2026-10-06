@@ -44,7 +44,7 @@ See `node-typescript.md` for the vitest and tsc notes, which apply unchanged.
 ## What the runner can see
 
     # UNVERIFIED - correct the grep targets against your own layout.
-    discovery | tests | . | pnpm exec vitest list | grep -q "src/"
+    discovery | tests | . | pnpm exec vitest list | grep "src/" > /dev/null
 
 `vitest list` prints the test files it would run. A `test.include` that stopped
 matching, or a directory moved out from under a coverage threshold, is invisible

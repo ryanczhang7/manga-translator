@@ -1,7 +1,8 @@
 ---
 description: Move one story forward by exactly one phase
+model: fable
 argument-hint: <story-id>
-allowed-tools: Bash(bash scripts/phase.sh:*), Bash(bash scripts/gates.sh:*), Bash(bash scripts/check-boundaries.sh:*), Bash(bash scripts/task.sh:*), Bash(git:*), Read, Grep, Glob, Edit, Write, Task
+allowed-tools: Bash(bash scripts/phase.sh:*), Bash(bash scripts/gates.sh:*), Bash(bash scripts/check-boundaries.sh:*), Bash(bash scripts/selftest.sh:*), Bash(bash scripts/ci-local.sh:*), Bash(bash scripts/task.sh:*), Bash(git:*), Read, Grep, Glob, Edit, Write, Task
 ---
 
 Story: $1
@@ -75,8 +76,12 @@ the user *first*, so they can overrule it before GREEN. Never absorb it silently
 and never skip it silently.
 
 Create and switch to the story's branch
-(`story/<id>-<slug>`) if it does not exist. Set the phase; `phase.sh` refuses
-if a `depends_on` story is not DONE or the checkout is on another branch, and
+(`story/<id>-<slug>`) if it does not exist. Before setting the phase, commit
+the story file on that branch while it still says `phase: PLANNED`:
+`check-boundaries.sh` freezes the criteria at the last state committed at
+PLANNED, so a refinement first committed together with RED is compared with the
+base branch instead and needs an `## Amendments` entry. Set the phase;
+`phase.sh` refuses if a `depends_on` story is not DONE or the checkout is on another branch, and
 either refusal is a reason to stop and tell the user, not to reach for
 `--force`. Then dispatch the
 **test-developer** subagent with the story path, the criteria restated in full
@@ -87,6 +92,21 @@ oracle") — the relevant constraints from `docs/wiki/`, and the exact test
 command from `.claude/harness/project.conf`. When it returns, verify: read the test files it
 wrote and run the tests yourself. Confirm they fail, and fail for the right
 reason. If they pass, or fail on an unrelated error, send it back.
+
+**Unless the runner did not start at all** — no test in the repository ran and
+`gates.sh` failed outright. That is a real state, it is sometimes the correct
+RED, and "confirm they fail for the right reason" cannot be discharged in it: a
+story adding a global test mechanism has to wire the runner's own config, which
+is frozen during GREEN, so the config names modules GREEN has not written yet.
+`tdd-cycle`, "When RED breaks the RUNNER, not the tests", has the dilemma and why
+this branch is the right one.
+
+Verify it differently rather than waving it through. Confirm that the **only**
+reason the runner cannot start is the named absence — not a syntax error, not a
+second missing import — and that the failure names **exactly** the modules the
+contract obliges GREEN to write. Then say so in the commit and paste the error
+into the handoff. An agent arriving at that tree otherwise cannot tell a
+deliberate dark suite from a broken repository, and will debug the wrong thing.
 
 Then run `bash scripts/gates.sh --fast` and read it before leaving RED. This is
 not a pass/fail check — the test gates are *supposed* to be red here. It asks a
@@ -114,15 +134,15 @@ question, now expecting green.
 in `## Deferred verifications` that names GATES as its owner, and paste what
 happened into the block: what was mutated, which assertion went red, and that the
 file was restored. Use `scripts/mutate.sh`, which is allowed in every phase and
-verifies its own restore. Do three mutations rather than one where the entry is
-about a format or a codec, and make one of them a wrong **value** rather than a
-missing field: two dropped-field mutations of one codec were each caught only by
-its property test, while the one that flipped a float writer's byte order was
-caught by six tests — and only because the container assertions read the bytes
-through a reader importing nothing from the source tree. A round-trip suite that
-verifies a format through its own reader passes against an encoder that is
-uniformly wrong. If an entry can no longer run, write `WAIVED` and the reason;
-leaving it silent is what `check-boundaries.sh` now refuses.
+verifies its own restore, and run each entry against the one suite that holds
+its assertion, not the full suite. How many entries a story carries is the
+budget in `rules.md`, "Mutation work per story": by default one "defect put
+back" mutation for the story's central claim, plus what the law owes for tests
+written against existing code; a format or codec story may add one wrong
+**value** mutation. Anything beyond that — earning every assertion that passed on
+arrival — is `/audit-mutations`' work, not this phase's. If an entry can no
+longer run, write `WAIVED` and the reason; leaving it silent is what
+`check-boundaries.sh` refuses.
 
 Then run `bash scripts/gates.sh`. It writes
 its own summary into the story's `## Gate results`; never paste or edit one.
@@ -130,6 +150,12 @@ On failure, dispatch the **feature-developer** to fix it, unless the failure
 means a test is wrong — in which case return the story to RED (see below). A
 `WARN` on an optional gate is read, not skipped; a known permanent failure gets
 a `waiver` line with its reason.
+
+**The stamp covers tracked and staged files only** — the tree `git commit -a`
+would make, which is what CI recomputes. A file the story created must be
+`git add`-ed before the full run. With an active story, `gates.sh` refuses to
+record (exit 1) while it names any `UNTRACKED` file; a user's own stray that
+should stay untracked belongs in `.git/info/exclude`, not in the commit.
 
 **A required gate reported `BLOCKED` (exit 3) is a third thing, and it is your
 decision.** BLOCKED means the environment would not let the gate start — a
@@ -168,11 +194,28 @@ without it is the point.
 
 Then, **in this order**:
 
-1. `bash scripts/phase.sh set $1 REVIEW`
-2. Commit, with a message that names the story and what it does.
-3. `bash scripts/check-boundaries.sh` — the second script CI runs, and the one
+1. `bash scripts/selftest.sh` — the whole harness self-test, every suite,
+   once, while the story is still at GATES. CI runs every suite, and one the
+   story never touched can still fail on its change: a line number another
+   suite pins, a floor, a value an upstream suite asserts. Run it detached
+   (the Bash tool's `run_in_background` with its longest timeout, or `nohup`
+   from a shell), so that a tool timeout cannot kill it, and run nothing else
+   in this worktree until it exits: not `gates.sh`, not a second self-test.
+   CI's whole job takes about 2 minutes; on a Windows host the self-test
+   alone has taken about 25. That is slow, not wrong. Do not swap in named
+   suites because the host is slow. If a run goes far past the last duration
+   a story recorded, look for an orphaned self-test or gate run before
+   blaming the host; one run stalled past an hour beside an orphan and passed
+   alone. Judge it by its exit status and its last line, `N harness suite(s)
+   passed.`, and paste both, with the duration, into `## Notes`. A failure
+   takes GATES' own routes: the feature-developer, or RED if a test is
+   wrong. A fix changes the tree, so `bash scripts/gates.sh` runs again and
+   these steps start over.
+2. `bash scripts/phase.sh set $1 REVIEW`
+3. Commit, with a message that names the story and what it does.
+4. `bash scripts/check-boundaries.sh` — the second script CI runs, and the one
    `gates.sh` cannot stand in for. Fix anything it reports before pushing.
-4. Push the branch and open a PR whose body links the story file and lists the
+5. Push the branch and open a PR whose body links the story file and lists the
    acceptance criteria with the test that covers each.
 
 The phase is set **before** the commit, and the order is not cosmetic:
@@ -182,8 +225,24 @@ rejects. Committing first happens to survive when the PR is opened before that
 job runs, which makes it fail intermittently rather than every time — the worse
 of the two. Do not reorder these to be helpful.
 
+`bash scripts/ci-local.sh` runs that self-test and every other step CI runs,
+read from the workflow files, and ends with step 4's check. It judges the
+commit, so it can only run after step 3. It runs the self-test twice and the
+gates again, so it is the better check where it is fast and never a
+substitute for step 1 where it is not.
+
 **REVIEW → DONE.** Only once the PR is merged. Set the phase to DONE, clear the
-lock with `bash scripts/phase.sh clear`, and report what the next story is.
+lock with `bash scripts/phase.sh clear`, and relay the report that
+`phase.sh set <id> DONE` printed — the output of `bash scripts/plan.sh after
+<id>` — to the user **as printed**: the `Next:` story and its command, any
+`Alongside:` set with its `git worktree add` lines, `In flight:` and
+`Blocked:`. Do not rebuild it from memory; run `bash scripts/plan.sh after
+<id>` again if the output scrolled away. When that report carries an `Epic:`
+line — the closed story's `epic:` is non-empty and no other story in that epic
+is short of DONE — it recommends `/audit-mutations <epic>`, scoped to the paths
+the epic's stories touched — the exhaustive mutation work that `rules.md`,
+"Mutation work per story", keeps out of every story. Recommend it; never run it.
+A story with an empty `epic:` gets no `Epic:` line and no recommendation.
 
 Before you call the PR green, **read the timings out of its first CI log** — not
 just the pass/fail. A pass within 10 % of a limit is a pending failure, and a
@@ -273,12 +332,12 @@ Rules for you as orchestrator:
 - **When the claim is "this suite discriminates", the check is a mutation you
   run.** A handoff's mutation table — *changing X fails 9 tests, changing Y
   fails 1* — could not be verified in RED, where the suite did not load, and
-  is easy to write. Against the committed implementation, pick a mutation the
-  table predicts a count for, preferring one whose predicted catch is a
-  **single** assertion (a lone assertion is where a vacuous test hides), run
-  the suite, compare the count, and confirm the suite is green again after the
-  file is back. Two mutations, one run each, is enough; matching counts turn the
-  table from a claim into evidence. Record it in `## Notes`.
+  is easy to write. Against the committed implementation, run **one** mutation
+  from the table: the one whose predicted catch is a **single** assertion (a
+  lone assertion is where a vacuous test hides), against the one suite that
+  holds that assertion. Compare the count, and confirm the suite is green again
+  after the file is back. Record it in `## Notes`. Verifying the rest of the
+  table is `/audit-mutations`' work (`rules.md`, "Mutation work per story").
 
   Use the script, in any phase:
 
@@ -298,5 +357,7 @@ Rules for you as orchestrator:
   subagent that escalates a scope question instead of resolving it quietly has
   done the right thing; answer it rather than sending it back.
 
-Finish by reporting: the phase you moved from and to, what changed, the real
-command output that justifies it, and the exact command to run next.
+Finish by reporting, as `rules.md`, "Reporting to the user" says: the phase you
+moved from and to, what changed, the real command output that justifies it, and
+last, the command to run next. Take it from `bash scripts/plan.sh $1` while the
+story is still in flight, or relay `bash scripts/plan.sh after $1` once it closed.

@@ -4,6 +4,21 @@
 #   bash scripts/selftest.sh            every suite in .claude/tests
 #   bash scripts/selftest.sh phase-guard one suite, by name
 #   VERBOSE=1 bash scripts/selftest.sh  name every assertion, not just failures
+#   SELFTEST_JOBS=4 bash scripts/selftest.sh   up to 4 suites at once
+#
+# SELFTEST_JOBS (HARNESS-036) is opt-in, and unset means 1: one suite at a
+# time, exactly as before. With 2 or more over a run of two or more suites, up
+# to that many run at once, each into its own buffer under
+# .claude/state/selftest.<pid>/, and their output is still printed in suite
+# order - byte for byte what a one-at-a-time run prints - each suite as soon as
+# it and every suite before it have finished. Anything but a whole number of 1
+# or more is refused with exit 2 before anything runs. The self-test is
+# spawn-bound, and two spawn-heavy runs on one Windows machine is what hung
+# issue #97, so choose a value for a machine you know; CI leaves it unset.
+# Measured once on the Windows/Git Bash host this was built on (HARNESS-036
+# DV-2, 2026-10-05): the full self-test took 1,135 s with it unset and 336 s
+# with SELFTEST_JOBS=4, with identical per-suite results. Suites start in suite
+# order, so the slowest one (phase-guard) still sets the floor.
 #
 # These test the harness, not the project built with it: the phase lock, the
 # path classifier, the hooks. They need bash, git and coreutils and nothing
@@ -12,7 +27,11 @@
 #
 # The project's own gates are a separate thing entirely: scripts/gates.sh.
 #
-# --- assertion floors (MT-039) ----------------------------------------------
+# --- assertion floors --------------------------------------------------------
+#
+# Ported from manga-translator's MT-039, which built this downstream while
+# upstream had nothing like it, and sent it back rather than lose it to a
+# refresh.
 #
 # A suite's exit status is not evidence that it did any work: a suite that
 # executed zero assertions exits 0, and a suite replaced by a single `printf`
@@ -21,10 +40,14 @@
 # of the suite's own stdout - the `N` of summary()'s `<name>: N passed, M
 # failed` line, matched anchored and by name, last match winning - then fails
 # the run when a suite did less than it declared. That count is not the number
-# of `assert_` call sites in the source: `profiles` is ONE call site inside a
-# loop and FORTY-FOUR executed assertions.
+# of `assert_` call sites in the source: on this tree `profiles` is ONE call
+# site inside a loop and 37 executed assertions.
 #
-# Two rules about scope, and the second is C-4(b) of MT-039:
+# This is the `evidence` and `floor` idea project.conf already applies to the
+# GATES, turned on the harness's own tests. A gate that exits 0 having done
+# nothing does not complain; neither does a suite.
+#
+# Two rules about scope, and the second matters most:
 #
 #   * a suite that prints no summary line at all FAILS. "No count could be
 #     read" is the strongest form of the defect, not an excuse to skip the
@@ -37,79 +60,50 @@
 #     exits 0. CI and scripts/ci-local.sh both invoke the full run, which is
 #     where the audit has to hold.
 #
-# --- concurrency (MT-042) ---------------------------------------------------
+# --- a project's own floors (HARNESS-020) -----------------------------------
 #
-#   SELFTEST_JOBS=2 bash scripts/selftest.sh   at most two suites at once
-#   SELFTEST_JOBS=1 bash scripts/selftest.sh   the serial runner
-#
-# Suites run concurrently, at most $SELFTEST_JOBS at once. Unset or empty means
-# 4, the CI runner's vCPU count, and deliberately not `nproc`: the work is
-# spawn-bound, and on Windows more jobs than cores is slower, not faster.
-# Anything that is not a positive integer is refused before any suite starts,
-# because a bound of 0 would never start anything.
-#
-# Four properties, each of which a concurrent runner gets wrong by default:
-#
-#   * EVERY job's exit status is collected on its own. A finished job is
-#     noticed with `kill -0 <pid>` and its status is then read with
-#     `wait <pid>`, which returns that job's status even though it has already
-#     exited. A bare `wait` would not. Should a bash ever forget a reaped job,
-#     `wait` returns 127 ("not a child"), which counts as a FAILURE, so this
-#     fails closed and never reports a lost status as a pass.
-#   * Output is BUFFERED per suite, in .claude/state/selftest/<name>.out under
-#     this script's own root (stdout and stderr together, as `2>&1` always
-#     was), and printed in GLOB order, each suite contiguous under its header,
-#     whatever order the suites finish in. A suite is printed as soon as it
-#     and every suite before it in the glob have finished. Each suite's floor
-#     is read from its own buffer. No buffer is left behind, pass or fail; one
-#     that survives means a run was killed, and it is safe to delete.
-#   * The LARGEST suite files start first. A run cannot finish before its
-#     longest suite does, so that suite must not wait in the queue behind short
-#     ones. Starting in glob order put `phase-guard` ~108 s late, which is over
-#     MT-042 AC-1's 1.10x ceiling before any contention is counted. File size is
-#     the proxy, because it needs no timing data and names no suite.
-#   * A slot is refilled the moment ANY job exits. Without bash 4.3's `wait -n`
-#     that means polling, and each `sleep` is a fork, so the interval backs off
-#     from 0.1 s to 2 s while nothing changes and resets when a job ends. The
-#     suites run for seconds to minutes, so 2 s is nothing on the critical path.
-#
-# SERIAL_SUITES, below, is the escape hatch for a suite that proves not to be
-# parallel-safe (MT-042 C-3). A suite named there runs alone, before the
-# concurrent ones, with no other suite alive. Its floor is still read and it
-# still prints in glob order. It is a line in this file, not an environment
-# variable, so that the exception is visible in the repository. It ships empty.
-#
-# Bash 3.2: no `wait -n`, no associative arrays, no mapfile; the tests grep for
-# them.
+# floors.conf ships upstream and is REPLACED by every refresh, so a consuming
+# project cannot floor its own `project-*.test.sh` suites there without the
+# next refresh wiping the line. Those floors go in
+# .claude/tests/project-floors.conf instead: same grammar, same faults, read
+# after floors.conf and only if it exists. Upstream never ships it, so the
+# refresh keeps it. Its absence is never a fault. A suite floored in both files
+# is a fault against the project file's line - otherwise a project could lower
+# an upstream suite's floor from the one file the refresh never replaces. A
+# shortfall names the file its floor came from, so the reader edits the right
+# one.
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ONLY="${1:-}"
 
-# Space-separated suite names, each of which runs with no other suite alive.
-SERIAL_SUITES=""
-
-# The job bound, validated before anything else happens.
-JOBS="${SELFTEST_JOBS:-}"
+# SELFTEST_JOBS, read before anything else so that a bad value is refused
+# before the floors audit, the lock and any suite (HARNESS-036 C-3). Unset and
+# empty mean 1; leading zeros are refused rather than normalised.
+JOBS="${SELFTEST_JOBS-}"
 case "$JOBS" in
-  '') JOBS=4 ;;
-  *[!0-9]*) JOBS="" ;;
-  *) JOBS="${JOBS#"${JOBS%%[!0]*}"}" ;;   # strip leading zeros; all zeros -> empty
+  '') JOBS=1 ;;
+  *[!0-9]*|0*)
+    printf "selftest: SELFTEST_JOBS must be a whole number of suites to run at once, 1 or more; got '%s'. Nothing was run.\n" "$JOBS" >&2
+    exit 2 ;;
 esac
-if [ -z "$JOBS" ]; then
-  printf "SELFTEST_JOBS must be a positive integer, the number of suites run at once; got '%s'. Nothing was run.\n" \
-    "${SELFTEST_JOBS:-}" >&2
-  exit 1
-fi
 
 # Resolved from the script's own root, never $PWD and never a baked path: the
 # harness's fixtures run a copy of this script from a throwaway tree.
 TESTS_DIR="$ROOT/.claude/tests"
 FLOORS_REL=".claude/tests/floors.conf"
 FLOORS_FILE="$ROOT/$FLOORS_REL"
+PROJECT_FLOORS_REL=".claude/tests/project-floors.conf"
+PROJECT_FLOORS_FILE="$ROOT/$PROJECT_FLOORS_REL"
 
 TAB=$(printf '\t')
 CR=$(printf '\r')
+# The FAULTS separator. Deliberately NOT whitespace: `read` strips a leading
+# IFS-whitespace delimiter, so with TAB a fault carrying no suite name
+# ("<TAB><message>") came back with the message in the name field and was
+# silently dropped - a malformed floors line passed the full run (HARNESS-020).
+# A non-whitespace IFS character yields an empty first field instead.
+US=$(printf '\037')
 
 # trim <string>   Result in $TRIMMED. Pure bash: no subshell, no process.
 TRIMMED=""
@@ -120,52 +114,15 @@ trim() {
 }
 
 # --- the floors table -------------------------------------------------------
-# "<suite><TAB><floor>" lines; no associative arrays, for bash 3.2 - as
-# gates.sh does for project.conf, and the grammar is deliberately the same:
-# `#` comments and blank lines ignored, `|`-separated, space trimmed.
+# "<suite><TAB><floor><TAB><source-rel-path>" lines; no associative arrays, for
+# bash 3.2 - as gates.sh does for project.conf, and the grammar is deliberately
+# the same: `#` comments and blank lines ignored, `|`-separated, space trimmed.
+# The source travels with the floor so that a shortfall names the file to edit.
 FLOORS=""
-# "<suite><TAB><message>" lines. The suite name is carried so that a single-
-# suite run can tell its own fault from somebody else's (C-4(b)).
+# "<suite><US><message>" lines. The suite name is carried so that a single-
+# suite run can tell its own fault from somebody else's (C-4(b)). A fault that
+# belongs to no suite has an EMPTY name, and a full run reports it.
 FAULTS=""
-
-if [ -f "$FLOORS_FILE" ]; then
-  lineno=0
-  while IFS= read -r line || [ -n "$line" ]; do
-    lineno=$((lineno+1))
-    line="${line%$CR}"
-    trim "$line"; line="$TRIMMED"
-    case "$line" in ''|'#'*) continue ;; esac
-    case "$line" in
-      *'|'*'|'*) ;;
-      *) FAULTS="$FAULTS$TAB$FLOORS_REL:$lineno  is not a floor line: '$line'
-"; continue ;;
-    esac
-    rest="$line"
-    kind="${rest%%|*}"; rest="${rest#*|}"
-    name="${rest%%|*}"; value="${rest#*|}"
-    trim "$kind";  kind="$TRIMMED"
-    trim "$name";  name="$TRIMMED"
-    trim "$value"; value="$TRIMMED"
-    if [ "$kind" != floor ]; then
-      FAULTS="$FAULTS$name$TAB$FLOORS_REL:$lineno  unknown kind '$kind'; the only kind is 'floor'
-"
-      continue
-    fi
-    if [ ! -f "$TESTS_DIR/$name.test.sh" ]; then
-      FAULTS="$FAULTS$name$TAB$FLOORS_REL:$lineno  floor names '$name', but .claude/tests/$name.test.sh does not exist
-"
-      continue
-    fi
-    case "$value" in
-      ''|*[!0-9]*)
-        FAULTS="$FAULTS$name$TAB$FLOORS_REL:$lineno  floor for '$name' is not a number: '$value'
-"
-        continue ;;
-    esac
-    FLOORS="$FLOORS$name$TAB$value
-"
-  done < "$FLOORS_FILE"
-fi
 
 # Both lookups below set a global rather than printing, and both are pure bash.
 # That is deliberate and it is DV-5: a command substitution is a fork, and on
@@ -175,17 +132,82 @@ fi
 # comparing an integer should be free, and this way it is: the floors mechanism
 # spawns no process at all.
 
-# floor_of <suite>   Sets $FLOOR to the declared floor, or empty. Last wins.
+# floor_of <suite>   Sets $FLOOR to the declared floor, or empty, and
+# $FLOOR_SRC to the file it was declared in. Last wins.
 FLOOR=""
+FLOOR_SRC=""
 floor_of() {
-  local n="$1" line
-  FLOOR=""
+  local n="$1" line rest
+  FLOOR=""; FLOOR_SRC=""
   while IFS= read -r line; do
-    case "$line" in "$n$TAB"*) FLOOR="${line#*"$TAB"}" ;; esac
+    case "$line" in
+      "$n$TAB"*)
+        rest="${line#"$n$TAB"}"
+        FLOOR="${rest%%"$TAB"*}"
+        FLOOR_SRC="${rest#*"$TAB"}" ;;
+    esac
   done <<FLOOR_LINES
 $FLOORS
 FLOOR_LINES
 }
+
+# load_floors <abs-path> <rel-path>   Appends the file's floors to $FLOORS and
+# its faults to $FAULTS, every fault located as <rel-path>:<lineno>. One more
+# `while read` per file, never a process (DV-5).
+load_floors() {
+  local file="$1" rel="$2" lineno=0 line rest kind name value
+  while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno+1))
+    line="${line%$CR}"
+    trim "$line"; line="$TRIMMED"
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in
+      *'|'*'|'*) ;;
+      *) FAULTS="$FAULTS$US$rel:$lineno  is not a floor line: '$line'
+"; continue ;;
+    esac
+    rest="$line"
+    kind="${rest%%|*}"; rest="${rest#*|}"
+    name="${rest%%|*}"; value="${rest#*|}"
+    trim "$kind";  kind="$TRIMMED"
+    trim "$name";  name="$TRIMMED"
+    trim "$value"; value="$TRIMMED"
+    if [ "$kind" != floor ]; then
+      FAULTS="$FAULTS$name$US$rel:$lineno  unknown kind '$kind'; the only kind is 'floor'
+"
+      continue
+    fi
+    if [ ! -f "$TESTS_DIR/$name.test.sh" ]; then
+      FAULTS="$FAULTS$name$US$rel:$lineno  floor names '$name', but .claude/tests/$name.test.sh does not exist
+"
+      continue
+    fi
+    case "$value" in
+      ''|*[!0-9]*)
+        FAULTS="$FAULTS$name$US$rel:$lineno  floor for '$name' is not a number: '$value'
+"
+        continue ;;
+    esac
+    # A suite has one floor. Only the project file can collide with the other:
+    # floors.conf is loaded first, and a repeat inside one file is last-wins,
+    # as it always was.
+    if [ "$rel" != "$FLOORS_REL" ]; then
+      floor_of "$name"
+      if [ "$FLOOR_SRC" = "$FLOORS_REL" ]; then
+        FAULTS="$FAULTS$name$US$rel:$lineno  floor for '$name' is already declared in $FLOORS_REL; a suite has one floor
+"
+        continue
+      fi
+    fi
+    FLOORS="$FLOORS$name$TAB$value$TAB$rel
+"
+  done < "$file"
+}
+
+if [ -f "$FLOORS_FILE" ]; then load_floors "$FLOORS_FILE" "$FLOORS_REL"; fi
+if [ -f "$PROJECT_FLOORS_FILE" ]; then
+  load_floors "$PROJECT_FLOORS_FILE" "$PROJECT_FLOORS_REL"
+fi
 
 # executed_count <suite> <output>   Sets $COUNT to the N of
 # `<name>: N passed, M failed`, anchored at column one, keyed by name, LAST
@@ -215,16 +237,13 @@ SUITE_OUTPUT
 # --- what this run is going to run ------------------------------------------
 # Names by parameter expansion rather than `basename`, for the reason above: a
 # fork per suite, twice over, is the whole cost of this mechanism on Windows.
-# The same list is kept as indexed arrays, in glob order, for the run below.
 SUITES=""
-S_NAME=(); S_FILE=(); N=0
 for suite in "$TESTS_DIR"/*.test.sh; do
   [ -e "$suite" ] || continue
   name="${suite##*/}"; name="${name%.test.sh}"
   [ -n "$ONLY" ] && [ "$ONLY" != "$name" ] && continue
   SUITES="$SUITES$name
 "
-  S_NAME[$N]="$name"; S_FILE[$N]="$suite"; N=$((N+1))
 done
 
 # AC-6, on a full run only: a suite with no floor is a suite that can be
@@ -232,13 +251,13 @@ done
 # worth knowing about in a second rather than after the whole suite has run.
 if [ -z "$ONLY" ]; then
   [ -f "$FLOORS_FILE" ] || [ -z "$SUITES" ] || \
-    FAULTS="$FAULTS$TAB$FLOORS_REL  does not exist; every suite must declare its assertion floor there
+    FAULTS="$FAULTS$US$FLOORS_REL  does not exist; every suite must declare its assertion floor there
 "
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     floor_of "$name"
     [ -n "$FLOOR" ] || \
-      FAULTS="$FAULTS$name$TAB$name  no floor line in $FLOORS_REL; every suite must declare one
+      FAULTS="$FAULTS$name$US$name  no floor line in $FLOORS_REL or $PROJECT_FLOORS_REL; every suite must declare one (a project's own suites go in project-floors.conf)
 "
   done <<SUITE_NAMES
 $SUITES
@@ -246,9 +265,11 @@ SUITE_NAMES
 fi
 
 # Report the faults this run is answerable for. A single-suite run answers for
-# its own suite's line and for nothing else (C-4(b)).
+# its own suite's line and for nothing else (C-4(b)) - so a fault that names no
+# suite (a line that is not a floor line, a missing floors.conf) is reported by
+# a full run and by no single-suite run, which audits nothing but its own floor.
 faulted=0
-while IFS="$TAB" read -r fname fmsg; do
+while IFS="$US" read -r fname fmsg; do
   [ -n "$fmsg" ] || continue
   [ -n "$ONLY" ] && [ "$ONLY" != "$fname" ] && continue
   printf 'FAIL %s\n' "$fmsg"
@@ -257,129 +278,68 @@ done <<FAULT_LINES
 $FAULTS
 FAULT_LINES
 if [ "$faulted" -gt 0 ]; then
-  printf '\n%d fault(s) in %s. Nothing was run.\n' "$faulted" "$FLOORS_REL"
+  where="$FLOORS_REL"
+  [ -f "$PROJECT_FLOORS_FILE" ] && where="$FLOORS_REL or $PROJECT_FLOORS_REL"
+  printf '\n%d fault(s) in %s. Nothing was run.\n' "$faulted" "$where"
   exit 1
 fi
 
-if [ "$N" -eq 0 ]; then
-  printf 'No suites matched%s. Looked in .claude/tests/*.test.sh\n' "${ONLY:+ '$ONLY'}" >&2
-  exit 1
-fi
+# --- the run lock (HARNESS-034) ----------------------------------------------
+# A self-test beside gates.sh, or beside another self-test, in one tree is how
+# issue #97 got a hang past 30 minutes that passed alone. Every run - full or
+# one suite - takes .claude/state/run.lock or refuses with 2 before any suite
+# runs; it never waits. After the floors audit, so a malformed floors file is
+# reported at once without contending for anything. Traps BEFORE the take, so
+# no signal strands a lock; trapped, TERM and INT wait for the running suite
+# rather than orphaning it. Suites inherit HARNESS_RUN_LOCK(_PID), which is
+# what lets a suite that runs this tree's own selftest.sh through - and what
+# a fixture tree, whose lock path differs, ignores.
+#
+# One EXIT handler (HARNESS-036 C-4): with suites in the background the lock
+# may go only after the last of them has exited, so the handler waits for any
+# still running, removes this run's buffer directory if it made one, and only
+# then releases the lock. On a one-at-a-time run there is nothing to wait for
+# and no directory, and it is the release it always was. A trapped TERM or INT
+# therefore starts no further suite and lets the running ones finish.
+BUF="$ROOT/.claude/state/selftest.$$"
+BUF_MADE=0
+PIDS=()     # by suite index, glob order; emptied once a suite's status is collected
+selftest_exit() {
+  local i=0
+  while [ "$i" -lt "${#PIDS[@]}" ]; do
+    [ -z "${PIDS[$i]}" ] || wait "${PIDS[$i]}" 2>/dev/null
+    i=$((i+1))
+  done
+  [ "$BUF_MADE" = 1 ] && rm -rf "$BUF"
+  run_lock_release
+}
+. "$ROOT/scripts/run-lock.sh" || { printf 'run-lock: scripts/run-lock.sh is missing; nothing was run.\n' >&2; exit 2; }
+trap selftest_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+run_lock_acquire "$ROOT" "scripts/selftest.sh${*:+ $*}" || exit 2
 
 # --- run --------------------------------------------------------------------
-# Per suite, by glob index: S_PID (empty until started), S_DONE (0/1), S_RC.
-BUF_DIR="$ROOT/.claude/state/selftest"
-[ -d "$BUF_DIR" ] || mkdir -p "$BUF_DIR" || {
-  printf 'selftest.sh: cannot create %s for the output buffers\n' "$BUF_DIR" >&2
-  exit 1
-}
-S_PID=(); S_DONE=(); S_RC=()
-i=0
-while [ "$i" -lt "$N" ]; do S_PID[$i]=""; S_DONE[$i]=0; S_RC[$i]=0; i=$((i+1)); done
-
-# On the way out, however the runner ends: any suite still running is stopped,
-# rather than left orphaned and writing to a buffer nobody will read, and this
-# run's own buffers are removed, in one process. On a normal exit nothing is
-# running. It matters when the runner itself dies - an interrupt, or a runner
-# edited under a live run, which bash reads incrementally and will misparse
-# (MT-042 GREEN hit exactly that and left four suites running).
-cleanup() {
-  local j files
-  for j in $ALIVE; do kill "${S_PID[$j]}" 2>/dev/null; done
-  files=(); j=0
-  while [ "$j" -lt "$N" ]; do
-    [ -e "$BUF_DIR/${S_NAME[$j]}.out" ] && files[${#files[@]}]="$BUF_DIR/${S_NAME[$j]}.out"
-    j=$((j+1))
-  done
-  [ "${#files[@]}" -eq 0 ] || rm -f "${files[@]}"
-}
-on_signal() { exit "$1"; }
-ALIVE=""      # glob indices of the suites now running, space-separated
-RUNNING=0
-trap cleanup EXIT
-trap 'on_signal 130' INT
-trap 'on_signal 143' TERM
-
-# start <index>   In the background. The redirect is made before the suite's
-# first line runs, so its buffer exists from the start.
-start() {
-  bash "${S_FILE[$1]}" > "$BUF_DIR/${S_NAME[$1]}.out" 2>&1 &
-  S_PID[$1]=$!
-  ALIVE="$ALIVE $1"
-  RUNNING=$((RUNNING+1))
-}
-
-# reap   Collects every job that has exited, each by its own pid, and sets
-# REAPED to how many. `kill -0` fails once the job is gone; `wait <pid>` then
-# returns that job's own status.
-REAPED=0
-reap() {
-  local j still=""
-  REAPED=0
-  for j in $ALIVE; do
-    if kill -0 "${S_PID[$j]}" 2>/dev/null; then
-      still="$still $j"
-    else
-      wait "${S_PID[$j]}"; S_RC[$j]=$?
-      S_DONE[$j]=1
-      RUNNING=$((RUNNING-1)); REAPED=$((REAPED+1))
-    fi
-  done
-  ALIVE="$still"
-}
-
-# wait_until <n>   Returns once at most <n> suites are running, printing every
-# suite that becomes printable on the way. Polls, backing off while nothing
-# changes: see "concurrency" at the top.
-NAP=0.1
-wait_until() {
-  while [ "$RUNNING" -gt "$1" ]; do
-    reap
-    if [ "$REAPED" -gt 0 ]; then
-      flush; NAP=0.1
-    else
-      sleep "$NAP"
-      case "$NAP" in 0.1) NAP=0.2 ;; 0.2) NAP=0.5 ;; 0.5) NAP=1 ;; *) NAP=2 ;; esac
-    fi
-  done
-}
-
-# flush   Prints, in glob order, every finished suite not yet printed whose
-# predecessors have all been printed.
-NEXT=0
-flush() {
-  while [ "$NEXT" -lt "$N" ] && [ "${S_DONE[$NEXT]}" -eq 1 ]; do
-    report "$NEXT"
-    NEXT=$((NEXT+1))
-  done
-}
-
 fails=0; ran=0; floored=0; met=0; executed=0; declared=0
-NL='
-'
-# report <index>   The suite's header, its buffer, and its floor verdict.
-report() {
-  local name="${S_NAME[$1]}" rc="${S_RC[$1]}" out="" bad floor observed
-  printf '\n=== %s ===\n' "$name"
 
-  # Buffered rather than streamed, because the count is read back out of it -
-  # and printed in full, because a failing suite whose output was swallowed
-  # makes every failure a second command to reproduce. Read by `read -d ''`,
-  # a builtin, where `$(cat)` would be a fork; trailing newlines are then
-  # stripped, which is exactly what the `$(...)` capture it replaces did.
-  IFS= read -r -d '' out < "$BUF_DIR/$name.out"
-  out="${out%"${out##*[!$NL]}"}"
+# The per-suite verdict, shared by both paths so that they cannot drift
+# (HARNESS-036 C-1). suite_header prints the block's first line; report_suite
+# prints the suite's output - the global $out, captured exactly as `$(...)`
+# captures it - and judges it: exit status, then the floor read back out of it.
+suite_header() { printf '\n=== %s ===\n' "$1"; }
+report_suite() {
+  local name="$1" rc="$2" bad floor observed
   printf '%s\n' "$out"
 
   bad=0
   [ "$rc" -eq 0 ] || bad=1
   ran=$((ran+1))
 
-  floor_of "$name"; floor="$FLOOR"
+  floor_of "$name"; floor="$FLOOR"   # and $FLOOR_SRC, the file it came from
   if [ -z "$floor" ]; then
     # Only reachable on a single-suite run; a full run has already failed above.
     printf 'WARNING: no floor line for %s in %s, so this run cannot tell\n' \
-      "$name" "$FLOORS_REL" >&2
+      "$name" "$FLOORS_REL or $PROJECT_FLOORS_REL" >&2
     printf 'WARNING: whether that suite did any work. Declare one before the full run.\n' >&2
   else
     floored=$((floored+1))
@@ -393,7 +353,7 @@ report() {
       executed=$((executed+observed))
       if [ "$observed" -lt "$floor" ]; then
         printf 'FAIL %s  did %s units of work, below the floor of %s in %s\n' \
-          "$name" "$observed" "$floor" "$FLOORS_REL"
+          "$name" "$observed" "$floor" "$FLOOR_SRC"
         bad=1
       else
         met=$((met+1))
@@ -402,71 +362,104 @@ report() {
   fi
 
   [ "$bad" -eq 0 ] || fails=$((fails+1))
+  return 0
 }
 
-# --- the start order --------------------------------------------------------
-# Pinned suites first, in glob order; then the rest, largest file first, ties
-# in glob order. One `wc -c` over every file is the only process this costs,
-# and it is skipped when there is nothing to reorder. Each of wc's lines is
-# matched to its file by path, so a file wc could not read sorts last rather
-# than shifting every size after it.
-PINNED=""; POOL=""
-i=0
-while [ "$i" -lt "$N" ]; do
-  case " $SERIAL_SUITES " in
-    *" ${S_NAME[$i]} "*) PINNED="$PINNED $i" ;;
-    *) POOL="$POOL $i" ;;
-  esac
-  i=$((i+1))
-done
+# A suite's exit status, collected by its own pid once it has exited. One line,
+# exactly: DV-1's mutation targets it. A pid the shell no longer knows makes
+# `wait` return 127, which counts as a failure - fail closed.
+suite_status() { wait "$1"; }
 
-if [ "$JOBS" -gt 1 ] && [ "$N" -gt 1 ]; then
-  S_SIZE=()
-  i=0; while [ "$i" -lt "$N" ]; do S_SIZE[$i]=0; i=$((i+1)); done
-  SIZES="$(wc -c "${S_FILE[@]}" 2>/dev/null)"
-  i=0
-  while IFS= read -r line; do
-    # wc prints in argument order, so search forward from the last match.
-    j="$i"
-    while [ "$j" -lt "$N" ]; do
-      case "$line" in *" ${S_FILE[$j]}") break ;; esac
-      j=$((j+1))
-    done
-    [ "$j" -lt "$N" ] || continue          # the `total` line, or noise
-    trim "${line% "${S_FILE[$j]}"}"
-    case "$TRIMMED" in ''|*[!0-9]*) ;; *) S_SIZE[$j]="$TRIMMED" ;; esac
-    i=$((j+1))
-  done <<WC_LINES
-$SIZES
-WC_LINES
-  # Insertion sort, descending by size; strict comparison keeps it stable.
-  SORTED=""
-  for i in $POOL; do
-    before=""; after=""; placed=0
-    for j in $SORTED; do
-      if [ "$placed" -eq 0 ] && [ "${S_SIZE[$i]}" -gt "${S_SIZE[$j]}" ]; then
-        after="$after $i"; placed=1
-      fi
-      if [ "$placed" -eq 0 ]; then before="$before $j"; else after="$after $j"; fi
-    done
-    [ "$placed" -eq 1 ] || after="$after $i"
-    SORTED="$before$after"
+NSUITES=0
+while IFS= read -r name; do
+  [ -n "$name" ] && NSUITES=$((NSUITES+1))
+done <<SUITE_COUNT
+$SUITES
+SUITE_COUNT
+
+if [ "$JOBS" -lt 2 ] || [ "$NSUITES" -lt 2 ]; then
+  # One at a time: the loop as it has always been. Nothing in the background,
+  # no buffer directory.
+  for suite in "$TESTS_DIR"/*.test.sh; do
+    [ -e "$suite" ] || continue
+    name="${suite##*/}"; name="${name%.test.sh}"
+    [ -n "$ONLY" ] && [ "$ONLY" != "$name" ] && continue
+    suite_header "$name"
+
+    # Captured rather than streamed, because the count is read back out of it -
+    # and reprinted in full immediately, because a failing suite whose output
+    # was swallowed makes every failure a second command to reproduce.
+    out="$(bash "$suite" 2>&1)"; rc=$?
+    report_suite "$name" "$rc"
   done
-  POOL="$SORTED"
+else
+  # Concurrently (HARNESS-036 C-2). Up to $JOBS suites alive at once, started
+  # in glob order; a slot is refilled when ANY of them exits. bash 3.2 has no
+  # way to wait for whichever job ends first, so the running pids are polled
+  # with `kill -0` and a gone one's status is collected with suite_status.
+  # Printing is in glob order: a suite's block goes out as soon as it and every
+  # suite before it have finished.
+  mkdir -p "$BUF" 2>/dev/null || {
+    printf "selftest: cannot create .claude/state/selftest.%s for the suites' output; nothing was run.\n" "$$" >&2
+    exit 2
+  }
+  BUF_MADE=1
+  NAMES=(); RCS=()
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    NAMES[${#NAMES[@]}]="$name"
+  done <<SUITE_LIST
+$SUITES
+SUITE_LIST
+
+  started=0; printed=0; running=0
+  # Each `sleep` is a fork, so back off while nothing changes and start again
+  # from the shortest interval whenever something does. The ceiling stays at
+  # 1 s: a trapped TERM is acted on only once the current sleep returns.
+  delays="0.05 0.1 0.2 0.5 1"
+  delay_left="$delays"
+  while [ "$printed" -lt "$NSUITES" ]; do
+    changed=0
+    while [ "$running" -lt "$JOBS" ] && [ "$started" -lt "$NSUITES" ]; do
+      name="${NAMES[$started]}"
+      bash "$TESTS_DIR/$name.test.sh" > "$BUF/$name.out" 2>&1 &
+      PIDS[$started]=$!
+      RCS[$started]=""
+      started=$((started+1)); running=$((running+1))
+    done
+
+    i="$printed"
+    while [ "$i" -lt "$started" ]; do
+      if [ -n "${PIDS[$i]}" ] && ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
+        suite_status "${PIDS[$i]}"; RCS[$i]=$?
+        PIDS[$i]=""
+        running=$((running-1)); changed=1
+      fi
+      i=$((i+1))
+    done
+
+    while [ "$printed" -lt "$started" ] && [ -n "${RCS[$printed]}" ]; do
+      name="${NAMES[$printed]}"
+      suite_header "$name"
+      out="$(cat "$BUF/$name.out")"
+      report_suite "$name" "${RCS[$printed]}"
+      printed=$((printed+1))
+    done
+
+    if [ "$changed" -eq 1 ]; then
+      delay_left="$delays"
+    elif [ "$printed" -lt "$NSUITES" ]; then
+      delay="${delay_left%% *}"
+      [ "$delay_left" = "$delay" ] || delay_left="${delay_left#* }"
+      sleep "$delay"
+    fi
+  done
 fi
 
-# --- the run ----------------------------------------------------------------
-for i in $PINNED; do
-  # Nothing else is alive: the pinned suites run before any other starts.
-  start "$i"
-  wait_until 0
-done
-for i in $POOL; do
-  wait_until $((JOBS-1))
-  start "$i"
-done
-wait_until 0
-flush
+if [ "$ran" -eq 0 ]; then
+  printf 'No suites matched%s. Looked in .claude/tests/*.test.sh\n' "${ONLY:+ '$ONLY'}" >&2
+  exit 1
+fi
 
 printf '\n'
 if [ "$floored" -eq 0 ]; then

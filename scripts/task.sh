@@ -6,14 +6,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONF="$ROOT/.claude/harness/project.conf"
 want="${1:-}"
 # Parsing project.conf with builtins only, as scripts/gates.sh does (see there):
-# a process per field cost minutes per manifest walk on Windows.
+# a process per field cost minutes per manifest walk on a slow-spawning host.
+# The same four helpers as gates.sh and doctor.sh, kept byte-identical.
 #
 # trim <string> [var]   <string> without leading or trailing [:space:] - the
 # carriage return of a CRLF manifest included, which this script relies on.
-# Printed, or assigned to <var>. Self-contained: the test suite evaluates it alone.
-trim() { local _t="$1"; _t="${_t#"${_t%%[![:space:]]*}"}"; _t="${_t%"${_t##*[![:space:]]}"}"; if [ $# -gt 1 ]; then printf -v "$2" '%s' "$_t"; else printf '%s' "$_t"; fi; }
-# from_field <n> <string> <var>   `cut -d'|' -f<n>-`, untrimmed: the later `|`s
+# Printed, or assigned to <var>.
+# from_field <n> <string> <var>   cut's `-f<n>-`, untrimmed: the later `|`s
 # kept, a string with no `|` returned whole, too few fields giving ''.
+# rest <n> <string> <var>    trimmed `-f<n>-`.
+# field <n> <string> <var>   trimmed `-f<n>`.
+# Never name `_t`, `_r`, `_i` or `_v` as <var> (bash's dynamic `local`).
+trim() { local _t="$1"; _t="${_t#"${_t%%[![:space:]]*}"}"; _t="${_t%"${_t##*[![:space:]]}"}"; if [ $# -gt 1 ]; then printf -v "$2" '%s' "$_t"; else printf '%s' "$_t"; fi; }
 from_field() {
   local _r="$2" _i=1
   case "$_r" in
@@ -25,8 +29,8 @@ from_field() {
   esac
   printf -v "$3" '%s' "$_r"
 }
-rest()  { local _v; from_field "$1" "$2" _v; trim "$_v" "$3"; }          # trimmed -f<n>-
-field() { local _v; from_field "$1" "$2" _v; trim "${_v%%|*}" "$3"; }    # trimmed -f<n>
+rest()  { local _v; from_field "$1" "$2" _v; trim "$_v" "$3"; }
+field() { local _v; from_field "$1" "$2" _v; trim "${_v%%|*}" "$3"; }
 
 if [ -z "$want" ]; then
   printf 'Available tasks:\n'

@@ -17,17 +17,22 @@ fail gets a waiver naming why:
 A waiver turns that gate's failure from `WARN` into `KNOWN` so that `WARN`
 always means something changed. It is refused on required gates.
 
-Five more kinds, each explained in the skill and in `project.conf`'s own
+Seven more kinds, each explained in the skill and in `project.conf`'s own
 comments:
 
     floor        | <gate id> | <minimum count read out of the evidence match>
     slow         | <gate id> | <why it is too slow for gates.sh --fast>
+    ondemand     | <gate id> | <why it is not run per story>
     covers       | <gate id> | <glob of the paths this gate actually reads>
     discovery    | <id> | <cwd> | <command proving a runner can see a directory>
     blocked-when | <gate id> | <regex meaning this runner could not START>
+    skipped-when | <gate id> | <regex meaning the work was skipped, not lost>
 
 `floor` catches a gate that quietly started doing much less; `slow` names what
-`--fast` leaves out, reason required; `covers` is what lets `gates.sh` fail a
+`--fast` leaves out, reason required; `ondemand` names what no run executes
+unless asked - `--gate <id>`, or a story's `required_gates` - and is refused on a
+required gate (every profile's `mutation` gate is one: see `rules.md`'s
+`# Mutation work per story`); `covers` is what lets `gates.sh` fail a
 run whose changed source only optional gates read; `discovery` lines are run
 by `doctor.sh`, never by the gates, and are how a `covers` line is proved.
 
@@ -39,6 +44,17 @@ FAIL. Add one only for a launch failure your runner words differently. A compile
 error, a missing module and a failed assertion are the gate doing its job, and a
 pattern that catches them turns real failures into decisions nobody makes.
 `--audit` refuses a line naming no gate, and one with no pattern.
+
+`skipped-when` applies only to a floor shortfall: a gate that exited 0, matched
+its evidence, and did less work than its `floor`. When that gate's log matches
+the pattern - the runner saying the work was skipped because this checkout
+lacks its inputs - the shortfall reports `BLOCKED` (exit 3) if the gate is
+required, by the manifest or the story's `required_gates`, and `KNOWN` if it is
+optional. A shortfall the pattern does not match stays the FAIL or WARN it
+always was, and a non-zero exit or missing evidence is never reclassified.
+`--audit` refuses a line naming no gate, one with no pattern, and one on a gate
+with no `floor` line. Patterns are matched by awk, like `evidence` and
+`blocked-when`, so avoid interval expressions (`{n}`).
 
 Once CI has run a gate for real, record how much slower one test is there:
 
@@ -91,8 +107,8 @@ it rarely, and say why in the story.
 
     bash scripts/gates.sh --audit
 
-reports gates whose `cwd` does not exist, gates with no evidence line, a floor
-or slow line it cannot honour, and - once `BOOTSTRAPPED=yes` - required gates
+reports gates whose `cwd` does not exist, gates with no evidence line, a floor,
+slow or ondemand line it cannot honour, and - once `BOOTSTRAPPED=yes` - required gates
 with no command, without running anything. Before the flag is flipped an
 unconfigured gate is reported as `ok (unconfigured)`.
 

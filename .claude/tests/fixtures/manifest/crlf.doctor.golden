@@ -1,0 +1,11 @@
+Project toolchain (from project.conf)
+  ok       printf       printf
+  ok       true         true
+  MISSING  no-such-tool-h024 needed for: gate 'mutation'
+
+
+Test discovery
+  ok       cpu          discovered
+  MISSING  gpu          nothing discovered by: printf 'CUDA|Dml\n' | { IFS= read -r l; case "$l" in *'|CPU') true ;; *) false ;; esac; }
+               tests under it would be committed and never run
+

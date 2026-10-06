@@ -44,6 +44,11 @@ profile_problems() {
     /^[[:space:]]*floor[[:space:]]*\|/     { fl[t($2)] = 1; next }
     /^[[:space:]]*discovery[[:space:]]*\|/ { ndisc++; next }
     /^[[:space:]]*slow[[:space:]]*\|/      { id = t($2); slow[id] = 1; why[id] = rest(3); next }
+    # HARNESS-015: `ondemand | <id> | <why>` marks a gate a full run leaves out
+    # until somebody asks for it (--gate <id>, or the story frontmatter).
+    # Parsed like `slow`, and judged by the same two rules: it must name a
+    # gate the profile configures, and it must say why.
+    /^[[:space:]]*ondemand[[:space:]]*\|/  { id = t($2); ondemand[id] = 1; owhy[id] = rest(3); next }
     /What `--fast` should leave out/       { fastsec = 1 }
 
     END {
@@ -58,6 +63,7 @@ profile_problems() {
       for (id in ev)   if (!(id in gates)) print "orphan\tevidence names `" id "`, which this profile does not configure"
       for (id in fl)   if (!(id in gates)) print "orphan\tfloor names `"    id "`, which this profile does not configure"
       for (id in slow) if (!(id in gates)) print "orphan\tslow names `"     id "`, which this profile does not configure"
+      for (id in ondemand) if (!(id in gates)) print "orphan\tondemand names `" id "`, which this profile does not configure"
 
       for (id in fl)
         if (!(id in ev))
@@ -66,6 +72,17 @@ profile_problems() {
       for (id in slow)
         if (why[id] == "")
           print "slow\t`" id "` is marked slow with no reason"
+
+      for (id in ondemand)
+        if (owhy[id] == "")
+          print "ondemand\t`" id "` is marked on request with no reason"
+
+      # HARNESS-015 AC-3: a profile that configures a `mutation` gate marks it on
+      # request. `slow` only keeps it out of --fast; without this line every full
+      # gates.sh run - each GATES phase and each PR CI job - runs the mutation
+      # tool, which is the per-story cost the story exists to remove.
+      if (("mutation" in gates) && !("mutation" in ondemand))
+        print "mutation-ondemand\tconfigures a `mutation` gate with no `ondemand | mutation | <why>` line, so every full run executes it"
 
       if (!fastsec) print "fast-section\tno `## What --fast should leave out` section; new-profile.md requires one"
       if (ndisc == 0) print "discovery\tno `discovery` line; nothing asks the runner what it can actually see"
@@ -101,6 +118,65 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# has_mutation_gate <file>   Does this profile configure a `mutation` gate?
+# The same line shape is_profile reads, narrowed to one id.
+has_mutation_gate() { grep -qE '^[[:space:]]*gate[[:space:]]*\|[[:space:]]*mutation[[:space:]]*\|' "$1"; }
+
+# ---------------------------------------------------------------------------
+describe "the checker recognises an ondemand line (HARNESS-015, C-5)"
+
+# The checker is this file's own instrument, so it is checked against fixtures
+# before it is pointed at the profiles: an `ondemand` rule that never fires
+# would leave every per-profile assertion below green and empty.
+WORK="$(mktemp -d 2>/dev/null || mktemp -d -t harness.XXXXXX)"
+trap 'rm -rf "$WORK"' EXIT
+ondemand_probs() { # <check id>   the checker's lines for one check, over $WORK/p.md
+  profile_problems "$WORK/p.md" | awk -F'\t' -v c="$1" '$1 == c { print $2 }'
+}
+base_profile() { # a profile with a mutation gate and every other rule satisfied
+  cat > "$WORK/p.md" <<'EOF'
+    gate | lint      | required | . | x lint
+    gate | typecheck | required | . | x check
+    gate | unit      | required | . | x test
+    gate | coverage  | required | . | x cov
+    gate | build     | required | . | x build
+    gate | mutation  | optional | . | x mutants
+    evidence | lint | .
+    evidence | typecheck | .
+    evidence | unit | .
+    evidence | coverage | .
+    evidence | build | .
+    discovery | unit | x list
+## What `--fast` should leave out
+    slow | build | slow
+EOF
+}
+base_profile
+assert_eq "a mutation gate with no ondemand line is reported" \
+  "configures a \`mutation\` gate with no \`ondemand | mutation | <why>\` line, so every full run executes it" \
+  "$(ondemand_probs mutation-ondemand)"
+base_profile; printf '    ondemand | mutation | costs a full suite per mutant\n' >> "$WORK/p.md"
+assert_eq "with the line, the checker is silent on every ondemand rule" "" \
+  "$(profile_problems "$WORK/p.md" | awk -F'\t' '$1 == "mutation-ondemand" || $1 == "ondemand" || $1 == "orphan" { print }')"
+base_profile; printf '    ondemand | mutatoin | a typo\n' >> "$WORK/p.md"
+assert_eq "an ondemand line naming no gate is an orphan" \
+  "ondemand names \`mutatoin\`, which this profile does not configure" "$(ondemand_probs orphan)"
+base_profile; printf '    ondemand | mutation |\n' >> "$WORK/p.md"
+assert_eq "an ondemand line with no reason is reported" \
+  "\`mutation\` is marked on request with no reason" "$(ondemand_probs ondemand)"
+
+# ---------------------------------------------------------------------------
+describe "the profiles that configure a mutation gate are the ones expected (HARNESS-015, AC-3)"
+
+# The per-profile assertion below is derived from the files, so a list that came
+# back empty would assert nothing and pass. M-3 in the story names three.
+lacking=""
+for p in node-typescript.md python-uv.md rust-cargo.md; do
+  has_mutation_gate "$PROFILE_DIR/$p" || lacking="$lacking $p"
+done
+assert_eq "node-typescript, python-uv and rust-cargo each configure a mutation gate" "" "$lacking"
+
+# ---------------------------------------------------------------------------
 for f in "$PROFILE_DIR"/*.md; do
   [ -e "$f" ] || continue
   is_profile "$f" || continue
@@ -115,11 +191,17 @@ for f in "$PROFILE_DIR"/*.md; do
   }
   check required-gates "configures every required gate"
   check evidence       "every required gate with a command has an evidence line"
-  check orphan         "no evidence, floor or slow line names an unconfigured gate"
+  check orphan         "no evidence, floor, slow or ondemand line names an unconfigured gate"
   check floor          "every floor has an evidence line to measure"
   check slow           "every slow line carries a reason"
+  check ondemand       "every ondemand line carries a reason"
   check fast-section   "says what --fast should leave out"
   check discovery      "has at least one discovery line"
+  # AC-3: named with the profile so the failure reads "<profile>: its mutation
+  # gate is on request", which is the control the criterion asks for.
+  if has_mutation_gate "$f"; then
+    check mutation-ondemand "$name: its mutation gate is on request"
+  fi
 done
 
 summary "profiles"

@@ -16,6 +16,10 @@ every turn, so it stays short.
 /setup-environment → install the toolchain the stack needs → docs/wiki/environment.md
 /advance-story ID  → one phase of the cycle
 /complete-story ID → every phase, to done
+                     `bash scripts/plan.sh ID` recommends which, and why —
+                     ask it rather than asking the user every time
+                     closing a story prints `bash scripts/plan.sh after ID`:
+                     what to run next, and what can run alongside it
 /audit-mutations   → Mutation Tester (optional, above the bar)
 ```
 
@@ -66,9 +70,71 @@ form of "working around the lock" that is allowed.
 
 ```bash
 bash scripts/phase.sh show                 # what is active, what may be written
-bash scripts/phase.sh board                # every story at a glance
+bash scripts/phase.sh board                # every story at a glance, with the
+                                           # recommended command per story
+bash scripts/plan.sh WORLD-014             # why that command, and the model plan
 bash scripts/phase.sh set WORLD-014 GREEN  # the only supported way to change phase
 ```
+
+## Two stories at once
+
+**One worktree, one story, one lock.** The lock is already per-worktree:
+`.claude/state/*` is gitignored and a git worktree has its own working
+directory, so each gets its own `current-story.env`, its own gate stamp and its
+own copy of the harness. Nothing is shared and nothing coordinates them.
+The hooks follow the session rather than `CLAUDE_PROJECT_DIR`. They read the
+tree holding the session's `cwd`, and a write into another worktree of the same
+repository is judged by *that* worktree's lock, whether it comes by absolute
+path, by `cd`, or into a nested `.claude/worktrees/<name>`. The denial then
+carries a `worktree:` line.
+
+```bash
+git worktree add ../adh-WORLD-015 -b story/WORLD-015-slug   # a tree per story
+bash scripts/doctor.sh          # says which worktree you are in, and whether
+                                # its harness release matches the main checkout
+```
+
+**Before you pick the second story, ask which pairs are safe:**
+
+```bash
+bash scripts/plan.sh conflicts
+```
+
+It compares the file paths two stories declare and reports `CONFLICT`, `clear`
+or `UNKNOWN`. **It reads each story's `touches:` frontmatter first**, and falls
+back to the paths its `## Contract` mentions only when `touches:` is absent or
+`[]`. `touches:` is written when the story is cut, so it is the one declaration
+that exists before anyone has started — fill it (`story-authoring` says how).
+
+**`UNKNOWN` is not `clear`.** A story with neither a filled `touches:` nor a
+written `## Contract` declares nothing, and every pair involving it is
+unjudgeable — the stories that predate the field, for a start. When you see it:
+
+- fill `touches:` for both stories — one line of frontmatter, and the thing
+  that makes the answer mechanical; or
+- judge the pair by hand, and treat two stories that touch the same script as a
+  conflict until you have read both.
+
+A story that declares both gets a `DRIFT` line for each path on its Contract's
+`**Writes:**` line that its `touches:` does not cover. It is a warning, never a
+refusal. It reads only the `**Writes:**` line, not every path the prose
+*mentions*, so a Contract with no `**Writes:**` line gets no DRIFT at all.
+
+Never read `UNKNOWN` as permission. The command exits non-zero only on a real
+`CONFLICT`, precisely so that the ordinary unjudgeable case does not train you
+to ignore it.
+
+**A conflict the tool cannot see.** `plan.sh conflicts` judges declarations,
+not diffs, so a story that strays outside its own `## Contract` strays into the
+other worktree's story with nothing reporting it. Nothing checks a declaration
+against the diff it produced yet.
+
+**Refreshing.** `bash scripts/refresh-harness.sh` updates the tree it is run
+in and leaves the others alone — correct, but it means two worktrees can sit on
+different harness releases, running different hooks and different gates. That is
+what `doctor.sh`'s `worktree` row reports. Refresh each tree you intend to keep,
+and remember a refresh inside a worktree lands as an uncommitted diff on that
+worktree's story branch.
 
 ## Where things live
 
@@ -93,10 +159,18 @@ bash scripts/gates.sh            # all gates
 bash scripts/gates.sh --fast     # every gate not marked `slow` — for RED and GREEN
 bash scripts/gates.sh --gate unit
 bash scripts/check-boundaries.sh # the other half of CI: the commit, not the code
+bash scripts/check-sigpipe.sh   # refuse a pipefail SIGPIPE matcher, tree-wide
+bash scripts/check-grep-count.sh # refuse a printing `grep -c` fallback
 bash scripts/ci-local.sh         # every step CI runs, in order, on this machine
+bash scripts/plan.sh ID          advance-story or complete-story, and why
+bash scripts/plan.sh write ID    put the per-phase model plan in the story
+bash scripts/plan.sh conflicts   which startable stories share a declared file
+bash scripts/plan.sh after ID    what to run next, and what can run alongside it
+bash scripts/classify.sh --list source src   # what the lock thinks a path is
+bash scripts/refresh-harness.sh ../agentic-dev-harness  # pull a newer harness in
 bash scripts/task.sh dev         # run the app
 bash scripts/mutate.sh F 'EXPR' -- CMD   # the only sanctioned diagnostic mutation
-bash scripts/mutate.sh --check          # is a mutation still stranded in the tree?
+bash scripts/mutate.sh --check   # is a killed mutation still in the tree? gates.sh asks first
 ```
 
 `mutate.sh` exists because the law below requires mutating production code in a
@@ -137,3 +211,10 @@ memorising it — the next agent has a fresh context and will not know.
 Subagents start with empty context. Anything the next agent needs must be
 written into the story file before the current phase ends — especially the
 `## Handoff` section. "As discussed above" does not survive the boundary.
+
+## Reporting to the user
+
+Lead with what is now true and end with the one next action `plan.sh` gives.
+Keep your working notes in the story file, not in chat. On a failure, point at
+the evidence, and never state a cause it does not show. The full rule, and
+what is exempt, is `rules.md`, "Reporting to the user".

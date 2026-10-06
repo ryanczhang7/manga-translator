@@ -4,7 +4,7 @@
 #   bash scripts/gates.sh                  run every gate; record the result in the active story
 #   bash scripts/gates.sh --story WORLD-3  ... and record it in that story instead
 #   bash scripts/gates.sh --list           show what is configured
-#   bash scripts/gates.sh --gate unit      run one gate  (not recorded: a partial run is not evidence)
+#   bash scripts/gates.sh --gate unit      run one gate, `ondemand` or not  (not recorded: a partial run is not evidence)
 #   bash scripts/gates.sh --required       required gates only  (not recorded)
 #   bash scripts/gates.sh --fast           every gate not marked `slow`  (not recorded)
 #   bash scripts/gates.sh --audit          check the manifest itself, run nothing
@@ -28,13 +28,6 @@
 # rather than a defect - see the quality-gates skill, and `blocked-when` in
 # project.conf for a runner that words a launch failure its own way.
 #
-# A gate can also START, exit 0, match its evidence and still come in below its
-# floor because the ENVIRONMENT never supplied the work - gitignored test data
-# a worktree does not carry, and the suite skips rather than fails. A
-# `skipped-when` line classifies that shortfall: BLOCKED when a story escalated
-# the gate, KNOWN (a declared non-result, exit 0) when it did not. It only ever
-# classifies a shortfall the floor already measured; it never excuses one.
-#
 # `slow` lines name the gates a --fast run leaves out. --fast exists so that RED
 # and GREEN can ask the gates whether the tests are even ADMISSIBLE - lint, types,
 # and the instrumented test command they will actually be judged by - without
@@ -42,25 +35,35 @@
 # otherwise, so the subset is right by default and wrong only where someone said
 # so out loud. A --fast run is never recorded: it is not a full run.
 #
-# A full run writes its own summary into the story's ## Gate results, stamped
-# with the commit and a hash of the code it ran against. Nobody pastes it - and
-# it goes into the story only when the checkout is that story's branch, because
-# `.claude/state/current-story.env` names one story for the whole tree rather
-# than for the caller. On a mismatch the run still happens and still exits on
-# its own verdict; only the recording is refused, and it says so.
+# `ondemand` lines name the gates NO run executes unless asked: `--gate <id>`,
+# or a story that names the gate in `required_gates`. `slow` alone still let a
+# mutation tool run on every full run - every story's GATES, every PR's CI job.
+# A run that leaves one out prints `ON REQUEST   <id> (not run: <why>; ...)`
+# and counts it in nothing. --audit refuses one on a required gate.
 #
-# Two things running in one tree is the ordinary shape of this harness, not an
-# exotic configuration: an orchestrator that dispatches a subagent and then runs
-# a script is two of them. So this script notices rather than locks - it also
-# fingerprints project.conf before and after the gates and fails if the manifest
-# moved under the run, because a floor read at start-up printed beside a count
-# observed afterwards is a pairing that never existed.
+# A full run writes its own summary into the story's ## Gate results, stamped
+# with the commit and a hash of the code it ran against. Nobody pastes it.
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONF="$ROOT/.claude/harness/project.conf"
 LOGDIR="$ROOT/.claude/state/gate-logs"
 STAMP="$ROOT/.claude/state/last-gate-run"
+
+# THE MANIFEST MUST NOT CHANGE UNDER THE RUN.
+# PORTED from manga-translator (MT-032), reported there off a --fast run.
+#
+# This script parses project.conf into its evidence/floor/waiver/slow tables
+# ONCE at start-up and runs the gate commands afterwards. Anything that edits
+# the file in between produces a summary whose numbers are each real and whose
+# PAIRING never existed - `PASS lint (0s, observed 5, floor 1)` printed as a
+# clean pass while the file on disk says `floor | lint | 5`.
+#
+# It is cheap to detect: fingerprint the file at parse time and again before the
+# summary. `cksum` rather than a hash tool, for the same reason the rest of this
+# harness stays in coreutils.
+conf_fingerprint() { cksum 2>/dev/null < "$CONF" || printf 'unreadable'; }
+CONF_AT_PARSE="$(conf_fingerprint)"
 
 export CLAUDE_PROJECT_DIR="$ROOT"
 . "$ROOT/.claude/hooks/lib.sh"
@@ -72,6 +75,7 @@ BOOTSTRAPPED="$(grep -E '^BOOTSTRAPPED=' "$CONF" | head -1)"
 BOOTSTRAPPED="${BOOTSTRAPPED#*=}"; BOOTSTRAPPED="${BOOTSTRAPPED//[[:space:]]/}"
 [ -z "$BOOTSTRAPPED" ] && BOOTSTRAPPED=no
 
+RUN_LOCK_SELF="scripts/gates.sh${*:+ $*}"   # what the run lock records; the loop below shifts $@ away
 ONLY=""; REQUIRED_ONLY=0; LIST=0; AUDIT=0; STORY=""; FAST=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -81,33 +85,38 @@ while [ $# -gt 0 ]; do
     --fast) FAST=1 ;;
     --audit) AUDIT=1 ;;
     --story) shift; STORY="${1:-}" ;;
-    -h|--help) sed -n '2,43p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
     *) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
   shift
 done
 
 # --- parsing project.conf without a process per field -----------------------
-# The manifest is ~600 lines and both loops below walk all of it, so whatever
-# runs per field runs ~1,500 times per invocation. It used to be a `sed` inside
-# a `$(...)` around a `cut` inside another: ~1,670 processes to print --list,
-# over a minute on a CI runner and several on Windows. Everything here is
-# parameter expansion and builtins, and assigns into a variable rather than
-# printing, because a `$(...)` is a fork even when its body is all builtins -
-# measured at ~27 ms each on Windows, which on its own is 40 s of --list.
+# Both loops below walk the whole manifest, so whatever runs per field runs once
+# per line or more. It used to be a `sed` inside a `$(...)` around a `cut`
+# inside another: hundreds of processes to print --list, minutes on a host
+# where a spawn costs a fifth of a second. Everything here is parameter
+# expansion and builtins, and assigns into a variable rather than printing,
+# because a `$(...)` forks even when its body is all builtins.
+#
+# The same four definitions are in scripts/doctor.sh and scripts/task.sh,
+# copied rather than shared (doctor.sh must run when lib.sh is missing), and
+# the test suite holds the three copies byte-identical.
 #
 # trim <string> [var]   <string> without leading or trailing [:space:] (tabs
 # and carriage returns included, not only spaces). Printed, or assigned to
-# <var> when one is named. Self-contained on purpose: the test suite evaluates
-# this definition on its own and compares it with the old sed form.
+# <var> when one is named. Self-contained: the suite evaluates it on its own.
 trim() { local _t="$1"; _t="${_t#"${_t%%[![:space:]]*}"}"; _t="${_t%"${_t##*[![:space:]]}"}"; if [ $# -gt 1 ]; then printf -v "$2" '%s' "$_t"; else printf '%s' "$_t"; fi; }
-
 # from_field <n> <string> <var>   Field <n> of a `|`-separated string and
-# everything after it, the later `|`s INCLUDED, untrimmed: `cut -d'|' -f<n>-`.
+# everything after it, the later `|`s INCLUDED, untrimmed: cut's `-f<n>-`.
 # `IFS='|' read` is not a substitute - it drops the delimiters it consumed, so a
 # command or regex containing `|` would be cut at its first one. Like cut, a
-# string with no `|` at all is returned whole, and one with fewer than <n>
-# fields gives ''.
+# string with no `|` is returned whole, and one with fewer than <n> fields
+# gives ''.
+# rest <n> <string> <var>    trimmed `-f<n>-`: a value that may contain `|`.
+# field <n> <string> <var>   trimmed `-f<n>`: one field.
+# Never name `_t`, `_r`, `_i` or `_v` as <var>: bash scopes `local`
+# dynamically, so the result would land in the helper's own local and vanish.
 from_field() {
   local _r="$2" _i=1
   case "$_r" in
@@ -119,22 +128,16 @@ from_field() {
   esac
   printf -v "$3" '%s' "$_r"
 }
-# rest <n> <string> <var>    trimmed `cut -d'|' -f<n>-`: the value of a line
-#                            whose last field may itself contain `|`.
-# field <n> <string> <var>   trimmed `cut -d'|' -f<n>`: one field.
-# Both work on a whole manifest line and on a value already taken out of one
-# (the ci-factor split below).
 rest()  { local _v; from_field "$1" "$2" _v; trim "$_v" "$3"; }
 field() { local _v; from_field "$1" "$2" _v; trim "${_v%%|*}" "$3"; }
 
 TAB=$(printf '\t')
 ESC=$(printf '\033')
 
-# --- evidence, floor, waiver and slow tables --------------------------------
+# --- evidence, floor, waiver, slow and ondemand tables ----------------------
 # Read up front, so that --gate <id> still finds its own lines. Stored as
 # "<id><TAB><value>" lines; no associative arrays, for bash 3.2.
-EVIDENCE=""; WAIVERS=""; FLOORS=""; SLOWS=""; CIFACTORS=""; COVERS=""; BLOCKEDWHEN=""; GATE_IDS=""
-SKIPPEDWHEN=""
+EVIDENCE=""; WAIVERS=""; FLOORS=""; SLOWS=""; ONDEMANDS=""; CIFACTORS=""; COVERS=""; BLOCKEDWHEN=""; SKIPPEDWHEN=""; GATE_IDS=""
 GATE_REQ=""   # "<id><TAB>required|optional" per gate, after any story escalation
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -149,8 +152,8 @@ while IFS= read -r line; do
   # line", and a misspelt `floor` id fails the audit outright, but a misspelt
   # `slow` id is silent - the gate it meant to exclude simply stays in --fast.
   [ "$kind" = "gate" ] && { GATE_IDS="$GATE_IDS $tid"; continue; }
-  case "$kind" in evidence|waiver|floor|slow|ci-factor|covers|blocked-when|skipped-when) ;; *) continue ;; esac
-  # rest, not field, so that a regex containing `|` (alternation) survives the split.
+  case "$kind" in evidence|waiver|floor|slow|ondemand|ci-factor|covers|blocked-when|skipped-when) ;; *) continue ;; esac
+  # rest, not field, so that a regex containing `|` (alternation) survives.
   rest 3 "$line" tval
   [ -n "$tid" ] || continue
   case "$kind" in
@@ -162,6 +165,8 @@ while IFS= read -r line; do
 " ;;
     slow)     SLOWS="$SLOWS$tid$TAB$tval
 " ;;
+    ondemand) ONDEMANDS="$ONDEMANDS$tid$TAB$tval
+" ;;
     ci-factor) CIFACTORS="$CIFACTORS$tid$TAB$tval
 " ;;
     covers)   COVERS="$COVERS$tid$TAB$tval
@@ -172,35 +177,6 @@ while IFS= read -r line; do
 " ;;
   esac
 done < "$CONF"
-
-# --- the manifest must not change under the run -----------------------------
-# Every table above was read ONCE, here, and the gate commands run afterwards.
-# Anything that edits project.conf in between - a subagent mid-write, a second
-# session, a script the orchestrator ran next - produces a summary whose numbers
-# are each real and whose PAIRING never existed: `PASS lint (0s, observed 5,
-# floor 1)` printed as a clean pass while the file on disk already said
-# `floor | lint | 5`. That was observed, on a --fast run, and nothing caught it:
-# a --fast run is never recorded, so nothing downstream ever compares it to
-# anything. Its only consumer is whoever reads the summary and decides the phase
-# is healthy.
-#
-# The fix is detection, not a lock. The harness's concurrency is a fact of how
-# it is used - an orchestrator that dispatches a subagent and then runs a script
-# is two things in one tree - and a lock it can deadlock against its own
-# subagent is worse than the race. So: fingerprint the file here, fingerprint it
-# again just before the summary, and if they differ say so instead of printing a
-# pairing that was never true.
-#
-# Scope is project.conf and nothing else. "The files a gate reads" is the tree
-# hash's job; widening it here would fire on every ordinary edit during a long
-# build, and a new non-zero exit from this script is a new way for CI to fail.
-#
-# cksum, not sha1sum: coreutils everywhere, including the shells this harness
-# runs in on Windows. The redirection is written after 2>/dev/null so that a
-# conf deleted mid-run reports `unreadable` - which differs from any checksum,
-# so a deletion is a change - instead of a bare shell error.
-conf_fingerprint() { cksum 2>/dev/null < "$CONF" || printf 'unreadable'; }
-CONF_AT_PARSE="$(conf_fingerprint)"
 
 # --- BLOCKED: the environment would not let the gate run --------------------
 # A gate's result used to be a boolean derived from an exit code, and there is a
@@ -236,36 +212,41 @@ if [ -n "$ONLY" ]; then
   esac
 fi
 
-# --- is the tree the code? --------------------------------------------------
-# Everything below judges the working tree and files the verdict as evidence,
-# stamped with a hash of the code it ran against. scripts/mutate.sh deliberately
-# mutates that tree, and puts the file back on every path it can still run code
-# on - but a kill is a path where it cannot, and a restore that fails is a path
-# where it could not. In both the file is left mutated, and a gate run behind
-# one produces a verdict about code nobody wrote, recorded under law 3 against a
-# tree hash that faithfully describes the mutation.
-#
-# `mutate.sh --check` reads the sentinels mutate.sh leaves while a mutation is in
-# flight. Detection, not a lock, for the same reason the project.conf
-# fingerprint above is detection: nothing here waits or holds anything, and a
-# mutation whose process is still alive is reported as in flight rather than as
-# wreckage. Refused before any gate runs, because a run behind a stranded
-# mutation is minutes spent producing a number that must be thrown away.
-#
-# --list and --audit are skipped by the check: they read the manifest and never
-# look at the tree, and a check that refused those too would gag the harness at
-# exactly the moment somebody needs it to explain itself. Inert on CI, where
+# IS THE TREE THE CODE? (HARNESS-030) Everything below judges the working tree
+# and records the verdict as evidence. mutate.sh puts its file back on every path
+# it can still run code on, but a kill is a path where it cannot, and a failed
+# restore one where it could not; its `.active` sentinel survives both, and
+# `mutate.sh --check` reads them. Refused before any gate runs - a run behind a
+# stranded mutation is minutes producing a number that must be thrown away -
+# and with 2, the existing "nothing ran" code. Detection, not a lock: nothing
+# here waits. The mutation this run is itself the command of is not counted
+# (--check honours HARNESS_MUTATION), so a gate probe still runs; whether such a
+# run may be RECORDED is decided at the refusal block below. --list and --audit
+# read the manifest, never the tree, and must not be gagged. Inert on CI, where
 # .claude/state is gitignored and no sentinel can exist.
-if [ "$LIST" = 0 ] && [ "$AUDIT" = 0 ]; then
-  if [ -x "$ROOT/scripts/mutate.sh" ] || [ -f "$ROOT/scripts/mutate.sh" ]; then
-    if ! mutation_report="$(bash "$ROOT/scripts/mutate.sh" --check 2>&1)"; then
-      printf '%s\n' "$mutation_report" >&2
-      printf 'gates: refusing to run. The gates judge the working tree and record the\n' >&2
-      printf 'verdict as evidence; behind an unaccounted-for mutation that verdict is\n' >&2
-      printf 'about code nobody wrote. Resolve the above, then run the gates again.\n' >&2
-      exit 2
-    fi
+if [ "$LIST" = 0 ] && [ "$AUDIT" = 0 ] && [ -f "$ROOT/scripts/mutate.sh" ]; then
+  if ! mutation_report="$(bash "$ROOT/scripts/mutate.sh" --check 2>&1)"; then
+    printf '%s\n' "$mutation_report" >&2
+    printf 'gates: refusing to run. The gates judge the working tree, and the tree may hold a mutation nobody restored.\n' >&2
+    printf 'Resolve each mutation above, then run the gates again.\n' >&2
+    exit 2
   fi
+fi
+
+# THE RUN LOCK (HARNESS-034). Two harness runs in one tree - this and a
+# self-test, or two of either - starve each other: issue #97 measured a hang
+# past 30 minutes that passed alone. scripts/run-lock.sh takes
+# .claude/state/run.lock or refuses with 2, before any gate runs and before
+# last-gate-run is written; it never waits. --list and --audit read the
+# manifest, not the tree, and keep working beside a run in flight. The traps go
+# in BEFORE the take, so no signal can strand a lock; trapped, a TERM or INT
+# waits for the running gate command instead of orphaning it, and EXIT releases.
+if [ "$LIST" = 0 ] && [ "$AUDIT" = 0 ]; then
+  . "$ROOT/scripts/run-lock.sh" || { printf 'run-lock: scripts/run-lock.sh is missing; nothing was run.\n' >&2; exit 2; }
+  trap run_lock_release EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  run_lock_acquire "$ROOT" "$RUN_LOCK_SELF" || exit 2
 fi
 
 # table_lookup <table> <id>   Echoes the value. Exact string comparison, never
@@ -295,19 +276,18 @@ clean_log() {
 # Parenthesised, so that an evidence regex using top-level alternation
 # (`a|b`) does not bind the trailing `.*` to its last branch alone.
 work_count() {
-  clean_log "$1" \
-    | grep -oE -m1 -- "($2).*" 2>/dev/null | head -1 \
-    | grep -oE '[0-9]+' 2>/dev/null | head -1
+  clean_log "$1" | awk 'BEGIN { re = ARGV[1]; ARGV[1] = "" }
+    !seen && match($0, re) { seen = 1; m = substr($0, RSTART, RLENGTH); if (match(m, /[0-9]+/)) out = substr(m, RSTART, RLENGTH) }
+    END { if (out != "") print out; exit (out == "") ? 1 : 0 }' "($2).*"
 }
 
 # --- recording ----------------------------------------------------------------
 # The short commit the gates ran against, with a note when the working tree
 # (outside docs/) had uncommitted changes. Shared by record_in_story and the
-# preserved failing log, so the two can never describe the same run differently.
+# kept failing log, so the two can never describe one run differently.
 commit_with_note() {
-  local commit dirty
+  local commit dirty=""
   commit="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || printf 'no commit')"
-  dirty=""
   [ -z "$(git -C "$ROOT" status --porcelain -- . ':!docs' 2>/dev/null)" ] || dirty=" (working tree had uncommitted changes)"
   printf '%s%s' "$commit" "$dirty"
 }
@@ -375,11 +355,12 @@ while IFS= read -r line; do
   # An escalation makes the gate required for everything below, and says so
   # wherever the gate is reported, so nobody has to wonder why `integration`
   # blocked this story and not the last one.
-  escalated=""
+  escalated=""; story_asked=0
+  confreq="$req"   # what project.conf says, before any story escalation
   case "$STORY_REQUIRES" in
     *" $id "*)
       [ "$req" = "required" ] || escalated=" (required by story $STORY)"
-      req=required ;;
+      req=required; story_asked=1 ;;
   esac
 
   # Recorded before any filter skips the gate: the changes check below needs
@@ -390,6 +371,35 @@ while IFS= read -r line; do
 
   [ -n "$ONLY" ] && [ "$ONLY" != "$id" ] && continue
   [ "$REQUIRED_ONLY" = 1 ] && [ "$req" != "required" ] && continue
+
+  # An `ondemand` gate runs only when asked for: by name (--gate), or by a
+  # story that escalated it. Decided before --fast's `slow` check, so it is
+  # reported once, as on request, and not again in `skipped:`; and before
+  # configured-ness, so one with no command is ON REQUEST, not UNCONFIGURED.
+  # It is counted in none of ran, unconfigured or known. A line with no reason,
+  # or on a gate project.conf itself requires, is a manifest fault - a required
+  # gate no full run executes is a hole shaped like a gate.
+  ondwhy=$(table_lookup "$ONDEMANDS" "$id"); is_ondemand=$?
+  if [ "$LIST" = 0 ] && [ "$is_ondemand" = 0 ]; then
+    ond_broken=""
+    if [ -z "$ondwhy" ]; then
+      ond_broken="marked on-request with no reason; say why it is not run per story"
+    elif [ "$confreq" = "required" ]; then
+      ond_broken="an on-request gate cannot be required: no full run would ever judge it"
+    fi
+    if [ -n "$ond_broken" ]; then
+      if [ "$AUDIT" = 1 ]; then
+        printf 'FAIL %-12s %s\n' "$id" "$ond_broken"
+      else
+        results="$results\nFAIL         $id ($ond_broken)"
+      fi
+      fails=$((fails+1)); continue
+    fi
+    if [ "$AUDIT" = 0 ] && [ "$ONLY" != "$id" ] && [ "$story_asked" = 0 ]; then
+      results="$results\nON REQUEST   $id (not run: $ondwhy; bash scripts/gates.sh --gate $id)"
+      continue
+    fi
+  fi
 
   # --fast leaves out the gates a `slow` line names. It is a deliberate subset,
   # not a cheaper full run: it is never recorded, and a gate the story escalated
@@ -404,10 +414,8 @@ while IFS= read -r line; do
   waiver=$(table_lookup "$WAIVERS" "$id") || waiver=""
   slowwhy=$(table_lookup "$SLOWS" "$id"); is_slow=$?
   floor=$(table_lookup "$FLOORS" "$id") || floor=""
-  cifactor=$(table_lookup "$CIFACTORS" "$id") || cifactor=""
-  # Read here with the other tables, but consulted in exactly one place below:
-  # a gate that exited 0, matched its evidence and came in BELOW its floor.
   skippat=$(table_lookup "$SKIPPEDWHEN" "$id") || skippat=""
+  cifactor=$(table_lookup "$CIFACTORS" "$id") || cifactor=""
   logrel=".claude/state/gate-logs/$id.log"
 
   if [ "$LIST" = 1 ]; then
@@ -426,6 +434,7 @@ while IFS= read -r line; do
       [ "$kid" = "$id" ] && printf '%-12s %-9s %-6s skipped-when: %s\n' "" "" "" "$kpat"
     done <<< "$SKIPPEDWHEN"
     [ "$is_slow" = 0 ] && printf '%-12s %-9s %-6s slow:     %s (left out of --fast)\n' "" "" "" "${slowwhy:-no reason given}"
+    [ "$is_ondemand" = 0 ] && printf '%-12s %-9s %-6s on-request: %s (run with --gate %s)\n' "" "" "" "${ondwhy:-no reason given}" "$id"
     [ -n "$escalated" ] && printf '%-12s %-9s %-6s optional for the repo,%s\n' "" "" "" "$escalated"
     continue
   fi
@@ -517,14 +526,7 @@ while IFS= read -r line; do
     fi
     if [ "$exp" = "<none>" ]; then
       printf 'WARN %-12s no evidence line; a vacuous pass would go unnoticed\n' "$id"
-      # The summary below reports this count as "required gate(s)", and the run
-      # path guards its own increment by `req`. Guard this one the same way, or
-      # an optional gate makes the audit state something false about a required
-      # one - and masks a required gate that genuinely lost its line. `req`
-      # only: BOOTSTRAPPED is a property of the project's stage, and --audit is
-      # exactly the tool a bootstrap story uses on a half-filled manifest.
-      if [ "$req" = "required" ]; then noevidence=$((noevidence+1)); fi
-      continue
+      [ "$req" = "required" ] && noevidence=$((noevidence+1)); continue
     fi
     if [ "$exp" = "-" ]; then
       printf 'ok   %-12s (liveness declared unassertable)\n' "$id"
@@ -535,6 +537,7 @@ while IFS= read -r line; do
     [ -n "$skippat" ] && printf '     %-12s skipped-when: %s\n' "" "$skippat"
     [ -n "$cifactor" ] && printf '     %-12s ci-factor: %s\n' "" "$cifactor"
     [ "$is_slow" = 0 ] && printf '     %-12s slow:   %s\n' "" "$slowwhy"
+    [ "$is_ondemand" = 0 ] && printf '     %-12s on-request: %s\n' "" "$ondwhy"
     [ -n "$waiver" ] && printf '     %-12s waiver: %s\n' "" "$waiver"
     continue
   fi
@@ -572,11 +575,11 @@ while IFS= read -r line; do
     blockpat="$BLOCKED_DEFAULT"
     extra=$(table_lookup "$BLOCKEDWHEN" "$id") || extra=""
     [ -n "$extra" ] && blockpat="$blockpat|$extra"
-    if clean_log "$log" | grep -Eq -- "$blockpat"; then
+    if clean_log "$log" | awk 'BEGIN{r=ARGV[1];ARGV[1]=""} $0~r{h=1} END{exit !h}' "$blockpat"; then
       outcome=blocked
       why="could not launch: $(clean_log "$log" | grep -Eom1 -- "$blockpat" | head -1)"
     fi
-  elif [ "$exp" != "<none>" ] && [ "$exp" != "-" ] && ! clean_log "$log" | grep -Eq -- "$exp"; then
+  elif [ "$exp" != "<none>" ] && [ "$exp" != "-" ] && ! clean_log "$log" | awk 'BEGIN{r=ARGV[1];ARGV[1]=""} $0~r{h=1} END{exit !h}' "$exp"; then
     outcome=noevidence
     why="ran but produced no evidence of work: expected /$exp/"
   elif [ "$exp" != "<none>" ] && [ "$exp" != "-" ]; then
@@ -591,13 +594,11 @@ while IFS= read -r line; do
       elif [ "$observed" -lt "$floor" ]; then
         outcome=noevidence
         why="did $observed units of work, below the floor of $floor in project.conf"
-        # Did the suite LOSE the work, or did the environment never supply it?
-        # A `skipped-when` pattern classifies the shortfall it has just
-        # measured; it never excuses one. Without a matching pattern this is
-        # the floor shortfall it has always been, wording included - which is
-        # why $why is extended here rather than rewritten.
-        if [ -n "$skippat" ] && clean_log "$log" | grep -Eq -- "$skippat"; then
-          skipmatch="$(clean_log "$log" | grep -Eom1 -- "$skippat" | head -1)"
+        # Lost, or never supplied? A `skipped-when` pattern classifies the
+        # shortfall just measured; it never excuses one. One awk engine both
+        # detects and extracts, and reads all of its input, so no SIGPIPE.
+        if [ -n "$skippat" ] && clean_log "$log" | awk 'BEGIN{r=ARGV[1];ARGV[1]=""} $0~r{h=1} END{exit !h}' "$skippat"; then
+          skipmatch="$(clean_log "$log" | awk 'BEGIN{r=ARGV[1];ARGV[1]=""} !s && match($0, r){s=1; m=substr($0, RSTART, RLENGTH)} END{printf "%s", m}' "$skippat")"
           outcome=environment
           why="$why; the log says $skipmatch, so the work was skipped rather than lost: the environment did not supply it"
         fi
@@ -634,21 +635,6 @@ while IFS= read -r line; do
       else
         results="$results\nWARN         $id (${dur}s, exit $rc, optional) -> $logrel"; warns=$((warns+1))
       fi ;;
-    environment)
-      # The gate ran, exited 0 and did less work than its floor, and its
-      # `skipped-when` pattern says the environment is why. A story leaning on
-      # it has no verdict and must get one from a machine that has the inputs,
-      # so that is a BLOCK (exit 3). Nobody leaning on it means nobody was
-      # going to be stopped: a declared non-result, not a WARN, because nothing
-      # CHANGED - this checkout simply cannot answer the question.
-      if [ "$req" = "required" ]; then
-        results="$results\nBLOCKED      $id$escalated (${dur}s, $why) -> $logrel"
-        blocked=$((blocked+1))
-      elif [ -n "$waiver" ]; then
-        results="$results\nKNOWN        $id (${dur}s, $why; $waiver) -> $logrel"; known=$((known+1))
-      else
-        results="$results\nKNOWN        $id (${dur}s, $why) -> $logrel"; known=$((known+1))
-      fi ;;
     blocked)
       # An OPTIONAL gate the environment blocked is nobody's decision: it was
       # never going to stop the story. Only a required one opens the third path.
@@ -660,14 +646,26 @@ while IFS= read -r line; do
       else
         results="$results\nWARN         $id (${dur}s, $why, optional) -> $logrel"; warns=$((warns+1))
       fi ;;
+    environment)
+      # Ran, exited 0, did less than its floor, and its `skipped-when` pattern
+      # says the inputs were never here. A story leaning on it has no verdict
+      # from this machine (BLOCKED, exit 3); nobody leaning on it is a declared
+      # non-result (KNOWN), not a WARN: nothing changed, this checkout just
+      # cannot answer the question.
+      if [ "$req" = "required" ]; then
+        results="$results\nBLOCKED      $id$escalated (${dur}s, $why) -> $logrel"
+        blocked=$((blocked+1))
+      elif [ -n "$waiver" ]; then
+        results="$results\nKNOWN        $id (${dur}s, $why; $waiver) -> $logrel"; known=$((known+1))
+      else
+        results="$results\nKNOWN        $id (${dur}s, $why) -> $logrel"; known=$((known+1))
+      fi ;;
   esac
 
-  # --- keep the last non-passing log (MT-046) --------------------------------
   # <id>.log is overwritten by every run, so the re-run someone starts to see
   # whether a failure was a flake destroys the only copy of it. Keep the last
   # run that did not pass, stamped, in <id>.failed.log: one per gate, replaced
-  # whole, never removed. Deliberately not in $results: the gate record is
-  # unchanged by this.
+  # whole, never removed. Not added to $results: the gate record is unchanged.
   if [ "$outcome" != pass ]; then
     { printf '%s\n' \
         "# gates.sh: last failing run of gate '$id'" \
@@ -693,6 +691,15 @@ if [ "$AUDIT" = 1 ]; then
       *) printf 'FAIL %-12s a `slow` line names no configured gate\n' "$sid"; fails=$((fails+1)) ;;
     esac
   done <<< "$SLOWS"
+  # And an `ondemand` line naming no gate is worse than silent: the gate it
+  # meant stays on every full run, which is the cost the line exists to stop.
+  while IFS="$TAB" read -r oid _; do
+    [ -n "$oid" ] || continue
+    case " $GATE_IDS " in
+      *" $oid "*) ;;
+      *) printf 'FAIL %-12s an `ondemand` line names no configured gate\n' "$oid"; fails=$((fails+1)) ;;
+    esac
+  done <<< "$ONDEMANDS"
   # Same for a ci-factor: a measurement filed against a gate that does not
   # exist is a number nobody will ever find when they need it.
   while IFS="$TAB" read -r cid _; do
@@ -820,20 +827,13 @@ if [ -n "$COVERS" ] && [ -n "$STORY" ] && [ -f "$STORY_FILE" ]; then
   fi
 fi
 
-# --- did the manifest move under us? ----------------------------------------
-# Fingerprinted again, immediately before the summary that pairs the tables read
-# at start-up with the work the gates did afterwards. A difference means those
-# two halves describe different files, so the pairing is unsound - and this is
-# FAIL rather than WARN because it is the failure with no backstop: a --fast run
-# is never recorded, nothing downstream compares it, and a WARN would leave
-# `gates.sh && next-thing` proceeding on a summary this script has just said it
-# cannot vouch for. Appended to `results` and counted in `fails` like any other
-# verdict, which is deliberate: that lands it INSIDE the summary block - so the
-# exit status, the RESULT=fail stamp, the "N required gate(s) failed" line and
-# --fast's own caveats all follow without a separate early exit that would take
-# them with it. Runs in every mode that runs a gate command, --fast included,
-# because --fast is the mode this was reported on. --list and --audit run no
-# gate command and have already exited above.
+# Folded into `results` rather than reported as a separate early exit, which is
+# deliberate: that lands it INSIDE the summary block, so the exit status, the
+# RESULT=fail stamp, the "N required gate(s) failed" line and --fast's own
+# caveats all follow without a separate exit that would take them with it. Runs
+# in every mode that runs a gate command, --fast included, because --fast is the
+# mode this was reported on. --list and --audit run no gate command and have
+# already exited above.
 CONF_CHANGED=0
 if [ "$(conf_fingerprint)" != "$CONF_AT_PARSE" ]; then
   CONF_CHANGED=1
@@ -877,12 +877,66 @@ if [ "$warns" -gt 0 ]; then
   printf '  waiver | <id> | <why this optional gate is expected to fail, and where that is recorded>\n'
 fi
 
+# UNTRACKED GATED FILES ARE NOT IN THE STAMP (HARNESS-014). The recorded tree is
+# the one `git commit -a` would make, which is what CI recomputes from the
+# commit; an untracked file that some gate read is in neither. Name every one,
+# in every mode that runs a gate, so a file the story created and never staged
+# is seen before it is missing from the commit rather than after.
+untracked="$(untracked_gated)"
+untracked_n=0
+if [ -n "$untracked" ]; then
+  untracked_n="$(printf '%s\n' "$untracked" | awk 'END { print NR }')"
+  printf '\nuntracked: %d gated file(s) are not part of the recorded tree:\n' "$untracked_n"
+  printf '%s\n' "$untracked" | awk '{ print "    UNTRACKED  " $0 }'
+  printf 'Stage them (git add) if they belong to the story, or exclude them\n'
+  printf '(.git/info/exclude) or move them if they do not.\n'
+fi
+
 # FULL says whether this was a whole run. The Stop hook decides from this stamp
 # whether a phase's gate obligation has been met, and `--fast`, `--gate` and
 # `--required` all write it too - so without the line a `--gate unit` could
 # discharge GATES, whose entire job is the full suite.
 FULLRUN=yes
 { [ -n "$ONLY" ] || [ "$REQUIRED_ONLY" = 1 ] || [ "$FAST" = 1 ]; } && FULLRUN=no
+
+# A full run with a story to record into refuses to record while anything is
+# named above: the stamp would describe a tree that is not the one about to be
+# committed. With no active story (CI, ci-local.sh) there is nothing to refuse,
+# and the exit status stays the gates' own. A refused run did not discharge the
+# full run, so its stamp says FULL=no.
+REFUSED=0; REFUSED_WHY=""
+# Never record a run made inside a mutation of this tree (HARNESS-030): a gate
+# probe may run the gates under its own mutation, but a verdict on mutated code
+# is not evidence. Checked first, ahead of the branch: the mutation is the more
+# fundamental reason. The directory comparison is load-bearing - a fixture copy
+# of this script, run by a suite that is itself under a mutation of the REAL
+# tree, inherits HARNESS_MUTATION and must not take that mutation for its own.
+if [ "$FULLRUN" = yes ] && [ -n "${HARNESS_MUTATION:-}" ] && [ -f "$HARNESS_MUTATION" ] \
+   && [ "${HARNESS_MUTATION%/*}" = "$ROOT/.claude/state/mutations" ]; then
+  REFUSED=1; FULLRUN=no
+  REFUSED_WHY="this run is inside mutate.sh's mutation of $(awk -F'\t' '$1 == "file" { print $2; exit }' "$HARNESS_MUTATION"); a verdict on mutated code is not evidence"
+fi
+# Refuse to record into a story from a checkout on another branch: the record
+# would stamp another branch's tree into this story, which gate-reminder.sh
+# tells the agent cannot happen. The branch is the story file's own `branch:`,
+# not current-story.env's, because the story file is what is written to. A
+# story with no `branch:`, or a detached HEAD, cannot be judged, so it fails
+# open, as gate-reminder.sh does. Checked before the untracked files: a count means
+# nothing for a tree that belongs to another story.
+if [ "$FULLRUN" = yes ] && [ -n "$STORY" ] && [ -f "$STORY_FILE" ]; then
+  checkout_branch="$(git -C "$ROOT" branch --show-current 2>/dev/null || printf '')"
+  story_branch="$(frontmatter_value "$STORY_FILE" branch)"
+  if [ -n "$checkout_branch" ] && [ -n "$story_branch" ] && [ "$checkout_branch" != "$story_branch" ]; then
+    REFUSED=1
+    FULLRUN=no
+    REFUSED_WHY="the checkout is on '$checkout_branch' but story $STORY belongs on '$story_branch'; check out '$story_branch' and run again"
+  fi
+fi
+if [ "$FULLRUN" = yes ] && [ "$untracked_n" -gt 0 ] && [ -n "$STORY" ] && [ -f "$STORY_FILE" ]; then
+  REFUSED=1
+  FULLRUN=no
+  REFUSED_WHY="$untracked_n untracked gated file(s) are not in the tree this run would stamp; stage them (git add) or exclude them (.git/info/exclude) or move them, then run again"
+fi
 
 if [ "$fails" -gt 0 ]; then
   result="fail ($fails required gate(s) failed$([ "$blocked" -gt 0 ] && printf ', %d blocked' "$blocked"))"
@@ -920,39 +974,11 @@ else
     printf '\n(not recorded: no active story; use --story <id> to record it in one)\n'
   elif [ ! -f "$STORY_FILE" ]; then
     printf '\n(not recorded: no story file at docs/backlog/stories/%s.md)\n' "$STORY"
+  elif [ "$REFUSED" = 1 ]; then
+    printf '\n(not recorded: %s)\n' "$REFUSED_WHY"
   else
-    # `.claude/state/current-story.env` names one story for the whole tree, not
-    # for the caller, so a second session - or a script run from the wrong
-    # context - used to stamp ## Gate results into a story it was not working
-    # on. `phase.sh set` already refuses exactly this mismatch; this agrees with
-    # it. The run itself was valid: it is the RECORDING that is misdirected, so
-    # the verdict, the exit status and the machine-local stamp above are all
-    # left alone - the Stop hook reads that stamp, and suppressing it would make
-    # the hook claim the gates had never run.
-    #
-    # Compared against the STORY FILE's frontmatter, the same pair phase.sh
-    # compares, so `--story <id>` is not an override: naming the story
-    # explicitly still names a story that belongs on a branch.
-    #
-    # `git branch --show-current` is empty on a detached HEAD, and a story may
-    # carry no branch: either way there is nothing to disagree with, so fail
-    # open and record, as the harness does everywhere it cannot tell. (phase.sh
-    # reads `rev-parse --abbrev-ref HEAD`, which prints the literal `HEAD` when
-    # detached and so refuses there; the divergence is deliberate - phase.sh is
-    # granting a state transition, this is filing a record.)
-    checkout_branch="$(git -C "$ROOT" branch --show-current 2>/dev/null || printf '')"
-    story_branch="$(frontmatter_value "$STORY_FILE" branch)"
-    if [ -n "$checkout_branch" ] && [ -n "$story_branch" ] \
-       && [ "$checkout_branch" != "$story_branch" ]; then
-      printf "\n(not recorded: the checkout is on '%s' but story %s belongs on '%s')\n" \
-        "$checkout_branch" "$STORY" "$story_branch"
-      printf 'The gates above ran and their verdict stands; only the recording is refused,\n'
-      printf 'because ## Gate results would have landed in a story this checkout is not\n'
-      printf 'working on. Check out %s and run the gates again to record them.\n' "$story_branch"
-    else
-      record_in_story "$STORY_FILE" "$result" "$(printf '%b' "$results")"
-      printf '\nrecorded in docs/backlog/stories/%s.md (## Gate results)\n' "$STORY"
-    fi
+    record_in_story "$STORY_FILE" "$result" "$(printf '%b' "$results")"
+    printf '\nrecorded in docs/backlog/stories/%s.md (## Gate results)\n' "$STORY"
   fi
 fi
 
@@ -973,8 +999,15 @@ if [ "$fails" -gt 0 ]; then
   printf '\n%d required gate(s) failed.\n' "$fails"
   exit 1
 fi
-if [ "$blocked" -gt 0 ]; then exit 3; fi
+# A refused BLOCKED run exits 1, not 3: nothing was recorded for a PO decision
+# about the blocked gate to stand on.
+if [ "$blocked" -gt 0 ]; then
+  [ "$REFUSED" = 1 ] && exit 1
+  exit 3
+fi
 printf '\nAll required gates passed (%d ran, %d unconfigured, %d known).\n' "$ran" "$unconfigured" "$known"
+# The verdict above is about the code; the refusal is about the record.
+[ "$REFUSED" = 1 ] && exit 1
 if [ "$FAST" = 0 ] && [ -z "$ONLY" ] && [ "$REQUIRED_ONLY" = 0 ]; then
   printf 'CI runs one more script that this does not: bash scripts/check-boundaries.sh\n'
   printf 'It is not a gate because it judges the COMMIT rather than the code - the phase in\n'

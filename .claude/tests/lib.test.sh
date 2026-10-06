@@ -29,6 +29,11 @@ for case in \
   ".github/workflows/gates.yml=harness" \
   "CLAUDE.md=harness" \
   ".gitignore=harness" \
+  "src/ui/__import_guard_probe.ts=test" \
+  "src/core/__probe_offending_import.ts=test" \
+  "src/__probe_a.py=test" \
+  "src/ui/heat_probe.ts=source" \
+  "src/core/probe.ts=source" \
   "LICENSE=docs" \
   "LICENSE.md=docs" \
   "COPYING=docs" \
@@ -41,7 +46,14 @@ for case in \
   ".editorconfig=harness" \
   ".mailmap=harness" \
   "CODEOWNERS=harness" \
-  "package.json=config" \
+  "package.json=manifest" \
+  "pyproject.toml=manifest" \
+  "Cargo.toml=manifest" \
+  "Cargo.lock=manifest" \
+  "pnpm-lock.yaml=manifest" \
+  "uv.lock=manifest" \
+  "go.mod=config" \
+  "requirements.txt=config" \
   "tsconfig.json=config" \
   "vite.config.ts=config" \
   "vitest.config.ts=test" \
@@ -69,152 +81,6 @@ assert_eq "a tracked source file" "source" "$(classify "src/main.ts")"
 assert_eq "an unknown new path" "source" "$(classify "src/brand-new.ts")"
 
 # ---------------------------------------------------------------------------
-describe "MT-034 AC-4: a bare directory that is NOT a category directory stays source"
-
-# THE TRAP, and the reason C-3 chose a rule-driven retry over anything that
-# looks at a directory's children. `src` is not a category directory: no
-# paths.conf glob begins `src/`, so no retry can invent a category for it, and
-# `classify src` -> `source` is CORRECT. A fix that resolves a bare directory to
-# whatever its children classify as, or that stops defaulting to `source` at
-# all, satisfies AC-1 and breaks every line below.
-#
-# ALL SIX PASS ON ARRIVAL. They are earned by DV-1's mirror probe, run in RED
-# against the unfixed tree and pasted into MT-034 `## Regressions`:
-#
-#   bash scripts/mutate.sh .claude/hooks/lib.sh 's/c = "source"/c = "docs"/' \
-#     -- bash scripts/selftest.sh lib
-#
-# which is the cheapest wrong fix - stop defaulting to source - and takes all
-# six red. The count is deliberate: AC-4 says "6 red on AC-4", so this block
-# holds exactly six assertions and nothing else.
-for case in \
-  "src=source" \
-  "src/=source" \
-  "src/mangatl=source" \
-  "src/mangatl/ui=source" \
-  "packaging=source" \
-  "src/brand-new.ts=source" \
-  ; do
-  assert_eq "AC-4: classify ${case%%=*}" "${case#*=}" "$(classify "${case%%=*}")"
-done
-
-# ---------------------------------------------------------------------------
-describe "MT-034 AC-1/AC-3 and C-3: a bare directory name takes its directory's category"
-
-# RED ON ARRIVAL: every one of these is `source` today. Every paths.conf glob
-# for a directory carries a `/` - `docs/**`, `**/tests/**`, `scripts/**` - so a
-# BARE directory name matches none of them and falls to the classifier's
-# restrictive default; and the trailing slash the author actually typed does not
-# survive `normalize_rel`, which skips the empty last segment.
-#
-# The categories below are READ OUT OF C-3's measured table and are not
-# re-derived here. C-8 makes AC-1..AC-5 settled: the table is the oracle.
-for case in \
-  "docs=docs" \
-  "tests=test" \
-  "scripts=harness" \
-  ".claude=harness" \
-  ".github=harness" \
-  "src/tests=test" \
-  "src/test=test" \
-  "src/__tests__=test" \
-  "src/spec=test" \
-  ; do
-  assert_eq "AC-1/AC-3: classify ${case%%=*}" "${case#*=}" "$(classify "${case%%=*}")"
-done
-
-# The same directory, two spellings, one answer. This is `## Context`
-# direction 3 seen at the classifier rather than at the guard: `to_rel` KEEPS a
-# trailing slash and `normalize_rel` STRIPS it, so one write gets two verdicts
-# depending on whether the author wrote an absolute or a relative path. The
-# assertion is deliberately written as an equality between two classify calls
-# rather than against a literal, because what it pins is agreement.
-#
-# RED ON ARRIVAL: today the slashed form matches the glob and the bare form does
-# not, so these are `docs` vs `source`, `test` vs `source`, and so on.
-for d in docs tests scripts .claude; do
-  assert_eq "the two spellings of $d agree" "$(classify "$d/")" "$(classify "$d")"
-done
-
-# ---------------------------------------------------------------------------
-describe "MT-034 AC-5: a directory that does not exist on disk is still classifiable"
-
-# `fixtures/` is classified `test` by paths.conf and exists in neither this
-# repository nor the fixture. classify consults `git check-ignore` but never the
-# filesystem (C-5, and MT-031 pinned it in write_candidates' header), because the
-# guard judges a token in a command string rather than an inode - most of the
-# paths it judges are about to be created.
-#
-# RED ON ARRIVAL for the category; the identity control below passes on arrival.
-assert_eq "AC-5: classify fixtures, which does not exist" "test" "$(classify "fixtures")"
-
-# DV-4, RED's own deferred verification: the same classification run twice in one
-# fixture repository, once before `mkdir fixtures` and once after. The two
-# answers must match EXACTLY. A fix that stats the path fails this; today both
-# answers are `source` and after C-3 both are `test`, and in either world the
-# assertion is about identity, not about the value.
-#
-# PASSES ON ARRIVAL (source == source). It is earned by its pair: the assertion
-# directly above fixes the value, so "identical" cannot be satisfied by a
-# classifier that always answers `source`.
-_dv4_before="$(classify "fixtures")"
-_dv4_fix="$(make_fixture)"
-mkdir -p "$_dv4_fix/fixtures"
-printf 'page\n' > "$_dv4_fix/fixtures/page.png"
-_dv4_root="$HARNESS_ROOT"; _dv4_dir="$HARNESS_DIR"
-HARNESS_ROOT="$_dv4_fix"; HARNESS_DIR="$_dv4_fix/.claude/harness"
-_dv4_after="$(classify "fixtures")"
-HARNESS_ROOT="$_dv4_root"; HARNESS_DIR="$_dv4_dir"
-rm -rf "$_dv4_fix"
-assert_eq "DV-4: creating the directory does not change the answer" "$_dv4_before" "$_dv4_after"
-
-# ---------------------------------------------------------------------------
-describe "MT-034 C-3 ordering: a rule still beats .gitignore, and nested paths do not move"
-
-# C-3 pins the order: rules on the bare form -> rules on the slashed form ->
-# git check-ignore -> source. `dist` is BOTH matched by a paths.conf vendor twin
-# rule and covered by the fixture's .gitignore, so it is the one path whose
-# answer says which of the two ran first. A retry inserted after is_ignored, or
-# an is_ignored moved in front of the rules, turns it `ignored`.
-#
-# PASSES ON ARRIVAL. Earned together with `.vitest` and `playwright-report`
-# above, which are the opposite case - ignored, matched by no rule either way -
-# so the pair is what makes the precedence specific rather than accidental.
-assert_eq "a vendor directory the project also gitignores" "vendor" "$(classify "dist")"
-
-# C-3's "the parent glob already supplies the slash" rows: a path that already
-# matches must not be retried, and must not move.
-assert_eq "a nested docs directory"  "docs" "$(classify "docs/backlog")"
-assert_eq "a nested tests directory" "test" "$(classify "tests/core")"
-
-# ---------------------------------------------------------------------------
-describe "MT-034 AC-6 and C-7: the fix lands in classify, not in classify_stdin"
-
-# AC-6 is the blast-radius criterion, and this is its surface stated as a unit
-# assertion. `classify_stdin` is what gate_tree_hash, check-boundaries.sh:97 and
-# gates.sh:621 all read; a fix written as bare-directory twin globs in
-# paths.conf - the option C-3 REJECTS - would land here, and would change what a
-# recorded gate hash means. classify() adds the retry and the git lookup on top;
-# classify_stdin keeps the plain paths.conf default.
-#
-# PASSES ON ARRIVAL, and it is the assertion that forbids the rejected design
-# rather than merely describing the chosen one. Earned by a probe run in RED and
-# pasted into MT-034 `## Regressions`:
-#
-#   bash scripts/mutate.sh .claude/harness/paths.conf \
-#     's|^docs | docs/\*\*$|docs | docs|' -- bash scripts/selftest.sh lib
-#
-# which is exactly the twin-rule fix, and takes this assertion red.
-assert_eq "classify_stdin still gives a bare directory name the source default" \
-  "source docs
-source tests
-source scripts
-source fixtures
-source .claude
-source .github" \
-  "$(printf 'docs\ntests\nscripts\nfixtures\n.claude\n.github\n' | classify_stdin | tr '\t' ' ')"
-
-# ---------------------------------------------------------------------------
 describe "to_rel"
 
 assert_eq "a relative path"        "src/main.ts" "$(to_rel "src/main.ts")"
@@ -223,6 +89,21 @@ assert_eq "an absolute path"       "src/main.ts" "$(to_rel "$FIX/src/main.ts")"
 assert_eq "a backslash path"       "src/main.ts" "$(to_rel "$(printf '%s' "$FIX" | tr '/' '\134')\\src\\main.ts")"
 assert_eq "somewhere else on disk" ""            "$(to_rel "/somewhere/else/main.ts")"
 
+# HARNESS-035 AC-5. One root, three drive spellings: MSYS `/d/p`, Windows `D:/p`
+# and `D:\p`. to_rel used to tolerate the difference by asking whether the path
+# contained `/<root's folder name>/`, which also took `/e/p` and
+# `C:/elsewhere/p` for this repository and missed a worktree named anything
+# else. Pure string work, so the roots need not exist.
+for _root in '/d/p' 'D:/p' 'D:\p' 'd:/p/'; do
+  for _path in 'D:\p\src\a.ts' 'D:/p/src/a.ts' '/d/p/src/a.ts' 'd:/P/src/a.ts'; do
+    assert_eq "AC-5: root $_root, path $_path" "src/a.ts" "$(HARNESS_ROOT="$_root"; to_rel "$_path")"
+  done
+  assert_eq "AC-5 control: root $_root, /d/pp is a different folder"  "" "$(HARNESS_ROOT="$_root"; to_rel '/d/pp/src/a.ts')"
+  assert_eq "AC-5 control: root $_root, /e/p is a different drive"    "" "$(HARNESS_ROOT="$_root"; to_rel '/e/p/src/a.ts')"
+  assert_eq "AC-5 control: root $_root, C:/elsewhere/p is elsewhere"  "" "$(HARNESS_ROOT="$_root"; to_rel 'C:/elsewhere/p/src/a.ts')"
+done
+assert_eq "AC-5: /cygdrive/d/p is D:/p" "src/a.ts" "$(HARNESS_ROOT='D:/p'; to_rel '/cygdrive/d/p/src/a.ts')"
+
 # ---------------------------------------------------------------------------
 describe "mask_shell_quotes: operators inside quotes stop being operators"
 
@@ -230,7 +111,17 @@ mask() { printf '%s' "$1" | mask_shell_quotes; }
 roundtrip() { printf '%s' "$1" | mask_shell_quotes | unmask_shell_quotes; }
 
 # What the masker is for: no operator survives inside a quoted span.
-has_operator() { printf '%s' "$1" | grep -qE '[|&;<>]'; }
+#
+# ONE awk, not `printf | grep -qE`. WORLD-086's guard reports that shape, and it
+# reported this line: `grep -qE` leaves at its first match, the writer behind it
+# can die of SIGPIPE, and `_lib.sh` puts this file under pipefail, so 141 would
+# become the answer to "does this hold an operator". It is the very defect the
+# masker below exists to make visible, sitting in the test that pins the masker.
+#
+# It escaped the guard's first port for a reason worth keeping: the body was
+# split on `;` to find its last command, and the QUOTED `;` in the character
+# class took the split with it. The guard now reads through mask_shell_quotes.
+has_operator() { awk '/[|&;<>]/ { h = 1 } END { exit !h }' <<<"$1"; }
 
 for cmd in \
   "sed -i 's|a|b|' f.txt" \
@@ -269,7 +160,13 @@ describe "mask_shell_quotes: heredocs and escapes"
 
 hd="$(mask "$(printf 'cat > notes.md <<%sEOF%s\nrun: cat > src/main.ts\nEOF\n' "'" "'")")"
 assert_contains "the real redirect survives" "> notes.md" "$hd"
-if printf '%s' "$hd" | grep -q '> src/main.ts'; then
+# awk over a here-string, not `printf | grep -q`. `grep -q` leaves at its first
+# match, the printf behind it dies of SIGPIPE, and pipefail promotes 141 to the
+# status this `if` reads - so a body's surviving redirect reads as "masked".
+# The needle carries no regex metacharacter, so index() is the same test.
+# WORLD-086 R-1.
+if awk 'BEGIN { n = ARGV[1]; ARGV[1] = "" } index($0, n) { h = 1 } END { exit !h }' \
+     '> src/main.ts' <<<"$hd"; then
   _bad "a heredoc body is masked" "the body's redirect survived: $hd"
 else
   _ok "a heredoc body is masked"
@@ -278,6 +175,38 @@ fi
 assert_eq "an escaped operator is masked" "0" \
   "$(mask 'echo a \> b' | grep -cE '>')"
 
+
+describe "mask_shell_quotes: a here-string opens nothing"
+
+# `<<<` is a HERE-STRING. The word after it is its DATA, and no heredoc body
+# follows. The scanner used to walk past the first `<` and reach the SECOND,
+# where the remaining text reads `<< WORD` - a perfect match for the heredoc
+# opener - and take that word for a delimiter. Every following line was then
+# masked as heredoc body, waiting for a line equal to it that never arrives.
+#
+# ONE-LINE COMMANDS WERE UNHARMED, which is why it survived: the false delimiter
+# only takes effect from the NEXT line. So the assertion that matters is the
+# multi-line one, and a fix tested only on one line would look correct.
+hs="$(mask "$(printf 'grep x <<< "$data"\necho hi > src/main.ts\n')")"
+assert_contains "a redirect on the line AFTER a here-string is still syntax" \
+  "> src/main.ts" "$hs"
+
+# The control that keeps it honest: a REAL heredoc still opens one, so the
+# redirect in its body is still data. A fix that simply stopped opening
+# heredocs would pass the assertion above and fail this.
+rhd="$(mask "$(printf 'cat > notes.md <<%sEOF%s\necho hi > src/main.ts\nEOF\n' "'" "'")")"
+if awk 'BEGIN { n = ARGV[1]; ARGV[1] = "" } index($0, n) { h = 1 } END { exit !h }' \
+     '> src/main.ts' <<<"$rhd"; then
+  _bad "a real heredoc body is still masked" "the body's redirect survived: $rhd"
+else
+  _ok "a real heredoc body is still masked"
+fi
+
+# And the here-string's own data is still data - the `>` here is a character in
+# a string, not a redirect.
+hsd="$(mask 'grep x <<< "a > b"')"
+assert_eq "the here-string word itself is still masked" "0" \
+  "$(printf '%s' "$hsd" | grep -cE '> b')"
 describe "mask_shell_quotes: a backslash inside double quotes is usually a backslash"
 
 # Bash escapes only five things inside double quotes: $ ` " \ and newline.
@@ -355,6 +284,47 @@ assert_eq "no \${var,,} or \${var^^} in shipped scripts" "" "$hits"
 hits="$(grep -nE '(^|[[:space:]|;&(])sed[[:space:]]+(-[A-Za-z]*\s+)*-i([[:space:]]|$)' $shipped || true)"
 assert_eq "no GNU-only sed -i in shipped scripts" "" "$hits"
 
+# A fallback that cannot fire is not a fallback. Every suite opens with
+# `mktemp -d 2>/dev/null || mktemp -d -t harness`, and GNU's -t wants X's in the
+# template: `mktemp -d -t harness` is "too few X's in template". So on the only
+# platform where the first half could fail, the second half fails too. Latent,
+# because plain `mktemp -d` is universal - and exactly the kind of guard that
+# reads as handled in review. Found by a consuming project pre-checking this
+# repository's suites for Linux hazards before running them there.
+#
+# The failure MESSAGE carries two facts, and both are load-bearing for a reader
+# who is not in this conversation. This check scans `.claude/tests/*.sh`, which
+# in a vendored copy includes the PROJECT'S OWN suites - so an upstream
+# portability rule can fail on a file the project wrote. That is deliberate: the
+# hazard is identical wherever the idiom appears, and a rule that stops applying
+# the moment it is vendored is one more check nothing has to listen to. But an
+# agent with a fresh context sees an upstream rule failing on its own file and
+# reads "the vendored suite is stale", which makes skipping it feel like the
+# careful move. So the message says that project files are in scope on purpose,
+# and gives the exact replacement rather than making the reader derive it.
+hits="$(grep -rnE 'mktemp -d[^|)]*-t [A-Za-z0-9_.-]+' "$REPO_ROOT"/.claude/tests/*.sh "$REPO_ROOT"/scripts/*.sh 2>/dev/null \
+  | grep -vE ':[0-9]+:[[:space:]]*#' | grep -v 'XXX' || true)"
+if [ -z "$hits" ]; then
+  _ok "no mktemp -t template without X's"
+else
+  # The example below is deliberately NOT written as a contiguous
+  # 'mktemp' + '-d' + '-t name', because this message is itself inside a file
+  # this check scans - writing the broken form here makes the message a hit and
+  # the check report itself. It did, on the first run.
+  _bad "no mktemp -t template without X's" "GNU's -t needs X's in the template: a -t given a bare name fails with
+\"too few X's in template\", so the fallback cannot run on the one platform
+where the plain create-a-temp-dir call before it could fail.
+
+Fix each site by adding them:   -t name   ->   -t name.XXXXXX
+
+PROJECT-OWNED SUITES ARE IN SCOPE ON PURPOSE. If one of the files below is
+yours rather than the harness's, that is not a stale vendored suite and not a
+reason to skip this - the idiom is broken wherever it appears, and this rule
+reaching your files is the point of it. Fix it in place; it is one line.
+
+$hits"
+fi
+
 # $TMPDIR is unset in some of the shells this harness runs in, and the one place
 # that mattered - a mutation backup - lost its backup to exactly that, leaving
 # the restore to depend on the sed expression happening to be an exact inverse.
@@ -396,10 +366,24 @@ describe "gate_tree_hash: covers what the gates judge, and only that"
 # file no gate reads must not move it, or every prompt edit after the last run
 # forces a re-run before the PR is acceptable - and it does have to move on a
 # change to anything a gate does read, or the record proves nothing.
+#
+# EVERY FILE BELOW IS TRACKED BEFORE h0 IS TAKEN. HARNESS-014: the hash is the
+# tree `git commit -a` would make, so an UNTRACKED file moves nothing whatever it
+# classifies as. The first form of this block wrote the prompt, the hook and the
+# docs file without committing them, which meant "a hook moves the hash" passed
+# only because untracked files were hashed (the defect), and the two negatives
+# would have passed against a hash that counted markdown - vacuous, by tracking
+# status rather than by class. Committing first is what makes each assertion
+# below discriminate by CLASS, which is the claim in its name.
 HARNESS_ROOT="$FIX"
+fix_commit() { # <message>   Everything in the fixture, tracked and committed.
+  git -C "$FIX" add -A >/dev/null 2>&1
+  git -C "$FIX" -c user.email=t@t -c user.name=t commit -qm "$1" >/dev/null 2>&1
+}
 mkdir -p "$FIX/.claude/commands" "$FIX/.claude/hooks"
 printf '# advance\n' > "$FIX/.claude/commands/advance-story.md"
 printf 'x() { :; }\n' > "$FIX/.claude/hooks/lib.sh"
+fix_commit "a prompt and a hook, tracked"
 h0="$(gate_tree_hash)"
 printf '# advance, reworded\n' > "$FIX/.claude/commands/advance-story.md"
 assert_eq "a command prompt does not move the hash" "$h0" "$(gate_tree_hash)"
@@ -411,6 +395,137 @@ if [ "$h1" = "$h0" ]; then _bad "a hook moves the hash" "unchanged: $h0"; else _
 printf 'export const x = 2\n' > "$FIX/src/main.ts"
 h2="$(gate_tree_hash)"
 if [ "$h2" = "$h1" ]; then _bad "source moves the hash" "unchanged: $h1"; else _ok "source moves the hash"; fi
+# The discriminator for the rewrite above: the same class of file, UNTRACKED,
+# moves nothing. Against the pre-HARNESS-014 hash this is red, because that hash
+# folded every untracked non-ignored file in.
+printf 'z() { :; }\n' > "$FIX/.claude/hooks/other.sh"
+assert_eq "an untracked hook does not move the hash" "$h2" "$(gate_tree_hash)"
+rm -f "$FIX/.claude/hooks/other.sh"
+
+# ---------------------------------------------------------------------------
+describe "gate_tree_hash: the tree the commit would have, not the working directory (HARNESS-014)"
+
+# The stamp is recomputed by CI from the PR head commit, which contains no
+# untracked file. Locally it was computed with `git add -A` over a HEAD-seeded
+# index, so a stray `.patch` in the checkout moved it and CI refused a record
+# that was correct for the code. The fix: seed from the REAL index and `add -u`
+# - tracked files as they stand, plus whatever is staged, minus deletions.
+fix_commit "everything tracked before the untracked cases"
+
+# AC-1, positive. Two untracked gated files, one per class the specimen had:
+# `handoff/x.patch` falls through paths.conf to `source`, exactly as
+# handoff-world-080/*.patch does; the second classifies `test`.
+mkdir -p "$FIX/handoff"
+printf 'diff --git a/x b/x\n' > "$FIX/handoff/x.patch"
+printf 'test("stray", () => {})\n' > "$FIX/tests/stray.test.ts"
+assert_eq "fixture: the stray patch classifies as source" "source" "$(classify "handoff/x.patch")"
+assert_eq "fixture: the stray test classifies as test"    "test"   "$(classify "tests/stray.test.ts")"
+assert_eq "AC-1: an untracked gated file does not move the stamp off HEAD's" \
+  "$(gate_tree_hash_of HEAD)" "$(gate_tree_hash)"
+
+# AC-1, control. The working tree still counts for files git TRACKS: an
+# unstaged edit to a tracked source file moves the hash off HEAD's. A fix that
+# simply hashed HEAD passes the positive case and fails here.
+printf 'export const x = 3\n' > "$FIX/src/main.ts"
+before_status="$(git -C "$FIX" status --porcelain)"
+before_cached="$(git -C "$FIX" diff --cached)"
+if [ "$(gate_tree_hash)" = "$(gate_tree_hash_of HEAD)" ]; then
+  _bad "AC-1 control: an unstaged edit to a TRACKED source file moves the stamp" "still equal to HEAD's: $(gate_tree_hash_of HEAD)"
+else
+  _ok "AC-1 control: an unstaged edit to a TRACKED source file moves the stamp"
+fi
+
+# C-1: the real index is never written. `git status` and the staged diff are
+# byte-identical before and after that run - taken WITH the unstaged edit and
+# the strays present, because that is the state in which a `git add -u` that
+# leaked into the real index would have something to stage.
+assert_eq "C-1: gate_tree_hash leaves git status --porcelain unchanged" \
+  "$before_status" "$(git -C "$FIX" status --porcelain)"
+assert_eq "C-1: and leaves the staged diff unchanged" \
+  "$before_cached" "$(git -C "$FIX" diff --cached)"
+git -C "$FIX" checkout -q -- src/main.ts 2>/dev/null
+rm -rf "$FIX/handoff" "$FIX/tests/stray.test.ts"
+
+# AC-3, positive: a file the story creates is covered once it is STAGED. The
+# hash taken with the file staged equals CI's hash of the commit that follows.
+printf 'export const staged = 1\n' > "$FIX/src/staged-module.ts"
+git -C "$FIX" add src/staged-module.ts >/dev/null 2>&1
+h_staged="$(gate_tree_hash)"
+fix_commit "the staged module, committed"
+assert_eq "AC-3: a staged new file is in the stamp, which equals the following commit's" \
+  "$(gate_tree_hash_of HEAD)" "$h_staged"
+
+# AC-3, control: the same file written but NOT staged is not in the stamp, so
+# the stamp does not equal the commit that later contains it. This is exactly
+# the file AC-4 exists to name; against the pre-HARNESS-014 hash it is red,
+# because `add -A` folded the unstaged file in and the two hashes agreed.
+printf 'export const unstaged = 1\n' > "$FIX/src/unstaged-module.ts"
+h_unstaged="$(gate_tree_hash)"
+fix_commit "the unstaged module, committed after the hash was taken"
+if [ "$h_unstaged" = "$(gate_tree_hash_of HEAD)" ]; then
+  _bad "AC-3 control: an UNSTAGED new file is not in the stamp, so it differs from the later commit's" \
+    "the stamp already equalled the later commit's hash: $h_unstaged"
+else
+  _ok "AC-3 control: an UNSTAGED new file is not in the stamp, so it differs from the later commit's"
+fi
+
+# ---------------------------------------------------------------------------
+describe "untracked_gated: the one definition of an untracked gated file (HARNESS-014, C-2)"
+
+# gates.sh names what this prints and refuses to record while it is non-empty.
+# It is `git ls-files --others --exclude-standard`, kept to what gated_stdin
+# keeps: so `.gitignore` AND `.git/info/exclude` both count (AC-6), docs and
+# harness markdown are never named, and nothing under .claude/state/ is.
+fix_commit "clean before the listing cases"
+out="$(untracked_gated 2>&1)"; rc=$?
+assert_eq "with no untracked gated file it prints nothing" "" "$out"
+assert_eq "and returns 0"                                  "0" "$rc"
+
+mkdir -p "$FIX/handoff" "$FIX/.claude/commands" "$FIX/.claude/state"
+printf 'diff --git a/x b/x\n' > "$FIX/handoff/x.patch"          # source
+printf 'test("stray", () => {})\n' > "$FIX/tests/stray.test.ts"  # test
+printf 'export const z = 1\n' > "$FIX/Zed.ts"                    # source; sorts FIRST under LC_ALL=C
+printf '# stray notes\n' > "$FIX/notes.md"                       # docs: never named
+printf '# a prompt\n' > "$FIX/.claude/commands/x.md"             # harness markdown: never named
+printf 'STORY_ID=T-9\n' > "$FIX/.claude/state/current-story.env" # harness state: never named
+out="$(untracked_gated 2>&1)"; rc=$?
+assert_eq "lists every untracked gated file, repo-relative, LC_ALL=C sorted, one per line" \
+  "$(printf 'Zed.ts\nhandoff/x.patch\ntests/stray.test.ts')" "$out"
+assert_eq "and returns 0 when it printed something" "0" "$rc"
+rm -f "$FIX/Zed.ts" "$FIX/notes.md" "$FIX/.claude/commands/x.md" "$FIX/.claude/state/current-story.env"
+
+# AC-6: an untracked file that WOULD classify as source, but is ignored. Both
+# ignore files, because .git/info/exclude is the remedy the refusal points a
+# user to for a stray they mean to keep, so it has to actually work.
+printf 'src/scratch-ignored.ts\n' >> "$FIX/.gitignore"
+# Commit ONLY .gitignore (it is gated, so HEAD carries it). Not fix_commit: that
+# is `add -A`, which would track handoff/x.patch and tests/stray.test.ts, and
+# the three "is listed" assertions below read them as UNTRACKED (R-1a).
+git -C "$FIX" add .gitignore >/dev/null 2>&1
+git -C "$FIX" -c user.email=t@t -c user.name=t commit -qm "ignore rule for the scratch file" >/dev/null 2>&1
+h_clean="$(gate_tree_hash_of HEAD)"
+printf 'export const scratch = 1\n' > "$FIX/src/scratch-ignored.ts"
+assert_eq "fixture: the .gitignore'd scratch file classifies as ignored" "ignored" "$(classify "src/scratch-ignored.ts")"
+assert_eq "AC-6: a .gitignore'd file does not move the stamp" "$h_clean" "$(gate_tree_hash)"
+assert_eq "AC-6: and is not listed by untracked_gated" \
+  "$(printf 'handoff/x.patch\ntests/stray.test.ts')" "$(untracked_gated 2>&1)"
+
+printf 'src/scratch-excluded.ts\n' >> "$FIX/.git/info/exclude"
+printf 'export const excluded = 1\n' > "$FIX/src/scratch-excluded.ts"
+assert_eq "AC-6: a file excluded through .git/info/exclude does not move the stamp" "$h_clean" "$(gate_tree_hash)"
+assert_eq "AC-6: and is not listed by untracked_gated either" \
+  "$(printf 'handoff/x.patch\ntests/stray.test.ts')" "$(untracked_gated 2>&1)"
+
+# AC-6, control: with the exclude rule removed the same file IS an untracked
+# gated file, and is listed. Without this, "list nothing" passes every AC-6
+# assertion above.
+grep -v 'src/scratch-excluded.ts' "$FIX/.git/info/exclude" > "$FIX/.git/info/exclude.new"
+mv "$FIX/.git/info/exclude.new" "$FIX/.git/info/exclude"
+assert_eq "AC-6 control: with the exclude rule removed the same file is listed" \
+  "$(printf 'handoff/x.patch\nsrc/scratch-excluded.ts\ntests/stray.test.ts')" "$(untracked_gated 2>&1)"
+assert_eq "AC-6 control: and it still does not move the stamp - untracked is untracked" "$h_clean" "$(gate_tree_hash)"
+
+rm -rf "$FIX/handoff" "$FIX/tests/stray.test.ts" "$FIX/src/scratch-ignored.ts" "$FIX/src/scratch-excluded.ts"
 
 # ---------------------------------------------------------------------------
 describe "path_is_implausible: a failed parse is inconclusive, not a violation"
@@ -489,288 +604,292 @@ assert_eq "nothing when mutate.sh is not involved" "" \
 assert_eq "only scripts/mutate.sh" "" \
   "$(mutate_targets "$(m "bash tools/mutate.sh src/main.ts 's/a/b/' -- true")")"
 
-# ===========================================================================
-# MT-041 - one guard invocation costs half the processes.
+# ---------------------------------------------------------------------------
+# HARNESS-010. The reconciled write-target parser, asked directly.
 #
-# A cost story: lib.sh is rewritten to spawn fewer processes and NO verdict may
-# move. So almost everything below PASSES ON ARRIVAL - it is written against
-# code that already works, and pins what the rewrite must preserve. Each block
-# says which C-5 mutation earned it; the output is in MT-041 `## Test plan`.
-# The two assertions that are RED ON ARRIVAL are the cost claims themselves:
-# the process-count instrument's reading of one classify call (AC-4).
-. "$TESTS_DIR/_spawns.sh"
-_t41="$(mktemp -d 2>/dev/null || mktemp -d -t mt041)"
-_root41="$HARNESS_ROOT"; _dir41="$HARNESS_DIR"
-FIX41="$(make_fixture)"
-FIX41BS="$(printf '%s' "$FIX41" | tr '/' '\134')"
-HARNESS_ROOT="$FIX41"; HARNESS_DIR="$FIX41/.claude/harness"
+# phase-guard.test.sh drives the same thing end to end through the hook; this
+# section is the cheapest level that can falsify AC-2 and AC-3, because it can
+# see the ROLE of every operand, while the hook only ever reports the role of
+# the ONE candidate it happens to deny first.
+#
+# C-4: write_candidates() lives in lib.sh, takes MASKED command text, and emits
+# a verdict line - `W` when the command names a write-capable tool at a real
+# token boundary, `-` when it does not - followed by one line per candidate,
+# either `TARGET` or `TARGET<TAB>ROLE`.
+#
+# wcand() renders that as one string so an assertion can be an EQUALITY on the
+# whole answer rather than a containment in part of it. Three properties of the
+# rendering are deliberate:
+#
+#   * the verdict is kept, and an absent function renders `<no output>`. That is
+#     what stops every "yields no target" control from passing VACUOUSLY while
+#     write_candidates does not exist: `-` is not `<no output>`, so the controls
+#     go red in RED along with everything else rather than agreeing with a
+#     function that is not there.
+#   * the candidates are SORTED, so the assertions pin the SET and the roles and
+#     not an emission order no clause of C-4 fixes. LC_ALL=C, because a locale
+#     that ignores punctuation would order `/dev/null` against `src/main.ts`
+#     differently on CI than here.
+#   * one awk, no `grep -c`, no `head -1` under pipefail - check-sigpipe.sh and
+#     check-grep-count.sh judge this file too.
+wcand() {
+  local masked out verdict rest
+  masked="$(printf '%s' "$1" | mask_shell_quotes)"
+  out="$(write_candidates "$masked" 2>/dev/null)"
+  if [ -z "$out" ]; then printf '<no output>'; return 0; fi
+  verdict="${out%%$'\n'*}"
+  rest="${out#*$'\n'}"
+  [ "$rest" = "$out" ] && rest=""
+  printf '%s%s' "$verdict" \
+    "$(printf '%s\n' "$rest" \
+        | awk -F'\t' '$0 != "" { print (NF > 1 ? $1 " :: " $2 : $0) }' \
+        | LC_ALL=C sort \
+        | awk '{ printf " | %s", $0 }')" \
+    | unmask_shell_quotes
+}
 
 # ---------------------------------------------------------------------------
-describe "MT-041 instrument: the spawn counter counts what it claims to"
+describe "HARNESS-010 AC-6 and C-4: the parser is a named function of lib.sh"
 
-# The negative control for every "at most N" in AC-1 and AC-4. A counter that
-# sees nothing satisfies every upper bound; so this runs a snippet whose spawns
-# are known - one tr, one git, one lower() (itself a tr today, and possibly not
-# after C-4, so it is not asserted on), and builtins that must NOT count.
-spawn_trace_fn "$FIX41" "$_t41/ctl" 'tr a b </dev/null; printf x; git rev-parse --git-dir; true; [ 1 = 1 ]'
-_tally="$(spawn_tally "$_t41/ctl")"
-assert_eq "instrument: one tr of an unnamed form"  "1" "$(spawn_count "$_tally" 'tr:other*')"
-assert_eq "instrument: one git, keyed by subcommand" "1" "$(spawn_count "$_tally" 'git rev-parse')"
-assert_eq "instrument: builtins are not spawns"      "2" "$(spawn_count "$_tally" TOTAL)"
-
-# MT-041 R-1: xtrace spells an embedded single quote as '\'' - a backslash
-# OUTSIDE quotes. A parser that reads that escaped quote as opening a span ends
-# the word early, and the next word of the VALUE becomes a command name; on the
-# CI runner that counted `.gitignore` twice and AC-1 read 29 for a true 27. The
-# decoy is an executable on PATH in the tallying shell, so the old parser counts
-# it on every platform: this control is red there everywhere, not only where
-# some file in the repository happens to resolve.
-_bin41="$_t41/bin"; mkdir -p "$_bin41"
-printf '#!/bin/sh\nexit 0\n' > "$_bin41/mt041decoy"; chmod +x "$_bin41/mt041decoy"
-spawn_trace_fn "$FIX41" "$_t41/esc" "v=\"it's mt041decoy here\""
-_tally="$(PATH="$_bin41:$PATH" spawn_tally "$_t41/esc")"
-if PATH="$_bin41:$PATH" type -P mt041decoy >/dev/null 2>&1; then _ok "instrument R-1: the decoy resolves on PATH (control precondition)"
-else _bad "instrument R-1: the decoy resolves on PATH (control precondition)" "type -P mt041decoy failed"; fi
-assert_contains "instrument R-1: the trace spells the quote as '\\''" "'\''" "$(cat "$_t41/esc")"
-assert_eq "instrument R-1: a word after '\\'' inside a value is not a command" "0" \
-  "$(spawn_count "$_tally" mt041decoy)"
-assert_eq "instrument R-1: an assignment alone spawns nothing" "0" "$(spawn_count "$_tally" TOTAL)"
+# AC-6 says the parser lives in ONE place and every caller asks it rather than
+# re-deriving - the rule rules.md already states for classify.sh. The criterion
+# is marked "verified by review", and review is the right owner of "every
+# caller"; this pins the half that is mechanical, so review reads a design
+# question rather than checking whether a function exists.
+assert_eq "write_candidates is a function, not an inline pipeline" "function" \
+  "$(type -t write_candidates 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
-describe "MT-041 AC-5: classify's answers, and the order they are decided in"
+describe "HARNESS-010 AC-2: sed in-place is decided per word"
 
-# READ OUT of MT-034 C-3's measured table (C-6: settled), not re-derived. The
-# eight rows, spelled plainly, are ALREADY asserted above and are not repeated:
-# dist ("a vendor directory the project also gitignores"), .vitest and
-# playwright-report ("classify: git decides what is generated"), src and
-# src/mangatl/ui (MT-034 AC-4), docs and tests (MT-034 AC-1/AC-3), fixtures
-# (MT-034 AC-5). What is new is the SPELLING check_path hands them over in.
+# The nine forms AC-2 names. The first eight write in place; `-n` does not.
 #
-# The eight, reached the way check_path reaches them: through to_rel, from an
-# absolute path spelled with BACKSLASHES (C-2: `${s//\\//}` done wrong returns
-# its input unchanged, and every absolute-path verdict on Windows moves). to_rel
-# has two branches, and both are taken: the root itself spelled with
-# backslashes, for all eight rows; and a drive-letter path matched on the
-# repository's folder name, for one row decided by a rule and one decided by
-# git - the branch does not depend on the category, and each classify call
-# costs seconds on Windows in a suite this story exists to make cheaper.
-_base41="${FIX41##*/}"
-for case in \
-  "dist=vendor" \
-  ".vitest=ignored" \
-  "playwright-report=ignored" \
-  "docs=docs" \
-  "tests=test" \
-  "src=source" \
-  'src\mangatl\ui=source' \
-  "fixtures=test" \
-  ; do
-  p="${case%%=*}"; want="${case#*=}"
-  assert_eq "AC-5: classify of the backslash-spelled root + \\$p" "$want" \
-    "$(classify "$(to_rel "$FIX41BS\\$p")")"
-done
-for case in "dist=vendor" ".vitest=ignored"; do
-  p="${case%%=*}"; want="${case#*=}"
-  assert_eq "AC-5: classify of C:\\elsewhere\\<repo>\\$p" "$want" \
-    "$(classify "$(to_rel "C:\\elsewhere\\$_base41\\$p")")"
-done
+# `--i` is the live disagreement of C-1: upstream BLOCKS it, manga-translator
+# ALLOWS it, and upstream is right - GNU getopt_long honours any unambiguous
+# abbreviation and --in-place is the only long option of GNU sed 4.9 beginning
+# `--i`. So the long option is a PREFIX test and never a literal match.
+assert_eq "-i"                  "W | src/main.ts" "$(wcand "sed -i 's/a/b/' src/main.ts")"
+assert_eq "-i.bak"              "W | src/main.ts" "$(wcand "sed -i.bak 's/a/b/' src/main.ts")"
+assert_eq "-ni bundled"         "W | src/main.ts" "$(wcand "sed -ni 's/a/b/' src/main.ts")"
+assert_eq "-Ei bundled"         "W | src/main.ts" "$(wcand "sed -Ei 's/a/b/' src/main.ts")"
+assert_eq "-rin bundled"        "W | src/main.ts" "$(wcand "sed -rin 's/a/b/' src/main.ts")"
+assert_eq "--i abbreviated"     "W | src/main.ts" "$(wcand "sed --i 's/a/b/' src/main.ts")"
+assert_eq "--in-pl abbreviated" "W | src/main.ts" "$(wcand "sed --in-pl 's/a/b/' src/main.ts")"
+assert_eq "--in-place"          "W | src/main.ts" "$(wcand "sed --in-place 's/a/b/' src/main.ts")"
+assert_eq "--in-place=.bak"     "W | src/main.ts" "$(wcand "sed --in-place=.bak 's/a/b/' src/main.ts")"
+
+# The read-only forms yield NO target, and the verdict says the command was
+# never write-capable rather than write-capable-with-nothing-found.
+assert_eq "-n is a read"               "-" "$(wcand "sed -n '1,5p' src/main.ts")"
+assert_eq "no option at all is a read" "-" "$(wcand "sed 's/a/b/' src/main.ts")"
+
+# AC-2's CONTROL, and the reason the per-word test exists at all: the real
+# tests/guards/layer-imports.test.ts false positive. The FILENAME contains the
+# two characters `-i`, and a substring test refused a pure read on the very file
+# it was reading. A filename is not an option.
+assert_eq "AC-2 control: an -i bearing FILENAME under sed -n yields no target" "-" \
+  "$(wcand "sed -n '1,5p' tests/guards/layer-imports.test.ts")"
+assert_eq "AC-2 control: the same shape at the repository root" "-" \
+  "$(wcand "sed -n '1,5p' notes-inline.txt")"
+
+# The hole that control must not open from the other end: an -i bearing path is
+# not exempt from being WRITTEN. "Skip candidates whose name contains -i"
+# satisfies every must-permit case above and deletes this protection entirely.
+assert_eq "an -i bearing path is still the target of a real sed -i" \
+  "W | src/lib/layer-imports.ts" "$(wcand "sed -i 's/a/b/' src/lib/layer-imports.ts")"
+
+# --silent is GNU's long form of -n. It CONTAINS an i and writes nothing, which
+# is why the long option is a prefix test of `in-place` rather than a search for
+# the letter.
+assert_eq "--silent contains an i and writes nothing" "-" \
+  "$(wcand "sed --silent '1,5p' src/main.ts")"
+
+# EVERY positional is judged, not the last word of the match. `sed -i EXPR a b`
+# writes both, and an extractor ending in `awk '{print $NF}'` saw only `b` - the
+# cross-run reddened exactly this as "a frozen operand followed by a permitted
+# one".
+assert_eq "both operands of a two-file in-place edit" \
+  "W | docs/notes.md | src/main.ts" \
+  "$(wcand "sed -i 's/a/b/' src/main.ts docs/notes.md")"
+
+# With -e or -f supplying the script, the FIRST positional is a file too.
+assert_eq "-e supplies the script, so the first positional is a file" \
+  "W | src/main.ts" "$(wcand "sed -i -e 's/a/b/' src/main.ts")"
+assert_eq "-f supplies the script, so the first positional is a file" \
+  "W | src/main.ts" "$(wcand "sed -i -f script.sed src/main.ts")"
+
+# A trailing redirect is the redirect rule's business and does not displace the
+# operand. Both appear here; the hook drops /dev/null with its own filter.
+assert_eq "a trailing redirect does not hide the operand" \
+  "W | /dev/null | src/main.ts" \
+  "$(wcand "sed -i 's/a/b/' src/main.ts > /dev/null")"
+
+# A metacharacter in the expression is data. `(` used to terminate the
+# extractor's character class INSIDE the script and return a fragment of it.
+assert_eq "a capture group in the expression" "W | src/main.ts" \
+  "$(wcand "sed -i 's/\\(a\\)/b/' src/main.ts")"
+assert_eq "a negated address and a capture group" "W | src/main.ts" \
+  "$(wcand "sed -i '/x/!s/\\(a\\)/b/' src/main.ts")"
+assert_eq "a pipe delimiter" "W | src/main.ts" \
+  "$(wcand "sed -i 's|a|b|' src/main.ts")"
 
 # ---------------------------------------------------------------------------
-describe "MT-041 AC-4: is_ignored asks both spellings, and reads git's answer right"
+describe "HARNESS-010 AC-3: every mv operand carries the role it plays"
 
-# A fixture whose .gitignore is built to tell a correct batched is_ignored from
-# the plausible wrong ones. None of these names matches a paths.conf rule, so
-# every one of them is decided by is_ignored (C-3's third step). Each line says
-# what today's per-path, two-call is_ignored answers - MEASURED at 30bdc9a, and
-# the answer the rewrite must keep.
-#
-#   slashonly/   `slashonly` is ignored ONLY as `slashonly/` - the directory rule
-#                does not match a bare name that is not on disk. C-5 probe 3.
-#   bareonly     `bareonly` is ignored ONLY bare: `!bareonly/` re-includes the
-#   !bareonly/   slashed spelling. The mirror image, so dropping EITHER spelling
-#                moves a verdict.
-#   *.tmp        `keep.tmp` MATCHES a pattern - the negation - and is NOT
-#   !keep.tmp    ignored. `check-ignore --verbose` prints a line for it anyway
-#                (`.gitignore:N:!keep.tmp<TAB>keep.tmp`), so a batched reader
-#                that takes "not ::" to mean "ignored" turns it `ignored`.
-#                Measured; see MT-041 `## Handoff`.
-#   café/        a non-ASCII name: without -z, --verbose C-quotes it in the
-#                output ("caf\303\251/"), so a reader that matches output lines
-#                back to input by PATH text instead of by position loses it.
-_ign41="$(make_fixture)"
-printf 'slashonly/\nbareonly\n!bareonly/\n*.tmp\n!keep.tmp\ncaf\303\251/\n' >> "$_ign41/.gitignore"
-printf 'x\n' > "$_ign41/tracked.tmp"
-git -C "$_ign41" add -f tracked.tmp >/dev/null 2>&1
-HARNESS_ROOT="$_ign41"; HARNESS_DIR="$_ign41/.claude/harness"
+# AC-3's CONTROL, and the whole point of the section: THE SAME TOKEN is a
+# destination in one form and a source in the other. Nothing differs between
+# these two commands except operand order, the hook denies on src/main.ts
+# either way, and only the role tells them apart - which is what makes the role
+# assertion independent of the verdict rather than a second copy of it.
+assert_eq "mv DEST last: src/main.ts is the destination" \
+  "W | docs/notes.md :: source of mv (removed by the move) | src/main.ts :: destination of mv" \
+  "$(wcand "mv docs/notes.md src/main.ts")"
+assert_eq "AC-3 control: the same token is a SOURCE when it comes first" \
+  "W | docs/notes.md :: destination of mv | src/main.ts :: source of mv (removed by the move)" \
+  "$(wcand "mv src/main.ts docs/notes.md")"
 
-for case in \
-  "slashonly=ignored" \
-  "bareonly=ignored" \
-  "keep.tmp=source" \
-  "x.tmp=ignored" \
-  "$(printf 'caf\303\251')=ignored" \
-  "spikes=source" \
-  ; do
-  assert_eq "AC-4: classify ${case%%=*}" "${case#*=}" "$(classify "${case%%=*}")"
-done
+# `mv a b DEST`: the final positional is created, the rest are REMOVED. That
+# asymmetry with cp is why mv emits every operand - `mv f1 f2 d/` leaves neither
+# f1 nor f2 where it was, while `cp g1 g2 e/` leaves both.
+assert_eq "mv a b DEST: two sources and a destination" \
+  "W | docs/a.md :: source of mv (removed by the move) | docs/b.md :: source of mv (removed by the move) | src/main.ts :: destination of mv" \
+  "$(wcand "mv docs/a.md docs/b.md src/main.ts")"
 
-# The contract is unchanged (C-7): one path in, an exit status out.
-if is_ignored slashonly; then _ok "AC-4: is_ignored slashonly succeeds"
-else _bad "AC-4: is_ignored slashonly succeeds" "exit status said not ignored"; fi
-if is_ignored keep.tmp; then _bad "AC-4: is_ignored keep.tmp fails" "a negated match was read as ignored"
-else _ok "AC-4: is_ignored keep.tmp fails"; fi
-if is_ignored ""; then _bad "AC-4: is_ignored of nothing fails" "an empty path was ignored"
-else _ok "AC-4: is_ignored of nothing fails"; fi
+# `mv X d/`.
+assert_eq "mv X d/: a directory destination is still the last positional" \
+  "W | docs/ :: destination of mv | src/main.ts :: source of mv (removed by the move)" \
+  "$(wcand "mv src/main.ts docs/")"
 
-# PINNED AS TODAY'S VERDICT, NOT ENDORSED. A TRACKED file matching an ignore
-# rule classifies `ignored`, because the SLASHED spelling `tracked.tmp/` is not
-# in the index and `*.tmp` matches it - although lib.sh's own comment says a
-# tracked file is never reported ignored. MT-041 forbids any verdict change
-# (Out of scope 2), so this is held where it is and reported to the
-# orchestrator as its own defect. A story that fixes it flips this line.
-assert_eq "AC-4: a tracked file matching an ignore rule keeps today's verdict" \
-  "ignored" "$(classify tracked.tmp)"
+# -t / --target-directory INVERTS which operand is the destination: DIR is the
+# destination and EVERY positional is a source, whatever its position. All six
+# spellings, because three of them glue or attach the argument, and a parser
+# that merely SKIPS a `-` token whole leaves `mv -tsrc/ docs/notes.md` an
+# entirely unjudged write into frozen source.
+assert_eq "-t DIR separate" \
+  "W | docs/notes.md :: source of mv (removed by the move) | src/ :: destination of mv" \
+  "$(wcand "mv -t src/ docs/notes.md")"
+assert_eq "-tDIR glued" \
+  "W | docs/notes.md :: source of mv (removed by the move) | src/ :: destination of mv" \
+  "$(wcand "mv -tsrc/ docs/notes.md")"
+assert_eq "--target-directory DIR separate" \
+  "W | docs/notes.md :: source of mv (removed by the move) | src/ :: destination of mv" \
+  "$(wcand "mv --target-directory src/ docs/notes.md")"
+assert_eq "--target-directory=DIR attached" \
+  "W | docs/notes.md :: source of mv (removed by the move) | src/ :: destination of mv" \
+  "$(wcand "mv --target-directory=src/ docs/notes.md")"
+assert_eq "-ft DIR bundled" \
+  "W | docs/notes.md :: source of mv (removed by the move) | src/ :: destination of mv" \
+  "$(wcand "mv -ft src/ docs/notes.md")"
+assert_eq "-ftDIR bundled and glued" \
+  "W | docs/notes.md :: source of mv (removed by the move) | src/ :: destination of mv" \
+  "$(wcand "mv -ftsrc/ docs/notes.md")"
 
-# C-3: a path with a NEWLINE in it. `--stdin` without -z reads it as two paths.
-# Decided (C-3 as amended in MT-041 RED): a newline-bearing path goes through
-# the SAME single process as any other path - no fallback to two calls. The
-# count loop below enforces that half; these three enforce the answers, which
-# are today's per-path answers, measured. Each is a different way a line-split
-# batch lies:
-#   x<LF>.vitest   no rule matches the whole name; the line `.vitest` would.
-#   a.tmp<LF>b     no rule matches the whole name; the line `a.tmp` would.
-#   a<LF>b.tmp     `*.tmp` DOES match the whole name; the first line would not.
-assert_eq "AC-4: a newline-bearing path is judged whole (x<LF>.vitest)" \
-  "source"  "$(classify "$(printf 'x\n.vitest')")"
-assert_eq "AC-4: a newline-bearing path is judged whole (a.tmp<LF>b)" \
-  "source"  "$(classify "$(printf 'a.tmp\nb')")"
-assert_eq "AC-4: a newline-bearing path is judged whole (a<LF>b.tmp)" \
-  "ignored" "$(classify "$(printf 'a\nb.tmp')")"
+# The control again, through the option rather than through position: these two
+# tokens keep the same roles while SWAPPING position. A parser reading position
+# only gets this exactly backwards and still blocks, which is why the verdict
+# cannot be the thing under test.
+assert_eq "-t: the positional is a source however late it appears" \
+  "W | docs/ :: destination of mv | src/main.ts :: source of mv (removed by the move)" \
+  "$(wcand "mv -t docs/ src/main.ts")"
 
-# THE COST CLAIM, RED ON ARRIVAL. One classify call that reaches is_ignored
-# spawns at most one `git check-ignore`, whichever spelling decides it.
-# Measured today: 2 for spikes, slashonly, keep.tmp and x<LF>.vitest - is_ignored
-# asks `<p>` then `<p>/` - and 1 for bareonly, which the first call decides.
-#
-# The newline-bearing path is in this loop ON PURPOSE: it is what makes C-3's
-# decision a test rather than a sentence. A two-call fallback for such a path
-# keeps the verdicts above but spends two processes here. One process that
-# carries both spellings - `check-ignore -- "$1" "$1/"` as argv (measured in
-# MT-041 RED: same answer as today on every case in this block), or `--stdin -z`
-# - spends one.
-for p in spikes slashonly bareonly keep.tmp "$(printf 'x\n.vitest')"; do
-  spawn_trace_fn "$_ign41" "$_t41/ci" "classify '$p' >/dev/null"
-  _tally="$(spawn_tally "$_t41/ci")"
-  _n="$(spawn_count "$_tally" 'git check-ignore')"
-  _lbl="${p//$'\n'/<LF>}"
-  if [ "$(spawn_traced_calls "$_t41/ci" is_ignored)" -lt 1 ]; then
-    _bad "AC-4: classify $_lbl reaches is_ignored (instrument control)" "the trace never called is_ignored"
-  elif [ "$_n" -le 1 ]; then
-    _ok "AC-4: classify $_lbl spawns at most one git check-ignore"
-  else
-    _bad "AC-4: classify $_lbl spawns at most one git check-ignore" "spawned $_n"
-  fi
-done
-
-HARNESS_ROOT="$FIX41"; HARNESS_DIR="$FIX41/.claude/harness"
-rm -rf "$_ign41"
+# The option TOKEN itself must never become a candidate.
+assert_eq "an option is not an operand" \
+  "W | docs/a.md :: source of mv (removed by the move) | docs/b.md :: destination of mv" \
+  "$(wcand "mv -f docs/a.md docs/b.md")"
+assert_eq "-v is not an operand either" \
+  "W | docs/a.md :: source of mv (removed by the move) | docs/b.md :: destination of mv" \
+  "$(wcand "mv -v docs/a.md docs/b.md")"
 
 # ---------------------------------------------------------------------------
-describe "MT-041 C-2: the tr equivalences, on the inputs that tell them apart"
+describe "HARNESS-010 C-3 and PO-5: cp is NOT given mv's treatment"
 
-# tr -d '[:space:]' -> ${s//[[:space:]]/}  (phase_allows, phase_message)
-#
-# [:space:] is six characters, not one. A phases.conf row padded with a TAB, a
-# vertical tab and a form feed is still the RED row. C-5 probe 1 narrows the
-# class to ' ', after which the phase name no longer matches, phase_allows falls
-# through to "unknown phase: don't block" - the lock off - and these go red.
-_ph41="$(mktemp -d 2>/dev/null || mktemp -d -t mt041ph)"   # phases.conf only; no repo needed
-mkdir -p "$_ph41/.claude/harness"
-printf 'IDLE | vendor,ignored,test,source,config,docs,harness | idle\n\tRED\t\v| vendor, ignored ,\ttest,\fdocs ,harness\t | tabbed red message\n' \
-  > "$_ph41/.claude/harness/phases.conf"
-_phase41="${PHASE:-}"; HARNESS_DIR="$_ph41/.claude/harness"; PHASE=RED
-if phase_allows source; then _bad "C-2: a TAB-padded RED row still forbids source" "allowed"
-else _ok "C-2: a TAB-padded RED row still forbids source"; fi
-if phase_allows test; then _ok "C-2: a category after a TAB is still permitted"
-else _bad "C-2: a category after a TAB is still permitted" "refused test"; fi
-if phase_allows docs; then _ok "C-2: a category after a form feed is still permitted"
-else _bad "C-2: a category after a form feed is still permitted" "refused docs"; fi
-assert_eq "C-2: phase_message finds a TAB-padded phase name" "tabbed red message" "$(phase_message)"
-PHASE="$_phase41"; HARNESS_DIR="$FIX41/.claude/harness"
-rm -rf "$_ph41"
+# cp READS its sources and leaves them where they are, so only the destination
+# is a write target. Judging every operand would be a false positive, not a fix.
+assert_eq "cp judges the destination only" \
+  "W | src/main.ts :: destination of cp" \
+  "$(wcand "cp docs/notes.md src/main.ts")"
+assert_eq "cp with three operands still judges only the last" \
+  "W | src/main.ts :: destination of cp" \
+  "$(wcand "cp docs/a.md docs/b.md src/main.ts")"
 
-# tr '\134' '/' -> ${s//\\//}  (to_rel x2, path_is_absolute, normalize_rel,
-# command_cwd x2). Every site, with a backslash that has to become a slash.
-assert_eq "C-2: to_rel of a backslash-spelled absolute path" "src/main.ts" \
-  "$(to_rel "$FIX41BS\\src\\main.ts")"
-_r41="$HARNESS_ROOT"; HARNESS_ROOT="$FIX41BS"
-assert_eq "C-2: to_rel against a backslash-spelled HARNESS_ROOT" "src/main.ts" \
-  "$(to_rel "$FIX41/src/main.ts")"
-HARNESS_ROOT="$_r41"
-if path_is_absolute 'C:\Users\x'; then _ok "C-2: C:\\Users\\x is absolute"
-else _bad "C-2: C:\\Users\\x is absolute" "judged relative"; fi
-if path_is_absolute '\tmp\x'; then _ok "C-2: \\tmp\\x is absolute"
-else _bad "C-2: \\tmp\\x is absolute" "judged relative"; fi
-if path_is_absolute 'src\main.ts'; then _bad "C-2: src\\main.ts is relative" "judged absolute"
-else _ok "C-2: src\\main.ts is relative"; fi
-assert_eq "C-2: normalize_rel collapses a backslash-spelled .." "src/b.ts" \
-  "$(normalize_rel 'src\a\..\b.ts')"
-assert_eq "C-2: cd into a backslash-spelled subdirectory" "src" \
-  "$(command_cwd "$(m "cd \"$FIX41BS\\src\" && echo x > a.ts")")"
-assert_eq "C-2: cd into the repository root spelled with backslashes" "0:" \
-  "$(r="$(command_cwd "$(m "cd \"$FIX41BS\" && echo x > a.ts")")"; printf '%s:%s' "$?" "$r")"
-_r41="$HARNESS_ROOT"; HARNESS_ROOT="$FIX41BS"
-assert_eq "C-2: cd into the root, against a backslash-spelled HARNESS_ROOT" "0:" \
-  "$(r="$(command_cwd "$(m "cd \"$FIX41\" && echo x > a.ts")")"; printf '%s:%s' "$?" "$r")"
-HARNESS_ROOT="$_r41"
-
-# tr -d '"'"'" -> ${s//[\"\']/}  (shell_assignments, mutate_targets,
-# command_cwd). The delete set is BOTH quote characters - C-2 as amended at
-# PLANNED->RED. The single quote is the one a `${s//\"/}` rewrite keeps.
-assert_eq "C-2: a single-quoted value loses its quotes" "F=src/main.ts" \
-  "$(shell_assignments "$(m "F='src/main.ts'; rm \"\$F\"")")"
-assert_eq "C-2: both quote characters go, wherever they are" "A=xy" \
-  "$(shell_assignments "$(m "A=\"x'y\"; rm \"\$A\"")")"
-assert_eq "C-2: a single-quoted mutate.sh FILE argument" "src/main.ts" \
-  "$(mutate_targets "$(m "bash scripts/mutate.sh 'src/main.ts' 's/a/b/' -- true")")"
-assert_eq "C-2: cd into a single-quoted directory" "src" \
-  "$(command_cwd "$(m "cd 'src' && echo x > a.ts")")"
-assert_eq "C-2: cd into a double-quoted directory" "src" \
-  "$(command_cwd "$(m 'cd "src" && echo x > a.ts')")"
-
-# And what the quote deletion must NOT delete: a backslash. `${s//[\"\']/}`
-# puts escaped quotes inside a bracket expression inside a parameter expansion,
-# which is exactly where bash versions disagree about what a backslash means;
-# a bracket that also holds `\` strips every Windows path that passes through.
-# (command_cwd's case is the backslash-spelled `cd` above.)
-assert_eq "C-2: a backslash in an assigned value survives the quote deletion" 'F=C:\x\y.ts' \
-  "$(shell_assignments "$(m 'F="C:\x\y.ts"; rm "$F"')")"
-assert_eq "C-2: a backslash in a mutate.sh FILE argument survives the quote deletion" 'C:\r\src\a.ts' \
-  "$(mutate_targets "$(m "bash scripts/mutate.sh 'C:\r\src\a.ts' 's/a/b/' -- true")")"
+# `cp -t` is one of C-1's three BOTH WRONG rows: a real write into frozen source
+# that both parsers permit, because the destination is behind the option and the
+# parser names docs/notes.md instead. C-3 and PO-5 say it is a FINDING and not a
+# criterion - widening the rule set inside a reconciliation makes it impossible
+# to attribute a behaviour change to either cause. So this assertion pins the
+# hole OPEN on purpose. Closing it should break this line and require a story.
+assert_eq "C-3: cp -t stays unhandled, deliberately" \
+  "W | docs/notes.md :: destination of cp" \
+  "$(wcand "cp -t src/ docs/notes.md")"
 
 # ---------------------------------------------------------------------------
-describe "MT-041 AC-3: lower() still lowers, by a mechanism bash 3.2 has"
+describe "HARNESS-010: an option's ARGUMENT is not the file being written"
 
-# The grep above ("no \${var,,} or \${var^^}") is AC-3's static half. This is
-# its behavioural half: to_rel's comparison is case-insensitive, whatever
-# mechanism does it - tr, or C-4's saved-and-restored nocasematch.
-#
-# And the static half has a hole, found by C-5's AC-3 probe in MT-041 RED: its
-# pattern requires a NAME, so `${1,,}` - the spelling lower() itself would use,
-# `printf '%s' "${1,,}"` - matches nothing and the assertion stays green. This
-# one covers positional and special parameters, array elements, the
-# single-character forms, `~`, bash 5's `@L`/`@U`/`@u`, and the case-converting
-# attributes of declare/typeset/local. Zero hits in the tree at 30bdc9a.
-hits="$(grep -nE '\$\{([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*])(\[[^]]*\])?(,,?|\^\^?|~~?|@[LUu])\}' $shipped || true)"
-hits="$hits$(grep -nE '(declare|typeset|local)[[:space:]]+-[A-Za-z]*[lu]' $shipped || true)"
-assert_eq "AC-3: no bash 4+ case conversion of any parameter in shipped scripts" "" "$hits"
-assert_eq "AC-3: lower converts ASCII capitals" "c:/users/ryanc/x.ts" "$(lower 'C:/Users/RyanC/X.ts')"
-assert_eq "AC-3: to_rel places a path whose root is spelled in capitals" "src/main.ts" \
-  "$(to_rel "$(printf '%s' "$FIX41" | tr 'a-z' 'A-Z')/src/main.ts")"
-assert_eq "AC-3: to_rel keeps the relative part's own case" "src/Main.TS" \
-  "$(to_rel "$(printf '%s' "$FIX41" | tr 'a-z' 'A-Z')/src/Main.TS")"
+# The cross-run's xA half. manga-translator's parser emits every non-option
+# token, so `touch -t 202601010000 docs/a.md` produced the TIMESTAMP as a
+# candidate and `touch -r src/main.ts docs/a.md` produced a file `-r` only
+# READS. A wrong denial naming a real path is the most convincing kind, and the
+# reconciled parser must not inherit it.
+assert_eq "touch -t: the timestamp is not a path" "W | docs/a.md" \
+  "$(wcand "touch -t 202601010000 docs/a.md")"
+assert_eq "touch -d: the date is not a path" "W | docs/a.md" \
+  "$(wcand "touch -d 2026-01-01 docs/a.md")"
+assert_eq "touch -r: the reference is only read" "W | docs/a.md" \
+  "$(wcand "touch -r src/main.ts docs/a.md")"
+assert_eq "touch --date: the long form too" "W | docs/a.md" \
+  "$(wcand "touch --date 2026-01-01 docs/a.md")"
+assert_eq "touch --reference: the long form too" "W | docs/a.md" \
+  "$(wcand "touch --reference src/main.ts docs/a.md")"
+assert_eq "touch --date=: an attached argument consumes no next word" "W | docs/a.md" \
+  "$(wcand "touch --date=2026-01-01 docs/a.md")"
 
-HARNESS_ROOT="$_root41"; HARNESS_DIR="$_dir41"
-rm -rf "$FIX41" "$_t41"
+# And the control that keeps the skip honest: the file BEHIND the option is
+# still judged. A rule skipping one word too many satisfies every assertion
+# above and stops guarding anything.
+assert_eq "the real target behind -t is still a target" "W | src/main.ts" \
+  "$(wcand "touch -t 202601010000 src/main.ts")"
+assert_eq "the real target behind -r is still a target" "W | src/main.ts" \
+  "$(wcand "touch -r docs/notes.md src/main.ts")"
+
+# rm, touch and tee take every remaining operand.
+assert_eq "rm -f takes both operands" "W | src/a.ts | src/b.ts" \
+  "$(wcand "rm -f src/a.ts src/b.ts")"
+assert_eq "tee takes its operand" "W | src/main.ts" \
+  "$(wcand "tee src/main.ts < docs/notes.md")"
+assert_eq "tee -a takes its operand" "W | src/main.ts" \
+  "$(wcand "tee -a src/main.ts < docs/notes.md")"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-010 AC-4: the verdict separates 'nothing to find' from 'found nothing'"
+
+# AC-4 rests on this line. A command that NAMES a write-capable tool and yields
+# no target is a different fact from a command that was never a write, and while
+# the two were indistinguishable from outside a bypass stayed invisible: after
+# it the log was empty, and after a permitted write the log was empty too.
+assert_eq "operands arriving from a pipe are unknowable, but rm was named" "W" \
+  "$(wcand "find src -name '*.ts' | xargs rm")"
+assert_eq "an input redirect gives no operand either" "W" \
+  "$(wcand "xargs touch < list")"
+
+# The negative controls. Without these, "always print W" satisfies both lines
+# above and AC-4's log becomes one entry per command.
+assert_eq "a read-only cat is not write-capable"      "-" "$(wcand "cat src/main.ts")"
+assert_eq "a read-only grep is not write-capable"     "-" "$(wcand "grep -rn export src/")"
+assert_eq "a read-only git diff is not write-capable" "-" "$(wcand "git diff -- src/main.ts")"
+
+# A redirect ALONE does not make a command write-capable: `cmd > /dev/null` is
+# ubiquitous and its target is dropped on purpose, so tracing it would drown the
+# log this trace exists to make readable. The candidate is still emitted - the
+# verdict and the candidate list are separate answers.
+assert_eq "a bare redirect emits a candidate but is not a write-capable command" \
+  "- | /dev/null" "$(wcand "git diff > /dev/null")"
+assert_eq "a redirect into docs is a candidate without a write-capable name" \
+  "- | docs/notes.md" "$(wcand "echo x > docs/notes.md")"
+
+# Prose in quoted data is one token and can never be a command name. Widening a
+# character class does not buy this: `\bsed\b` matches the `sed` inside the
+# unmasked token `sed-i`.
+assert_eq "the harness's own vocabulary in a commit message is not a command" "-" \
+  "$(wcand 'git commit -m "fix the sed -i extractor"')"
 
 summary "lib"

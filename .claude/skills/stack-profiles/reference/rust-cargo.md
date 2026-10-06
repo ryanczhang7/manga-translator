@@ -12,6 +12,7 @@ that a JavaScript or Godot front end drives.
     gate | coverage  | required | . | cargo llvm-cov --workspace --fail-under-lines 100
     gate | build     | required | . | cargo build --release --workspace
     gate | mutation  | optional | . | cargo mutants
+    ondemand | mutation | cargo mutants re-runs the suite once per mutant; run it with /audit-mutations, not per story
 
     task | install | - | . | cargo fetch
     task | dev     | - | . | cargo run
@@ -54,7 +55,7 @@ ok\. [1-9]` stops after one digit, so it would measure `1` where cargo printed
 The vacuous-workspace bug also has a direct check, which does not depend on
 anyone reading `--workspace` correctly in a diff:
 
-    discovery | crates | . | cargo test --workspace --no-run 2>&1 | grep -q "world-core"
+    discovery | crates | . | cargo test --workspace --no-run 2>&1 | grep "world-core" > /dev/null
 
 Name a crate whose tests must run. `bash scripts/doctor.sh` runs it, and it
 fails the moment that crate stops being compiled into the test run.

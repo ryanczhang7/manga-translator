@@ -136,30 +136,25 @@ describe "the shipped pair agrees with itself"
 assert_eq "no disagreements" "" "$(problems "$SETTINGS" "$README")"
 
 # ---------------------------------------------------------------------------
-describe "MT-046 AC-7: the preserved failing log has its own row"
+describe "HARNESS-027 AC-7: the kept failing log has its own row"
 
 # `gate-logs/*.log` already matches `*.failed.log` as a glob, so the check above
-# is satisfied without a row. The row is there to say what the file is and who
-# writes it - so it is asserted by its exact first cell, not by a glob match.
-# Hand-editable `yes` (story PO-2): nothing believes its contents as a verdict,
-# and a deny would also block a Bash `rm` of a stale failure.
-failed_row() { # <readme>   "<written by><TAB><hand-editable>" for the row, or nothing
-  awk -F'|' '
-    /^[[:space:]]*\|/ {
-      p = $2; w = $3; e = $(NF - 1)
-      gsub(/^[ \t`]+|[ \t`]+$/, "", p); gsub(/^[ \t`]+|[ \t`]+$/, "", w); gsub(/^[ \t]+|[ \t]+$/, "", e)
-      if (p == "gate-logs/*.failed.log") { print w "\t" tolower(e); exit }
-    }' "$1"
+# is satisfied without a row. The row says what the file is and who writes it,
+# so it is asserted by its own first two cells and its last, as a whole line.
+# grep -E rather than downstream's awk reader: no gsub/field-splitting dialect
+# to differ between gawk and mawk (HARNESS-025), and no interval expressions.
+# failed_row <readme> <path cell>   How many table rows have that path, written
+# by scripts/gates.sh, hand-editable yes.
+failed_row() {
+  local p; p="$(printf '%s' "$2" | sed 's/[.*]/\\&/g')"
+  tr -d '\r' < "$1" | grep -cE -- "^\\| \`$p\` +\\| \`scripts/gates\\.sh\` +\\|.*\\| yes +\\|\$"
 }
-assert_eq "README has a gate-logs/*.failed.log row, written by scripts/gates.sh, hand-editable yes" \
-  "scripts/gates.sh${TAB}yes" "$(failed_row "$README")"
-# Control: the reader finds a row it knows is there, so a miss above is the
-# README's and not the parser's.
-_ctl="$(mktemp 2>/dev/null || mktemp -t mt046)"
-sed 's/`gate-logs\/\*\.log`/`gate-logs\/*.failed.log`/' "$README" > "$_ctl"
-assert_eq "control: the same reader finds the existing gate-logs/*.log row, renamed" \
-  "scripts/gates.sh${TAB}yes" "$(failed_row "$_ctl")"
-rm -f "$_ctl"
+assert_eq "AC-7: README has one gate-logs/*.failed.log row, written by scripts/gates.sh, hand-editable yes" \
+  1 "$(failed_row "$README" 'gate-logs/*.failed.log')"
+# Control: the same reader finds the row it knows is there, so a miss above is
+# the README's and not the reader's.
+assert_eq "AC-7 control: the same reader finds the existing gate-logs/*.log row" \
+  1 "$(failed_row "$README" 'gate-logs/*.log')"
 
 # ---------------------------------------------------------------------------
 describe "the two files that carry evidence stay denied"
@@ -294,5 +289,39 @@ good_settings; good_readme
 deny_also 'MultiEdit(./.claude/state/mystery)'
 assert_contains "an undocumented path under a later tool" \
   "denied path 'mystery' is not in the README table" "$(p)"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-029 AC-6: a surviving mutations/*.new has a row, and the paragraph says what it means"
+
+# mutate.sh builds the mutated text in a `.new` beside the backup. After
+# HARNESS-029 it removes it on every path it can run code on, so one that
+# survives means the run was killed outright - and it arrives with its `.bak`.
+# The row is matched whole, like AC-7's above: path, writer, a read-by cell
+# that says nothing reads it, hand-editable yes. grep -E, no interval
+# expressions (HARNESS-025: CI's awk and grep dialects differ from this host's).
+# new_row <readme>   How many table rows say that.
+new_row() {
+  tr -d '\r' < "$1" | grep -cE -- '^\| `mutations/\*\.new` +\| `scripts/mutate\.sh` +\| nothing[^|]*\| yes +\|$'
+}
+assert_eq "AC-6: README has one mutations/*.new row, written by scripts/mutate.sh, read by nothing, hand-editable yes" \
+  1 "$(new_row "$README")"
+# Control: the reader finds the row it is looking for in a table that has it,
+# so a miss above is the README's and not a mis-escaped pattern.
+printf -- '| File | Written by | Read by | Hand-editable |\n|---|---|---|---|\n| `mutations/*.new` | `scripts/mutate.sh` | nothing | yes |\n' > "$FIX/new-row.md"
+assert_eq "AC-6 control: the same reader finds a row written to the AC" 1 "$(new_row "$FIX/new-row.md")"
+
+# mutations_para <readme>   The paragraph that opens "`mutations/` is", joined
+# onto one line. No `exit` in the awk: it reads to the end rather than leave a
+# writer behind it.
+mutations_para() {
+  awk '{ sub(/\r$/, "") }
+       f == 1 && /^$/ { f = 2 }
+       f == 0 && /^`mutations\/` is/ { f = 1 }
+       f == 1 { printf "%s ", $0 }' "$1"
+}
+para="$(mutations_para "$README")"
+assert_contains "AC-6: the mutations/ paragraph is found" '`mutations/` is' "$para"
+assert_contains "AC-6: the mutations/ paragraph names a surviving .new" ".new" "$para"
+assert_contains "AC-6: and says it means the run was killed outright" "killed outright" "$para"
 
 summary "settings"

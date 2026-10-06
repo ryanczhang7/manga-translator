@@ -15,7 +15,10 @@
 . "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 
 FIX="$(make_fixture)"
-trap 'rm -rf "$FIX"' EXIT
+# HARNESS-031 builds its own fixture (C-3: never append a rule to the shared FIX,
+# or every later block inherits it) and adds it here.
+H031_FIXES=""
+trap 'rm -rf "$FIX" $H031_FIXES' EXIT
 
 # ---------------------------------------------------------------------------
 describe "RED: quoted arguments are not shell syntax"
@@ -75,6 +78,36 @@ assert_blocked "$FIX" 'mv docs/notes.md src/main.ts'    src/main.ts 'mv onto sou
 assert_blocked "$FIX" 'rm src/main.ts'                  src/main.ts 'rm source'
 assert_blocked "$FIX" 'touch src/new.ts'                src/new.ts  'touch new source'
 
+# ---------------------------------------------------------------------------
+describe "RED: a here-string does not open a heredoc"
+
+# `<<<` is a HERE-STRING. It opens nothing, and the word after it is its data,
+# not a delimiter. mask_shell_quotes read the SECOND `<` of `<<<` as the start
+# of a heredoc - from there, `<< "$paths"` matches the opener pattern - and took
+# `$paths` for a delimiter. Every following line was then masked as heredoc
+# body, waiting for a line equal to `$paths` that never arrives.
+#
+# On a one-line command nothing was lost, because the false delimiter only takes
+# effect from the NEXT line. On a multi-line command it opened the lock: the
+# redirect below arrived as `\004` and the guard saw no write target at all.
+#
+# Found while building scripts/check-grep-count.sh, which reads source through
+# the same masker and was silently scanning a fraction of every file that uses
+# a here-string - `scripts/plan.sh` from line 108 on, and nineteen suites.
+assert_blocked "$FIX" 'grep x <<< "$data"
+echo hi > src/main.ts' src/main.ts 'a redirect on the line after a here-string'
+
+# The same shape with the here-string on the same line, which always worked -
+# so a fix that only handles the multi-line case cannot pass both.
+assert_blocked "$FIX" 'grep x <<< "$data" > src/main.ts' src/main.ts \
+  'a redirect after a here-string on one line'
+
+# And the control that keeps the fix honest: a REAL heredoc still opens one, so
+# its body is still data. `>` in the body is prose, not a redirect.
+assert_allowed "$FIX" 'cat > docs/notes.md <<'"'"'EOF'"'"'
+echo hi > src/main.ts
+EOF' 'a real heredoc body is still data, not syntax'
+
 # The one the misparse was hiding: the target is the file, not the sed script.
 assert_blocked "$FIX" "sed -i 's|a|b|' src/main.ts"     src/main.ts 'sed -i with | delimiter, writing source'
 assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts"     src/main.ts 'sed -i with / delimiter, writing source'
@@ -82,14 +115,182 @@ assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts"     src/main.ts 'sed -i with
 # A quoted target keeps its spaces instead of being split into fragments.
 assert_blocked "$FIX" 'echo x > "src/my file.ts"'       'src/my file.ts' 'quoted target containing a space'
 
+# THE SAME PROPERTY THROUGH EVERY OTHER EXTRACTOR, and it is load-bearing for a
+# finding rather than decoration.
+#
+# The field report's last open item says `path_is_implausible` accepts a
+# candidate containing spaces, so a mis-parse is denied as a phase violation
+# naming a file that does not exist - and warns that the obvious fix, "a space
+# means the parse leaked", would break the assertion above.
+#
+# Measured, and neither half survives. The predicate is called while the
+# candidate is STILL MASKED, and masking replaces the spaces inside a quoted or
+# escaped span - so a quoted path arrives as one token with no real space in it,
+# and every extractor takes a single `awk` field, which cannot contain one
+# either. Ten shapes were tried and none produced a candidate carrying a real
+# space. The rule would not break these; it would have no input at all.
+#
+# That conclusion rests entirely on masking holding through EVERY extractor, and
+# only the redirect one was pinned. These are the others. If masking ever stops
+# holding, a quoted path splits into fields and these go red - which is the
+# alarm the finding needs and did not have.
+assert_blocked "$FIX" 'rm -rf "src/a b"'                'src/a b'        'rm, a quoted path with a space'
+assert_blocked "$FIX" 'touch "src/c d.ts"'              'src/c d.ts'     'touch, the same'
+assert_blocked "$FIX" 'tee "src/x y.ts"'                'src/x y.ts'     'tee, the same'
+assert_blocked "$FIX" 'cp docs/notes.md "src/e f.ts"'   'src/e f.ts'     'cp, on its destination'
+assert_blocked "$FIX" 'mv docs/notes.md "src/g h.ts"'   'src/g h.ts'     'mv, the same'
+# A BACKSLASH-ESCAPED space is the other spelling, and the masker knows it too.
+assert_blocked "$FIX" 'touch src/my\ file.ts'           'src/my file.ts' 'an escaped space, not a quoted one'
+assert_blocked "$FIX" 'cp docs/notes.md src/i\ j.ts'    'src/i j.ts'     'and through cp'
+
 assert_blocked "$FIX" 'echo x > src/main.ts' src/main.ts 'redirect into source (Bash)'
 r="$(guard "$FIX" Write file_path src/main.ts)"
 assert_contains "Write tool is blocked in RED" "category: source" "$r"
 r="$(guard "$FIX" Edit file_path "$FIX/src/main.ts")"
 assert_contains "Edit tool is blocked on an absolute path" "category: source" "$r"
 
+# The other two tool names CLAUDE.md promises the lock covers. Neither string
+# appeared anywhere in this suite, so narrowing the case to `Write|Edit)` -
+# which switches the lock OFF for both - passed 145 of 145. MultiEdit is the
+# ordinary tool for a multi-hunk edit, so that is not the lock failing on an
+# exotic path; it is the lock failing on the routine one.
+r="$(guard "$FIX" MultiEdit file_path src/main.ts)"
+assert_contains "MultiEdit is blocked in RED" "category: source" "$r"
+assert_contains "and names the path it refused" "path:     src/main.ts" "$r"
+
+# NotebookEdit names its target in `notebook_path`, never in `file_path`, so it
+# needs its own check_path call - and deleting that call passed 145 of 145 too.
+r="$(guard "$FIX" NotebookEdit notebook_path src/analysis.ipynb)"
+assert_contains "NotebookEdit is blocked on notebook_path" "category: source" "$r"
+assert_contains "and names the notebook" "path:     src/analysis.ipynb" "$r"
+
 
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+describe "RED may declare what its tests need, and nothing else"
+
+# H22. RED writes the failing test; a failing test routinely needs a test-only
+# dependency - a temp-directory crate, an async pytest plugin, a snapshot
+# matcher - and in every ecosystem that is declared in the same manifest as the
+# production dependencies. The lock classified the whole manifest as `config`,
+# froze it in RED, and left the agent a refusal with no sanctioned next step,
+# which is the condition under which agents invent one.
+#
+# Note the asymmetry that made it more than an inconvenience: GREEN could add
+# ANY dependency it liked, because config is writable there. The phase forbidden
+# from touching production code was the only one that could not say what its
+# tests needed.
+set_phase "$FIX" RED
+assert_allowed "$FIX" 'echo x >> Cargo.toml'      'RED may write Cargo.toml'
+assert_allowed "$FIX" 'echo x >> package.json'    'RED may write package.json'
+assert_allowed "$FIX" 'echo x >> pyproject.toml'  'RED may write pyproject.toml'
+# The lockfile too, or the install that follows the declaration cannot complete.
+assert_allowed "$FIX" 'echo x >> Cargo.lock'      'RED may write the lockfile'
+assert_allowed "$FIX" 'echo x >> pnpm-lock.yaml'  'RED may write pnpm-lock.yaml'
+
+# What the manifest permission is NOT. Splitting manifests out of `config` must
+# not hand RED the rest of the configuration: a build config, a container
+# definition or a tsconfig is production surface and stays frozen.
+assert_blocked "$FIX" 'echo x >> tsconfig.json'   tsconfig.json   'tsconfig is still config'
+assert_blocked "$FIX" 'echo x >> vite.config.ts'  vite.config.ts  'a build config is still config'
+assert_blocked "$FIX" 'echo x >> Dockerfile'      Dockerfile      'a Dockerfile is still config'
+assert_blocked "$FIX" 'echo x >> go.mod'          go.mod          'go.mod has no dev section, so it stays config'
+
+# And the phases that could always write these still can.
+set_phase "$FIX" GREEN
+assert_allowed "$FIX" 'echo x >> Cargo.toml'   'GREEN may still write a manifest'
+assert_allowed "$FIX" 'echo x >> tsconfig.json' 'GREEN may still write config'
+set_phase "$FIX" REVIEW
+assert_blocked "$FIX" 'echo x >> Cargo.toml'   Cargo.toml 'REVIEW may not write a manifest'
+set_phase "$FIX" RED
+
+# ---------------------------------------------------------------------------
+describe "a redirect belongs to the redirect rule and to no other"
+set_phase "$FIX" RED
+
+# H1 again, in the shipped harness, found by a consuming project re-verifying
+# the field report against the version it had just vendored.
+#
+# Every rule except the redirect one takes a word off the end of its match, and
+# none of them knew a redirect could be attached. So `cp a b 2>/dev/null` was
+# refused on a path of `2>/dev/null`, and `rm a 2>/dev/null` on a path of `2` -
+# a different token, because THAT rule's character class excludes `>` and so
+# truncates at it, leaving the bare file descriptor behind as the candidate.
+#
+# The two shapes matter to keep separate. A fix that only declines candidates
+# containing `>` cures cp and mv and leaves rm and touch refusing on `2`, which
+# is this finding's standing warning arriving on schedule: do not enumerate
+# shapes, because the next one is already out there.
+assert_allowed "$FIX" 'cp docs/notes.md docs/copy.md 2>/dev/null'    'cp with stderr redirected'
+assert_allowed "$FIX" 'cp docs/notes.md docs/copy.md >/dev/null'     'cp with stdout redirected'
+assert_allowed "$FIX" 'cp docs/notes.md docs/copy.md 1>/dev/null'    'cp with an explicit fd'
+assert_allowed "$FIX" 'mv docs/notes.md docs/copy.md 2>/dev/null'    'mv with stderr redirected'
+assert_allowed "$FIX" 'rm docs/notes.md 2>/dev/null'                 'rm with stderr redirected'
+assert_allowed "$FIX" 'touch docs/notes.md 2>/dev/null'              'touch with stderr redirected'
+assert_allowed "$FIX" 'cat docs/notes.md | tee docs/copy.md > /dev/null' 'tee whose output is discarded'
+assert_allowed "$FIX" "sed -i 's/a/b/' .gitignore 2>/dev/null"       'sed -i with stderr redirected'
+
+# The controls, and they are the point: a real write does not become invisible
+# by having a redirect attached to it. Each must still be refused, and refused
+# on the FILE - a guard that blocks the right command on the wrong path is
+# right by accident and will be wrong next time.
+assert_blocked "$FIX" 'cp docs/notes.md src/main.ts 2>/dev/null'  src/main.ts 'a real cp, stderr redirected'
+assert_blocked "$FIX" 'mv docs/notes.md src/main.ts 2>/dev/null'  src/main.ts 'a real mv, stderr redirected'
+assert_blocked "$FIX" 'rm src/main.ts 2>/dev/null'                src/main.ts 'a real rm, stderr redirected'
+assert_blocked "$FIX" 'touch src/new.ts 2>/dev/null'              src/new.ts  'a real touch, stderr redirected'
+assert_blocked "$FIX" 'echo x | tee src/main.ts > /dev/null'      src/main.ts 'a real tee whose output is discarded'
+assert_blocked "$FIX" 'echo x > src/main.ts 2>/dev/null'          src/main.ts 'a real redirect, with stderr also redirected'
+
+# TWO clauses, not one. `>/dev/null 2>&1` is the commonest redirect idiom in
+# shell, and every fixture above uses a single clause - so dropping the `g` from
+# the NOREDIR sed leaves all of them green while turning each of these into a
+# denial on a path of `2` or `2>`. One character, no assertion, and H1 reopened
+# after three field reports and two audits closed it.
+assert_allowed "$FIX" 'rm docs/notes.md >/dev/null 2>&1'              'rm, stdout and stderr both redirected'
+assert_allowed "$FIX" 'cp docs/notes.md docs/copy.md >/dev/null 2>&1' 'cp, two clauses'
+assert_allowed "$FIX" 'mv docs/notes.md docs/copy.md >/dev/null 2>&1' 'mv, two clauses'
+assert_allowed "$FIX" 'touch docs/notes.md >/dev/null 2>&1'           'touch, two clauses'
+assert_allowed "$FIX" 'rm -rf dist 1>/dev/null 2>/dev/null'           'two clauses, both with explicit fds'
+
+# The controls: a strip greedy enough to swallow a second clause is also greedy
+# enough to swallow the target, and that failure looks identical from outside.
+assert_blocked "$FIX" 'cp docs/notes.md src/main.ts >/dev/null 2>&1' src/main.ts 'a real cp behind two clauses'
+assert_blocked "$FIX" 'rm src/main.ts >/dev/null 2>&1'               src/main.ts 'a real rm behind two clauses'
+
+# ---------------------------------------------------------------------------
+describe "an option's argument is not the file being written"
+set_phase "$FIX" RED
+
+# H1's tenth shape, found by the second mutation audit. The rm/touch rule splits
+# its match into words and drops anything starting with `-`, but never the WORD
+# AFTER an option that takes one. So a timestamp became the write target:
+#
+#   touch -t 202601010000 docs/notes.md   refused, path: 202601010000
+#   touch -d 2026-01-01   docs/notes.md   refused, path: 2026-01-01
+#
+# The third case is the one that matters most, because it is not a nonsense
+# path - it is a real file, and a READ of it:
+#
+#   touch -r src/main.ts docs/a.md        refused, path: src/main.ts
+#
+# `-r` names the reference file whose timestamp is copied FROM. Refusing on it
+# denies a legitimate command by pointing at a file it only reads, which is
+# the most convincing kind of wrong denial: the path is real, so the message
+# looks correct.
+assert_allowed "$FIX" 'touch -t 202601010000 docs/notes.md' 'touch -t, timestamp is not a path'
+assert_allowed "$FIX" 'touch -d 2026-01-01 docs/notes.md'   'touch -d, date is not a path'
+assert_allowed "$FIX" 'touch -r src/main.ts docs/a.md'      'touch -r, the reference is only read'
+assert_allowed "$FIX" 'touch --reference=src/main.ts docs/a.md' 'touch --reference=, attached form'
+assert_allowed "$FIX" 'rm -f docs/notes.md'                 'rm -f still fine'
+
+# And the controls, because an option-skipping rule that skips one word too many
+# stops seeing the target. Each of these must still be refused, on the FILE.
+assert_blocked "$FIX" 'touch -t 202601010000 src/main.ts' src/main.ts 'a real touch behind -t'
+assert_blocked "$FIX" 'touch -d 2026-01-01 src/main.ts'   src/main.ts 'a real touch behind -d'
+assert_blocked "$FIX" 'touch -r docs/notes.md src/main.ts' src/main.ts 'the TARGET of -r is still judged'
+assert_blocked "$FIX" 'rm -rf src/main.ts'                src/main.ts 'rm -rf still refused'
+assert_blocked "$FIX" 'touch src/new.ts'                  src/new.ts  'plain touch still refused'
 describe "RED: a path in a variable is still a path"
 
 # The loophole every agent found. The guard used to discard any candidate
@@ -368,6 +569,17 @@ assert_blocked "$FIX" 'echo x > tests/main.test.ts' tests/main.test.ts 'writing 
 r="$(guard "$FIX" Write file_path tests/main.test.ts)"
 assert_contains "Write to a test is blocked in GREEN" "category: test" "$r"
 
+# The control for the two assertions added in RED above, and it has to run in
+# BOTH directions to be worth anything. "Deny whenever the tool is MultiEdit"
+# satisfies a denial-only test perfectly well; what distinguishes a real lock is
+# that the same tool in the same phase gets opposite verdicts from the CATEGORY.
+r="$(guard "$FIX" MultiEdit file_path tests/main.test.ts)"
+assert_contains "MultiEdit to a test is blocked in GREEN" "category: test" "$r"
+r="$(guard "$FIX" MultiEdit file_path src/main.ts)"
+assert_eq "but MultiEdit to source is allowed in GREEN" "" "$r"
+r="$(guard "$FIX" NotebookEdit notebook_path tests/explore.ipynb)"
+assert_contains "NotebookEdit to a test notebook is blocked in GREEN" "category: test" "$r"
+
 # ---------------------------------------------------------------------------
 describe "Generated output is not source"
 set_phase "$FIX" RED
@@ -394,412 +606,203 @@ assert_allowed "$FIX" 'echo x > src/main.ts' 'writing source with no story'
 r="$(guard "$FIX" Write file_path src/main.ts)"
 assert_eq "Write tool with no story" "" "$r"
 
-# ===========================================================================
-# MT-031: the extractors must read an OPERAND, not the last word.
+# ---------------------------------------------------------------------------
+describe "a phase the table does not list is refused, not waved through"
+
+# phase_allows used to end `# Unknown phase: don't block. return 0`, and that
+# fallback is a lock that opens on a typo. Measured on the real hook before this
+# was written: PHASE=RED refused a source write; GREE, ZZZ, GREEN. and empty all
+# ALLOWED it. `phase.sh set` validates its argument, so the state file should
+# never carry one of these - but "should never" is the whole of the defence, and
+# the state file is a file: hand-edited, half-written, restored from a stale
+# copy, or produced by a phase.sh whose own validation regressed.
 #
-# Two defects in the five extractors at .claude/hooks/phase-guard.sh:91-95,
-# with five measured symptoms - two false positives and THREE bypasses that let
-# a write to a frozen source file through during RED:
+# `no active story` is a DIFFERENT condition and still means no lock: the guard
+# exits on PHASE=IDLE before reaching here, and IDLE is a row in phases.conf.
+# An unrecognised phase is not an absent one.
+unknown_phase() { # <phase>
+  printf 'STORY_ID=T-1\nSTORY_SLUG=fixture\nSTORY_TYPE=feature\nPHASE=%s\nBRANCH=story/T-1-fixture\n' \
+    "$1" > "$FIX/.claude/state/current-story.env"
+}
+
+for ph in GREE ZZZ 'GREEN.'; do
+  unknown_phase "$ph"
+  r="$(guard "$FIX" Write file_path src/main.ts)"
+  if [ -z "$r" ]; then
+    _bad "PHASE=$ph refuses a source write" "it was allowed - the lock is off on a typo"
+  else
+    case "$r" in
+      *"$ph"*) _ok "PHASE=$ph refuses a source write" ;;
+      *) _bad "PHASE=$ph refuses a source write" "refused, but the reason never names the phase: $r" ;;
+    esac
+  fi
+done
+
+# Empty is its own case: it is what a truncated or half-written state file
+# leaves behind, and it is not IDLE.
+printf 'STORY_ID=T-1\nSTORY_SLUG=fixture\nSTORY_TYPE=feature\nPHASE=\nBRANCH=story/T-1-fixture\n' \
+  > "$FIX/.claude/state/current-story.env"
+r="$(guard "$FIX" Write file_path src/main.ts)"
+if [ -z "$r" ]; then
+  _bad "an empty PHASE refuses a source write" "it was allowed"
+else
+  _ok "an empty PHASE refuses a source write"
+fi
+
+# THE CONTROL. Without it, "refuse everything" passes all four above and the
+# fix has simply frozen the tree.
+set_phase "$FIX" GREEN
+r="$(guard "$FIX" Write file_path src/main.ts)"
+assert_eq "while a phase the table DOES list still allows it" "" "$r"
+set_phase "$FIX" ""
+# The lock protects a cycle in flight; it is not a general permission system,
+# and that has to hold for every tool it covers rather than for the two that
+# happened to be tested.
+r="$(guard "$FIX" MultiEdit file_path src/main.ts)"
+assert_eq "MultiEdit with no story" "" "$r"
+r="$(guard "$FIX" NotebookEdit notebook_path src/analysis.ipynb)"
+assert_eq "NotebookEdit with no story" "" "$r"
+
+# ---------------------------------------------------------------------------
+describe "WORLD-080: a filename containing -i is not the sed -i option"
+
+# The report: `sed -n '1,5p' tests/guards/layer-imports.test.ts` - a pure read
+# that writes nothing - refused with a message about frozen production code.
+# The extractor matched `-i` as a BARE SUBSTRING anywhere after the word `sed`,
+# the substring occurs inside `layer-imports`, and `awk '{print $NF}'` then took
+# the file being READ as the write target. Sibling files in the same directory
+# were allowed because their names contain no `-i`. The file's CONTENTS are
+# irrelevant - the guard never opens it.
 #
-#   (a) a command NAME matches inside a masked span, so prose in a quoted
-#       argument or a heredoc body is read as an invocation;
-#   (b) `awk '{print $NF}'` takes the LAST WORD of the match - which is the
-#       redirect target when the command has a trailing redirect, and a
-#       fragment of the sed script when the match is truncated by `(`.
+# The phase of each case is chosen from the category it has to freeze, which is
+# the trap the original report fell into: `test` is WRITABLE in RED, so a
+# misparsed read of a test path cannot block in RED however badly it is parsed.
+# AC-1 therefore runs in DONE.
+
+# The controls first, because they are what stops every "must be permitted"
+# case below from passing vacuously. If notes-inline.txt classified as docs, or
+# src/lib/layer-imports.ts as test, those reads would be permitted for a reason
+# with nothing to do with this defect.
+set_phase "$FIX" RED
+assert_blocked "$FIX" 'echo x > src/lib/layer-imports.ts' src/lib/layer-imports.ts \
+  'control: the -i bearing SOURCE path is frozen in RED'
+assert_blocked "$FIX" 'echo x > notes-inline.txt' notes-inline.txt \
+  'control: the -i bearing ROOT path is frozen in RED, via the paths.conf fallback'
+set_phase "$FIX" DONE
+assert_blocked "$FIX" 'echo x > tests/guards/layer-imports.test.ts' tests/guards/layer-imports.test.ts \
+  'control: the -i bearing TEST path is frozen in DONE'
+
+# AC-1. The literal command from the report, in a phase that freezes `test`.
+assert_allowed "$FIX" "sed -n '1,5p' tests/guards/layer-imports.test.ts" \
+  'AC-1: sed -n read of an -i bearing test path, in DONE'
+
+set_phase "$FIX" RED
+# AC-2. The same misparse on a source path, in the phase that freezes source.
+assert_allowed "$FIX" "sed -n '1,5p' src/lib/layer-imports.ts" \
+  'AC-2: sed -n read of an -i bearing source path, in RED'
+
+# AC-3. Unquoted, so masking cannot help: there is nothing quoted to mask.
+assert_allowed "$FIX" 'sed -n 1,5p notes-inline.txt' \
+  'AC-3: an unquoted -i bearing token in a sed read'
+
+# AC-4. Other short options, none of them i.
+assert_allowed "$FIX" "sed -En '1,5p' src/main.ts" \
+  'AC-4: sed -En read of frozen source'
+
+# Three shapes beyond the enumerated criteria, found by probing the guard
+# rather than by reading it.
 #
-# Every assertion below names the reported PATH, never merely "it was blocked":
-# a guard that refuses `sed -i 's|a|b|' src/main.ts` because it thinks the path
-# is `s` is right by accident, and that accident is the defect.
-# ===========================================================================
+# A read naming TWO input files, the first -i bearing. `$NF` is the second, so
+# the guard refused this on src/main.ts - a real file it only reads, which is
+# the most convincing kind of wrong denial. A fix that merely exempts the word
+# containing `-i` still fails here.
+assert_allowed "$FIX" "sed -n '1,5p' src/lib/layer-imports.ts src/main.ts" \
+  'a two-file sed read whose first file is -i bearing'
 
-# ---------------------------------------------------------------------------
-describe "MT-031 AC-1: prose in quoted data is not a command invocation"
-set_phase "$FIX" RED
+# A read whose sed SCRIPT contains the literal text `-i` - which is what an
+# agent auditing this very defect types. Masking does not save it: the masker
+# rewrites operators and whitespace inside quotes, not letters, so a quoted
+# `-i` reaches the extractor intact.
+assert_allowed "$FIX" "sed -n '/sed -i/p' src/main.ts" \
+  'a sed read whose script mentions -i'
 
-# The A/B pair from the field report: two `--dry-run --allow-empty` commits
-# differing only in whether the message mentions the in-place editor. NEITHER
-# WRITES ANYTHING, in any phase. Variant A is allowed today; variant B blocks
-# on `path: sed -i hard-BLOCKED with its own expression reported as the`.
-#
-# The cases below deliberately do NOT reuse that one sentence. The contract
-# being restored is CLAUDE.md's "quoted arguments and heredoc bodies are data,
-# not syntax", and a fix that special-cases an observed phrase satisfies a
-# single-sentence test while leaving the contract false. So: arbitrary prose,
-# several unrelated sentences, and every one of the six command names.
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
-a real in-place edit hard-BLOCKED with its own expression reported as the
-EOF' 'variant A: the same shape, without the phrase'
+# A long option that merely CONTAINS the letter i and is not --in-place.
+# `--silent` is GNU sed's long form of -n, so this writes nothing; the obvious
+# wrong fix - "a word starting with - and containing i" - refuses it.
+assert_allowed "$FIX" "sed --silent '1,5p' src/main.ts" \
+  'sed --silent, a long option containing i that is not --in-place'
 
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
-Never reach for sed -i on a file the phase has frozen.
-EOF' 'heredoc prose naming the in-place flag'
+# --- and the writes that must STILL be refused ------------------------------
+# These matter more than everything above. Deleting the rule cures every false
+# positive and removes the only thing stopping an agent from editing frozen
+# source with sed -i. AC-5 (the / and | delimiters) and AC-9 (a target held in
+# a variable) are asserted where they have always been - at the top of this
+# file and under "RED: a path in a variable is still a path" - and are
+# deliberately not repeated here.
 
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
-The reviewer asked why sed -i was mentioned in the handoff at all.
-A second paragraph, so the body is more than one line.
-EOF' 'a two-paragraph heredoc naming the in-place flag'
+# AC-6. A backup suffix attached to the option.
+assert_blocked "$FIX" "sed -i.bak 's/a/b/' src/main.ts" src/main.ts \
+  'AC-6: sed -i.bak writing frozen source'
 
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -m "do not reach for sed -i here"' \
-  'a quoted argument naming the in-place flag'
+# AC-7. The long option, bare and with a suffix.
+assert_blocked "$FIX" "sed --in-place 's/a/b/' src/main.ts" src/main.ts \
+  'AC-7: sed --in-place writing frozen source'
+assert_blocked "$FIX" "sed --in-place=.bak 's/a/b/' src/main.ts" src/main.ts \
+  'AC-7: sed --in-place=.bak writing frozen source'
 
-# Defect (a) with NO mask character inside the match, so it cannot be fixed by
-# widening a character class alone: `\bsed\b` matches the `sed` in `sed-i`, and
-# `$NF` then reports a fragment of an English sentence as the path. Blocked
-# today on `sed-i` and on `sed-i, ever`.
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -m "sed-i"' \
-  'a hyphenated mention with no whitespace to mask'
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -m "never sed-i, ever"' \
-  'a hyphenated mention inside a sentence'
+# AC-8. A bundled short-option cluster whose letters include i. These were NOT
+# already caught: `-ni` and `-Ei` contain no `-i` substring, so the extractor
+# never matched them, and both of these in-place writes to frozen source were
+# PERMITTED before this story. The false positive and a live hole are the same
+# bug read from two ends.
+assert_blocked "$FIX" "sed -ni 's/a/b/' src/main.ts" src/main.ts \
+  'AC-8: sed -ni writing frozen source'
+assert_blocked "$FIX" "sed -Ei 's/a/b/' src/main.ts" src/main.ts \
+  'AC-8: sed -Ei writing frozen source'
 
-# The other five command names, in prose. These are ALLOWED TODAY - the
-# `tee`, `cp|mv` and `rm|touch` extractors require `[[:space:]]+` after the
-# name, and a masked space is \006, which is not [[:space:]]. They are
-# regression guards on a rewrite that replaces those classes, and they are
-# earned by the mutation in DV-5.
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
-We should cp the audit notes into the wiki before review.
-EOF' 'heredoc prose naming cp'
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
-Do not rm the gate logs while a story is open.
-EOF' 'heredoc prose naming rm'
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
-The plan was to mv the fixture helpers into a shared file.
-EOF' 'heredoc prose naming mv'
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
-Nothing in this change should touch the frozen tests at all.
-EOF' 'heredoc prose naming touch'
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -F - <<'"'"'EOF'"'"'
-We tee the gate output so the log survives a crash.
-EOF' 'heredoc prose naming tee'
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -m "we cp docs into the wiki by hand"' \
-  'a quoted argument naming cp'
+# GNU getopt_long accepts any unambiguous abbreviation, and --in-place is the
+# only long option of GNU sed 4.9 that begins `--i`: `sed --i 's/a/b/' f`
+# rewrites f in place, verified against the sed this harness runs on. The
+# current extractor catches it only by accident, because `--i` happens to
+# contain the substring `-i`. A fix matching the literal `--in-place` cures the
+# false positives and opens this hole.
+assert_blocked "$FIX" "sed --i 's/a/b/' src/main.ts" src/main.ts \
+  'sed --i, an abbreviated --in-place, writing frozen source'
 
-# ---------------------------------------------------------------------------
-describe "MT-031 AC-1b: the same defect through a write the phase PERMITS"
-set_phase "$FIX" RED
+# And the pair that guards the fix's own mechanism: an -i bearing filename is
+# not exempt from being written. "Skip candidates whose name contains -i"
+# satisfies every must-permit case above and deletes the protection for these.
+assert_blocked "$FIX" "sed -i 's/a/b/' src/lib/layer-imports.ts" src/lib/layer-imports.ts \
+  'a real sed -i onto the -i bearing source path is still refused'
+assert_blocked "$FIX" "sed -i 's/a/b/' notes-inline.txt" notes-inline.txt \
+  'a real sed -i onto the -i bearing root path is still refused'
 
-# docs is writable in RED, so this command is entirely legitimate. Today it is
-# hard-BLOCKED on `path: sed -i expression as the path argument. False
-# positive, so` with `category: source`.
-#
-# BOTH halves are required. The softer exit of this defect is a decline, and a
-# fix that turns the block into a decline has moved the noise rather than
-# removed it - so the decline log must stay empty too.
-rm -f "$FIX/.claude/state/phase-guard-declined.log"
-assert_allowed "$FIX" 'cat >> docs/notes.md <<'"'"'EOF'"'"'
-The guard took the sed -i expression as the path argument. False positive, so
-it declined and logged it.
-EOF' 'a permitted docs append whose prose names the in-place flag'
-assert_eq "and nothing is appended to the decline log" "" \
-  "$(cat "$FIX/.claude/state/phase-guard-declined.log" 2>/dev/null)"
-
-# ---------------------------------------------------------------------------
-describe "MT-031 AC-2 and C-3: a real in-place edit is blocked on its operand"
-set_phase "$FIX" RED
-
-# ALL OF THESE PASS TODAY (regression guards, earned by DV-1). They are the
-# criterion that stops AC-1 being satisfied by deleting the `sed -i` heuristic:
-# delete it and every assertion in this block goes red.
-#
-# The option spellings are C-3's pin, checked against real sed: with a bare
-# script argument the files are every positional after it; with -e, --expression
-# or -f there is no positional script, so every positional is a file.
-assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts"          src/main.ts 'sed -i on frozen source'
-assert_blocked "$FIX" "sed -i.bak 's/a/b/' src/main.ts"      src/main.ts 'sed -i.bak on frozen source'
-assert_blocked "$FIX" "sed --in-place 's/a/b/' src/main.ts"  src/main.ts 'sed --in-place on frozen source'
-assert_blocked "$FIX" "sed -i -e 's/a/b/' src/main.ts"       src/main.ts 'sed -i -e EXPR'
-assert_blocked "$FIX" 'sed -i --expression=s/a/b/ src/main.ts' src/main.ts 'sed -i --expression=EXPR'
-assert_blocked "$FIX" 'sed -i -f script.sed src/main.ts'     src/main.ts 'sed -i -f SCRIPTFILE'
-
-# C-3: EVERY operand, not the last one. `sed -i EXPR a b` writes both a and b -
-# measured against real sed - so a frozen operand followed by a permitted one
-# is a fourth bypass, and it is not in the story's symptom list: today
-# `sed -i 's/a/b/' src/main.ts docs/notes.md` is ALLOWED, because `$NF` is the
-# permitted file. The reverse order blocks, which is how it stayed hidden.
-assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts docs/notes.md" src/main.ts \
-  'a frozen operand followed by a permitted one'
-assert_blocked "$FIX" "sed -i 's/a/b/' docs/notes.md src/main.ts" src/main.ts \
-  'a permitted operand followed by a frozen one'
-assert_blocked "$FIX" "sed -i -e 's/a/b/' src/main.ts docs/notes.md" src/main.ts \
-  'the -e form, frozen operand first'
-assert_blocked "$FIX" 'rm src/main.ts docs/notes.md' src/main.ts \
-  'rm with a frozen operand followed by a permitted one'
-
-# ---------------------------------------------------------------------------
-describe "MT-031 C-3: cp and mv judge the destination, not every operand"
-set_phase "$FIX" RED
-
-# ALL OF THESE PASS TODAY (regression guards, earned by re-running DV-4's M2 -
-# see `## Regressions` R-1). They exist because the block above pins the
-# OPPOSITE rule for `sed` and `rm` - every operand - and nothing pinned this
-# half: `cp a b c` copies a AND b into c, so `b` is a READ and only the last
-# argument is written. C-3's table says so, PO-11 measured it and told GREEN
-# not to "fix" it, and GREEN's own scepticism list repeats it - three claims,
-# zero assertions. Every cp/mv case in this suite had exactly two operands, so
-# a guard that judged EVERY cp operand passed the whole suite untouched: at
-# GATES the mutation `361s/lastop()/allops()/` on .claude/hooks/lib.sh, which
-# is exactly that change, reddened 0 assertions where 1 was predicted. The
-# `assert_allowed` case below is what it has to catch now (there were two; the
-# `mv` one was corrected by MT-033 - see below).
-#
-# The trap being closed is a precision failure, not a strictness one. MT-031
-# exists to make the guard precise; `cp a b c` is the one place the fix
-# deliberately declines to block, and an unpinned precision claim is what the
-# next rewrite breaks silently.
-assert_allowed "$FIX" 'cp docs/notes.md src/main.ts docs/other.md' \
-  'cp with three arguments: the frozen file in the middle is a READ'
-# CORRECTED IN MT-033 RED, 2026-09-14 (MT-033 PO-1 / AC-5). This asserted
-# ALLOWED, and that was wrong about the world: `mv f1 f2 d/` REMOVES both f1
-# and f2, so the frozen file in the middle of an `mv` is destroyed, not read.
-# Measured, GNU coreutils 8.32, 2026-09-14 - and `cp g1 g2 e/` removes neither,
-# which is why the `cp` line above is unchanged and still correct. MT-031
-# measured the `cp` half (its R-1 is explicit about `cp a b c`) and extended the
-# rule to `mv` by symmetry without measuring `mv`. See MT-033 `## Regressions`.
-# This is the ONLY MT-031 assertion MT-033 is authorised to change.
-assert_blocked "$FIX" 'mv docs/notes.md src/main.ts docs/other.md' src/main.ts \
-  'mv with three arguments: the frozen file in the middle is REMOVED by the move'
-
-# The controls, aimed at the other way the two cases above could pass: the
-# guard having stopped looking at cp/mv altogether, which would make them
-# allowed for no reason at all. Two operands must still block on the
-# destination, and so must three when the destination is the frozen one - so
-# what is pinned is the POSITION of the operand, not the mere presence of a
-# frozen path somewhere in the command.
-assert_blocked "$FIX" 'cp docs/notes.md src/main.ts'               src/main.ts \
-  'control: two-operand cp onto frozen source still blocks'
-assert_blocked "$FIX" 'mv docs/notes.md src/main.ts'               src/main.ts \
-  'control: two-operand mv onto frozen source still blocks'
-assert_blocked "$FIX" 'cp docs/notes.md docs/other.md src/main.ts' src/main.ts \
-  'control: three-operand cp whose DESTINATION is frozen still blocks'
-assert_blocked "$FIX" 'mv docs/notes.md docs/other.md src/main.ts' src/main.ts \
-  'control: three-operand mv whose DESTINATION is frozen still blocks'
-
-# ---------------------------------------------------------------------------
-describe "MT-031 AC-3: a metacharacter in the expression changes nothing"
-set_phase "$FIX" RED
-
-# The first five pass today. `(` `)` reports `s` - right by accident, on a
-# fragment of the script - and `!` together with `(` `)` is ALLOWED OUTRIGHT,
-# which is the plainest of the three bypasses: no redirect, no variable, just
-# a capture group, which is the most ordinary thing a sed script contains.
-assert_blocked "$FIX" "sed -i 's|a|b|' src/main.ts"             src/main.ts 'a pipe in the expression'
-assert_blocked "$FIX" "sed -i 's/a/b&c/' src/main.ts"           src/main.ts 'an ampersand in the replacement'
-assert_blocked "$FIX" "sed -i 's/a;b/c/' src/main.ts"           src/main.ts 'a semicolon in the expression'
-assert_blocked "$FIX" "sed -i 's/a<b>c/d/' src/main.ts"         src/main.ts 'angle brackets in the expression'
-assert_blocked "$FIX" "sed -i '/x/!s/a/b/' src/main.ts"         src/main.ts 'a negated address'
-assert_blocked "$FIX" "sed -i 's/\\(a\\)/b/' src/main.ts"         src/main.ts 'a capture group'
-assert_blocked "$FIX" "sed -i '/x/!s/\\(a\\)/b/' src/main.ts"     src/main.ts 'a negated address AND a capture group'
-assert_blocked "$FIX" "sed -i '/x/!s/\\(a\\)|b;c<d>e&f/g/' src/main.ts" src/main.ts 'every one of them at once'
-
-# The same defect seen from the false-positive side: a capture group in an
-# expression against a path the phase PERMITS. Today this is blocked on `s`,
-# so a legitimate docs edit is refused as `source`.
-assert_allowed "$FIX" "sed -i 's/\\(a\\)/b/' docs/notes.md" \
-  'a capture group in an expression writing docs'
-
-# ---------------------------------------------------------------------------
-describe "MT-031 AC-4: a target outside the repository root is nobody's business"
-set_phase "$FIX" RED
-
-# ALL FOUR PASS TODAY (regression guards, earned by DV-2). The scratchpad this
-# harness tells agents to use is outside the tree, and a probe script written
-# there is not the lock's business in any phase.
-assert_allowed "$FIX" "sed -i 's/a/b/' /tmp/claude/scratch/sib.py" \
-  'an MSYS absolute path outside the repository'
-assert_allowed "$FIX" "sed -i 's/a/b/' 'C:/Users/x/AppData/Local/Temp/claude/sib.py'" \
-  'a quoted C:/ path outside the repository'
-assert_allowed "$FIX" 'sed -i '"'"'s/a/b/'"'"' "C:\Users\x\AppData\Local\Temp\claude\sib.py"' \
-  'a double-quoted C:\ path outside the repository'
-# `.py`, not `.md`: `../outside.md` classifies as `docs`, so it is permitted for
-# a second reason and the case asserts nothing about being outside the tree.
-# DV-2b found that by failing to redden it.
-assert_allowed "$FIX" "sed -i 's/a/b/' ../outside.py" \
-  'a relative climb out of the tree'
-
-# ---------------------------------------------------------------------------
-describe "MT-031 AC-5: Symptom B, reproduced - the expression is scanned, not the operand"
-set_phase "$FIX" RED
-
-# Filed as "observed once, does not currently reproduce" after ten variants.
-# It reproduces deterministically against this fixture, in RED and in PLANNED
-# alike, on the verbatim expression from the field report - which answers the
-# story's open question: the active PHASE does not interact with candidate
-# extraction at all.
-#
-# The trigger is Symptom D's, not a fourth mechanism: `(` in `min(` terminates
-# the extractor's character class INSIDE the script, `$NF` returns the
-# truncated fragment `s|        if a.ndim == 4 and min` - one field, because
-# the spaces inside the quotes are masked - and that fragment carries an
-# alphanumeric and no paren, so path_is_implausible believes it and the guard
-# blocks on it.
-B_EXPR="sed -i 's|        if a.ndim == 4 and min(a.shape[1], a.shape[3]) <= 8 ...|...|'"
-assert_allowed "$FIX" "$B_EXPR /tmp/claude/scratch/sib.py" \
-  'the field report verbatim, against a scratchpad path'
-assert_blocked "$FIX" "$B_EXPR src/main.ts" src/main.ts \
-  'the same expression against a frozen source file'
-
-# ---------------------------------------------------------------------------
-describe "MT-031 AC-6: a trailing redirect does not hide the operand"
-set_phase "$FIX" RED
-
-# The bypass. Two commands differing by one space: the control blocks, and
-# `> /dev/null` is ALLOWED - the guard sees nothing, and a real source file in
-# place of the probe's nonexistent one would have been edited during RED.
-#
-# The unspaced and `2>` forms block TODAY, but on the redirect rather than the
-# file, so they must fail here on the reported path - a fix that preserves the
-# accident while leaving the hole open does not pass. And the last two rows
-# redirect to a path the phase PERMITS, which is a more ordinary thing to write
-# than /dev/null and bypasses the guard identically: special-casing /dev/null
-# closes nothing.
-assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts"                 src/main.ts 'control: no redirect'
-assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts > /dev/null"     src/main.ts 'a spaced redirect to /dev/null'
-assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts >/dev/null"      src/main.ts 'an unspaced redirect to /dev/null'
-assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts 2>/dev/null"     src/main.ts 'a stderr redirect'
-assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts > docs/log.txt"  src/main.ts 'a redirect to a path the phase permits'
-assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts >> docs/log.txt" src/main.ts 'an appending redirect to a permitted path'
-
-# ---------------------------------------------------------------------------
-describe "MT-031 AC-7: every write-capable extractor, not only sed"
-set_phase "$FIX" RED
-
-# Three fail today and three pass. All six stay here: a rewrite of the
-# extractor block is exactly what breaks the three that work, and the three
-# that work are earned by the mutations in DV-3.
-assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts > /dev/null" src/main.ts 'sed -i with a trailing redirect'
-assert_blocked "$FIX" 'cp docs/notes.md src/main.ts > /dev/null' src/main.ts 'cp with a trailing redirect'
-assert_blocked "$FIX" 'mv docs/notes.md src/main.ts > /dev/null' src/main.ts 'mv with a trailing redirect'
-assert_blocked "$FIX" 'rm src/main.ts > /dev/null'               src/main.ts 'rm with a trailing redirect'
-assert_blocked "$FIX" 'touch src/new.ts > /dev/null'             src/new.ts  'touch with a trailing redirect'
-assert_blocked "$FIX" 'echo x | tee src/main.ts > /dev/null'     src/main.ts 'tee with a trailing redirect'
-
-# And the same six against a redirect the phase permits, so that no fix can
-# pass this block by filtering /dev/null.
-assert_blocked "$FIX" 'cp docs/notes.md src/main.ts > docs/log.txt' src/main.ts 'cp with a redirect to a permitted path'
-assert_blocked "$FIX" 'mv docs/notes.md src/main.ts > docs/log.txt' src/main.ts 'mv with a redirect to a permitted path'
-assert_blocked "$FIX" 'rm src/main.ts >> docs/log.txt'              src/main.ts 'rm with an appending redirect'
-
-# tee's immunity comes from `[[:space:]]` in its terminating class, not from the
-# `>` the class also excludes - so the unspaced form is where that `>` earns its
-# place. Both pass today; DV-3(ii) and DV-3(iii) are aimed at exactly these two.
-assert_blocked "$FIX" 'echo x | tee src/main.ts>/dev/null'    src/main.ts 'tee with an unspaced redirect'
-assert_blocked "$FIX" 'echo x | tee -a src/main.ts>/dev/null' src/main.ts 'tee -a with an unspaced redirect'
-
-# ---------------------------------------------------------------------------
-describe "MT-031 AC-8: a zero-candidate write leaves a trace"
-set_phase "$FIX" RED
-
-# What made Symptom C invisible: after the bypass the decline log was empty,
-# and after a permitted `echo x > docs/notes.md` it was also empty. The two
-# outcomes - "the extractors found nothing to judge" and "they found candidates
-# and every one was permitted" - were indistinguishable from outside.
-#
-# The discrimination this suite demands, and the shape RED chose for it (C-4,
-# amended): a single line in .claude/state/phase-guard-declined.log carrying
-# the marker `no-candidate`, the story, the phase and enough of the command to
-# act on - and logged ONLY when one of the six write-capable command names
-# appears at a real token boundary and no candidate survived. A redirect
-# operator alone does not trigger it, because `cmd > /dev/null` is ubiquitous
-# and its target is filtered on purpose; `git diff > /dev/null` must stay
-# silent.
-MT031_LOG="$FIX/.claude/state/phase-guard-declined.log"
-mt031_log_of() { rm -f "$MT031_LOG"; guard_bash "$FIX" "$1" >/dev/null; cat "$MT031_LOG" 2>/dev/null; }
-
-# POSITIVE. A write command whose operands the guard cannot see: `rm` at a real
-# token boundary, no operand in the command string at all, zero candidates,
-# ALLOWED - and it would delete source in RED. The operand parse cannot close
-# this one, which is the whole reason a trace is wanted.
-assert_allowed "$FIX" "find src -name '*.ts' | xargs rm" 'operands arriving from a pipe are unknowable'
-mt031_l="$(mt031_log_of "find src -name '*.ts' | xargs rm")"
-assert_contains "a write command with no visible operand is traced" 'no-candidate' "$mt031_l"
-assert_contains "the trace names the story"                         'T-1'          "$mt031_l"
-assert_contains "the trace names the phase"                         'RED'          "$mt031_l"
-assert_contains "the trace quotes the command, so the log is actionable" 'xargs rm' "$mt031_l"
-assert_eq "the trace is one line, not a transcript" 1 "$(printf '%s' "$mt031_l" | grep -c .)"
-
-# Same shape through an input redirect, which is a READ of the list and gives
-# the guard no operand either. It must stay allowed (C-5) AND be traced:
-# "allowed" and "unexamined" are different facts and the log is where they part.
-assert_allowed "$FIX" 'xargs touch < list' 'an input redirect is still a read'
-assert_contains "an input-redirect operand list is traced too" 'no-candidate' \
-  "$(mt031_log_of 'xargs touch < list')"
-
-# NEGATIVE CONTROLS. Without these the log becomes a line per command and this
-# criterion has bought nothing.
-assert_eq "a candidate that was found and PERMITTED is not a zero-candidate trace" "" \
-  "$(mt031_log_of 'echo x > docs/notes.md')"
-assert_eq "a candidate that was found and DENIED is not one either" "" \
-  "$(mt031_log_of 'echo x > src/main.ts')"
-assert_eq "a read-only cat logs nothing" "" "$(mt031_log_of 'cat src/main.ts')"
-assert_eq "a read-only grep logs nothing" "" "$(mt031_log_of 'grep -rn export src/')"
-assert_eq "a read-only git diff logs nothing" "" "$(mt031_log_of 'git diff -- src/main.ts')"
-assert_eq "a bare redirect to /dev/null is not a write-capable command" "" \
-  "$(mt031_log_of 'git diff > /dev/null')"
-
-# And the trace is distinguishable from the OTHER thing this log carries. An
-# unresolvable candidate is a declined parse, not an absent one, and one event
-# gets one line.
-mt031_l="$(mt031_log_of "sed -i 's/a/b/' \"\$EXPORTED_ELSEWHERE\"")"
-assert_contains "an unresolvable candidate still logs as an implausible target" \
-  'implausible target' "$mt031_l"
-assert_eq "and is not ALSO reported as a zero-candidate command" 0 \
-  "$(printf '%s' "$mt031_l" | grep -c 'no-candidate')"
-
-# Note on the Symptom C command, deliberately not asserted here: once AC-6 is
-# satisfied, `sed -i 's/a/b/' src/main.ts > /dev/null` yields a candidate and
-# is BLOCKED, so it is no longer a zero-candidate command and must not be
-# traced. It is covered by AC-6 above, which is the stronger outcome.
-
-# ---------------------------------------------------------------------------
-describe "MT-031 C-5: the harness's own idioms must keep working"
-set_phase "$FIX" RED
-
-# Measured allowed today. A rewrite of the extractor block is the single most
-# likely thing to break them, and three are idioms the harness itself pushes
-# agents towards.
-assert_allowed "$FIX" "sed -i 's/a/b/' docs/notes.md" 'sed -i on docs in RED'
-assert_allowed "$FIX" 'sed -i "s|^a/$|a/\nb/|" .gitignore' 'sed -i on .gitignore in RED'
-assert_allowed "$FIX" "bash scripts/mutate.sh src/main.ts 's/a/b/' -- true" \
-  'the mutate.sh FILE exemption'
-assert_allowed "$FIX" 'grep -n "sed -i" docs/notes.md' 'grepping docs for the flag'
-assert_allowed "$FIX" "sed -i 's/a/b/' docs/notes.md > /dev/null" \
-  'sed -i on docs with a trailing redirect'
+# AC-11. The redirect scanner is a different rule and this story must not
+# disturb it.
+assert_blocked "$FIX" 'echo x > src/main.ts' src/main.ts \
+  'AC-11: a redirect into frozen source is untouched by this fix'
 
 
 # ===========================================================================
-# MT-033 - `mv` removes its source, and the guard has never looked at it.
+# HARNESS-010. The reconciliation of the two write-target parsers.
 #
-# MT-031 pinned "cp/mv judge the LAST non-option operand" and that is right for
-# `cp` and wrong for `mv`. Measured, GNU coreutils 8.32, 2026-09-14:
+# lib.test.sh asks write_candidates() directly, which is where the ROLE of
+# EVERY operand is visible. This half drives the whole hook, which is where the
+# things a criterion is actually about live: the verdict, the path named in the
+# denial, the role line in the message, and the decline log.
 #
-#   echo a > f1; echo b > f2; mkdir d; mv f1 f2 d/   ->  f1 and f2 are GONE
-#   echo c > g1; echo d > g2; mkdir e; cp g1 g2 e/   ->  g1 and g2 REMAIN
-#
-# That asymmetry is MT-033 C-3. So `mv` judges EVERY non-option operand - the
-# last because it is created, the rest because they are removed - and `cp` is
-# unchanged, because judging a `cp` source is a false positive, which is the
-# failure mode MT-031 exists to prevent.
-#
-# Three helpers below. They exist because the denial text grows a line (C-5)
-# and `_lib.sh`'s assert_blocked reads only the `path:` line; nothing in the
-# suite could previously assert on WHICH operand was refused, which is AC-6.
-# ---------------------------------------------------------------------------
+# Three helpers, taken from manga-translator's suite because its corpus is half
+# of this story's specification and a helper rewritten is a corpus not ported.
+# The <fixture> argument comes FIRST, exactly as in assert_allowed and
+# assert_blocked: downstream's first version took the command first, so all
+# thirteen calls ran the fixture DIRECTORY as the command and failed with "not
+# blocked at all", which reads exactly like an honest RED.
 
-# assert_role <fixture> <command> <expected operand: line> [label]
-#   Blocked, the denial carries C-5's role line verbatim, and that line comes
-#   AFTER `path:`. The ordering half is not decoration: assert_blocked matches
-#   `path:     <p>` followed by a space or end-of-string, and 79 assertions in
-#   this file depend on it, so a role line emitted before or inside `path:`
-#   breaks the whole suite for a reason no single failure would explain.
-#
-#   The <fixture> argument is first, exactly as in assert_allowed and
-#   assert_blocked. That is not decoration either: the first version of these
-#   three helpers took the command first, so every call ran `guard_bash "$FIX"
-#   "$FIX"` - the fixture DIRECTORY as the command - and all thirteen of them
-#   failed with "not blocked at all", which reads exactly like an honest RED.
-#   Caught by checking that the failure was the RIGHT failure; recorded in
-#   MT-033 `## Regressions` R-2 so the next person adding a helper here knows
-#   what it looked like.
+# assert_role <fixture> <command> <role line> [label]
+#   Blocked, carrying that role, with the role AFTER path: - because
+#   assert_blocked anchors on `path:     <p>` followed by a space or end of
+#   string, and a role line inserted before it would silently stop 99
+#   assertions from matching what they think they match.
 assert_role() {
   local r before
   r="$(guard_bash "$1" "$2")"
@@ -819,9 +822,10 @@ assert_role() {
 }
 
 # assert_no_role <fixture> <command> [label]
-#   Blocked, and carrying NO role line. C-5's fourth row: redirects, rm, touch,
-#   tee and sed -i have no ambiguous operand, and inventing a role for them is
-#   churn. Without this, "add an operand: line to every denial" satisfies AC-6.
+#   Blocked, carrying NO role line. AC-5's own control: a redirect, an rm, a
+#   touch, a tee and a sed -i have no ambiguous operand, and inventing a role
+#   for them is churn. Without this, "put an operand: line on every denial"
+#   satisfies AC-5.
 assert_no_role() {
   local r
   r="$(guard_bash "$1" "$2")"
@@ -836,12 +840,10 @@ assert_no_role() {
 }
 
 # assert_blocked_on_either <fixture> <command> <path A> <path B> [label]
-#   For `mv FROZEN FROZEN`, where AC-3 asks only that the denial name "a frozen
-#   path". BOTH operands are frozen and either is a correct answer; which one is
-#   reported depends on the order candidates reach check_path, and no acceptance
-#   criterion or contract clause pins that order (today it is whatever `sort -u`
-#   in phase-guard.sh produces, which is an implementation detail this story
-#   deliberately leaves to GREEN). Asserting one of the two would freeze it.
+#   For a command where BOTH candidates are frozen and either is a correct
+#   answer. Which one is reported depends on the order candidates reach
+#   check_path, and no criterion or contract clause pins that order. Asserting
+#   one of the two would freeze an implementation detail.
 assert_blocked_on_either() {
   local r
   r="$(guard_bash "$1" "$2")"
@@ -857,724 +859,622 @@ assert_blocked_on_either() {
 }
 
 # ---------------------------------------------------------------------------
-describe "MT-033 AC-1: mv removes its source, so the source operand is judged"
+describe "HARNESS-010 AC-1: C-1's twenty-two commands under the union rule"
 set_phase "$FIX" RED
 
-# EVERY ASSERTION IN THIS BLOCK IS RED ON ARRIVAL except the last one, which is
-# marked. Measured against this fixture on main at b1583d5, 2026-09-14:
-# `mv src/main.ts docs/gone.md` is ALLOWED, and src/main.ts is gone afterwards.
-# write_candidates emits `W|docs/gone.md|` for it - the operand `mv` creates,
-# and nothing at all about the one it destroys.
-assert_blocked "$FIX" 'mv src/main.ts docs/gone.md' src/main.ts \
+# C-1 is a SETTLED measurement: twenty-two commands driven through the real
+# hook against upstream release 48 and against manga-translator's parser, with
+# the instrument shown to BLOCK a frozen-source write and ALLOW a docs write on
+# both before a single row was believed. RED re-ran it on CI before depending
+# on it and reproduced all twenty-two rows exactly, four DIFFER rows included.
+#
+# C-2's union rule: the reconciled parser BLOCKS every command either parser
+# blocks today. So each row below is the MAXIMUM of the two measured verdicts -
+# except the three marked BOTH WRONG, which C-3 and PO-5 hold at ALLOW.
+
+# Agreed BLOCK, both parsers. The union rule must not LOSE any of these.
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts"        src/main.ts 'C-1 r1: sed -i'
+assert_blocked "$FIX" "sed -i.bak 's/a/b/' src/main.ts"    src/main.ts 'C-1 r2: sed -i.bak'
+assert_blocked "$FIX" "sed -ni 's/a/b/' src/main.ts"       src/main.ts 'C-1 r3: sed -ni'
+assert_blocked "$FIX" "sed -Ei 's/a/b/' src/main.ts"       src/main.ts 'C-1 r4: sed -Ei'
+assert_blocked "$FIX" "sed --in-place 's/a/b/' src/main.ts" src/main.ts 'C-1 r5: sed --in-place'
+assert_blocked "$FIX" 'mv docs/notes.md src/main.ts'       src/main.ts 'C-1 r9: mv onto source'
+assert_blocked "$FIX" 'cp docs/notes.md src/main.ts'       src/main.ts 'C-1 r14: cp onto source'
+assert_blocked "$FIX" 'rm src/main.ts'                     src/main.ts 'C-1 r16: rm source'
+assert_blocked "$FIX" 'rm -f src/a.ts src/b.ts'            src/a.ts    'C-1 r17: rm -f two sources'
+assert_blocked "$FIX" 'touch src/main.ts'                  src/main.ts 'C-1 r18: touch source'
+assert_blocked "$FIX" 'tee src/main.ts < docs/notes.md'    src/main.ts 'C-1 r19: tee into source'
+assert_blocked "$FIX" 'tee -a src/main.ts < docs/notes.md' src/main.ts 'C-1 r20: tee -a into source'
+
+# Agreed ALLOW, both parsers, and they must stay allowed.
+assert_allowed "$FIX" 'sed -n 1,5p tests/guards/layer-imports.test.ts' \
+  'C-1 r7: an -i bearing filename under sed -n'
+assert_allowed "$FIX" 'sed -n 1,5p src/main.ts' 'C-1 r8: sed -n reading source'
+
+# THE FOUR DIFFER ROWS. Each is a hole in one parser, with a direction.
+#
+# r6: upstream is right. GNU getopt_long honours any unambiguous abbreviation
+# and --in-place is the only long option of GNU sed 4.9 beginning `--i`, so
+# `sed --i` genuinely writes in place. Downstream permits it.
+assert_blocked "$FIX" "sed --i 's/a/b/' src/main.ts" src/main.ts \
+  'C-1 r6 DIFFER: sed --i, which downstream permits'
+# r10: downstream is right. mv REMOVES its source, so moving a frozen file away
+# is a write to the frozen path, and upstream permits it.
+assert_blocked "$FIX" 'mv src/main.ts docs/notes.md' src/main.ts \
+  'C-1 r10 DIFFER: mv a frozen source away, which upstream permits'
+# r11 and r12: downstream is right. -t and --target-directory INVERT which
+# operand is the destination; upstream reads position only, so it permits a move
+# INTO a frozen directory.
+assert_blocked "$FIX" 'mv -t src docs/notes.md' src \
+  'C-1 r11 DIFFER: mv -t into frozen source, which upstream permits'
+assert_blocked "$FIX" 'mv --target-directory=src docs/notes.md' src \
+  'C-1 r12 DIFFER: mv --target-directory= into frozen source'
+
+# r13. Both parsers BLOCK this today, and C-2 notes upstream does so for the
+# WRONG reason - on the positional, not on understanding -t. It is asserted
+# with assert_blocked_on_either, and that is not slack: bare `docs` classifies
+# as SOURCE in this repository, because only `docs/` with its trailing slash
+# matches the docs rule. Which of the two paths the denial names therefore turns
+# on a directory-shaped-path gap in classify that `## Out of scope` puts outside
+# this story. Pinning either spelling here would freeze that gap into a test.
+# The sharp form of the same command, with the slash, is two lines below.
+assert_blocked_on_either "$FIX" 'mv -t docs src/main.ts' docs src/main.ts \
+  'C-1 r13: mv -t docs, blocked on one of its two operands'
+assert_blocked "$FIX" 'mv -t docs/ src/main.ts' src/main.ts \
+  'C-1 r13 sharpened: with the slash, docs/ is writable and the SOURCE is refused'
+
+# THE THREE BOTH WRONG ROWS. All three are real writes into frozen source that
+# both parsers permit today, and C-3 and PO-5 make them findings rather than
+# criteria: widening the rule set inside a reconciliation makes it impossible to
+# attribute a behaviour change to either cause. These assertions pin the holes
+# OPEN. A run that quietly closes one has changed the rule set as well as
+# reconciling it, which is the one thing this story must not do without saying
+# so - and it will say so here, by going red.
+assert_allowed "$FIX" 'cp -t src docs/notes.md' \
+  'C-1 r15 BOTH WRONG, held open: cp -t is not given mv -t treatment'
+assert_allowed "$FIX" 'truncate -s 0 src/main.ts' \
+  'C-1 r21 BOTH WRONG, held open: truncate is not a write-capable name'
+assert_allowed "$FIX" 'install -m 644 docs/notes.md src/main.ts' \
+  'C-1 r22 BOTH WRONG, held open: install is not a write-capable name'
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-010 AC-3: mv removes its source, so the source operand is judged"
+set_phase "$FIX" RED
+
+# Upstream's extractor ends in `awk '{print $NF}'`, so it judged the operand mv
+# CREATES and said nothing about the ones it DESTROYS: a frozen file could leave
+# its path in any phase. Every shape below was red in the cross-run.
+assert_blocked "$FIX" 'mv src/main.ts docs/notes.md' src/main.ts \
   'a frozen source moved to a permitted path'
-assert_blocked "$FIX" "mv 'src/main.ts' docs/gone.md" src/main.ts \
+assert_blocked "$FIX" 'mv "src/main.ts" docs/notes.md' src/main.ts \
   'a quoted frozen source'
-
-# MT-031 Symptom C in the new direction: a trailing redirect must not hide the
-# source operand any more than it hid the sed operand.
-assert_blocked "$FIX" 'mv src/main.ts docs/gone.md > /dev/null' src/main.ts \
-  'a frozen source with a trailing redirect to /dev/null'
-assert_blocked "$FIX" 'mv src/main.ts docs/gone.md > docs/log.txt' src/main.ts \
-  'a frozen source with a trailing redirect to a permitted path'
-
-# The command has to be found wherever it sits in a list or a pipeline - the
-# same "real token boundary in any word position" the parser already relies on.
-assert_blocked "$FIX" 'mv src/main.ts docs/gone.md && echo done' src/main.ts \
-  'a frozen source in the first command of an && list'
-assert_blocked "$FIX" 'echo x | tee docs/log.md && mv src/main.ts docs/gone.md' src/main.ts \
-  'a frozen source in the last command of a pipeline-and-list'
-
-# A cwd-relative source. command_cwd already supplies the `cd src &&` prefix for
-# destinations; the source has to be resolved through the same prefix or the
-# candidate is the meaningless `main.ts`.
-assert_blocked "$FIX" 'cd src && mv main.ts ../docs/gone.md' src/main.ts \
-  'a cwd-relative frozen source, resolved through the cd prefix'
-
-# A source held in a variable. MT-031 made `$` resolvable precisely because the
-# harness pushes agents towards `F=...; <tool> "$F"`, and the mv source must go
-# through resolve_vars like every other candidate.
-assert_blocked "$FIX" 'F=src/main.ts; mv "$F" docs/gone.md' src/main.ts \
-  'a frozen source held in a quoted variable'
-assert_blocked "$FIX" 'F=src/main.ts; mv $F docs/gone.md' src/main.ts \
-  'a frozen source held in an unquoted variable'
-
-# An option must be skipped rather than judged, AND must not shift which operand
-# is read. `-f` is exactly the flag an agent adds when a move is refused.
-assert_blocked "$FIX" 'mv -f src/main.ts docs/gone.md' src/main.ts \
+assert_blocked "$FIX" 'mv src/main.ts docs/notes.md > /dev/null' src/main.ts \
+  'a trailing redirect to /dev/null does not hide the source'
+assert_blocked "$FIX" 'mv src/main.ts docs/notes.md > docs/log.txt' src/main.ts \
+  'a trailing redirect to a permitted path does not hide it either'
+assert_blocked "$FIX" 'git status && mv src/main.ts docs/notes.md' src/main.ts \
+  'the last command of an && list'
+assert_blocked "$FIX" 'mv -f src/main.ts docs/notes.md' src/main.ts \
   'an option before a frozen source'
-
-# Many sources: every one of them is removed, so the first frozen one denies.
-assert_blocked "$FIX" 'mv src/main.ts docs/a.md docs/b/' src/main.ts \
-  'a frozen source among several, moved into a directory'
-
-# One operand. Real `mv` errors on this, but the guard does not consult the
-# world and must not be made to: the single operand is still a candidate.
-# PASSES TODAY (it is the last operand, so lastop() already emits it) - a
-# regression guard against a fix that judges "every operand except the last".
-assert_blocked "$FIX" 'mv src/main.ts' src/main.ts \
-  'a single operand is still judged'
-
-# ---------------------------------------------------------------------------
-describe "MT-033 AC-1: a frozen TEST leaving its path during GREEN"
-set_phase "$FIX" GREEN
-
-# The most serious direction in this story, and the reason it is not cosmetic.
-# GREEN freezes tests, and GREEN is the phase where an agent has a motive to
-# make a failing test go away. `mv tests/main.test.ts docs/gone.md` is the same
-# law-2 violation as editing the assertion, and it is ALLOWED today.
-assert_blocked "$FIX" 'mv tests/main.test.ts docs/gone.md' tests/main.test.ts \
-  'a frozen test moved out of the test path during GREEN'
-assert_blocked "$FIX" 'mv tests/main.test.ts docs/gone.md > /dev/null' tests/main.test.ts \
-  'the same, with a trailing redirect'
-assert_blocked "$FIX" 'cd tests && mv main.test.ts ../docs/gone.md' tests/main.test.ts \
-  'the same, cwd-relative'
-
-# mutate.sh exempts its FILE argument and nothing else - the payload after `--`
-# is judged like any other command (MT-031, and the existing `cp` payload case
-# above). This is the shape the harness itself puts in front of an agent in
-# GREEN, so a payload that moves a frozen test out of the way must be refused.
-assert_blocked "$FIX" "bash scripts/mutate.sh src/main.ts 's/a/b/' -- mv tests/main.test.ts docs/gone.md" \
-  tests/main.test.ts 'a mutate.sh payload moving a frozen test away'
-
-# THE PRECISION SIDE, IN THE SAME PHASE. All three pass today. Without them,
-# "block every mv in GREEN" satisfies the four assertions above.
-assert_allowed "$FIX" 'cp tests/main.test.ts docs/copy.md' \
-  'copying a frozen test is a READ of it, in GREEN too'
-assert_allowed "$FIX" 'mv src/main.ts src/renamed.ts' \
-  'moving SOURCE in GREEN is exactly what GREEN is for'
-assert_allowed "$FIX" 'mv docs/notes.md docs/other.md' \
-  'moving docs in GREEN'
-
-# ---------------------------------------------------------------------------
-describe "MT-033 AC-4: git mv is judged by the mv rule, not by a new command name"
-set_phase "$FIX" RED
-
-# The story as filed said `git mv` "is not in the extractor's command list at
-# all, so it is unjudged in both directions". The first half is true and the
-# second is false: write_candidates matches a command name in ANY word position
-# - deliberately, because `xargs rm`, `echo x | tee f` and the mutate.sh `--`
-# payload all depend on it - so `git mv a b` already parses as cmd=mv. Measured
-# on main at b1583d5: `git mv docs/notes.md src/main.ts` BLOCKS on src/main.ts
-# today, and `git mv src/main.ts docs/gone.md` is ALLOWED. So AC-4 is discharged
-# by the mv rule alone, and `git` must NOT be added to isname(): it is not
-# write-capable, and a `git` that starts a command context puts every
-# `git commit -m` in the repository back in MT-031's false-positive territory.
-assert_blocked "$FIX" 'git mv src/main.ts docs/gone.md' src/main.ts \
-  'git mv out of a frozen path'
-assert_blocked "$FIX" 'git mv docs/notes.md src/main.ts' src/main.ts \
-  'git mv INTO a frozen path: blocked today, and it must stay blocked while the mv branch is rewritten'
-assert_allowed "$FIX" 'git mv docs/notes.md docs/other.md' \
-  'git mv between two permitted paths'
+assert_blocked "$FIX" 'mv docs/a.md src/main.ts docs/b.md' src/main.ts \
+  'three operands: the frozen file in the MIDDLE is removed by the move'
+assert_blocked "$FIX" 'cd docs && mv ../src/main.ts notes2.md' src/main.ts \
+  'a cwd-relative frozen source, resolved through the cd prefix'
+assert_blocked "$FIX" 'F=src/main.ts; mv "$F" docs/notes.md' src/main.ts \
+  'a frozen source held in a variable the command itself assigns'
+assert_blocked "$FIX" 'git mv src/main.ts docs/notes.md' src/main.ts \
+  'git mv is judged by the mv rule, not by a new command name'
 
 set_phase "$FIX" GREEN
-assert_blocked "$FIX" 'git mv tests/main.test.ts docs/gone.md' tests/main.test.ts \
+assert_blocked "$FIX" 'mv tests/main.test.ts docs/notes.md' tests/main.test.ts \
+  'a frozen TEST leaving its path during GREEN'
+assert_blocked "$FIX" 'git mv tests/main.test.ts docs/notes.md' tests/main.test.ts \
   'git mv a frozen test out of its path during GREEN'
 
 # ---------------------------------------------------------------------------
-describe "MT-033 AC-3: the existing destination rule survives"
+describe "HARNESS-010 AC-3: -t and --target-directory invert the destination"
 set_phase "$FIX" RED
 
-# `mv PERMITTED FROZEN` is covered several times over by MT-031's suite (the
-# two-operand, three-operand and trailing-redirect cases above) and those stay
-# green. What nothing pinned is `mv FROZEN FROZEN`: today it blocks only by
-# accident, because the DESTINATION happens to be frozen too, never because the
-# source was looked at. Either operand is a correct answer - see
-# assert_blocked_on_either.
-assert_blocked_on_either "$FIX" 'mv src/main.ts src/renamed.ts' src/main.ts src/renamed.ts \
-  'a rename WITHIN a frozen category still blocks, on a frozen path'
+# All six spellings, because three of them glue or attach the argument. A parser
+# that drops a `-` token whole leaves `mv -tsrc/ docs/notes.md` an entirely
+# unjudged write INTO frozen source - the argument has to be READ, not skipped.
+assert_blocked "$FIX" 'mv -t src/ docs/notes.md'                  src/ '-t DIR separate'
+assert_blocked "$FIX" 'mv -tsrc/ docs/notes.md'                   src/ '-tDIR glued'
+assert_blocked "$FIX" 'mv --target-directory src/ docs/notes.md'  src/ '--target-directory DIR separate'
+assert_blocked "$FIX" 'mv --target-directory=src/ docs/notes.md'  src/ '--target-directory=DIR attached'
+assert_blocked "$FIX" 'mv -ft src/ docs/notes.md'                 src/ '-ft DIR bundled'
+assert_blocked "$FIX" 'mv -ftsrc/ docs/notes.md'                  src/ '-ftDIR bundled and glued'
 
-set_phase "$FIX" GREEN
-assert_blocked_on_either "$FIX" 'mv tests/main.test.ts tests/renamed.test.ts' \
-  tests/main.test.ts tests/renamed.test.ts \
-  'a rename within the frozen test path during GREEN'
-assert_blocked "$FIX" 'mv docs/notes.md tests/main.test.ts' tests/main.test.ts \
-  'mv ONTO a frozen test during GREEN: the destination rule, for tests'
+# And the inverse direction: with -t, the POSITIONAL is a source however late it
+# appears, so a frozen positional is refused even though the destination is
+# writable.
+assert_blocked "$FIX" 'mv -t docs/ src/main.ts'    src/main.ts '-t: the positional is still a source'
+assert_blocked "$FIX" 'mv -tdocs/ src/main.ts'     src/main.ts '-tDIR glued: the positional is still a source'
+assert_blocked "$FIX" 'mv --target-directory=docs/ src/main.ts' src/main.ts \
+  '--target-directory=: the positional is still a source'
 
 # ---------------------------------------------------------------------------
-describe "MT-033 AC-2 and AC-5: cp reads its sources, and must keep doing so"
+describe "HARNESS-010 AC-2: every operand of an in-place edit, not the last word"
 set_phase "$FIX" RED
 
-# ALL OF THESE PASS TODAY. They are the false-positive controls, and they are
-# the whole reason AC-1 cannot be satisfied by "judge every operand of cp and mv
-# alike". `cp g1 g2 e/` removes neither source - measured, GNU coreutils 8.32 -
-# so every one of these is a pure read of a frozen file, which no phase forbids.
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts docs/notes.md" src/main.ts \
+  'a frozen operand followed by a permitted one'
+assert_blocked "$FIX" "sed -i -e 's/a/b/' src/main.ts docs/notes.md" src/main.ts \
+  'the -e form, frozen operand first'
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts > /dev/null" src/main.ts \
+  'a trailing redirect to /dev/null does not hide the operand'
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts 2>/dev/null" src/main.ts \
+  'a stderr redirect is a file descriptor, not an operand'
+assert_blocked "$FIX" "sed -i 's/a/b/' src/main.ts > docs/log.txt" src/main.ts \
+  'a redirect to a permitted path does not hide it either'
+
+# A metacharacter in the expression is data. `(` used to terminate the
+# extractor's character class INSIDE the script, so the candidate was a fragment
+# of the sed program - `s` - which is a block on a nonsense path, and with `!`
+# in front of it the command was allowed outright.
+assert_blocked "$FIX" "sed -i 's/\\(a\\)/b/' src/main.ts"         src/main.ts 'a capture group'
+assert_blocked "$FIX" "sed -i '/x/!s/\\(a\\)/b/' src/main.ts"     src/main.ts 'a negated address AND a capture group'
+assert_blocked "$FIX" "sed -i '/x/!s/\\(a\\)|b;c<d>e&f/g/' src/main.ts" src/main.ts 'every one of them at once'
+assert_allowed "$FIX" "sed -i 's/\\(a\\)/b/' docs/notes.md" \
+  'the same defect from the false-positive side: a capture group writing docs'
+
+# The field report verbatim: `(` in `min(` truncated the match inside the
+# script and the fragment carried an alphanumeric and no paren, so
+# path_is_implausible believed it and the guard blocked on it.
+H010_B="sed -i 's|        if a.ndim == 4 and min(a.shape[1], a.shape[3]) <= 8 ...|...|'"
+assert_allowed "$FIX" "$H010_B /tmp/claude/scratch/sib.py" \
+  'the field report verbatim, against a path outside the repository'
+assert_blocked "$FIX" "$H010_B src/main.ts" src/main.ts \
+  'the same expression against a frozen source file'
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-010 AC-4: a write that parsed to no target leaves a trace"
+set_phase "$FIX" RED
+
+# AC-4. A command that NAMES a write-capable tool and yields no target the guard
+# can judge is ALLOWED, as it must be, and says so. Until that line existed the
+# two outcomes - "the extractors found nothing to judge" and "they found
+# candidates and every one was permitted" - were indistinguishable from outside,
+# which is how a bypass stays invisible: the log is empty either way.
+H010_LOG="$FIX/.claude/state/phase-guard-declined.log"
+h010_log_of() { rm -f "$H010_LOG"; guard_bash "$FIX" "$1" >/dev/null; cat "$H010_LOG" 2>/dev/null; }
+h010_lines() { printf '%s' "$1" | awk 'NF { n++ } END { print n + 0 }'; }
+
+assert_allowed "$FIX" "find src -name '*.ts' | xargs rm" \
+  'operands arriving from a pipe are unknowable'
+h010_l="$(h010_log_of "find src -name '*.ts' | xargs rm")"
+assert_contains "a write command with no visible operand is traced" 'no-candidate' "$h010_l"
+assert_contains "the trace names the story"                         'T-1'          "$h010_l"
+assert_contains "the trace names the phase"                         'RED'          "$h010_l"
+assert_contains "the trace quotes the command, so the log is actionable" 'xargs rm' "$h010_l"
+assert_eq "the trace is one line, not a transcript" 1 "$(h010_lines "$h010_l")"
+
+assert_allowed "$FIX" 'xargs touch < list' 'an input redirect is still a read'
+assert_contains "an input-redirect operand list is traced too" 'no-candidate' \
+  "$(h010_log_of 'xargs touch < list')"
+
+# AC-4's CONTROL: a command from which targets ARE derived writes nothing to
+# that log. Without these the log becomes a line per command and AC-4 has bought
+# nothing at all.
+assert_eq "a candidate that was found and PERMITTED is not a zero-candidate trace" "" \
+  "$(h010_log_of 'echo x > docs/notes.md')"
+assert_eq "a candidate that was found and DENIED is not one either" "" \
+  "$(h010_log_of 'echo x > src/main.ts')"
+assert_eq "a read-only cat logs nothing"      "" "$(h010_log_of 'cat src/main.ts')"
+assert_eq "a read-only grep logs nothing"     "" "$(h010_log_of 'grep -rn export src/')"
+assert_eq "a read-only git diff logs nothing" "" "$(h010_log_of 'git diff -- src/main.ts')"
+assert_eq "a bare redirect to /dev/null is not a write-capable command" "" \
+  "$(h010_log_of 'git diff > /dev/null')"
+
+# And the trace is distinguishable from the OTHER thing this log carries. An
+# unresolvable candidate is a parse the guard could not BELIEVE, not one it
+# could not FIND, and one event gets one line.
+h010_l="$(h010_log_of "sed -i 's/a/b/' \"\$EXPORTED_ELSEWHERE\"")"
+assert_contains "an unresolvable candidate still logs as an implausible target" \
+  'implausible target' "$h010_l"
+assert_not_contains "and is not ALSO reported as a zero-candidate command" \
+  'no-candidate' "$h010_l"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-010 AC-5: the denial names the operand's role"
+set_phase "$FIX" RED
+
+# AC-5 is the criterion with no settled oracle, and `## Deferred verifications`
+# records why: the PLANNED probe measured BLOCK/ALLOW only and never parsed a
+# message body, so no measurement of what a denial SAYS existed before this
+# suite. It also names the trap - "a role assertion that fails only when the
+# verdict ALSO flips is not testing the role, it is testing the verdict a second
+# time".
 #
-# EARNED, in RED, by DV-1: the mutation
-#   bash scripts/mutate.sh .claude/hooks/lib.sh '361s/lastop()/allops()/' \
-#     -- bash scripts/selftest.sh phase-guard
-# makes the cp branch judge every operand, and every assertion in this block
-# goes red. Output pasted in MT-033 `## Regressions`.
-assert_allowed "$FIX" 'cp src/main.ts docs/copy.md' \
-  'cp out of a frozen path is a READ'
-assert_allowed "$FIX" 'cp src/main.ts docs/copy.md > /dev/null' \
-  'cp out of a frozen path, with a trailing redirect'
-assert_allowed "$FIX" 'cp src/main.ts docs/a.md docs/b/' \
-  'cp with several frozen sources into a directory'
-assert_allowed "$FIX" 'F=src/main.ts; cp "$F" docs/copy.md' \
-  'a cp source held in a variable is still a READ'
-
-# PO-3: `-t` inverts the operand order, so `cp -t src/ docs/notes.md` writes
-# into src/ and is unjudged. That is a REAL hole and it is deliberately OUT OF
-# SCOPE here - it belongs with `install`, `ln -f`, `rsync` and `dd` in a story
-# with its own evidence. Pinned at its current, permissive behaviour so that
-# GREEN cannot silently "fix" it on the way past, untested.
-assert_allowed "$FIX" 'cp -t src/ docs/notes.md' \
-  'cp -t writing into a frozen directory stays permitted (PO-3, out of scope)'
-
-# ---------------------------------------------------------------------------
-describe "MT-033 AC-6 and C-5: the denial says WHICH operand was refused"
-set_phase "$FIX" RED
-
-# RED ON ARRIVAL: there is no `operand:` line in the denial at all today.
-# C-5 pins the vocabulary and the position - one line, immediately after
-# `path:`, never before it and never inside it, because assert_blocked matches
-# `path:     <p>` followed by a space or end-of-string.
-assert_role "$FIX" 'mv src/main.ts docs/gone.md' \
+# So the metric is this PAIR, and it is built to be independent of the verdict:
+# the two commands differ only in operand order, BOTH are denied, BOTH are
+# denied ON THE SAME PATH, and the only thing that distinguishes them is the
+# role. A parser that reported one fixed role for every mv operand would satisfy
+# one line and fail the other while leaving every verdict in this file green.
+assert_role "$FIX" 'mv src/main.ts docs/notes.md' \
   'operand:  source of mv (removed by the move)' \
-  'a denial on an mv source says the source is removed by the move'
-assert_role "$FIX" 'mv src/main.ts docs/a.md docs/b/' \
-  'operand:  source of mv (removed by the move)' \
-  'a non-final mv operand among several is a source'
+  'src/main.ts moved AWAY is a source, removed by the move'
 assert_role "$FIX" 'mv docs/notes.md src/main.ts' \
   'operand:  destination of mv' \
-  'a denial on an mv destination says destination of mv'
+  'the SAME path moved ONTO is a destination - same verdict, same path, other role'
 
-# The one that makes the role track POSITION rather than the command name: the
-# same command, the same three operands, the frozen one at the END.
-assert_role "$FIX" 'mv docs/notes.md docs/other.md src/main.ts' \
-  'operand:  destination of mv' \
-  'the FINAL operand of a three-argument mv is the destination'
-
-assert_role "$FIX" 'cp docs/notes.md src/main.ts' \
-  'operand:  destination of cp' \
-  'a denial on a cp destination says destination of cp'
-
-set_phase "$FIX" GREEN
-assert_role "$FIX" 'mv tests/main.test.ts docs/gone.md' \
+# The same independence through the option, where position is no guide at all:
+# `-t` makes the late operand a source and the early one a destination.
+assert_role "$FIX" 'mv -t docs/ src/main.ts' \
   'operand:  source of mv (removed by the move)' \
-  'the GREEN/test direction is legible as a source denial too'
-set_phase "$FIX" RED
-
-# The `path:` line keeps its exact spelling AND its place, adjacent and first.
-# This is the assertion that fails loudly if the role line is spliced into the
-# path line instead of following it - which would take every other blocked
-# assertion in this file down with it, for a reason none of them would explain.
-# (guard() in _lib.sh flattens newlines to spaces, so the three spaces below are
-# the newline plus the next line's two-space indent.)
-assert_contains "the role line follows path: immediately, and path: is unchanged" \
-  'path:     src/main.ts   operand:  source of mv (removed by the move)' \
-  "$(guard_bash "$FIX" 'mv src/main.ts docs/gone.md')"
-
-# C-5's fourth row: every other candidate keeps the message it has. A role line
-# on all of them is churn, and it is also the cheapest way to make the six
-# assertions above pass without implementing anything.
-assert_no_role "$FIX" 'rm src/main.ts'                  'rm names no role'
-assert_no_role "$FIX" 'echo x > src/main.ts'            'a redirect names no role'
-assert_no_role "$FIX" "sed -i 's/a/b/' src/main.ts"     'sed -i names no role'
-assert_no_role "$FIX" 'touch src/new.ts'                'touch names no role'
-assert_no_role "$FIX" 'echo x | tee src/main.ts'        'tee names no role'
-
-# ---------------------------------------------------------------------------
-describe "MT-033 C-6: what the mv rule must not start refusing"
-set_phase "$FIX" RED
-
-# ALL OF THESE PASS TODAY. The mv rule widens what the guard judges, so this is
-# where a widening becomes a false-positive machine. The first two are aimed
-# squarely at C-5's stated hazard: the candidate filter in phase-guard.sh drops
-# a line that is empty, starts with a dash, contains a glob, or starts with
-# /dev/ - and every one of those anchors assumes the line IS the bare path. If
-# candidates start carrying a role, a line that no longer begins with `/dev/`
-# or `-` slips through, and `cmd > /dev/null` is the most common command shape
-# in this repository.
-assert_allowed "$FIX" 'echo x > /dev/null' \
-  'the /dev/null filter still fires'
-assert_allowed "$FIX" 'git diff > /dev/null' \
-  'a read-only command with a /dev/null redirect'
-assert_allowed "$FIX" 'mv -v docs/notes.md docs/other.md' \
-  'an option is not a candidate'
-
-assert_allowed "$FIX" 'mv docs/notes.md docs/other.md' \
-  'mv between two permitted paths'
-assert_allowed "$FIX" 'cd docs && mv notes.md other.md' \
-  'a cwd-relative mv between permitted paths'
-set_phase "$FIX" REVIEW
-assert_allowed "$FIX" 'mv docs/notes.md docs/other.md' \
-  'mv between two permitted paths in REVIEW'
-assert_allowed "$FIX" 'mv docs/notes.md docs/other.md docs/b/' \
-  'mv with several permitted sources into a permitted directory, in REVIEW'
-set_phase "$FIX" RED
-
-# An unresolvable source must stay a DECLINE, not become a block. This is the
-# MT-031 Symptom A family: the classifier's default for an unrecognised string
-# is the most restrictive category, so an unresolved variable reaching
-# check_path is a hard block on a path that does not exist.
-assert_allowed "$FIX" 'mv $UNSET_THING docs/gone.md' \
-  'an unresolvable mv source is declined, not blocked'
-
-# Prose, and a read. MT-031 AC-1: `mv` inside a quoted span is one masked token
-# and can never be a command name. The second of these names a frozen path
-# inside the prose, which is the sharper control now that mv judges more
-# operands. C-6 lists the first as already asserted in this suite; it was not -
-# only the `cp` spelling of it was (see the false-positives block above).
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -m "we mv the fixtures into a shared file"' \
-  'prose mentioning mv in a commit message'
-assert_allowed "$FIX" 'git commit --dry-run --allow-empty -m "mv src/main.ts to docs"' \
-  'prose naming a frozen path after the word mv'
-assert_allowed "$FIX" 'grep -n "mv src" docs/notes.md' \
-  'grepping docs for the word mv'
-
-# Zero operands: a write-capable name with nothing to judge stays allowed, and
-# MT-031 AC-8's trace is what records it. A fix that manufactures a candidate
-# out of an empty operand list would block on the empty string.
-assert_allowed "$FIX" 'mv' \
-  'mv with no operands at all'
-
-# ---------------------------------------------------------------------------
-describe "MT-033 AC-1/AC-6 and PO-8: mv -t inverts the operands, so it inverts the roles"
-set_phase "$FIX" RED
-
-# ADDED IN RED'S CORRECTIVE PASS, 2026-09-14. R-6 sent the story back from GREEN:
-# mvops() labels operands by POSITION, and `-t DIR` / `--target-directory DIR`
-# inverts what position means. Measured, GNU coreutils 8.32, in a scratch
-# directory - all five spellings, each leaving the positional GONE from the cwd
-# and present in DIR:
-#
-#   mkdir dest; echo a > f1; mv -t dest/ f1               -> dest/f1
-#   mkdir d2;   echo b > f2; mv -td2/ f2                  -> d2/f2
-#   mkdir d3;   echo c > f3; mv --target-directory=d3 f3  -> d3/f3
-#   mkdir d4;   echo d > f4; mv --target-directory d4 f4  -> d4/f4
-#   mkdir d5;   echo e > f5; mv -ft d5/ f5                -> d5/f5
-#
-# So with -t: DIR is the DESTINATION and EVERY positional is a SOURCE, whatever
-# its position. That is the whole rule, and the glued -tDIR spelling is real -
-# GNU mv accepts it, measured above, which is why it is asserted here.
-#
-# WHY THE PERMITTED DIRECTORY IS docs/backlog/ AND NOT docs/, WHICH IS WHAT R-6
-# WROTE. A candidate loses its trailing slash in normalize_rel, and a top-level
-# directory name has no `/` left for `docs/**` to match, so `docs` falls to the
-# classifier's restrictive default and classifies `source`. That is PRE-EXISTING
-# and has nothing to do with -t: on main at b1583d5, `mv src/main.ts docs/` is
-# BLOCKED on `docs` and so is `cp docs/notes.md docs/`, while
-# `mv docs/notes.md docs/sub/` is ALLOWED. With `docs/` as the -t argument the
-# denial would name `docs` however mvops() is fixed - `docs` sorts before
-# `src/main.ts` - so those rows could never report the source operand and would
-# have bounced the story a second time. `docs/backlog/` classifies `docs`, exists
-# in the fixture, and isolates the defect R-6 is actually about. Full evidence in
-# MT-033 `## Regressions` R-7.
-
-# --- DIR is the destination, so every positional is a source ----------------
-# The PATH is already right today (the sole positional is also the last one, so
-# position-labelling lands on it by luck); the ROLE is wrong in all five. Each
-# path assertion is a false-negative control: without it, "stop parsing mv when
-# -t is present" would satisfy every role assertion below by never denying.
-assert_blocked "$FIX" 'mv -t docs/backlog/ src/main.ts' src/main.ts \
-  'mv -t DIR: the positional is the source, and it is what the denial names'
-assert_role "$FIX" 'mv -t docs/backlog/ src/main.ts' \
-  'operand:  source of mv (removed by the move)' \
-  'mv -t DIR: the positional is a SOURCE, not the destination'
-
-assert_blocked "$FIX" 'mv -tdocs/backlog/ src/main.ts' src/main.ts \
-  'mv -tDIR glued: the positional is still the source'
-assert_role "$FIX" 'mv -tdocs/backlog/ src/main.ts' \
-  'operand:  source of mv (removed by the move)' \
-  'mv -tDIR glued: the positional is a SOURCE'
-
-# R-6 calls this one the sharp one, and it is: src/main.ts IS the source, it IS
-# the frozen operand, and the shipped denial calls it `destination of mv`. AC-6
-# stated backwards is worse than AC-6 unstated.
-assert_blocked "$FIX" 'mv --target-directory=docs/backlog src/main.ts' src/main.ts \
-  'mv --target-directory=DIR: the positional is the source'
-assert_role "$FIX" 'mv --target-directory=docs/backlog src/main.ts' \
-  'operand:  source of mv (removed by the move)' \
-  'mv --target-directory=DIR: the frozen operand is a SOURCE, and today it is named a destination'
-
-assert_blocked "$FIX" 'mv --target-directory docs/backlog src/main.ts' src/main.ts \
-  'mv --target-directory DIR: the positional is the source'
-assert_role "$FIX" 'mv --target-directory docs/backlog src/main.ts' \
-  'operand:  source of mv (removed by the move)' \
-  'mv --target-directory DIR: the positional is a SOURCE'
-
-# -t bundled with another short option. `-f` is exactly the flag an agent adds
-# when a move is refused, and `-ft DIR` is how it ends up spelled.
-assert_blocked "$FIX" 'mv -ft docs/backlog/ src/main.ts' src/main.ts \
-  'mv -ft DIR: a bundled -t still makes the positional a source'
-assert_role "$FIX" 'mv -ft docs/backlog/ src/main.ts' \
-  'operand:  source of mv (removed by the move)' \
-  'mv -ft DIR: the positional is a SOURCE'
-
-# Bundled AND glued, which GNU mv also accepts - measured:
-#   mkdir d6; echo f > f6; mv -ftd6/ f6   ->  d6/f6
-# Asserted because a fix that recognises `-t` only as a whole token, or only at
-# the start of a bundle, gets this one wrong - and an unasserted spelling is
-# exactly what sent this story back from GREEN.
-assert_blocked "$FIX" 'mv -ftdocs/backlog/ src/main.ts' src/main.ts \
-  'mv -ftDIR bundled and glued: the positional is still the source'
-assert_role "$FIX" 'mv -ftdocs/backlog/ src/main.ts' \
-  'operand:  source of mv (removed by the move)' \
-  'mv -ftDIR bundled and glued: the positional is a SOURCE'
-
-# --- and DIR itself is the destination, so DIR is judged ---------------------
-# The other direction, and the reason a fix cannot simply relabel every
-# positional a source and ignore the option's argument: `mv -t src/ ...` WRITES
-# INTO src/, which RED freezes. Two of these are ALLOWED today - the option's
-# argument is not visible to the parser at all when it is glued or =-attached,
-# so the write into src/ goes unjudged.
-assert_blocked "$FIX" 'mv -t src/ docs/notes.md' src \
-  'mv -t FROZENDIR: the option argument is the destination and it is judged'
+  '-t: the positional is a source however late it appears'
 assert_role "$FIX" 'mv -t src/ docs/notes.md' \
   'operand:  destination of mv' \
-  'mv -t FROZENDIR: DIR is the DESTINATION, not a source'
+  '-t: DIR is the destination however early it appears'
 
-assert_blocked "$FIX" 'mv -tsrc/ docs/notes.md' src \
-  'mv -tFROZENDIR glued: the glued argument is still the destination'
-assert_role "$FIX" 'mv -tsrc/ docs/notes.md' \
-  'operand:  destination of mv' \
-  'mv -tFROZENDIR glued: DIR is the DESTINATION'
-
-assert_blocked "$FIX" 'mv --target-directory=src docs/notes.md' src \
-  'mv --target-directory=FROZENDIR: the attached argument is the destination'
-assert_role "$FIX" 'mv --target-directory=src docs/notes.md' \
-  'operand:  destination of mv' \
-  'mv --target-directory=FROZENDIR: DIR is the DESTINATION'
-
-assert_blocked "$FIX" 'mv --target-directory src/ docs/notes.md' src \
-  'mv --target-directory FROZENDIR: the separate argument is the destination'
-assert_role "$FIX" 'mv --target-directory src/ docs/notes.md' \
-  'operand:  destination of mv' \
-  'mv --target-directory FROZENDIR: DIR is the DESTINATION'
-
-assert_blocked "$FIX" 'mv -ft src/ docs/notes.md' src \
-  'mv -ft FROZENDIR: a bundled -t still names a destination'
-assert_role "$FIX" 'mv -ft src/ docs/notes.md' \
-  'operand:  destination of mv' \
-  'mv -ft FROZENDIR: DIR is the DESTINATION'
-
-assert_blocked "$FIX" 'mv -ftsrc/ docs/notes.md' src \
-  'mv -ftFROZENDIR bundled and glued: the argument is still the destination'
-assert_role "$FIX" 'mv -ftsrc/ docs/notes.md' \
-  'operand:  destination of mv' \
-  'mv -ftFROZENDIR bundled and glued: DIR is the DESTINATION'
-
-# --- the GREEN direction, verbatim from R-6 ---------------------------------
-# `docs/` is harmless here: it classifies `source` for the reason in the comment
-# above, and GREEN permits source. So this row reads exactly as R-6 wrote it, and
-# it is the one that matters most - GREEN is the phase where an agent has a
-# motive to make a frozen test go away, and `mv -t docs/ tests/main.test.ts` is
-# the spelling that does it.
-set_phase "$FIX" GREEN
-assert_blocked "$FIX" 'mv -t docs/ tests/main.test.ts' tests/main.test.ts \
-  'mv -t out of the frozen test path during GREEN'
-assert_role "$FIX" 'mv -t docs/ tests/main.test.ts' \
+# cp has its own destination role, and a three-operand mv still names its last.
+assert_role "$FIX" 'cp docs/notes.md src/main.ts' \
+  'operand:  destination of cp' 'a cp destination says so'
+assert_role "$FIX" 'mv docs/a.md docs/b.md src/main.ts' \
+  'operand:  destination of mv' 'the FINAL operand of a three-argument mv'
+assert_role "$FIX" 'mv docs/a.md src/main.ts docs/b.md' \
   'operand:  source of mv (removed by the move)' \
-  'mv -t in GREEN: the frozen TEST is a SOURCE, removed by the move'
+  'a non-final operand among several is a source'
 
-# --- the two false-positive controls ----------------------------------------
-# BOTH PASS ON ARRIVAL, and that is correct rather than convenient.
-# The first: -t between two permitted paths must stay permitted, or the fix has
-# turned `mv -t` into "block whenever -t is present".
-set_phase "$FIX" REVIEW
-assert_allowed "$FIX" 'mv -t docs/backlog/ docs/notes.md' \
-  'mv -t between two permitted paths stays permitted, in REVIEW'
+# The role line comes AFTER path:, and path: keeps its exact spelling and
+# indent, because every assert_blocked in this file anchors on it.
+assert_contains "the role line follows path: immediately, and path: is unchanged" \
+  'path:     src/main.ts   operand:  source of mv (removed by the move)' \
+  "$(guard_bash "$FIX" 'mv src/main.ts docs/notes.md')"
 
-# The second: `cp -t` is OUT OF SCOPE and stays out of it. PO-8 amended PO-3 for
-# `mv -t` ONLY, because only `mv -t` got worse; `cp -t src/ docs/notes.md` is an
-# unjudged write into src/ on main too, so it is a hole rather than a regression
-# and it belongs with install/ln -f/rsync/dd in a story of its own. Pinned here,
-# a second time and next to its mv siblings, so that a fix which teaches the
-# parser about -t cannot extend it to cp on the way past without a red test.
-set_phase "$FIX" RED
-assert_allowed "$FIX" 'cp -t src/ docs/notes.md' \
-  'cp -t writing into a frozen directory stays permitted (PO-3/PO-8, out of scope)'
+# AC-5's OWN CONTROL: a denial for a path with no meaningful role does not
+# invent one. Without these, "put an operand: line on every denial" satisfies
+# every assertion above.
+assert_no_role "$FIX" 'echo x > src/main.ts'          'a redirect target has no ambiguous role'
+assert_no_role "$FIX" 'rm src/main.ts'                'an rm operand has no ambiguous role'
+assert_no_role "$FIX" 'touch src/main.ts'             'a touch operand has no ambiguous role'
+assert_no_role "$FIX" "sed -i 's/a/b/' src/main.ts"   'a sed -i operand has no ambiguous role'
+assert_no_role "$FIX" 'echo x | tee src/main.ts'      'a tee operand has no ambiguous role'
+
+set_phase "$FIX" GREEN
+assert_role "$FIX" 'mv tests/main.test.ts docs/notes.md' \
+  'operand:  source of mv (removed by the move)' \
+  'the GREEN/test direction is legible as a source denial too'
 
 # ---------------------------------------------------------------------------
-# MT-034: a directory-shaped path is classified, not guessed at
-#
-# Every paths.conf glob for a directory carries a `/`, so a BARE directory name
-# matches none of them and takes classify()'s restrictive `source` default - and
-# the trailing slash an agent actually types is stripped by normalize_rel before
-# classify ever sees it. It fails in both directions from one cause, and only
-# one of them was known before this story:
-#
-#   * a FALSE POSITIVE - `cp docs/notes.md docs/` refused in REVIEW, a phase in
-#     which docs is explicitly writable, on a command that writes only into
-#     docs. That is the denial most likely to teach an agent that denials are
-#     noise, which is the instinct law 5 of CLAUDE.md exists to suppress.
-#   * a BYPASS - `rm -rf tests/` PERMITTED in GREEN, the phase whose whole job
-#     is freezing the test tree. `rm -rf tests/main.test.ts` is refused; the
-#     shorter command is not.
-#
-# assert_blocked_as below is new, because AC-1, AC-3 and AC-3b all name a
-# CATEGORY as well as a path, and _lib.sh's assert_blocked reads only `path:`.
-# Without the category half, "block tests/ for any reason" satisfies AC-3 -
-# including a fix that classified it `vendor`, or one that left it `source` and
-# changed what GREEN permits, which is out of scope item 8.
+describe "HARNESS-010 AC-6 and C-4: the hook asks lib.sh rather than re-deriving"
+set_phase "$FIX" RED
 
-# assert_blocked_as <fixture> <command> <expected path> <expected category> [label]
-#   Blocked, on that path, AND reported as that category. One assertion, so that
-#   AC-3's four commands are four assertions and DV-1's predicted count is
-#   checkable. The path half repeats assert_blocked's matching exactly - a
-#   trailing space or end-of-string - because the denial text is the same text
-#   and 79 assertions already depend on that spelling.
-assert_blocked_as() {
-  local r; r="$(guard_bash "$1" "$2")"
-  if [ -z "$r" ]; then
-    _bad "blocks: ${5:-$2}" "not blocked at all"
-    return
-  fi
-  case "$r" in
-    *"path:     $3 "*|*"path:     $3") ;;
-    *) _bad "blocks: ${5:-$2}" "blocked, but on the wrong path (wanted '$3'): $r"; return ;;
-  esac
-  case "$r" in
-    *"category: $4"*) _ok "blocks: ${5:-$2}" ;;
-    *) _bad "blocks: ${5:-$2}" "blocked on '$3' but with the wrong category (wanted '$4'): $r" ;;
-  esac
+# C-4 and AC-6. The parser is a named function of lib.sh that the hook ASKS -
+# the rule rules.md already states for classify.sh - and C-5 checked the callers
+# against the tree: `grep -rn CANDIDATES .claude/ scripts/` returns two lines,
+# both in phase-guard.sh, and nothing else reads them. RED re-checked that and
+# it still holds.
+#
+# This is the mechanical half of a criterion marked "verified by review"; review
+# still owns "every caller asks it", which is a design question a grep cannot
+# settle.
+assert_contains "lib.sh defines write_candidates" 'write_candidates()' \
+  "$(cat "$REPO_ROOT/.claude/hooks/lib.sh")"
+assert_contains "phase-guard.sh calls it" 'write_candidates ' \
+  "$(cat "$REPO_ROOT/.claude/hooks/phase-guard.sh")"
+
+# And the other half: the inline pipeline it replaces is gone. The needle is the
+# `grep -oE` extractor chain, not the word CANDIDATES - that variable survives
+# the refactor as the name of the parser's ANSWER, so asserting its absence
+# would be an assertion that cannot hold, and asserting its presence would be
+# satisfied by the code this story exists to remove.
+assert_not_contains "the hook no longer carries its own extractor pipeline" \
+  "grep -oE '\\bsed\\b" "$(cat "$REPO_ROOT/.claude/hooks/phase-guard.sh")"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-010 C-6: what the reconciled parser must NOT start refusing"
+set_phase "$FIX" RED
+
+# A lock with false positives teaches the agent that blocks are noise, which is
+# the instinct law 5 exists to suppress. Both halves of the reconciliation add
+# refusals, so this is where the cost of getting it wrong shows up.
+#
+# The first five are the xA half of the cross-run: manga-translator's parser
+# emits every non-option token, so it refused the TIMESTAMP of a touch -t and
+# the REFERENCE FILE of a touch -r - a wrong denial naming a real file the
+# command never writes, which is the most convincing kind.
+assert_allowed "$FIX" 'touch -t 202601010000 docs/a.md' 'touch -t: a timestamp is not a path'
+assert_allowed "$FIX" 'touch -d 2026-01-01 docs/a.md'   'touch -d: a date is not a path'
+assert_allowed "$FIX" 'touch -r src/main.ts docs/a.md'  'touch -r: the reference is only read'
+assert_allowed "$FIX" 'touch --reference src/main.ts docs/a.md' 'touch --reference, the long form'
+assert_allowed "$FIX" 'touch --date 2026-01-01 docs/a.md'       'touch --date, the long form'
+
+# cp READS its sources and leaves them where they are. The mv rule must not
+# spread to it, or every `cp src/x docs/` a review does becomes a refusal.
+assert_allowed "$FIX" 'cp src/main.ts docs/copy.md' 'cp leaves its source where it was'
+assert_allowed "$FIX" 'cp docs/a.md docs/b.md'      'cp between permitted paths'
+
+# Ordinary moves inside a permitted category, in every -t spelling.
+assert_allowed "$FIX" 'mv docs/a.md docs/b.md'                 'mv between permitted paths'
+assert_allowed "$FIX" 'mv -f docs/a.md docs/b.md'              'an option before permitted operands'
+assert_allowed "$FIX" 'mv -t docs/ docs/a.md'                  'mv -t into a permitted directory'
+assert_allowed "$FIX" 'mv --target-directory=docs/ docs/a.md'  'the attached form, permitted'
+
+# And two frozen operands: either path is a correct answer and no clause pins
+# which, but SOMETHING must be refused.
+assert_blocked_on_either "$FIX" 'mv src/a.ts src/b.ts' src/a.ts src/b.ts \
+  'both operands frozen: one of them is named'
+
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-011 AC-2: GREEN freezes the tests DIRECTORY, not only the files"
+set_phase "$FIX" GREEN
+
+# In GREEN, deleting one frozen test was refused and deleting all of them was
+# permitted. The cause is not in this hook: `paths.conf` wrote its rules as
+# `**/tests/**`, which matches paths UNDER tests and never `tests` itself, so
+# the bare directory fell through to the `source` fallback - and source is
+# writable in GREEN. Law 2 says tests are frozen during GREEN; the lock
+# enforced that per file and not for the directory that holds them.
+#
+# THE CONTROLS ARE THE POINT of this block. Both of them were ALREADY refused
+# at release 49 and must stay refused, because the criterion is about the
+# DIRECTORY closing a hole the FILE never had. Without them, "the lock refuses
+# something under tests/" proves nothing new.
+assert_blocked "$FIX" 'rm -rf tests/main.test.ts' tests/main.test.ts \
+  'the control: one test file was always refused'
+assert_blocked "$FIX" 'rm -rf tests/' tests/ \
+  'the control: a trailing-slash directory, closed by HARNESS-010'
+
+# THE HOLE.
+assert_blocked "$FIX" 'rm -rf tests' tests 'the bare tests directory in GREEN'
+
+# ...and refused AS A TEST. A denial alone would be satisfied by a rule that
+# swallowed the path into any frozen category; what the story claims is that
+# the classifier now gives the bare name its own category.
+r="$(guard_bash "$FIX" 'rm -rf tests')"
+assert_contains "and refused because it is test, not incidentally" "category: test" "$r"
+
+# THE COUNTER-CONTROL, in the other direction: source is WRITABLE in GREEN and
+# must stay so. A fix that reached too far - one over-broad bare rule - would
+# freeze src here, and the failure would be silent in the classifier.
+assert_allowed "$FIX" 'rm -rf src' 'the control: bare src is still writable in GREEN'
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-011 AC-3: RED may write the bare directories RED owns"
+set_phase "$FIX" RED
+
+# The same defect pointing the other way. `source` is frozen in RED, so every
+# bare directory name that should have been harness, docs or test was REFUSED
+# in the phase that may write all three. Measured at release 49: `rm -rf docs`,
+# `rm -rf .claude`, `rm -rf scripts`, `rm -rf .github` and `rm -rf tests` were
+# all BLOCKED in RED, each one reported as `category: source`.
+assert_allowed "$FIX" 'rm -rf docs'    'the bare docs directory in RED'
+assert_allowed "$FIX" 'rm -rf scripts' 'the bare scripts directory in RED'
+assert_allowed "$FIX" 'rm -rf .claude' 'the bare .claude directory in RED'
+assert_allowed "$FIX" 'rm -rf .github' 'the bare .github directory in RED'
+assert_allowed "$FIX" 'rm -rf tests'   'the bare tests directory in RED'
+
+# THE CONTROLS. `src` is a real source directory and there is no rule that
+# should make it anything else; `wibble` matches no rule at all, and the
+# documented fallback to `source` is what makes the lock FAIL CLOSED on a path
+# nobody has classified. Eight new rules, three of them `**/`-prefixed, are
+# eight chances to swallow a path they were never meant to reach - and a path
+# wrongly classified as test or harness is WRITABLE here, where source is
+# frozen. These two assertions are what notices.
+assert_blocked "$FIX" 'rm -rf src'    src    'the control: bare src is still frozen in RED'
+assert_blocked "$FIX" 'rm -rf wibble' wibble 'the control: an unclassified bare name still falls through to source'
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-031: a project rule X/** covers bare X, through the guard"
+
+# HARNESS-011 gave the BUILT-IN directory rules bare twins. A project's own
+# rule gets none unless its author writes one, and manga-translator's
+# `test | fixtures/**` had none. Measured at 16c42a1 through this hook, in a
+# fixture with that one line appended:
+#
+#   GREEN  rm -rf fixtures              ALLOW   <- the frozen test dir is deletable
+#   GREEN  rm -rf fixtures/             DENY    the slashed form was always right
+#   RED    rm -rf fixtures              DENY    category: source
+#   RED    cp docs/notes.md fixtures    DENY    category: source
+#   RED    rm -rf .pytest_cache         DENY    category: source (a built-in rule, no twin)
+#
+# The end-to-end half of the classify.test.sh block. Its own fixture (C-3).
+H031="$(make_fixture)"; H031_FIXES="$H031_FIXES $H031"
+printf '%s\n' 'test | fixtures/**' >> "$H031/.claude/harness/paths.conf"
+
+# AC-1, GREEN: the hole.
+set_phase "$H031" GREEN
+assert_blocked "$H031" 'rm -rf fixtures' fixtures \
+  'AC-1: the bare fixtures directory in GREEN, under a project rule with no twin'
+r="$(guard_bash "$H031" 'rm -rf fixtures')"
+assert_contains "AC-1: and refused because it is test, not incidentally" "category: test" "$r"
+# Controls: the slashed form was always refused (HARNESS-010), and source stays
+# writable in GREEN - a retry that reached too far would freeze src here.
+assert_blocked "$H031" 'rm -rf fixtures/' fixtures/ \
+  'AC-1 control: the trailing-slash fixtures/ is still refused in GREEN'
+assert_allowed "$H031" 'rm -rf src' 'AC-1 control: bare src is still writable in GREEN'
+
+# AC-1 and AC-2, RED: the false positives.
+set_phase "$H031" RED
+assert_allowed "$H031" 'rm -rf fixtures' 'AC-1: the bare fixtures directory in RED'
+assert_blocked "$H031" 'rm -rf src' src 'AC-1 control: bare src is still frozen in RED'
+assert_allowed "$H031" 'cp docs/notes.md fixtures' \
+  'AC-2: cp into a bare project test directory in RED'
+
+# AC-3, through the guard, against the REAL paths.conf (the shared FIX carries
+# no extra rule): a built-in rule with no twin.
+set_phase "$FIX" RED
+assert_allowed "$FIX" 'rm -rf .pytest_cache' \
+  'AC-3: the bare .pytest_cache in RED, a built-in vendor rule with no twin'
+
+# AC-2, REVIEW: what is already right stays right. The slashed operand is kept
+# by HARNESS-010 and matches `docs/**`. Passes on arrival; DV-3 earns it by
+# deleting that rule. The paired control proves an allow cannot come from the
+# guard failing to see a cp target at all.
+set_phase "$FIX" REVIEW
+assert_allowed "$FIX" 'cp docs/notes.md docs/' 'AC-2: cp into docs/ in REVIEW'
+assert_blocked "$FIX" 'cp docs/notes.md src/' src/ \
+  'AC-2 control: cp into src/ in REVIEW is refused, on src/'
+
+# ---------------------------------------------------------------------------
+# HARNESS-035 - the lock of the worktree that owns the file.
+#
+# Field report: fantasy-world-builder WORLD-113, D-7. A desktop session started
+# in the main checkout moved into a linked worktree. CLAUDE_PROJECT_DIR kept
+# naming the main checkout, so every hook read ITS story; and an absolute path
+# into the worktree came back from to_rel as "outside", so a Write there was
+# never judged at all.
+#
+# REAL WORKTREES, as in worktree.test.sh: the claim is about what git does with
+# `.git`, and a copied directory would pass while proving nothing. A is the main
+# checkout and is what CLAUDE_PROJECT_DIR names in every case below, as it did
+# in the field. B is a linked worktree in a directory with a DIFFERENT folder
+# name, which is the shape to_rel's folder-name fallback could not see. W is a
+# linked worktree nested under A, where Claude Code puts its own. C is a
+# separate repository, not a worktree of A's at all.
+H035_A="$(make_fixture)"
+H035_WT="$(mktemp -d 2>/dev/null || mktemp -d -t harness.XXXXXX)"
+H035_C="$(make_fixture)"
+H035_FIXES="$H035_A $H035_WT $H035_C"
+trap 'rm -rf "$FIX" $H031_FIXES $H035_FIXES' EXIT
+H035_B="$H035_WT/b-tree"
+H035_W="$H035_A/.claude/worktrees/w"
+printf '.claude/state/*\n.claude/worktrees/\n' >> "$H035_A/.gitignore"
+git -C "$H035_A" add -A >/dev/null 2>&1
+git -C "$H035_A" -c user.email=t@t -c user.name=t commit -qm fixture >/dev/null 2>&1
+git -C "$H035_A" worktree add -q -b story/T-B "$H035_B" HEAD >/dev/null 2>&1
+git -C "$H035_A" worktree add -q -b story/T-W "$H035_W" HEAD >/dev/null 2>&1
+mkdir -p "$H035_B/.claude/state" "$H035_W/.claude/state"
+
+# h035_state <tree> <id> <phase>   A story in that tree's own state file. An
+# empty phase clears it. Each tree gets its own id so a denial can be traced to
+# the lock that issued it.
+h035_state() {
+  if [ -z "${3:-}" ]; then rm -f "$1/.claude/state/current-story.env"; return 0; fi
+  printf 'STORY_ID=%s\nSTORY_SLUG=fixture\nSTORY_TYPE=feature\nPHASE=%s\nBRANCH=story/%s\n' "$2" "$3" "$2" \
+    > "$1/.claude/state/current-story.env"
 }
 
-# ---------------------------------------------------------------------------
-describe "MT-034 AC-1: a directory-shaped path in a category the phase PERMITS"
-set_phase "$FIX" REVIEW
+# h035_reason <tool> <key> <value>   The denial reason with CLAUDE_PROJECT_DIR=A,
+# and GUARD_CWD as the caller sets it.
+h035_reason() { guard "$H035_A" "$1" "$2" "$3"; }
 
-# RED ON ARRIVAL: all four are BLOCKED today, on a path of `docs` and a category
-# of `source`. Measured on main at b1583d5 through a git worktree and on the
-# _lib.sh fixture; reproduced in RED before these were written.
-assert_allowed "$FIX" 'cp docs/notes.md docs/' \
-  'cp into docs/ during REVIEW, where docs is writable'
-assert_allowed "$FIX" 'mv docs/notes.md docs/' \
-  'mv into docs/ during REVIEW'
-assert_allowed "$FIX" 'rm -rf docs/' \
-  'rm -rf docs/ during REVIEW'
-assert_allowed "$FIX" 'touch docs/' \
-  'touch docs/ during REVIEW'
+describe "HARNESS-035 premise: B and W are linked worktrees of A, C is not"
 
-# The same criterion in the other phase that has a writable directory the guard
-# currently refuses. RED permits `test`, and today a Test Developer cannot copy
-# a file into the very tree the phase exists to let them write - it is refused
-# on `tests`, category `source`. BOTH RED ON ARRIVAL.
-set_phase "$FIX" RED
-assert_allowed "$FIX" 'cp docs/notes.md tests/' \
-  'cp into tests/ during RED, where test is writable'
-assert_allowed "$FIX" 'rm -rf docs/' \
-  'rm -rf docs/ during RED, where docs is writable'
+_common() { (cd "$1" && cd "$(git rev-parse --git-common-dir)" && pwd); }
+assert_eq "B shares A's .git" "$(_common "$H035_A")" "$(_common "$H035_B")"
+assert_eq "W shares A's .git" "$(_common "$H035_A")" "$(_common "$H035_W")"
+case "$(_common "$H035_C")" in
+  "$(_common "$H035_A")") _bad "C is a separate repository" "C shares A's .git" ;;
+  *) _ok "C is a separate repository" ;;
+esac
+assert_eq "B's folder name is not A's" "no" "$([ "${H035_B##*/}" = "${H035_A##*/}" ] && echo yes || echo no)"
 
-# Direction 3, at the guard: the same write, two spellings, two verdicts. The
-# absolute branch of check_path reaches classify through to_rel, which KEEPS the
-# trailing slash; the relative branch goes through normalize_rel, which strips
-# it. The absolute spelling is ALLOWED today and must stay allowed; the relative
-# one above is refused today and must become allowed. What this pair pins is
-# that the two agree.
-#
-# PASSES ON ARRIVAL, and it is earned by its partner above: a fix that made the
-# two spellings agree by refusing BOTH would take that one red.
-set_phase "$FIX" REVIEW
-assert_allowed "$FIX" "cp docs/notes.md $FIX/docs/" \
-  'the absolute spelling of the same permitted write'
+describe "HARNESS-035 AC-1: the session's tree follows the hook input's cwd"
 
-# AC-1's control, verbatim: the criterion must not be satisfiable by making the
-# guard quieter. BOTH PASS ON ARRIVAL. `src` is not a category directory and no
-# paths.conf glob begins `src/`, so no retry can invent a category for it - see
-# AC-4 in lib.test.sh, which is where that is asserted at the unit level.
-assert_blocked_as "$FIX" 'cp docs/notes.md src/' src source \
-  'cp into src/ stays refused in REVIEW'
-assert_blocked_as "$FIX" 'cp docs/notes.md src/sub/' src/sub source \
-  'cp one level inside src/ stays refused in REVIEW'
+h035_state "$H035_A" T-A RED
+h035_state "$H035_B" T-B GREEN
+r="$(GUARD_CWD="$H035_B" h035_reason Bash command 'echo x > src/main.ts')"
+assert_eq "AC-1: in B (GREEN) a relative source write is allowed although A is in RED" "" "$r"
+r="$(GUARD_CWD="$H035_B" h035_reason Bash command 'echo x > tests/main.test.ts')"
+assert_contains "AC-1: in B a relative test write is refused" "path:     tests/main.test.ts" "$r"
+assert_contains "AC-1: by B's story" "story:    T-B" "$r"
+assert_contains "AC-1: in B's phase" "phase:    GREEN" "$r"
+r="$(GUARD_CWD="$H035_B" h035_reason Write file_path "$H035_B/tests/main.test.ts")"
+assert_contains "AC-1: Write into B's tests with cwd B is refused by B's story" "story:    T-B" "$r"
 
-# ---------------------------------------------------------------------------
-describe "MT-034 AC-2: mv into a permitted directory is judged on the operand it REMOVES"
-set_phase "$FIX" RED
+# The prompt hook: what the field saw report WORLD-018 from inside WORLD-113.
+r="$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","prompt":"x"}' "$(json_str "$H035_B")" \
+  | CLAUDE_PROJECT_DIR="$H035_A" bash "$REPO_ROOT/.claude/hooks/inject-state.sh" 2>&1)"
+assert_contains "AC-1: the prompt hook reports B's story" "Active story: T-B" "$r"
+assert_not_contains "AC-1: and not A's" "T-A" "$r"
 
-# RED ON ARRIVAL, and this is MT-033 AC-1 finally landing on the command shape
-# MT-033 could not reach. Today `mv src/main.ts docs/` is blocked on `docs` -
-# the WRONG operand, in a category RED permits, with the role line calling it a
-# destination. The frozen file leaving its path is not mentioned at all.
-#
-# Once `docs` classifies `docs`, the destination candidate is permitted and the
-# denial falls where it belongs: on `src/main.ts`, the source, removed by the
-# move. The role string is MT-033 C-5's vocabulary verbatim (C-8: mechanical,
-# pin exactly).
-assert_blocked_as "$FIX" 'mv src/main.ts docs/' src/main.ts source \
-  'mv of a frozen file into docs/ is refused on the file, not on docs'
-assert_role "$FIX" 'mv src/main.ts docs/' \
-  'operand:  source of mv (removed by the move)' \
-  'and the denial calls it the source of the mv, not a destination'
+# A IDLE: the root used to be read as A, found idle, and the guard exited
+# before judging anything.
+h035_state "$H035_A" T-A ""
+r="$(GUARD_CWD="$H035_B" h035_reason Bash command 'echo x > tests/main.test.ts')"
+assert_contains "AC-1: with A IDLE, B's GREEN still refuses a test write" "story:    T-B" "$r"
 
-# ---------------------------------------------------------------------------
-describe "MT-034 AC-3 and AC-3b: GREEN freezes the test tree however the path is spelled"
-set_phase "$FIX" GREEN
+# The field's spelling. The host sends Windows paths, so `cwd` arrives as a
+# JSON string full of escaped backslashes. Spelled here by turning the fixture's
+# slashes into backslashes, which slash back to the same path on every platform
+# (as lib.test.sh's "a backslash path" does). Added on returning to RED: every
+# case above passed while a real `"cwd":"D:\\adh-HARNESS-035"` was not read at
+# all - see ## Regressions.
+H035_BBS="$(printf '%s' "$H035_B" | tr '/' '\134')"
+H035_ABS="$(printf '%s' "$H035_A" | tr '/' '\134')"
+h035_state "$H035_A" T-A RED
+r="$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","prompt":"x"}' "$(json_str "$H035_BBS")" \
+  | CLAUDE_PROJECT_DIR="$H035_A" bash "$REPO_ROOT/.claude/hooks/inject-state.sh" 2>&1)"
+assert_contains "AC-1: a backslash-spelled cwd is read: the prompt hook reports B's story" "Active story: T-B" "$r"
+r="$(GUARD_CWD="$H035_BBS" h035_reason Bash command 'echo x > src/main.ts')"
+assert_eq "AC-1: with a backslash-spelled cwd, B (GREEN) allows a relative source write" "" "$r"
 
-# ALL FOUR ALLOWED TODAY. `tests` classifies `source`, GREEN permits `source`,
-# and so a write into the frozen test tree is permitted when the destination is
-# named at the top level and refused one directory down. That is law 2 with a
-# hole in it, reachable by a command SHORTER than the one that is caught.
-#
-# AC-3b - `rm -rf tests/` - is listed as its own criterion because it is the one
-# instance whose consequence is unrecoverable: GREEN is precisely the phase in
-# which an agent has a motive to make a failing test stop failing, and
-# `rm -rf tests/main.test.ts` is refused while `rm -rf tests/` is not.
-#
-# Exactly four assertions, because AC-4's control predicts "4 red on AC-3".
-assert_blocked_as "$FIX" 'cp docs/notes.md tests/' tests test \
-  'cp into the frozen test tree during GREEN'
-assert_blocked_as "$FIX" 'mv docs/notes.md tests/' tests test \
-  'mv into the frozen test tree during GREEN'
-assert_blocked_as "$FIX" 'touch tests/' tests test \
-  'touch of the frozen test tree during GREEN'
-assert_blocked_as "$FIX" 'rm -rf tests/' tests test \
-  'AC-3b: rm -rf of the whole frozen test tree during GREEN'
+# Control: no cwd in the input is today's behaviour - A's lock.
+h035_state "$H035_A" T-A RED
+r="$(h035_reason Bash command 'echo x > src/main.ts')"
+assert_contains "AC-1 control: without cwd the root is CLAUDE_PROJECT_DIR (A refuses)" "story:    T-A" "$r"
 
-# AC-3's control: the one-level-deeper form is blocked today and must stay
-# blocked, and so must the named file. BOTH PASS ON ARRIVAL - they are what
-# stops AC-3 being satisfied by widening the guard rather than by classifying
-# the path, and what would go red if a fix reached green by changing which
-# categories GREEN permits (out of scope item 8).
-assert_blocked_as "$FIX" 'cp docs/notes.md tests/sub/' tests/sub test \
-  'cp one level inside the frozen test tree stays refused'
-assert_blocked_as "$FIX" 'rm -rf tests/main.test.ts' tests/main.test.ts test \
-  'rm of a named frozen test stays refused'
+describe "HARNESS-035 AC-2: an absolute path into a sibling worktree is judged by its lock"
 
-# The mirror of AC-3b in the other direction, and AC-4's trap at the guard: a
-# bare `src` must keep taking the restrictive default. BOTH PASS ON ARRIVAL;
-# they go red under the same mutation that earns AC-4 - stop defaulting to
-# source, and RED starts permitting the deletion of the whole source tree.
-set_phase "$FIX" RED
-assert_blocked_as "$FIX" 'rm -rf src/' src source \
-  'rm -rf of the whole frozen source tree during RED stays refused'
-assert_blocked_as "$FIX" 'touch src/' src source \
-  'touch of the frozen source tree during RED stays refused'
+h035_state "$H035_A" T-A RED
+h035_state "$H035_B" T-B RED
+for tool in Write Edit; do
+  r="$(h035_reason "$tool" file_path "$H035_B/src/main.ts")"
+  assert_contains "AC-2: $tool <B>/src/main.ts from A is refused, on B's relative path" "path:     src/main.ts" "$r"
+  assert_contains "AC-2: $tool names B's story" "story:    T-B" "$r"
+  assert_contains "AC-2: $tool names B as the worktree" "worktree: $H035_B" "$r"
+done
+r="$(h035_reason Bash command "echo x > $H035_B/src/main.ts")"
+assert_contains "AC-2: a Bash redirect to <B>/src/main.ts is refused by B" "story:    T-B" "$r"
+r="$(h035_reason Bash command ": >> $H035_B/src/main.ts")"
+assert_contains "AC-2: the field's own probe, : >>, by absolute path" "story:    T-B" "$r"
+r="$(h035_reason Bash command "cd $H035_B && echo x > src/main.ts")"
+assert_contains "AC-2: cd <B> && echo x > src/main.ts is refused by B" "story:    T-B" "$r"
+assert_contains "AC-2: on B's relative path" "path:     src/main.ts" "$r"
 
-# ---------------------------------------------------------------------------
-describe "MT-034 C-6: what the directory rule must not start refusing"
+# A IDLE: the guard must still look, because B is not.
+h035_state "$H035_A" T-A ""
+r="$(h035_reason Write file_path "$H035_B/src/main.ts")"
+assert_contains "AC-2: with A IDLE, Write <B>/src/main.ts is refused by B" "story:    T-B" "$r"
+r="$(h035_reason Bash command "echo x > $H035_B/src/main.ts")"
+assert_contains "AC-2: with A IDLE, a Bash redirect into B is refused by B" "story:    T-B" "$r"
+# CLAUDE_PROJECT_DIR as the host spells it on Windows, with backslashes. Added
+# on returning to RED: the IDLE root's worktree listing globbed through a
+# backslash, which a glob reads as an escape, and found no worktree at all.
+r="$(guard "$H035_ABS" Write file_path "$H035_B/src/main.ts")"
+assert_contains "AC-2: with A IDLE and spelled with backslashes, Write <B>/src/main.ts is refused by B" "story:    T-B" "$r"
 
-# Already correct, measured, and listed in C-6 so that a fix cannot buy AC-1 by
-# refusing more. BOTH PASS ON ARRIVAL. The other four C-6 rows - `rm -rf
-# .vitest`, `rm -rf node_modules`, the mutate.sh FILE exemption and
-# `git commit -m` prose - are already asserted above by MT-031 and MT-033 and
-# are not duplicated here.
-set_phase "$FIX" REVIEW
-assert_allowed "$FIX" 'mv docs/notes.md docs/sub/' \
-  'mv into a nested docs directory during REVIEW'
-set_phase "$FIX" RED
-assert_allowed "$FIX" 'cp docs/notes.md docs/backlog/' \
-  'cp into docs/backlog/ during RED'
+# Controls: B's lock, not a blanket refusal.
+h035_state "$H035_A" T-A RED
+h035_state "$H035_B" T-B ""
+assert_eq "AC-2 control: B IDLE allows <B>/src/main.ts though A is in RED" "" \
+  "$(h035_reason Write file_path "$H035_B/src/main.ts")"
+h035_state "$H035_B" T-B GREEN
+assert_eq "AC-2 control: B GREEN allows <B>/src/main.ts though A is in RED" "" \
+  "$(h035_reason Write file_path "$H035_B/src/main.ts")"
+r="$(h035_reason Write file_path "$H035_B/tests/main.test.ts")"
+assert_contains "AC-2 control: and B GREEN refuses <B>/tests/main.test.ts, as GREEN" "phase:    GREEN" "$r"
+# And A's own lock is untouched by all of this.
+r="$(h035_reason Write file_path "$H035_A/src/main.ts")"
+assert_contains "AC-2 control: <A>/src/main.ts is still refused by A" "story:    T-A" "$r"
+assert_not_contains "AC-2 control: with no worktree line for the session's own tree" "worktree:" "$r"
 
-# ===========================================================================
-# MT-041 - one guard invocation costs half the processes.
-#
-# ADDITIONS ONLY (AC-2): not one line above this block is changed by MT-041.
-# The cost claims are measured on the REAL hook, traced, by the instrument in
-# _spawns.sh - whose own negative control is in lib.test.sh. Everything else
-# here passes on arrival and pins a verdict the rewrite must keep; MT-041
-# `## Test plan` has the mutation that earned each.
-. "$TESTS_DIR/_spawns.sh"
-_t41="$(mktemp -d 2>/dev/null || mktemp -d -t mt041)"
-_f41="$(make_fixture)"
-_f41bs="$(printf '%s' "$_f41" | tr '/' '\134')"
+describe "HARNESS-035 AC-3: a worktree nested under the root is its own tree"
 
-# ---------------------------------------------------------------------------
-describe "MT-041 AC-1: one guard invocation spawns at most 27 processes"
-set_phase "$_f41" RED
+h035_state "$H035_A" T-A GREEN
+h035_state "$H035_W" T-W RED
+r="$(h035_reason Write file_path "$H035_W/src/main.ts")"
+assert_contains "AC-3: Write <A>/.claude/worktrees/w/src/main.ts is refused by W" "story:    T-W" "$r"
+assert_contains "AC-3: on W's relative path" "path:     src/main.ts" "$r"
+r="$(h035_reason Bash command 'cd .claude/worktrees/w && echo x > src/main.ts')"
+assert_contains "AC-3: cd .claude/worktrees/w && echo x > src/main.ts is refused by W" "story:    T-W" "$r"
+h035_state "$H035_W" T-W GREEN
+h035_state "$H035_A" T-A RED
+assert_eq "AC-3 control: W GREEN allows its src/main.ts though A is in RED" "" \
+  "$(h035_reason Write file_path "$H035_W/src/main.ts")"
 
-# The invocation AC-1 names: `echo hi > src/main.ts`, phase RED, the real hook,
-# the _lib.sh fixture. RED ON ARRIVAL - measured at 30bdc9a: 45 in total (the
-# story's 44 plus the hook's own `cat` of stdin), of which tr -d '[:space:]' 7,
-# tr '\134' '/' 5, tr -d with both quotes 4. The bound 27 is the story's, read
-# out, not tuned here (C-6).
-spawn_trace "$_f41" Bash command 'echo hi > src/main.ts' "$_t41/ac1"
-_tally="$(spawn_tally "$_t41/ac1")"
-_why="$(printf 'measured, one line per tool (count, tool):\n%s' "$_tally")"
+describe "HARNESS-035 AC-4: another repository, or a same-named folder, is still outside"
 
-# Vacuity controls: the bounds below are all "at most", so a trace that never
-# reached the classification would satisfy them by counting nothing.
-assert_contains "AC-1: the traced invocation still blocks src/main.ts (instrument control)" \
-  '"permissionDecision":"deny"' "$(cat "$_t41/ac1.out")"
-if [ "$(spawn_traced_calls "$_t41/ac1" classify)" -ge 1 ]; then
-  _ok "AC-1: the trace reached classify (instrument control)"
-else _bad "AC-1: the trace reached classify (instrument control)" "no classify call in the trace"; fi
-
-_n="$(spawn_count "$_tally" TOTAL)"
-if [ "$_n" -le 27 ]; then _ok "AC-1: at most 27 external processes for one guard invocation"
-else _bad "AC-1: at most 27 external processes for one guard invocation" "spawned $_n
-$_why"; fi
-assert_eq "AC-1: no tr -d '[:space:]' is spawned" "0" "$(spawn_count "$_tally" tr:space)"
-assert_eq "AC-1: no tr '\\134' '/' is spawned"    "0" "$(spawn_count "$_tally" tr:backslash)"
-assert_eq "AC-1: no tr -d of the two quote characters is spawned" "0" "$(spawn_count "$_tally" tr:quotes)"
-
-# ---------------------------------------------------------------------------
-describe "MT-041 AC-4: one guard invocation, at most one git check-ignore"
-
-# RED ON ARRIVAL: 2 in both - is_ignored asks `<p>`, then `<p>/`. The first is
-# the AC-1 trace above (src/main.ts is tracked, so both spellings are asked);
-# the second is decided by the SLASHED spelling alone.
-_n="$(spawn_count "$_tally" 'git check-ignore')"
-if [ "$_n" -le 1 ]; then _ok "AC-4: echo hi > src/main.ts spawns at most one git check-ignore"
-else _bad "AC-4: echo hi > src/main.ts spawns at most one git check-ignore" "spawned $_n"; fi
-
-spawn_trace "$_f41" Bash command 'rm -rf .vitest' "$_t41/ac4"
-_n="$(spawn_count "$(spawn_tally "$_t41/ac4")" 'git check-ignore')"
-assert_not_contains "AC-4: rm -rf .vitest is still allowed - ignored only as .vitest/" \
-  '"permissionDecision":"deny"' "$(cat "$_t41/ac4.out")"
-if [ "$(spawn_traced_calls "$_t41/ac4" is_ignored)" -lt 1 ]; then
-  _bad "AC-4: rm -rf .vitest spawns at most one git check-ignore" "the trace never reached is_ignored"
-elif [ "$_n" -le 1 ]; then _ok "AC-4: rm -rf .vitest spawns at most one git check-ignore"
-else _bad "AC-4: rm -rf .vitest spawns at most one git check-ignore" "spawned $_n"; fi
-
-# AC-4 as amended (A-1, PO-5 D-3): at most one per CLASSIFIED CANDIDATE. Three
-# source candidates in GREEN, which permits source, so no denial ends the hook
-# early and all three are classified. RED ON ARRIVAL: measured 6 at 30bdc9a.
-set_phase "$_f41" GREEN
-spawn_trace "$_f41" Bash command 'rm src/a.ts src/b.ts src/c.ts' "$_t41/ac4n"
-_n="$(spawn_count "$(spawn_tally "$_t41/ac4n")" 'git check-ignore')"
-_c="$(spawn_traced_calls "$_t41/ac4n" classify)"
-if [ "$_c" -ne 3 ]; then
-  _bad "AC-4: three candidates spawn at most three git check-ignore" "classify was called $_c times, not 3 (instrument control)"
-elif [ "$_n" -le 3 ]; then _ok "AC-4: three candidates spawn at most three git check-ignore"
-else _bad "AC-4: three candidates spawn at most three git check-ignore" "spawned $_n"; fi
-
-# "Both spellings of every candidate are still submitted." The instrument sees
-# argv, not stdin, so a `--stdin` implementation's input is invisible to it -
-# this is proved by VERDICT instead, which holds whatever the mechanism. Three
-# candidates in REVIEW, which refuses source, each ignored by a different
-# spelling: `.vitest` and `playwright-report` only as `<p>/`, `bareonly` only as
-# `<p>` (`!bareonly/` re-includes the slashed form). Allowed only if every
-# candidate's deciding spelling reached git; drop either spelling and one of
-# them falls to `source` and is refused. Also counted: at most three. RED ON
-# ARRIVAL for the count (measured 5: 2 + 1 + 2); the verdict passes today.
-_f41b="$(make_fixture)"
-printf 'bareonly\n!bareonly/\n' >> "$_f41b/.gitignore"
-set_phase "$_f41b" REVIEW
-spawn_trace "$_f41b" Bash command 'rm -rf .vitest bareonly playwright-report' "$_t41/ac4s"
-assert_not_contains "AC-4: both spellings of each of three candidates reach git (all three ignored, allowed in REVIEW)" \
-  '"permissionDecision":"deny"' "$(cat "$_t41/ac4s.out")"
-_n="$(spawn_count "$(spawn_tally "$_t41/ac4s")" 'git check-ignore')"
-_c="$(spawn_traced_calls "$_t41/ac4s" classify)"
-if [ "$_c" -ne 3 ]; then
-  _bad "AC-4: three ignored candidates spawn at most three git check-ignore" "classify was called $_c times, not 3 (instrument control)"
-elif [ "$_n" -le 3 ]; then _ok "AC-4: three ignored candidates spawn at most three git check-ignore"
-else _bad "AC-4: three ignored candidates spawn at most three git check-ignore" "spawned $_n"; fi
-rm -rf "$_f41b"
-
-# ---------------------------------------------------------------------------
-describe "MT-041 AC-5: the same verdicts through a backslash-spelled absolute path"
-
-# The guard's whole path from a Windows spelling: masked, unquoted, judged
-# absolute, placed by to_rel, classified. C-5 probe 2 - to_rel's backslash
-# conversion made a no-op - is what turns every one of these, and they are the
-# verdicts that move silently on the platform this repository is built on.
-# One row per way a category is decided - by git, by a rule, by the source
-# default, and a directory rule in the phase that freezes it. All eight rows of
-# AC-5's table go through the same spelling in lib.test.sh; here each guard
-# invocation costs seconds, in the suite this story exists to make cheaper.
-set_phase "$_f41" RED
-assert_allowed "$_f41" "rm -rf \"$_f41bs\\.vitest\"" \
-  'AC-5: rm -rf <root>\.vitest in RED - ignored'
-assert_allowed "$_f41" "rm -rf \"$_f41bs\\dist\"" \
-  'AC-5: rm -rf <root>\dist in RED - vendor'
-assert_blocked "$_f41" "rm -rf \"$_f41bs\\src\\mangatl\\ui\"" src/mangatl/ui \
-  'AC-5: rm -rf <root>\src\mangatl\ui in RED - source'
-set_phase "$_f41" GREEN
-assert_blocked "$_f41" "rm -rf \"$_f41bs\\tests\"" tests \
-  'AC-5: rm -rf <root>\tests in GREEN - test'
-
-rm -rf "$_f41" "$_t41"
-
+h035_state "$H035_A" T-A RED
+h035_state "$H035_C" T-C RED
+assert_eq "AC-4: Write into a separate repository's src from A is allowed" "" \
+  "$(h035_reason Write file_path "$H035_C/src/main.ts")"
+assert_eq "AC-4: so is a Bash redirect into it" "" \
+  "$(h035_reason Bash command "echo x > $H035_C/src/main.ts")"
+# The folder-name fallback: a directory elsewhere that merely shares A's name.
+assert_eq "AC-4: C:\\elsewhere\\<A's name>\\src\\main.ts is not A's src" "" \
+  "$(h035_reason Write file_path "C:\\elsewhere\\${H035_A##*/}\\src\\main.ts")"
 summary "phase-guard"

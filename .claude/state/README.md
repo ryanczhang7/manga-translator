@@ -9,12 +9,16 @@ in here is ever committed; only this file and `.gitkeep` are tracked.
 | `last-gate-run` | `scripts/gates.sh` | the stop hook | no |
 | `gate-logs/*.log` | `scripts/gates.sh` | you, when a gate fails | yes |
 | `gate-logs/*.failed.log` | `scripts/gates.sh` | you, when a failure did not reproduce | yes |
-| `mutations/*.active` | `scripts/mutate.sh` | `mutate.sh --check`, and `gates.sh` through it | yes |
 | `mutations/*.bak` | `scripts/mutate.sh` | `scripts/mutate.sh`, to restore the file | yes |
-| `mutations/*.new` | `scripts/mutate.sh` | nothing; it is scratch | yes |
+| `mutations/*.new` | `scripts/mutate.sh` | nothing; scratch for the mutated text | yes |
 | `mutations/log` | `scripts/mutate.sh` | you, and the story that quotes it | yes |
+| `mutations/*.active` | `scripts/mutate.sh` | `mutate.sh --check`, and `gates.sh` through it | yes |
 | `phase-guard-declined.log` | `.claude/hooks/phase-guard.sh` | you, when the guard looks noisy | yes |
-| `selftest/*.out` | `scripts/selftest.sh` | `scripts/selftest.sh`, to print each suite in glob order and read its floor | yes |
+| `refresh-self.<pid>.sh` | `scripts/refresh-harness.sh` | `bash`, as the script it is running | yes |
+| `plan-write.<pid>.md` | `scripts/plan.sh write` | `awk`, while it splices the section | yes |
+| `run.lock` | `scripts/gates.sh`, `scripts/selftest.sh` | `scripts/run-lock.sh`, in the next run | yes |
+| `run.lock.<pid>` | `scripts/run-lock.sh` | `ln`, while it takes the lock | yes |
+| `selftest.<pid>/*.out` | `scripts/selftest.sh`, with `SELFTEST_JOBS` above 1 | `scripts/selftest.sh`, to print each suite in order | yes |
 
 ## The `Hand-editable` column is enforced
 
@@ -57,16 +61,12 @@ law 3 exists to prevent. `bash scripts/gates.sh` is what writes it.
 The `yes` rows are all written by a tool and safe to delete; the next run
 recreates what it needs.
 
-**`gate-logs/<id>.failed.log` is the last run of that gate that did not pass**
-(MT-046). `<id>.log` is overwritten by every run, so the re-run somebody starts to
-see whether a failure was a flake used to destroy the only copy of it. When a
-gate that ran ends in any outcome other than pass, `scripts/gates.sh` replaces
-`<id>.failed.log` whole with a six-line header - the gate, the outcome, the UTC
-time the gate started, the commit (noting uncommitted changes) and the gate tree
-hash - followed by that run's log, byte for byte, and prints
-`failing log kept: <path>`. One file per gate, the last failure only. A pass
-never writes or removes it, and a gate a run does not execute leaves it alone.
-Nothing reads it but a person, which is why it is hand-editable: delete it once
+`gate-logs/<id>.failed.log` is the last run of that gate that did not pass:
+a six-line header (the gate, its outcome, when it started, the commit and the
+gate tree hash) followed by that run's log, byte for byte. `<id>.log` is
+overwritten by every run, so this is the copy the flake-checking re-run cannot
+destroy. The next run that does not pass replaces it whole; a pass never
+removes it, and neither does a run that skips the gate. Delete it by hand once
 the cause is understood.
 
 `mutations/` is `scripts/mutate.sh`'s working area, and the backup path is
@@ -74,68 +74,56 @@ explicit rather than `$TMPDIR` because that variable is unset in some of the
 shells this harness runs in - a mutation whose backup went nowhere once left its
 restore depending on the `sed` expression happening to be an exact inverse of a
 single-occurrence match. **A `.bak` left behind means a restore failed.**
-`mutate.sh` exits 90 and says so when that happens; on every other path it can
-still run code on, it cleans up after itself. Put the file back from the backup,
-check it with `cmp`, then delete the backup. The one path it cannot run code on
-is a kill, and that leaves a `.new` beside the `.bak` - see below.
+`mutate.sh` exits 90 and says so when that happens; on every other path it cleans
+up after itself. Put the file back from the backup, check it with `cmp`, then
+delete the backup. The mutated text is built in a `.new` beside the backup (sed
+cannot read and write one path) and an `EXIT` trap removes it, with the `.diff`
+the count is read from, on every path the script can still run code on. **A
+`.new` left behind means the run was killed outright** - `SIGKILL`, or the machine
+going away - which no trap can catch. It arrives with its `.bak`, and there is no
+log line for that run: the source file may still be mutated, so check it against
+the `.bak` with `cmp` before deleting either.
 
-**`selftest/` is `scripts/selftest.sh`'s output buffers** (MT-042). The self-test
-runs its suites concurrently, so each suite writes to `selftest/<name>.out` and
-the runner prints them in glob order and reads each suite's floor from its own
-file. It removes every file in there on the way out, pass or fail; one that
-survives means a run was killed, and it is safe to delete. A fixture copy of
-the runner writes under its own fixture, never here.
+`mutations/*.active` is the mutation in flight: written immediately before the
+file is touched, removed only after a restore verified with `cmp`. **One left
+behind means a run was killed, or its restore failed**, so the file may still be
+mutated. `bash scripts/mutate.sh --check` names each one and prints its remedy,
+and `gates.sh` runs that first and refuses to judge the tree until it is clean.
+It is `yes` because deleting it is that remedy; a deny rule would also block the
+printed `rm`.
 
-**A `.new` is scratch, not a signal.** `sed` cannot read and write one path, so
-`mutate.sh` builds the mutated text in `mutations/<file>.<stamp>.<pid>.new` and
-copies that over the original. Its content is the `.bak` put through the
-expression, and `mutations/log` records both, so there is nothing in it to act
-on. A single trap removes it on every path the script can still run code on -
-including the two that write no log line, a target that cannot be written and an
-interrupt.
+`plan-write.<pid>.md` holds the rendered `## Model guidance` block for the moment
+it takes `awk` to splice it into the story, and is removed straight after. Same
+reason as the two below for the explicit path rather than `$TMPDIR`. One left
+behind means `plan.sh write` died between rendering and splicing; the story file
+is untouched in that case, and re-running it is safe.
 
-So a `.new` that outlives a run means the run was **killed outright**: a
-`SIGKILL`, a closed terminal, a tool timeout that does not wait. Nothing can be
-trapped there, which is why the case is documented rather than fixed. It arrives
-with its `.bak`, and that pair is the whole instruction: the source file may
-still be mutated, so `cmp` it against the backup before running anything that
-judges the tree, then delete both. There is no log line for such a run, and the
-absence is itself the confirmation - the log is written after the command
-returns, and it never did.
+`refresh-self.<pid>.sh` exists only while a refresh is running, and for the same
+reason `mutations/` has an explicit path rather than `$TMPDIR`. `refresh-harness.sh`
+replaces `scripts/*.sh`, which includes itself, and bash reads a script by byte
+offset as it executes it: overwrite the file underneath and execution resumes at
+the old offset in the new bytes, mid-line. So the script copies itself here and
+re-execs, and the file being read is then never a file the copy loop writes. An
+`EXIT` trap removes it. One left behind means a refresh died outright rather than
+finishing, and it is safe to delete.
 
-This was not always so. Each exit path removed the scratch file separately, the
-two that report nothing removed nothing, and two `.new` files from different
-weeks sat here with no log entry to explain either.
-`.claude/tests/mutate.test.sh` pins every path now.
+`run.lock` is the run lock: `scripts/gates.sh` and `scripts/selftest.sh` each
+take it before they run anything and release it on every exit they can still
+run code on, so a second run in the same tree refuses with exit 2 instead of
+running on top of the first. It records the holder's pid, when it started and
+its command. **One left behind means a run was killed outright** - `SIGKILL`, or
+the machine going away. The next run reclaims it, with one line saying so, when
+the recorded pid is no longer running; if that pid has since been reused by a
+live process, the next run refuses, and the refusal says to delete the file.
+It is `yes` because deleting it is that remedy. `run.lock.<pid>` is the record
+being written before `ln` puts it in place as `run.lock`, removed straight
+after; one left behind is safe to delete.
 
-**An `.active` is a mutation in flight, and it is the one signal here that
-something else acts on.** `mutate.sh` writes it immediately before it touches the
-file and removes it only once the file is verifiably back, so it survives exactly
-the two states in which the tree is not what it looks like: a restore that could
-not be verified, and a run that was killed. It records the pid, the file, the
-backup, the expression, the command and the start stamp.
-
-```bash
-bash scripts/mutate.sh --check     # 0 and one line when clean; 1 and a report when not
-```
-
-`scripts/gates.sh` runs that before it runs any gate, and refuses with exit 2 if
-anything comes back. That is the point of the whole mechanism: the gates judge
-the working tree and file the verdict as evidence under law 3, stamped with a
-hash of the code they ran against — and behind a stranded mutation that verdict
-is about code nobody wrote, recorded against a hash that faithfully describes the
-mutation. `--list` and `--audit` read the manifest and never look at the tree, so
-they are not refused.
-
-Detection, not a lock — `gates.sh`'s own rule about `project.conf`, and for its
-reason: the harness's concurrency is a fact of how it is used, and a lock it can
-deadlock against its own subagent is worse than the race. `--check` reports and
-exits; it holds nothing and waits for nothing. A sentinel whose process is still
-alive is reported as **in flight** rather than as wreckage, because the answer
-differs — one is "wait", the other is "put the file back".
-
-**Hand-editable, deliberately.** Deleting one is the documented cleanup once the
-file is restored, and `--check` prints the exact command. Nothing is forged by
-creating one: a spurious `.active` only refuses gate runs, which is the safe
-direction. It is exhaust that something reads, not evidence that something is
-believed on.
+`selftest.<pid>/` exists only during a run of `scripts/selftest.sh` with
+`SELFTEST_JOBS` of 2 or more over two or more suites: each suite's output goes
+to `<name>.out` there while it runs, and the script prints them in suite order.
+`<pid>` is the run's own, the one `run.lock` records, so a run nested under
+the lock holder gets a directory of its own. It is removed on every exit the
+script can still run code on, after the last suite has exited and before the
+lock is released. **One left behind means a run was killed outright**, and it
+is safe to delete; the next run does not reclaim it.

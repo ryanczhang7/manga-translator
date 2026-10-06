@@ -116,6 +116,24 @@ comparison treat `-0` and `0` as equal, which stops it distinguishing values for
 every number in the document. The second is easier, because it is an edit in the
 file where the failure is reported. `tdd-cycle` has the case in full.
 
+## A test-only dependency is yours to declare
+
+You may write dependency manifests — `Cargo.toml`, `package.json`,
+`pyproject.toml` and their lockfiles — **for test dependencies only**. Put the
+entry in the dev block (`[dev-dependencies]`, `devDependencies`,
+`[dependency-groups]`) and change nothing else in the file:
+`check-boundaries.sh` strips that block from both sides of every RED commit and
+refuses one where the rest of the manifest moved. Adding a production dependency
+is a GREEN change; so is bumping an existing one.
+
+Other configuration is still frozen. A build config, a `tsconfig`, a Dockerfile
+is production surface.
+
+And where the ecosystem has no dev block at all — `go.mod`, `requirements.txt`,
+`*.csproj` — you cannot declare it, and the answer is to **stop and say so** so
+the orchestrator can change phase deliberately. Report it as a blocked
+precondition, not as a problem you worked around.
+
 ## A verification you cannot run, you decline in writing
 
 Where the story's `## Deferred verifications` names something you own, run it. Where

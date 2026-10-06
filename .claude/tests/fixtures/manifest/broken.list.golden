@@ -1,0 +1,36 @@
+ok           required  .      printf 'Tests  9 passed (9)\n'
+                              evidence: Tests +[1-9][0-9]* passed
+                              covers:   
+                              blocked-when: 
+nan          required  .      printf 'Tests  9 passed (9)\n'
+                              evidence: Tests +[1-9][0-9]* passed
+                              floor:    forty
+blind        required  .      printf 'Tests  9 passed (9)\n'
+                              evidence: <none>
+                              floor:    5
+hush         optional  .      printf 'Tests  9 passed (9)\n'
+                              evidence: Tests +[1-9][0-9]* passed
+                              slow:     no reason given (left out of --fast)
+idle         optional  .      printf 'Tests  9 passed (9)\n'
+                              evidence: Tests +[1-9][0-9]* passed
+                              on-request: no reason given (run with --gate idle)
+needed       required  .      printf 'Tests  9 passed (9)\n'
+                              evidence: Tests +[1-9][0-9]* passed
+                              on-request: costly | per mutant (run with --gate needed)
+guess        optional  .      printf 'Tests  9 passed (9)\n'
+                              evidence: Tests +[1-9][0-9]* passed
+                              ci-factor: about 3 | actions run 1
+anon         optional  .      printf 'Tests  9 passed (9)\n'
+                              evidence: Tests +[1-9][0-9]* passed
+                              ci-factor: 2.0
+nowhere      optional  missing-dir printf 'Tests  9 passed (9)\n'
+                              evidence: <none>
+                              on-request: needs a directory | that is missing (run with --gate nowhere)
+bare         required  .      printf 'done\n'
+                              evidence: <none>
+bypass       required  .      printf 'Tests  9 passed (9)\n'
+                              evidence: Tests +[1-9][0-9]* passed
+                              waiver:   known to fail | issue 3
+empty        required  .      <unconfigured>
+                              evidence: <none>
+rc=0

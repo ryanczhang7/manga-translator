@@ -26,7 +26,10 @@ story will depend on it, and so will every story after that.
    it is the command that judges the tests, and keeping it out of RED and GREEN
    is exactly how a suite reaches CI having never been measured under it. Note
    too whether this ecosystem's default test timeout is measured against the
-   plain run rather than the instrumented one; most are.
+   plain run rather than the instrumented one; most are. A `mutation` gate
+   carries both lines: `slow`, and `ondemand | mutation | <why>` beside its
+   `gate` line, so that no full run executes it unless asked for (`rules.md`,
+   "Mutation work per story").
 4. **Layout** - where production code, tests and configuration live.
 5. **`paths.conf` additions** - the globs that make the phase lock classify this
    stack's files correctly. Get this right or the lock will block the wrong
@@ -45,9 +48,10 @@ written - there is no list to add yourself to.
 
 It asserts what `gates.sh --audit` asserts about a real `project.conf`, because
 a profile is copied verbatim into one: every required gate is configured; every
-required gate with a command has an `evidence` line; no `evidence`, `floor` or
-`slow` line names a gate the profile does not configure; every `floor` has an
-evidence line to measure out of; every `slow` line carries a reason; the
+required gate with a command has an `evidence` line; no `evidence`, `floor`,
+`slow` or `ondemand` line names a gate the profile does not configure; every
+`floor` has an evidence line to measure out of; every `slow` and `ondemand`
+line carries a reason; a `mutation` gate has an `ondemand` line; the
 `## What --fast should leave out` section exists; and there is at least one
 `discovery` line.
 

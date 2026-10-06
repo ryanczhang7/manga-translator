@@ -1,7 +1,8 @@
 ---
 description: Drive one story from its current phase all the way to a merged-ready PR
+model: fable
 argument-hint: <story-id>
-allowed-tools: Bash(bash scripts/phase.sh:*), Bash(bash scripts/gates.sh:*), Bash(bash scripts/check-boundaries.sh:*), Bash(bash scripts/task.sh:*), Bash(git:*), Read, Grep, Glob, Edit, Write, Task
+allowed-tools: Bash(bash scripts/phase.sh:*), Bash(bash scripts/gates.sh:*), Bash(bash scripts/check-boundaries.sh:*), Bash(bash scripts/selftest.sh:*), Bash(bash scripts/ci-local.sh:*), Bash(bash scripts/task.sh:*), Bash(git:*), Read, Grep, Glob, Edit, Write, Task
 ---
 
 Story: $1
@@ -24,11 +25,14 @@ approval between phases is exactly when they get quietly reordered:
   tests instrumented, which is slower than the test command and slower again on
   CI. A suite can pass RED, pass GREEN, pass every local gate, and still fail a
   required gate in CI on a timeout nobody measured.
-- **GATES → REVIEW sets the phase before committing**, then runs
-  `bash scripts/check-boundaries.sh`, then pushes and opens the PR.
-  `check-boundaries.sh` reads the phase out of the *committed* frontmatter, so
-  a commit made while the story still says `phase: GATES` is one CI rejects —
-  intermittently, depending on when that job runs, which is worse than always.
+- **GATES → REVIEW runs the full `bash scripts/selftest.sh` first**, detached
+  and alone, while the story is still at GATES. Then it sets the phase before
+  committing, runs `bash scripts/check-boundaries.sh`, and pushes and opens
+  the PR. A suite the story never touched can fail on its change, and CI runs
+  them all. `check-boundaries.sh` reads the phase out of the *committed*
+  frontmatter, so a commit made while the story still says `phase: GATES` is
+  one CI rejects — intermittently, depending on when that job runs, which is
+  worse than always.
 
 - **A return to RED ends with pasted red, not with a note saying it went red.**
   A corrected test runs for the first time against code that already satisfies
@@ -46,12 +50,16 @@ approval between phases is exactly when they get quietly reordered:
   is exactly when this gets skipped, and it is the difference between a correct
   escalation and a plausible excuse for not failing.
 - **A mutation table in the handoff is a claim until you run one.** When RED
-  says the suite discriminates, pick a mutation it predicts a count for — the
-  one whose predicted catch is a single assertion, for preference — run it with
-  `bash scripts/mutate.sh <file> '<expression>' -- <test command>`, which
-  restores the file and verifies the restore, then compare the count and confirm
-  green. Unattended is when this gets skipped too, and when a hand-rolled
-  `sed -i` leaves a mutation in the tree.
+  says the suite discriminates, run **one** mutation it predicts a count for —
+  the one whose predicted catch is a single assertion — with
+  `bash scripts/mutate.sh <file> '<expression>' -- <test command>`, against the
+  one suite that holds that assertion. It restores the file and verifies the
+  restore; compare the count and confirm green. Unattended is when this gets
+  skipped too, and when a hand-rolled `sed -i` leaves a mutation in the tree.
+  That one run, the story's deferred verifications and nothing more is the
+  budget (`rules.md`, "Mutation work per story"); the rest of the table, and
+  every assertion that passed on arrival, is `/audit-mutations`' work, which
+  this loop never starts.
 - **A required gate that reports `BLOCKED` (exit 3) is one of the reasons to
   stop and ask.** The environment would not let it start, so it has no verdict;
   do not retry it on a hunch, and do not treat it as a code defect. The path —
@@ -83,5 +91,7 @@ previous one is genuinely complete — with the command output that proves it, n
 an assertion that it passed.
 
 At the end, report: the PR link, every acceptance criterion with the test that
-covers it, the full gate summary, anything you deliberately left out, and the
-next story you recommend.
+covers it, the full gate summary, anything you deliberately left out, and what
+to run next: the output of `bash scripts/plan.sh after $1`, relayed as printed.
+The story is at REVIEW by then, so it appears under `In flight:`. Report as
+`rules.md`, "Reporting to the user" says.

@@ -39,24 +39,26 @@ load_state
 case "$PHASE" in GREEN|GATES) ;; *) exit 0 ;; esac
 
 # --- whose story is this, anyway? --------------------------------------------
-# `.claude/state/current-story.env` names one story for the whole tree, and this
-# hook reads it with no notion of which session is asking. Measured, a session on
-# an unrelated branch was returned {"decision":"block"} and told to gate a story
-# belonging to someone else's: a hard stop caused by another session's state, in
-# a tree where two things running at once is the ordinary shape of the harness -
-# an orchestrator that dispatches a subagent and then runs a script is two things
-# in one tree.
+# PORTED from manga-translator (MT-032 C-5), which measured this downstream.
 #
-# So the block narrows rather than disappears. On the story's own branch every
+# `.claude/state/current-story.env` names ONE story for the whole tree, and this
+# hook reads it with no notion of which session is asking. Measured there: a
+# session on an unrelated branch was returned {"decision":"block"} and told to
+# gate a story belonging to someone else's - a hard stop caused by another
+# session's state, in a tree where two things running at once is the ordinary
+# shape. An orchestrator that dispatches a subagent and then runs a script is
+# two things in one tree.
+#
+# So the block NARROWS rather than disappears. On the story's own branch every
 # block below is exactly as it was; on another branch the same text is said
 # instead of enforced, naming both branches so the reader can tell whose
 # obligation it is. Detection, not a lock: nothing here serialises anything.
 #
 # The branch comes from the state file, which `phase.sh set` writes from the
-# story's frontmatter, so the two agree - and this hook has to run in trees where
-# the story file is not there to read. Either side empty (a detached HEAD, a
-# state file older than `phase.sh set`) means we cannot tell whose session this
-# is, so it fails open and behaves exactly as before.
+# story's frontmatter, so the two agree - and this hook has to run in trees
+# where the story file is not there to read. Either side empty (a detached HEAD,
+# a state file older than `phase.sh set`) means we cannot tell whose session
+# this is, so it FAILS OPEN and behaves exactly as before.
 CHECKOUT_BRANCH="$(git -C "$HARNESS_ROOT" branch --show-current 2>/dev/null || printf '')"
 OTHER_SESSION=0
 if [ -n "$CHECKOUT_BRANCH" ] && [ -n "${BRANCH:-}" ] && [ "$CHECKOUT_BRANCH" != "$BRANCH" ]; then
@@ -81,7 +83,12 @@ warn() {
   exit 0
 }
 
-stamp_value() { grep -E "^$1=" "$GATE_STAMP" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]'; }
+# ONE awk that reads the file itself, not `grep | head -1 | cut | tr`. head -1
+# leaves at the first line, the grep behind it dies of SIGPIPE, and pipefail
+# makes the whole pipeline - and so this function - exit 141 for a key that was
+# found. Every caller today takes the value and discards the status, so the
+# defect is latent rather than live; the shape is the thing being removed.
+stamp_value() { awk 'BEGIN { k = "^" ARGV[1] "="; ARGV[1] = "" } !h && $0 ~ k { h = 1; sub(/^[^=]*=/, ""); gsub(/[[:space:]]/, ""); print } END { exit !h }' "$1" "$GATE_STAMP" 2>/dev/null; }
 
 # --- the one thing it blocks -------------------------------------------------
 

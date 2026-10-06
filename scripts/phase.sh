@@ -117,18 +117,35 @@ cmd_show() {
   phase=$(grep -E '^PHASE=' "$STATE" | cut -d= -f2-)
   printf '\nWrites allowed in %s:\n  %s\n' "$phase" \
     "$(grep -E "^[[:space:]]*$phase[[:space:]]*\|" "$PHASES" | awk -F'|' '{gsub(/^ +| +$/,"",$2); print $2}')"
-  [ -f "$STORIES/$id.md" ] && printf '\nStory: docs/backlog/stories/%s.md\n' "$id"
+  if [ -f "$STORIES/$id.md" ]; then
+    printf '\nStory: docs/backlog/stories/%s.md\n' "$id"
+    local rec; rec="$(bash "$ROOT/scripts/plan.sh" next "$id" 2>/dev/null)"
+    if [ -n "$rec" ]; then
+      printf '\nNext:  %s\n       %s\n' "$(printf '%s' "$rec" | cut -f1)" "$(printf '%s' "$rec" | cut -f2-)"
+      printf '\nModel for %s: %s   (plan only — record what the dispatch RESOLVED to)\n' "$phase" \
+        "$(bash "$ROOT/scripts/plan.sh" models "$id" 2>/dev/null | awk -F'\t' -v p="$phase" '$1 == p { print $3 }')"
+    fi
+  fi
+}
+
+# The recommended command for a story, from scripts/plan.sh. Board and show
+# both carry it so that "which one do I run" is answered where the question is
+# actually asked, rather than being asked of a person every time.
+recommended() { # <id>
+  bash "$ROOT/scripts/plan.sh" next "$1" 2>/dev/null | cut -f1
 }
 
 cmd_board() {
-  printf '%-14s %-12s %-10s %s\n' ID PHASE STATUS TITLE
-  printf '%-14s %-12s %-10s %s\n' -------------- ------------ ---------- -----------------------------
+  printf '%-14s %-12s %-10s %-16s %s\n' ID PHASE STATUS NEXT TITLE
+  printf '%-14s %-12s %-10s %-16s %s\n' -------------- ------------ ---------- ---------------- ------------------------
   for f in "$STORIES"/*.md; do
     [ -e "$f" ] || continue
-    printf '%-14s %-12s %-10s %s\n' \
-      "$(frontmatter "$f" id)" "$(frontmatter "$f" phase)" \
-      "$(frontmatter "$f" status)" "$(frontmatter "$f" title)"
+    local id; id="$(frontmatter "$f" id)"
+    printf '%-14s %-12s %-10s %-16s %s\n' \
+      "$id" "$(frontmatter "$f" phase)" \
+      "$(frontmatter "$f" status)" "$(recommended "$id")" "$(frontmatter "$f" title)"
   done
+  printf '\nWhy, and the model plan for one story:  bash scripts/plan.sh <id>\n'
 }
 
 cmd_set() {
@@ -167,6 +184,14 @@ EOF
   printf '%s -> %s\n' "$id" "$phase"
   printf 'writes allowed: %s\n' \
     "$(grep -E "^[[:space:]]*$phase[[:space:]]*\|" "$PHASES" | awk -F'|' '{gsub(/^ +| +$/,"",$2); print $2}')"
+
+  # Closing a story is when the next one is chosen, so the report that answers
+  # "what next, and what alongside" is printed here (HARNESS-018). The phase is
+  # already written, so a failure in plan.sh must not fail the phase change.
+  if [ "$phase" = DONE ]; then
+    printf '\n'
+    bash "$ROOT/scripts/plan.sh" after "$id" || true
+  fi
 }
 
 cmd_clear() {

@@ -1,0 +1,28 @@
+short                  .      <unconfigured>
+                              evidence: <none>
+unit         required  .      printf 'Tests  47 passed (47)\n'
+                              evidence: Tests +[1-9][0-9]* passed|Checks [0-9]+ ok
+                              floor:    40
+                              ci-factor: 3.4 | actions run 412
+                              covers:   src/**
+                              covers:   tests/**
+lint         required  .      printf 'Checked 5 files|ok\n' | while IFS= read -r l; do printf '%s\n' "$l"; done || exit 1
+                              evidence: Checked [1-9][0-9]* files
+                              floor:    3
+                              ci-factor: 1.5 | actions run 412 | lint job | step 3
+types        required  .      true
+                              evidence: -
+coverage     optional  src    printf 'Coverage 91%% of 12 files\n'
+                              evidence: Coverage [0-9]+% of [1-9][0-9]* files
+                              ci-factor: 2.5 |  | measured in actions run 413
+                              slow:     instrumented | about 3x the plain run (left out of --fast)
+e2e          optional  .      printf 'RuntimeError: no device here\n'; exit 1
+                              evidence: Tests +[0-9]+ passed
+                              blocked-when: alpha launch failed|beta refused to start|no device here
+docs         optional  .      <unconfigured>
+                              evidence: <none>
+                              waiver:   docs build needs a renderer this machine lacks | issue 12
+mutation     optional  .      no-such-tool-h024 run --all
+                              evidence: -
+                              on-request: minutes per mutant | run with --gate mutation (run with --gate mutation)
+rc=0

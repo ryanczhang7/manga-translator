@@ -1,0 +1,44 @@
+
+=== gate: unit (required) ===
+printf 'Tests  47 passed (47)\n'
+Tests  47 passed (47)
+
+=== gate: lint (required) ===
+printf 'Checked 5 files|ok\n' | while IFS= read -r l; do printf '%s\n' "$l"; done || exit 1
+Checked 5 files|ok
+
+=== gate: types (required) ===
+true
+
+=== gate: coverage (optional) ===
+printf 'Coverage 91%% of 12 files\n'
+Coverage 91% of 12 files
+
+=== gate: e2e (optional) ===
+printf 'RuntimeError: no device here\n'; exit 1
+RuntimeError: no device here
+failing log kept: .claude/state/gate-logs/e2e.failed.log
+
+--- gate summary ---
+UNCONFIGURED short
+PASS         unit (Ns, observed 47, floor 40)
+PASS         lint (Ns, observed 5, floor 3)
+PASS         types (Ns)
+PASS         coverage (Ns, observed 91)
+WARN         e2e (Ns, could not launch: no device here, optional) -> .claude/state/gate-logs/e2e.log
+UNCONFIGURED docs
+ON REQUEST   mutation (not run: minutes per mutant | run with --gate mutation; bash scripts/gates.sh --gate mutation)
+
+1 optional gate(s) WARNed. A WARN means something changed since the last run:
+read it. A failure that is known and permanent belongs in a waiver, so that the
+next WARN is not buried next to it:
+  waiver | <id> | <why this optional gate is expected to fail, and where that is recorded>
+
+(not recorded: no active story; use --story <id> to record it in one)
+
+All required gates passed (5 ran, 2 unconfigured, 0 known).
+CI runs one more script that this does not: bash scripts/check-boundaries.sh
+It is not a gate because it judges the COMMIT rather than the code - the phase in
+the committed frontmatter, the criteria against the base branch, and whether this
+very record still matches the tree. Run it after committing, before the PR.
+rc=0

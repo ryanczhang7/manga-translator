@@ -1,0 +1,31 @@
+
+=== gate: ok (required) ===
+printf 'Tests  9 passed (9)\n'
+Tests  9 passed (9)
+
+=== gate: bare (required) ===
+printf 'done\n'
+done
+
+--- gate summary ---
+PASS         ok (Ns, observed 9)
+FAIL         nan (floor 'forty' is not a number)
+FAIL         blind (floor needs an evidence regex to measure, and blind has none)
+FAIL         hush (marked slow with no reason in project.conf)
+FAIL         idle (marked on-request with no reason; say why it is not run per story)
+FAIL         needed (an on-request gate cannot be required: no full run would ever judge it)
+FAIL         guess (ci-factor 'about 3' is not a number)
+FAIL         anon (ci-factor has no source; say which CI run it was measured from)
+ON REQUEST   nowhere (not run: needs a directory | that is missing; bash scripts/gates.sh --gate nowhere)
+PASS         bare (Ns) -- no evidence line: a vacuous pass would go unnoticed
+FAIL         bypass (has a waiver but is required; waivers are for optional gates only)
+FAIL         empty (required gate has no command in project.conf)
+
+Warning: 1 required gate(s) ran without an evidence line, so a command that
+did no work at all would still have been recorded as PASS. Add to project.conf:
+  evidence | <id> | <regex proving the tool did work>
+
+(not recorded: no active story; use --story <id> to record it in one)
+
+9 required gate(s) failed.
+rc=1

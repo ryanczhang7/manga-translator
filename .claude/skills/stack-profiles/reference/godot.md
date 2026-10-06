@@ -44,7 +44,7 @@ verify the artefact exists as a separate acceptance criterion instead.
 ## What the runner can see
 
     # UNVERIFIED - gdUnit4's flags move between versions; check yours.
-    discovery | tests | . | godot --headless --path . -s addons/gdUnit4/bin/GdUnitCmdTool.gd -a test/ | grep -qE "[1-9][0-9]* test.?s?"
+    discovery | tests | . | godot --headless --path . -s addons/gdUnit4/bin/GdUnitCmdTool.gd -a test/ | grep -E "[1-9][0-9]* test.?s?" > /dev/null
 
 This is the weakest `discovery` line of any profile here, because gdUnit4 has no
 list-only mode: the only way to ask what it can see is to run it, which makes
