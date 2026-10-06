@@ -65,6 +65,9 @@ __all__ = [
     "preview_bake",
 ]
 
+# MT-069: survive a lost thread-pool completion port - see `mangatl.clean.mask`.
+cv2.setNumThreads(-1)
+
 #: `<source>_en` (`architecture.md` §5).
 _OUTPUT_SUFFIX = "_en"
 
