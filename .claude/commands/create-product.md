@@ -1,5 +1,6 @@
 ---
 description: Interview the user and write the product brief
+model: fable
 argument-hint: [one-line product idea]
 ---
 
@@ -31,4 +32,5 @@ and why, and get their agreement before writing it down as fact.
 
 Write the brief with a short summary at the top, then a section per topic above,
 and an open-questions section for anything still unresolved. Then tell the user
-what to run next (`/plan-product`) and what it will produce.
+what to run next (`/plan-product`) and what it will produce. Report as
+`rules.md`, "Reporting to the user" says.

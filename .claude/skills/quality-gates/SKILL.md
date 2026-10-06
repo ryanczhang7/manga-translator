@@ -52,6 +52,12 @@ then correct in a new project, and wrong only where someone said so out loud.
 Never mark a gate slow to stop it failing - that is what a waiver is for, and
 waivers are refused on required gates for the same reason.
 
+`slow` keeps a gate out of `--fast` and nothing else: it still runs on every
+full run. A gate that should not run per story at all takes an `ondemand` line
+instead, reason required, and runs only with `--gate <id>` or when a story
+escalates it; `--audit` refuses one on a required gate. The `mutation` gate
+below carries both.
+
 A `--fast` run is never recorded in a story. It is not a full run, and only a
 full run is evidence.
 
@@ -151,7 +157,15 @@ sends the story back to RED instead.
 | `coverage` | required | Is anything shipped unexercised? |
 | `integration` | optional | Do the seams hold against real dependencies? |
 | `build` | required | Does a production artefact come out? |
-| `mutation` | optional | Would the tests notice if the code were wrong? |
+| `mutation` | optional, on request | Would the tests notice if the code were wrong? |
+
+The `mutation` gate is on request in every stack profile: an `ondemand` line in
+`project.conf` keeps it out of a full run and out of `--fast`, and the summary
+says so on one line - `ON REQUEST   mutation (not run: <why>; bash
+scripts/gates.sh --gate mutation)`. Run it with `bash scripts/gates.sh --gate
+mutation` or `/audit-mutations`; a story that needs it names it in
+`required_gates`. How much mutation work a story owes by default, and why the
+rest waits for an audit, is `rules.md`'s `# Mutation work per story`.
 
 A gate marked required with no command configured is a warning before the
 bootstrap story lands (`BOOTSTRAPPED=no`) and a hard failure after it. That is
@@ -227,7 +241,17 @@ Neither is visible in the configuration — reading the configuration is how it
 stays invisible. It is visible immediately if you ask the runner what it can
 see, so `project.conf` carries commands that do exactly that:
 
-    discovery | platform | . | pnpm exec vitest list | grep -q "src/platform/"
+    discovery | platform | . | pnpm exec vitest list | grep "src/platform/" > /dev/null
+
+Write the matcher as `grep PATTERN > /dev/null`, never `grep -q PATTERN`.
+`grep -q` exits on its first match, the runner upstream is still writing, and
+it dies of SIGPIPE - so `doctor` reports *nothing discovered* about a tree
+where everything is discovered. This skill taught the broken form, and so did
+four stack profiles; a real project hit it. It is **size-dependent**: a short
+listing finishes before `grep` exits and nothing happens, so it works until the
+suite grows. That is the worst property a check can have, because the wrong
+lesson from a spurious MISSING is to delete the line - and the line is the only
+thing that notices a gate whose scope has collapsed to nothing.
 
 `bash scripts/doctor.sh` runs them. Add one for every directory carrying a
 coverage threshold and every workspace member whose tests must run. **A claim
@@ -307,13 +331,94 @@ Waivers are refused on required gates - that would be a bypass with a nicer
 name. Leaving a gate unconfigured is not an alternative: a required gate with
 no command fails once `BOOTSTRAPPED=yes`, deliberately.
 
+### A gate that degrades to "reporting only" reports to nobody
+
+The subtlest member of the vacuous-pass family, because every individual
+decision in it is defensible.
+
+A real project's `perf` gate compares timings against a baseline recorded on the
+developer's machine. On a CI runner there is no comparable baseline, so rather
+than fail on hardware it cannot judge, it prints *"no comparable baseline for
+this machine — reporting only"* and passes. Sensible. It is also marked `slow`,
+because it is, so `--fast` skips it. Also sensible.
+
+Put together: **the gate passes unconditionally on CI, is skipped in RED and
+GREEN, and the only place its verdict exists at all is a full local `GATES` run
+on one particular machine, as an optional WARN.** It was masking a real 29–39%
+regression. Nothing was misconfigured; the check was correct and almost nothing
+had to listen to it.
+
+The general shape, and it is worth checking for by hand because no gate can
+report it about itself:
+
+- **Ask where a gate's verdict actually lands.** Not "is it configured" but
+  "which run, on which machine, would a human or a job ever see it fail?" If the
+  honest answer is one developer's local full run, the gate is a note.
+- **A degradation path is a second gate, and it needs the same scrutiny as the
+  first.** "Falls back to reporting only" is a branch that always passes; write
+  down what makes it fire and how you would know it fired more often than you
+  expected.
+- **`slow` plus `optional` plus a machine-specific baseline is three exclusions
+  multiplying.** Each is individually right — that is exactly the pattern from
+  "the directory nobody was testing", where three correct decisions combined to
+  leave a renderer untested.
+- **Where CI cannot judge, say so loudly rather than pass quietly.** BLOCKED
+  exists for the gate the machine *would not run*; a gate that runs and declines
+  to judge should be at least as visible, not less.
+
+If a gate can only be meaningful on one machine, that is worth knowing out loud
+in `project.conf` beside it — and worth asking whether a threshold that travels
+(a ratio, a relative regression against a committed baseline) could replace a
+number that does not.
+
+### An absolute threshold on a drifting machine measures the machine
+
+The section above is about a gate that *stops judging*. This one never stops: it
+compares correctly on every run, reports PASS honestly, and still cannot see a
+third of a regression. It is the worse of the two because there is nothing
+degraded to notice.
+
+A `perf` gate compares against a baseline of 455 ms with a 25% tolerance — a
+fixed number, which is the obvious way to write one. The machine's steady-state
+cost drifts about 20% between time windows. So the regression the gate can
+actually detect is `limit / current-clean − 1`, and that is a property of the
+machine on the day, not of the code:
+
+| machine window | clean reading | regression needed to fire |
+|---|---|---|
+| fast | ~385 ms | **~+45%** |
+| slow | ~520 ms | **~+9%** |
+
+Measured rather than reasoned: injecting a change worth about **+34% of real
+work** passed silently; a larger injection at +128% failed. The gate is not
+broken. It is least sensitive exactly when the machine is fastest, which is also
+when a developer is most likely to be running it.
+
+So add a second question to the one above. The first has a reassuring answer
+here and the second does not:
+
+- *Which run, on which machine, would anyone ever see this fail?*
+- **And how large would the regression have to be today for it to fail?**
+
+The fix is to anchor on something that travels. A ratio against a control
+measured in the same run, a relative regression against a committed baseline, a
+per-test factor rather than a wall-clock number — anything whose denominator
+moves with the machine. Where that is genuinely impossible, say in
+`project.conf` beside the gate that its sensitivity is machine-dependent, and do
+not let a PASS from it stand as evidence that performance held.
+
+And record the partial result honestly. The story that found this recorded its
+deferred verification as **PARTIALLY satisfied** rather than as a pass, which is
+the harder call and the correct one: the control fired at +128% and not at +34%,
+and "it passed" would have described neither.
+
 ## BLOCKED: the gate the machine would not run
 
 A gate's result used to be a boolean derived from an exit code, and there is a
 third state that is neither pass nor fail: **the environment would not let the
 gate start.** A required gate failed eight consecutive runs on one machine with
 
-    error: failed to run custom build command for `fantasy-world-builder v0.1.0`
+    error: failed to run custom build command for `the-project v0.1.0`
     Caused by: could not execute process `...build-script-build` (never executed)
     Caused by: An Application Control policy has blocked this file. (os error 4551)
 
@@ -356,6 +461,37 @@ The path, when a required gate is BLOCKED:
 
 Never reach for a waiver here: waivers are for optional gates, and an
 environment-blocked required gate has not been verified by anything yet.
+
+### A shortfall the environment caused
+
+A `floor` catches a suite that does much less work than it used to. Two very
+different things produce that shortfall. A suite that **shrank** - tests
+deleted, a glob that stopped matching, a filter left on - is a code problem. A
+suite whose **inputs this checkout does not carry** - gitignored data, a fixture
+nobody may redistribute, a device only some machines have - skips that work, and
+the log says so: `1 passed, 25 skipped`. That second case is not a failure of
+the code, and it is not a pass either: this machine simply cannot answer the
+question.
+
+A `skipped-when | <gate id> | <regex>` line tells the two apart. When a gate
+exits 0, matches its evidence and falls below its floor, and its log matches
+the pattern, the shortfall is reported as:
+
+- **BLOCKED** (exit 3) when the gate is required, by the manifest or by the
+  story's `required_gates` - the story has no verdict until a machine that has
+  the inputs runs it, and the BLOCKED path above applies;
+- **KNOWN** when it is optional - a declared non-result, not a WARN, because
+  nothing changed.
+
+It is never PASS, because the work was not done, and never WARN, because a WARN
+on every run on every machine teaches people to stop reading WARN. The failing
+run's log is kept, with `# outcome: environment` in its header.
+
+The pattern **classifies a shortfall; it never excuses one.** It is consulted
+only below a floor, after a zero exit with evidence; a shortfall it does not
+match stays the FAIL or WARN it always was, and a non-zero exit is never
+reclassified by it. Write the pattern for the runner's skip line and nothing
+broader: `[1-9][0-9]* skipped`, not `skipped`.
 
 ## The gate record is written by the tool
 

@@ -1,37 +1,56 @@
 #!/usr/bin/env bash
-# Tests for scripts/selftest.sh's ASSERTION FLOORS - MT-039.
+# Tests for scripts/selftest.sh's ASSERTION FLOORS.
 #
-# selftest.sh runs each harness suite and reads its exit status and nothing
-# else. A suite that executed zero assertions exits 0; a suite replaced by a
-# single `printf` exits 0. Three stories that reward a SMALLER self-test
-# (MT-040, MT-041, MT-042) are queued behind this one, so the guard-rail ships
-# first: each suite declares in .claude/tests/floors.conf how much work it is
-# worth, and a suite that does less fails the run even when it exits 0.
+# PORTED FROM A CONSUMING PROJECT, manga-translator's MT-039, which built this
+# and shipped it downstream while upstream had nothing like it. It came back
+# because a refresh would have deleted it: `scripts/selftest.sh` and
+# `.claude/tests/_lib.sh` are REPLACED by refresh-harness.sh while
+# `floors.conf` and this suite are KEPT, so the implementation would have gone
+# and its configuration and tests would have stayed - the H26 shape the refresh
+# script's own header warns about. Ported rather than overwritten.
+#
+# The problem it solves: selftest.sh runs each harness suite and reads its exit
+# status and nothing else. A suite that executed zero assertions exits 0; a
+# suite replaced by a single `printf` exits 0. So each suite declares in
+# .claude/tests/floors.conf how much work it is worth, and a suite that does
+# less fails the run even when it exits 0. It is the `evidence`/`floor` idea
+# project.conf already applies to GATES, turned on the harness's own tests.
 #
 # Two things about this file are worth knowing before changing it.
 #
 # 1. The floor is the EXECUTED assertion count - the `N` of summary()'s
 #    `<name>: N passed, M failed` line - and not the number of `assert_` call
-#    sites in the source. They are different numbers: `profiles` is ONE call
-#    site inside a loop and FORTY-FOUR executed assertions, `lib` is 57 and
-#    148. A call-site floor for `profiles` would be 1, and deleting 43 of its
-#    44 assertions would satisfy it. Every fixture suite below is generated in
-#    that same shape - one call site, a loop - so the distinction is live in
-#    every case rather than argued about in a comment.
+#    sites in the source. They are different numbers, and measured on THIS
+#    tree rather than inherited: `profiles` is ONE call site inside a loop and
+#    37 executed assertions; `lib` is 50 call sites and 139. A call-site floor
+#    for `profiles` would be 1, and deleting 36 of its 37 assertions would
+#    satisfy it. Every fixture suite below is generated in that same shape -
+#    one call site, a loop - so the distinction is live in every case rather
+#    than argued about in a comment.
 #
 # 2. Every fixture runs against a THROWAWAY tree, never this checkout. The
 #    fixture gets its own .claude/tests with its own suites and its own
-#    floors.conf, so nothing here depends on - or disturbs - the twelve real
-#    suites whose counts this story is about.
+#    floors.conf, so nothing here depends on - or disturbs - the real suites
+#    whose counts the shipped floors.conf records.
 #
 # The one real-tree assertion block reads .claude/tests/floors.conf itself and
-# checks it against the values MT-039 C-3 settled. Those are read out, not
-# re-derived.
+# checks it against the counts measured from a full run of this repository.
+# Those are read out, not re-derived.
 
 . "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 
 FIX="$(make_project_fixture)"
-trap 'rm -rf "$FIX"' EXIT
+# HARNESS-036: the cases at the end background selftest.sh runs whose suites
+# hold on files. On any exit, release every hold and wait every background run
+# (each hold is bounded, so the wait is too) before the fixture is removed.
+BG=""
+selftest_cleanup() {
+  local p
+  mkdir -p "$FIX/mk/release" 2>/dev/null && : > "$FIX/mk/release/all"
+  for p in $BG; do wait "$p" 2>/dev/null; done
+  rm -rf "$FIX"
+}
+trap selftest_cleanup EXIT
 
 mkdir -p "$FIX/.claude/tests"
 # The REAL _lib.sh, for the same reason make_fixture copies the real paths.conf:
@@ -40,8 +59,13 @@ cp "$REPO_ROOT/.claude/tests/_lib.sh" "$FIX/.claude/tests/_lib.sh"
 
 # --- fixture helpers ---------------------------------------------------------
 
-# reset_suites   Empties the fixture's test directory and its floors file.
-reset_suites() { rm -f "$FIX"/.claude/tests/*.test.sh "$FIX/.claude/tests/floors.conf"; }
+# reset_suites   Empties the fixture's test directory and BOTH floors files.
+# HARNESS-020 added project-floors.conf; a block that writes one and a later
+# block that assumes it absent would otherwise be coupled through the fixture.
+reset_suites() {
+  rm -f "$FIX"/.claude/tests/*.test.sh "$FIX/.claude/tests/floors.conf" \
+        "$FIX/.claude/tests/project-floors.conf"
+}
 
 # passing_suite <name> <n>   A suite with exactly ONE `assert_` call site,
 # executed <n> times. That shape is AC-7's subject, not an accident of writing.
@@ -68,7 +92,18 @@ selftest() { out="$( cd "$FIX" && bash scripts/selftest.sh "$@" 2>&1 )"; RC=$?; 
 # shortfall   The floor-shortfall line out of the last run, or empty. Empty is
 # never treated as a match by the assertions below: a preceding assert_contains
 # on the WHOLE output reports what was printed instead.
-shortfall() { printf '%s\n' "$out" | grep -F 'below the floor' | head -1; }
+#
+# ONE awk over a here-string, not `grep | head -1`. The ported original was
+# `printf | grep -F | head -1`, and check-sigpipe.sh flagged it on arrival:
+# `head` exits on its first line, the writer upstream takes SIGPIPE and dies
+# 141, and under `pipefail` that corpse becomes the status. Fixed here rather
+# than waived - the guard was right, and the downstream copy it came from has
+# the same latent defect because its own guard predates the rule.
+shortfall() {
+  awk 'index($0, "below the floor") { print; exit }' <<SHORTFALL_OUT
+$out
+SHORTFALL_OUT
+}
 
 # ---------------------------------------------------------------------------
 describe "AC-1  a suite below its floor fails the run, though the suite exits 0"
@@ -384,540 +419,1151 @@ describe "AC-6/AC-7  the shipped floors file covers every suite, at its count"
 # control is that `profiles` is recorded at 44 and not at its 1 call site.
 REAL="$REPO_ROOT/.claude/tests/floors.conf"
 
-floor_of() { # <suite>   the value recorded for a suite, or empty
-  sed -n "s/^[[:space:]]*floor[[:space:]]*|[[:space:]]*$1[[:space:]]*|[[:space:]]*\([0-9][0-9]*\).*/\1/p" \
-    "$REAL" 2>/dev/null | head -1
+# One awk over the file, for the same reason as shortfall() above: `sed | head -1`
+# is a pipeline into an early-exit reader, and check-sigpipe.sh flagged it.
+floor_of() { # <suite> <file>   the value recorded for a suite in <file>, or empty
+  awk -v want="$1" '
+    { line = $0; sub(/#.*/, "", line) }
+    { n = split(line, f, "|") }
+    n < 3 { next }
+    { for (i = 1; i <= n; i++) { gsub(/^[ \t]+|[ \t]+$/, "", f[i]) } }
+    f[1] == "floor" && f[2] == want && f[3] ~ /^[0-9]+$/ { print f[3]; exit }
+  ' "$2" 2>/dev/null
 }
 
-missing=""
-for s in "$REPO_ROOT"/.claude/tests/*.test.sh; do
-  n="$(basename "$s" .test.sh)"
-  [ -n "$(floor_of "$n")" ] || missing="$missing $n"
-done
-assert_eq "every suite in .claude/tests has a floor" "" "$missing"
+# suites_without_floor <root>   The space-joined names of the suites in
+# <root>/.claude/tests/*.test.sh that have a floor line in neither
+# <root>/.claude/tests/floors.conf nor, when it exists,
+# <root>/.claude/tests/project-floors.conf. Empty when every suite is floored.
+# HARNESS-021: this loop used to read floors.conf only, so every consuming
+# project that floors its project-*.test.sh suites in project-floors.conf (as
+# HARNESS-020 designed) failed the assertion below. Taking a root is what lets
+# the fixture cases further down point it at a tree that is not this one.
+suites_without_floor() {
+  _swf_dir="$1/.claude/tests"
+  _swf_missing=""
+  for _swf_s in "$_swf_dir"/*.test.sh; do
+    [ -e "$_swf_s" ] || continue
+    _swf_n="$(basename "$_swf_s" .test.sh)"
+    [ -n "$(floor_of "$_swf_n" "$_swf_dir/floors.conf")" ] && continue
+    if [ -f "$_swf_dir/project-floors.conf" ]; then
+      [ -n "$(floor_of "$_swf_n" "$_swf_dir/project-floors.conf")" ] && continue
+    fi
+    _swf_missing="$_swf_missing $_swf_n"
+  done
+  printf '%s' "${_swf_missing# }"
+}
 
-# C-3's settled ten, read out. Not re-derived, not rounded, not calibrated.
-# The last two were measured by RED against the unchanged tree (DV-3).
+assert_eq "every suite in .claude/tests has a floor" "" "$(suites_without_floor "$REPO_ROOT")"
+
+# HARNESS-021 fixture cases for suites_without_floor. Each root is a throwaway
+# directory under $FIX holding only the .claude/tests files the helper reads:
+# empty suite files (it reads names, not contents) and the floors files. Every
+# needle is the helper's WHOLE output compared with assert_eq, so a helper that
+# reports nothing, or reports the right name among wrong ones, cannot pass.
+
+# floor_root <case> <suite>...   A fresh root with an empty <suite>.test.sh for
+# each name. Prints the root. floors.conf / project-floors.conf are written by
+# the caller, so "absent" is a case and not an accident.
+floor_root() {
+  _fr="$FIX/floor-roots/$1"; shift
+  rm -rf "$_fr"; mkdir -p "$_fr/.claude/tests"
+  for _fr_s in "$@"; do : > "$_fr/.claude/tests/$_fr_s.test.sh"; done
+  printf '%s' "$_fr"
+}
+
+describe "HARNESS-021 AC-1  a suite floored only in project-floors.conf is not reported missing"
+
+R="$(floor_root ac1 alpha project-mine)"
+printf 'floor | alpha | 3\n' > "$R/.claude/tests/floors.conf"
+printf '# a project'"'"'s own suites\nfloor | project-mine | 4\n' > "$R/.claude/tests/project-floors.conf"
+assert_eq "a suite floored in project-floors.conf alone is not reported as missing a floor" \
+  "" "$(suites_without_floor "$R")"
+# The same, beside an unfloored suite: the project floor excuses project-mine
+# and nothing else, so the output is exactly the orphan.
+R="$(floor_root ac1b alpha project-mine project-orphan)"
+printf 'floor | alpha | 3\n' > "$R/.claude/tests/floors.conf"
+printf 'floor | project-mine | 4\n' > "$R/.claude/tests/project-floors.conf"
+assert_eq "beside an unfloored suite, only the unfloored one is reported" \
+  "project-orphan" "$(suites_without_floor "$R")"
+
+describe "HARNESS-021 AC-2  control: a suite floored in neither file is reported, by name"
+
+# Without this, a helper that reports nothing satisfies AC-1. A project-floors.conf
+# EXISTS here (comment only), so this also refuses a helper that treats the
+# file's mere presence as excusing every suite. Green under the old and the new
+# helper alike - it is the control, not the change.
+R="$(floor_root ac2 alpha project-orphan)"
+printf 'floor | alpha | 3\n' > "$R/.claude/tests/floors.conf"
+printf '# a project file that floors nothing\n' > "$R/.claude/tests/project-floors.conf"
+assert_eq "a suite floored in neither file is reported, and only that suite" \
+  "project-orphan" "$(suites_without_floor "$R")"
+
+describe "HARNESS-021 AC-3  with no project-floors.conf the check behaves as before"
+
+R="$(floor_root ac3 alpha beta gamma)"
+printf 'floor | alpha | 3\nfloor | gamma | 1\n' > "$R/.claude/tests/floors.conf"
+assert_eq "with no project-floors.conf, a suite missing from floors.conf is reported" \
+  "beta" "$(suites_without_floor "$R")"
+# Two missing, to pin the space-joined shape the real-tree message prints.
+R="$(floor_root ac3b alpha beta gamma)"
+printf 'floor | alpha | 3\n' > "$R/.claude/tests/floors.conf"
+assert_eq "and several missing suites are reported space-joined, in name order" \
+  "beta gamma" "$(suites_without_floor "$R")"
+# AC-3's second half - this repository's real tree still passes - is the
+# real-tree assertion above. Deliberately NOT asserted: that the real tree has
+# no project-floors.conf. This file is copied into consuming projects, which
+# do ship one, and there that assertion would be the defect this story removes.
+
+# The counts measured from a full run of THIS repository, read out rather than
+# re-derived. MT's numbers were deliberately NOT inherited: its suite set is a
+# different one, and a floor copied from another tree is a floor nobody
+# measured - which is the exact defect this mechanism exists to catch, pointed
+# at itself. Confirmed against the CI run of the same tree, and three of them
+# (profiles, mutate, lib) re-run locally at the port.
 wrong=""
 while read -r n v; do
   [ -z "$n" ] && continue
-  got="$(floor_of "$n")"
+  got="$(floor_of "$n" "$REAL")"
   [ "$got" = "$v" ] || wrong="$wrong $n=${got:-<none>}(want $v)"
 done <<'COUNTS'
-new-story 22
-ci-local 8
-profiles 44
-phase 24
-settings 20
-mutate 39
-doctor 7
-lib 148
+boundaries 113
+ci-local 28
+classify 55
+doctor 50
 gate-reminder 32
-boundaries 26
-gates 161
-phase-guard 289
+gates 470
+grep-count 20
+lib 217
+mutate 189
+new-story 43
+phase 33
+phase-guard 310
+plan 42
+policy 17
+procedure 37
+profiles 50
+refresh 122
+reporting 27
+run-lock 140
+selftest 268
+settings 27
+sigpipe 82
+spawns 69
+worktree 73
 COUNTS
-assert_eq "and each records the executed count MT-039 C-3 settled" "" "$wrong"
+assert_eq "and each records the executed count measured on this tree" "" "$wrong"
 
 # Named individually, because these two are the reason AC-7 is a criterion
-# rather than a note: a call-site implementation records 1 and 57.
-assert_eq "profiles is floored at its 44 executed assertions, not its 1 call site" \
-  44 "$(floor_of profiles)"
-assert_eq "lib is floored at its 148 executed assertions, not its 57 call sites" \
-  148 "$(floor_of lib)"
+# rather than a note: a call-site implementation records 1 and 104. HARNESS-010
+# moved lib from 139 to 197 and phase-guard from 188 to 288 - both floors are
+# recorded in RED, so both suites sit BELOW them until the reconciled parser
+# lands. See the note at the foot of floors.conf.
+assert_eq "profiles is floored at its 50 executed assertions, not its call-site count" \
+  50 "$(floor_of profiles "$REAL")"
+assert_eq "lib is floored at its 217 executed assertions, not its call-site count" \
+  217 "$(floor_of lib "$REAL")"
 
 # ===========================================================================
-# MT-042  the runner runs its suites CONCURRENTLY
+# HARNESS-020: a project declares its own suites' floors in
+# .claude/tests/project-floors.conf, which upstream never ships and the refresh
+# keeps. Every needle below is a WHOLE LINE of selftest.sh's output, compared
+# with `grep -cxF`, because the fault strings are mechanical (the story's
+# Contract pins them byte for byte) and a floating substring is satisfied by
+# the wrong file's name in the right sentence.
 # ===========================================================================
+
+# project_floors   project-floors.conf body on stdin.
+project_floors() { cat > "$FIX/.claude/tests/project-floors.conf"; }
+
+# exact_lines <line>   How many lines of the last run's output are EXACTLY
+# <line>. A here-doc rather than a pipe, for check-sigpipe.sh; no `|| echo 0`
+# fallback, for check-grep-count.sh - grep -c already prints 0.
+exact_lines() {
+  grep -cxF -- "$1" <<EXACT_OUT
+$out
+EXACT_OUT
+}
+
+PF=".claude/tests/project-floors.conf"
+MISSING_TAIL="no floor line in .claude/tests/floors.conf or .claude/tests/project-floors.conf; every suite must declare one (a project's own suites go in project-floors.conf)"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-020 AC-1  a suite floored only in project-floors.conf passes the full-run audit"
+
+# alpha is upstream's (floors.conf), project-mine is the project's own. The
+# full run is the one CI invokes, and the one FWB's refresh broke.
+reset_suites
+passing_suite alpha 3
+passing_suite project-mine 4
+floors <<'FLOORS'
+floor | alpha | 3
+FLOORS
+project_floors <<'FLOORS'
+# a project's own suites
+floor | project-mine | 4
+FLOORS
+selftest
+assert_eq "a full run with a project-floored suite exits 0" 0 "$RC"
+assert_eq "and says both suites passed" 1 "$(exact_lines "2 harness suite(s) passed.")"
+assert_eq "and counts both floors as met, the project's included" 1 \
+  "$(exact_lines "assertion floors: all 2 suite(s) met their declared floor (7 assertions executed, 7 declared).")"
+# Prefix, not the new whole line: this must fail under the OLD wording too.
+assert_eq "and the project suite is not reported as missing a floor" 0 \
+  "$(printf '%s\n' "$out" | grep -c '^FAIL project-mine  no floor line')"
+assert_not_contains "and no fault of any kind is printed" "FAIL" "$out"
+
+describe "HARNESS-020 AC-1  and that floor is enforced, not merely accepted"
+
+# The same declaration with the suite one assertion short. An implementation
+# that satisfies the audit by treating project-floors.conf as "these suites
+# need no floor" passes the block above and dies here.
+reset_suites
+passing_suite alpha 3
+passing_suite project-mine 3
+floors <<'FLOORS'
+floor | alpha | 3
+FLOORS
+project_floors <<'FLOORS'
+floor | project-mine | 4
+FLOORS
+selftest
+assert_eq "a project suite below its project floor fails the full run" 1 "$RC"
+# Contract amendment (RED): the shortfall names the file the floor came FROM.
+# Saying `in .claude/tests/floors.conf` here would send the reader to edit the
+# upstream file the refresh wipes - the very defect this story removes.
+assert_eq "the shortfall names the suite, both numbers and project-floors.conf" 1 \
+  "$(exact_lines "FAIL project-mine  did 3 units of work, below the floor of 4 in $PF")"
+assert_eq "while upstream's suite, which met its floor, is not blamed" 0 \
+  "$(printf '%s\n' "$out" | grep -c '^FAIL alpha ')"
+assert_not_contains "and the run does not also claim everything passed" \
+  "harness suite(s) passed." "$out"
+
+describe "HARNESS-020 AC-1  a floors.conf floor's shortfall still names floors.conf"
+
+# The control for the amendment above: the file a floor came from is reported
+# per floor, not swapped wholesale for the new name.
+reset_suites
+passing_suite alpha 2
+passing_suite project-mine 4
+floors <<'FLOORS'
+floor | alpha | 3
+FLOORS
+project_floors <<'FLOORS'
+floor | project-mine | 4
+FLOORS
+selftest
+assert_eq "an upstream suite below its floor fails the full run" 1 "$RC"
+assert_eq "and its shortfall line names floors.conf, byte for byte as before" 1 \
+  "$(exact_lines "FAIL alpha  did 2 units of work, below the floor of 3 in .claude/tests/floors.conf")"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-020 AC-2  a suite floored in neither file names both files"
+
+# No project-floors.conf at all: exactly the tree FWB had after the refresh,
+# and the case where the old message pointed only at the upstream file.
+reset_suites
+passing_suite alpha 3
+passing_suite project-orphan 5
+floors <<'FLOORS'
+floor | alpha | 3
+FLOORS
+selftest
+assert_eq "an unfloored suite fails the full run" 1 "$RC"
+assert_eq "the fault names both files and where a project's own floor belongs" 1 \
+  "$(exact_lines "FAIL project-orphan  $MISSING_TAIL")"
+assert_eq "the old one-file wording is gone" 0 \
+  "$(exact_lines "FAIL project-orphan  no floor line in .claude/tests/floors.conf; every suite must declare one")"
+
+# The same with a project-floors.conf present that floors something else: the
+# message does not depend on whether the project file exists.
+reset_suites
+passing_suite alpha 3
+passing_suite project-mine 2
+passing_suite project-orphan 5
+floors <<'FLOORS'
+floor | alpha | 3
+FLOORS
+project_floors <<'FLOORS'
+floor | project-mine | 2
+FLOORS
+selftest
+assert_eq "with a project file present, an unfloored suite still fails" 1 "$RC"
+assert_eq "and the fault names both files, the same words" 1 \
+  "$(exact_lines "FAIL project-orphan  $MISSING_TAIL")"
+assert_eq "and only the unfloored suite is named" 1 \
+  "$(printf '%s\n' "$out" | grep -c '^FAIL ')"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-020 AC-3  a project-floors.conf fault is named, with its file, line and fault"
+
+# Each fault on a line number that a count of PARSED lines would get wrong: a
+# comment and a blank line come first.
+
+# (a) malformed line.
+reset_suites
+passing_suite alpha 3
+passing_suite project-mine 4
+floors <<'FLOORS'
+floor | alpha | 3
+FLOORS
+project_floors <<'FLOORS'
+# a comment, and a blank line, before the fault
+
+floor | project-mine | 4
+this is not a floor
+FLOORS
+selftest
+assert_eq "a malformed project-floors.conf line fails the full run" 1 "$RC"
+assert_eq "named with project-floors.conf, line 4, and the fault" 1 \
+  "$(exact_lines "FAIL $PF:4  is not a floor line: 'this is not a floor'")"
+
+# (b) a floor naming a suite that does not exist.
+reset_suites
+passing_suite alpha 3
+passing_suite project-mine 4
+floors <<'FLOORS'
+floor | alpha | 3
+FLOORS
+project_floors <<'FLOORS'
+# the fault is on line 3
+
+floor | project-ghost | 12
+floor | project-mine | 4
+FLOORS
+selftest
+assert_eq "a project floor naming a missing suite fails the full run" 1 "$RC"
+assert_eq "named with project-floors.conf, line 3, the suite, and the missing file" 1 \
+  "$(exact_lines "FAIL $PF:3  floor names 'project-ghost', but .claude/tests/project-ghost.test.sh does not exist")"
+
+# (c) a suite floored in BOTH files. Without this, a project could quietly
+# lower an upstream suite's floor from the file the refresh never replaces.
+reset_suites
+passing_suite alpha 3
+passing_suite project-mine 4
+floors <<'FLOORS'
+floor | alpha | 3
+FLOORS
+project_floors <<'FLOORS'
+floor | project-mine | 4
+floor | alpha | 1
+FLOORS
+selftest
+assert_eq "a suite floored in both files fails the full run" 1 "$RC"
+assert_eq "named against project-floors.conf's line 2, naming floors.conf" 1 \
+  "$(exact_lines "FAIL $PF:2  floor for 'alpha' is already declared in .claude/tests/floors.conf; a suite has one floor")"
+assert_eq "and the floors.conf line is not the one blamed" 0 \
+  "$(printf '%s\n' "$out" | grep -c '^FAIL \.claude/tests/floors\.conf')"
+
+# (d) the remaining two faults of the shared grammar, against the project file.
+reset_suites
+passing_suite alpha 3
+passing_suite project-mine 4
+floors <<'FLOORS'
+floor | alpha | 3
+FLOORS
+project_floors <<'FLOORS'
+# two faults
+flor | project-mine | 4
+floor | project-mine | lots
+FLOORS
+selftest
+assert_eq "a non-numeric or unknown-kind project floor fails the full run" 1 "$RC"
+assert_eq "an unknown kind is named with project-floors.conf and its line" 1 \
+  "$(exact_lines "FAIL $PF:2  unknown kind 'flor'; the only kind is 'floor'")"
+assert_eq "a non-number is named with project-floors.conf and its line" 1 \
+  "$(exact_lines "FAIL $PF:3  floor for 'project-mine' is not a number: 'lots'")"
+
+describe "HARNESS-020 AC-3  a fault that names no suite is reported, not dropped"
+
+# Found in RED, and the reason (a) above cannot pass by reuse alone. A fault
+# that carries no suite name - `is not a floor line`, `does not exist` - is
+# queued as "<TAB><message>", and the report loop reads it back with
+# IFS=<TAB>. TAB is an IFS WHITESPACE character, so read strips the leading
+# one, the message lands in the name field, the message field is empty, and
+# `[ -n "$fmsg" ] || continue` drops it. Measured on the shipped selftest.sh:
+# a floors.conf holding `this is not a floor` passes the full run, exit 0. So
+# the malformed-line fault has never been printed, for either file, and the
+# missing-floors.conf fault is printed only by accident - every suite then
+# also lacks a floor. These two pin the shared report path for floors.conf;
+# (a) pins it for project-floors.conf.
+reset_suites
+passing_suite alpha 3
+floors <<'FLOORS'
+floor | alpha | 3
+this is not a floor
+FLOORS
+selftest
+assert_eq "a malformed floors.conf line fails the full run" 1 "$RC"
+assert_eq "named with floors.conf, its line, and the fault" 1 \
+  "$(exact_lines "FAIL .claude/tests/floors.conf:2  is not a floor line: 'this is not a floor'")"
+
+reset_suites
+passing_suite alpha 3
+selftest
+assert_eq "a missing floors.conf fails the full run" 1 "$RC"
+assert_eq "and says so in its own words, not only through each suite's missing floor" 1 \
+  "$(exact_lines "FAIL .claude/tests/floors.conf  does not exist; every suite must declare its assertion floor there")"
+
+describe "HARNESS-020 AC-3  control: no project-floors.conf is not a fault"
+
+# An upstream tree - this repository - ships no project-floors.conf, and must
+# pass exactly as before. The needle is the file's NAME anywhere in the output:
+# every fault above prints it, so a mechanism that makes absence a fault (or so
+# much as mentions the file when it is absent) is caught here.
+reset_suites
+passing_suite alpha 3
+passing_suite beta  7
+floors <<'FLOORS'
+floor | alpha | 3
+floor | beta  | 7
+FLOORS
+selftest
+assert_eq "with no project-floors.conf the full run exits 0" 0 "$RC"
+assert_eq "and says both suites passed" 1 "$(exact_lines "2 harness suite(s) passed.")"
+assert_not_contains "and project-floors.conf is not mentioned at all" "project-floors.conf" "$out"
+assert_eq "and no line is a fault" 0 "$(printf '%s\n' "$out" | grep -c '^FAIL')"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-020 AC-4  a single-suite run enforces a project-floors.conf floor"
+
+reset_suites
+passing_suite alpha 3
+passing_suite project-mine 3
+floors <<'FLOORS'
+floor | alpha | 3
+FLOORS
+project_floors <<'FLOORS'
+floor | project-mine | 4
+FLOORS
+selftest project-mine
+assert_eq "a project suite below its project floor fails its single-suite run" 1 "$RC"
+assert_eq "naming the suite, both numbers and project-floors.conf" 1 \
+  "$(exact_lines "FAIL project-mine  did 3 units of work, below the floor of 4 in $PF")"
+assert_not_contains "and it is not waved through as having no floor" \
+  "WARNING: no floor line for project-mine" "$out"
+
+# The passing half: at its floor, the single-suite run is clean and counts
+# the floor as met - not "passed, with a warning that no floor exists".
+reset_suites
+passing_suite alpha 3
+passing_suite project-mine 4
+floors <<'FLOORS'
+floor | alpha | 3
+FLOORS
+project_floors <<'FLOORS'
+floor | project-mine | 4
+FLOORS
+selftest project-mine
+assert_eq "at its project floor the single-suite run exits 0" 0 "$RC"
+assert_eq "and the floor is counted as met" 1 \
+  "$(exact_lines "assertion floors: all 1 suite(s) met their declared floor (4 assertions executed, 4 declared).")"
+assert_not_contains "with no missing-floor warning" "WARNING: no floor line" "$out"
+
+# ===========================================================================
+# HARNESS-036: opt-in concurrent suites, SELFTEST_JOBS. Every case below runs
+# the fixture's copy of selftest.sh with SELFTEST_JOBS stated explicitly - a
+# value, empty, or removed with `env -u` - and with VERBOSE empty, so nothing
+# here depends on the caller's environment. The cases above are left alone
+# and inherit the caller's value; under SELFTEST_JOBS=4 they exercise the
+# concurrent path for free.
 #
-# Everything below runs the fixture's copy of scripts/selftest.sh over PROBE
-# suites: synthetic suites that sleep, print numbered lines while they sleep,
-# and record what they observed into a marker directory ($MARKS) outside the
-# fixture's .claude/tests. The markers are the structural evidence - which
-# suites ran, how many were alive at once, which ones a suite saw beside it -
-# so no assertion here is a wall-clock threshold. Timing only ever makes the
-# evidence STRONGER (a slower machine overlaps more), never flips a verdict.
+# THE SYNTHETIC SUITES are generated by held(): each sources _held.sh (below,
+# written into the fixture), which records into the marker directory mk/ what
+# the suite saw, and can HOLD - block on a file - so that ordering is a state
+# the test controls rather than a race it hopes to win. Every hold is bounded:
+# 120 s by default, 20 s for AC-3's work-conserving case (its control is meant
+# to hit the bound), and a hold that waits on OTHER SUITES also gives up after
+# 30 s with no other suite alive (LONELY) - a serial runner can never clear it,
+# and without that every such hold would cost the suite its full bound. Once
+# any hold in a run has timed out, every other hold in that run gives up at
+# once: one failure is the evidence, the rest would be waiting time. A hold
+# that times out fails the suite with
+#     FAIL <name>: its hold cleared before its bound
+# which is the line AC-3's control reads.
 #
-# The contract these pin is MT-042 C-2 and C-3 as amended in RED:
-#   SELFTEST_JOBS         the job bound; unset or empty means 4; anything that
-#                         is not a positive integer is refused, exit 1, before
-#                         any suite runs.
-#   SERIAL_SUITES=""      a line of scripts/selftest.sh, space-separated suite
-#                         names; a suite named there runs with no other suite
-#                         alive. Ships empty.
-#   .claude/state/selftest/<name>.out
-#                         each suite's output buffer, under the script's $ROOT,
-#                         created if absent, no file left behind, pass or fail.
+# What a suite records, all under mk/:
+#   peers/<name>     the suites alive when it started, ITSELF INCLUDED. Each
+#                    suite creates alive/<name> and THEN lists alive/, so of
+#                    any set of suites alive together the last to start lists
+#                    them all: the largest listing is the true peak.
+#   started/<name>   created on start; finished/<name> created as it exits
+#   state/<name>     `ls -A .claude/state` as it started
+#   buf/<name>       the listing of .claude/state/selftest.*/ as it started
+#   finbefore/<name> the suites that had finished when it finished
+#   lockend/<name>   .claude/state/run.lock as it finished
+#   timeout/<name>   created if its hold hit a bound
+#
+# Every executed assertion counts: a held() suite executes N+1 (its N cases
+# and the hold assertion), so a floor of N+1 is met and N+2 is not.
+# ===========================================================================
 
-# The outer runner may have been started with a job bound of its own; the
-# nested fixture runs below must see only the one each case sets.
-unset SELFTEST_JOBS
+MK="$FIX/mk"
+HW="$FIX/w"
+mkdir -p "$HW"
 
-MARKS="$FIX/marks"
-cp "$FIX/scripts/selftest.sh" "$FIX/selftest.sh.as-copied"
-restore_runner() { cp "$FIX/selftest.sh.as-copied" "$FIX/scripts/selftest.sh"; }
-reset_marks() { rm -rf "$MARKS"; mkdir -p "$MARKS"; }
+cat > "$FIX/.claude/tests/_held.sh" <<'HELD'
+# Sourced by HARNESS-036's synthetic suites, after _lib.sh. Inputs, set by the
+# suite before sourcing: S (name), N (cases), and optionally WAIT_REL (hold
+# until mk/release/<S> or mk/release/all), WAIT_FIN / WAIT_START (hold until
+# those suites have finished / started), WAIT_COUNT (hold until that many
+# suites have started), BOUND, LONELY, SETTLE, EXIT_RC, NOSUM, ERRLINE, TRAIL,
+# FINISH_DELAY. mk/release/<S> or mk/release/all always clears a hold.
+: "${N:=1}" "${BOUND:=120}" "${LONELY:=}" "${WAIT_REL:=}" "${WAIT_FIN:=}"
+: "${WAIT_START:=}" "${WAIT_COUNT:=}" "${SETTLE:=}" "${EXIT_RC:=}" "${NOSUM:=}"
+: "${ERRLINE:=}" "${TRAIL:=}" "${FINISH_DELAY:=}"
+M="$REPO_ROOT/mk"
+mkdir -p "$M/alive" "$M/started" "$M/finished" "$M/peers" "$M/state" "$M/buf" \
+         "$M/lockend" "$M/finbefore" "$M/release" "$M/timeout"
+: > "$M/alive/$S"
+ls "$M/alive" > "$M/peers/$S"
+ls -A "$REPO_ROOT/.claude/state" > "$M/state/$S" 2>/dev/null
+ls -A "$REPO_ROOT"/.claude/state/selftest.*/ > "$M/buf/$S" 2>/dev/null
+: > "$M/started/$S"
 
-# probe_suite <name> <asserts> <steps> [pass|fail|silent]
-#   A suite that, for each of <steps> steps, prints `<name> line <i>` and then
-#   sleeps 0.3 s and counts the `running.*` markers alive. It records:
-#     ran.<name>       it ran at all
-#     buffered.<name>  its output buffer existed when it started (C-2)
-#     peak.<name>      the most suites it saw alive at once, itself included
-#     saw.<name>       every other suite it saw alive
-#     verbose.<name>   VERBOSE reached it
-#   Then it executes <asserts> passing assertions from ONE call site (MT-039's
-#   shape), and - by mode - one failing assertion plus a stderr line, or no
-#   summary line at all. Counting is pure bash: a fork per sample would cost
-#   ~150 ms on Windows and blur the thing being sampled.
-probe_suite() {
-  local mode="${4:-pass}"
+h_cond() {
+  local x c
+  if [ -e "$M/release/$S" ] || [ -e "$M/release/all" ]; then return 0; fi
+  [ -n "$WAIT_REL" ] && return 1
+  for x in $WAIT_FIN; do [ -e "$M/finished/$x" ] || return 1; done
+  for x in $WAIT_START; do [ -e "$M/started/$x" ] || return 1; done
+  if [ -n "$WAIT_COUNT" ]; then
+    c=0
+    for x in "$M"/started/*; do [ -e "$x" ] && c=$((c+1)); done
+    [ "$c" -ge "$WAIT_COUNT" ] || return 1
+  fi
+  return 0
+}
+h_alone() {
+  local x
+  for x in "$M"/alive/*; do
+    [ -e "$x" ] && [ "$x" != "$M/alive/$S" ] && return 1
+  done
+  return 0
+}
+held=cleared
+if [ -n "$WAIT_REL$WAIT_FIN$WAIT_START$WAIT_COUNT" ]; then
+  i=0; alone=0
+  while ! h_cond; do
+    if [ "$i" -ge $((BOUND*5)) ]; then held="timed out"; break; fi
+    if [ -n "$LONELY" ]; then
+      if h_alone; then alone=$((alone+1)); else alone=0; fi
+      if [ "$alone" -ge $((LONELY*5)) ]; then held="timed out"; break; fi
+    fi
+    for x in "$M"/timeout/*; do [ -e "$x" ] && held="timed out"; done
+    [ "$held" = cleared ] || break
+    sleep 0.2; i=$((i+1))
+  done
+  if [ -n "$SETTLE" ] && [ "$held" = cleared ]; then sleep "$SETTLE"; fi
+fi
+[ "$held" = cleared ] || : > "$M/timeout/$S"
+
+describe "$S"
+printf '%s: a line of its own output\n' "$S"
+[ -n "$ERRLINE" ] && printf '%s: a line on stderr\n' "$S" >&2
+assert_eq "$S: its hold cleared before its bound" cleared "$held"
+i=0
+while [ "$i" -lt "$N" ]; do assert_eq "$S case $i" x x; i=$((i+1)); done
+rc=0
+if [ -z "$NOSUM" ]; then summary "$S"; rc=$?; fi
+[ -n "$TRAIL" ] && printf '\n\n\n'
+[ -n "$FINISH_DELAY" ] && sleep "$FINISH_DELAY"
+cp "$REPO_ROOT/.claude/state/run.lock" "$M/lockend/$S" 2>/dev/null
+ls "$M/finished" > "$M/finbefore/$S"
+rm -f "$M/alive/$S"
+: > "$M/finished/$S"
+exit "${EXIT_RC:-$rc}"
+HELD
+
+# held <name> [VAR=value ...]   A synthetic suite. PAD=<n> adds n comment
+# lines, which changes nothing but the file's size: C-2 lets GREEN start the
+# largest file first, and the cases whose meaning depends on WHICH suites
+# start first are padded so that size order and glob order agree.
+held() {
+  local n="$1" kv p
+  shift
   {
     printf '#!/usr/bin/env bash\n'
     printf '. "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"\n'
-    printf "N='%s'; M='%s'; STEPS=%d; ASSERTS=%d\n" "$1" "$MARKS" "$3" "$2"
-    cat <<'BODY'
-: > "$M/running.$N"; : > "$M/ran.$N"
-[ -f "${BASH_SOURCE[0]%/*}/../state/selftest/$N.out" ] && : > "$M/buffered.$N"
-[ -n "${VERBOSE:-}" ] && : > "$M/verbose.$N"
-peak=1; saw=""; i=1
-while [ "$i" -le "$STEPS" ]; do
-  printf '%s line %d\n' "$N" "$i"
-  sleep 0.3
-  c=0
-  for f in "$M"/running.*; do
-    [ -e "$f" ] || continue
-    c=$((c+1)); o="${f##*/running.}"
-    [ "$o" = "$N" ] && continue
-    case " $saw " in *" $o "*) ;; *) saw="$saw $o" ;; esac
-  done
-  [ "$c" -gt "$peak" ] && peak=$c
-  i=$((i+1))
-done
-printf '%s\n' "$peak" > "$M/peak.$N"
-printf '%s\n' "${saw# }" > "$M/saw.$N"
-rm -f "$M/running.$N"
-j=0
-while [ "$j" -lt "$ASSERTS" ]; do assert_eq "$N case $j" x x; j=$((j+1)); done
-BODY
-    case "$mode" in
-      fail)
-        printf 'printf "%%s-stderr\\n" "$N" >&2\n'
-        printf 'assert_eq "$N is the one that is wrong" want got\n'
-        printf 'summary "$N"\n' ;;
-      silent)
-        printf 'exit 0\n' ;;
-      *)
-        printf 'summary "$N"\n' ;;
-    esac
-  } > "$FIX/.claude/tests/$1.test.sh"
+    printf 'S=%s\n' "$n"
+    for kv in "$@"; do
+      case "$kv" in
+        PAD=*) p=0; while [ "$p" -lt "${kv#PAD=}" ]; do
+                 printf '# padding, so that this file sorts larger by size\n'; p=$((p+1)); done ;;
+        *) printf '%s\n' "$kv" ;;
+      esac
+    done
+    printf '. "$(dirname "${BASH_SOURCE[0]}")/_held.sh"\n'
+  } > "$FIX/.claude/tests/$n.test.sh"
 }
 
-# peak_of <names...>   The highest concurrency any of the named suites saw.
-peak_of() {
-  local m=0 n v
-  for n in "$@"; do
-    v=""; [ -f "$MARKS/peak.$n" ] && read -r v < "$MARKS/peak.$n"
-    [ -n "$v" ] && [ "$v" -gt "$m" ] && m=$v
+# mk_reset   No markers. Holds are released only by files the case creates.
+mk_reset() { rm -rf "$MK"; mkdir -p "$MK/release"; }
+
+# release <name>...   Pre-releases a hold, so a serial run never blocks on it.
+release() { local s; for s in "$@"; do : > "$MK/release/$s"; done; }
+
+# jrun <jobs> [args]   The fixture's selftest.sh in the foreground, with
+# SELFTEST_JOBS=<jobs>, or removed when <jobs> is `-`. stdout to $HW/out,
+# stderr to $HW/err, status in JRC. Kept as files so that byte identity is
+# checked with cmp, trailing newlines included.
+JRC=""
+jrun() {
+  local j="$1"
+  shift
+  if [ "$j" = - ]; then
+    ( cd "$FIX" && env -u SELFTEST_JOBS VERBOSE= bash scripts/selftest.sh "$@" ) > "$HW/out" 2> "$HW/err"
+  else
+    ( cd "$FIX" && SELFTEST_JOBS="$j" VERBOSE= bash scripts/selftest.sh "$@" ) > "$HW/out" 2> "$HW/err"
+  fi
+  JRC=$?
+}
+
+# keep <tag>   Saves the last run's out/err as out.<tag>/err.<tag>.
+keep() { cp "$HW/out" "$HW/out.$1"; cp "$HW/err" "$HW/err.$1"; }
+
+# jstart <jobs> [args]   The SCRIPT ITSELF backgrounded from inside the
+# fixture - `cd`, then `bash scripts/selftest.sh &` - so that $! is the pid in
+# the buffer directory's name and in the lock (as run-lock.test.sh does).
+HP=""
+jstart() {
+  local j="$1" here="$PWD"
+  shift
+  cd "$FIX" || return 1
+  SELFTEST_JOBS="$j" VERBOSE= bash scripts/selftest.sh "$@" > "$HW/out" 2> "$HW/err" &
+  HP=$!
+  cd "$here" || return 1
+  BG="$BG $HP"
+}
+
+# h_wait <file>...   Polls up to 60 s for every file to exist. 0 once they do.
+h_wait() {
+  local i=0 f ok
+  while [ "$i" -lt 300 ]; do
+    ok=1
+    for f in "$@"; do [ -e "$f" ] || ok=0; done
+    [ "$ok" = 1 ] && return 0
+    sleep 0.2; i=$((i+1))
+  done
+  return 1
+}
+
+# yn <test...>   `yes` or `no`, so a failure message says which.
+yn() { if "$@"; then printf yes; else printf no; fi; }
+present() { if [ -e "$1" ]; then printf present; else printf absent; fi; }
+
+# h_lines <file>   Its line count, 0 when absent. Pure bash.
+h_lines() {
+  local n=0 l
+  [ -f "$1" ] || { printf 0; return; }
+  while IFS= read -r l || [ -n "$l" ]; do n=$((n+1)); done < "$1"
+  printf '%s' "$n"
+}
+
+# h_count <dir>   How many entries mk/<dir> holds.
+h_count() {
+  local n=0 f
+  for f in "$MK/$1"/*; do [ -e "$f" ] && n=$((n+1)); done
+  printf '%s' "$n"
+}
+
+# h_peak   The most suites alive at once, from the peers listings.
+h_peak() {
+  local m=0 f n
+  for f in "$MK"/peers/*; do
+    [ -e "$f" ] || continue
+    n="$(h_lines "$f")"
+    [ "$n" -gt "$m" ] && m="$n"
   done
   printf '%s' "$m"
 }
 
-# ran_list <names...>   Which of the named suites left a ran.* marker.
-ran_list() {
-  local n r=""
-  for n in "$@"; do [ -e "$MARKS/ran.$n" ] && r="$r $n"; done
-  printf '%s' "${r# }"
-}
-
-# transcript <output>   Every `=== <name> ===` header as `H <name>` and every
-# probe line as `<name> <i>`, in the order printed. Two suites interleaved, a
-# line under the wrong header, or suites out of glob order all change it.
-transcript() {
-  printf '%s\n' "$1" | awk '
-    /^=== [^ ]+ ===$/        { print "H " $2; next }
-    /^[a-z]+ line [0-9]+$/   { print $1 " " $3 }'
-}
-
-# expect_transcript <name>:<steps> ...   The transcript of those suites run in
-# that order, each contiguous.
-expect_transcript() {
-  local spec n s i
-  for spec in "$@"; do
-    n="${spec%%:*}"; s="${spec#*:}"
-    printf 'H %s\n' "$n"
-    i=1; while [ "$i" -le "$s" ]; do printf '%s %d\n' "$n" "$i"; i=$((i+1)); done
+# h_saw_re <ERE>   How many suites' .claude/state listings hold a matching line.
+h_saw_re() {
+  local n=0 f
+  for f in "$MK"/state/*; do
+    [ -e "$f" ] || continue
+    grep -qE -- "$1" "$f" && n=$((n+1))
   done
+  printf '%s' "$n"
 }
 
-# block <name>   The lines under suite <name>'s header, up to the next header.
-block() {
-  printf '%s\n' "$out" | awk -v h="=== $1 ===" '
-    $0 == h { on = 1; next } /^=== [^ ]+ ===$/ { on = 0 } on'
+# h_saw_line <dir> <line|@NAME@>   How many of mk/<dir>/* hold the exact line,
+# `@NAME@` replaced by each file's own suite name.
+h_saw_line() {
+  local n=0 f want
+  for f in "$MK/$1"/*; do
+    [ -e "$f" ] || continue
+    want="${2//@NAME@/${f##*/}}"
+    grep -qxF -- "$want" "$f" && n=$((n+1))
+  done
+  printf '%s' "$n"
 }
 
-headers() { printf '%s\n' "$out" | grep -E '^=== [^ ]+ ===$'; }
-last_line() { printf '%s\n' "$out" | awk 'NF { l = $0 } END { print l }'; }
-leftover_buffers() {
-  [ -d "$FIX/.claude/state/selftest" ] || return 0
-  find "$FIX/.claude/state/selftest" -type f | sed "s|^$FIX/||"
+# h_left   What the run left in the fixture's .claude/state: selftest.*
+# entries, run.lock and run.lock.*, space-joined. Empty when clean.
+h_left() {
+  local f l=""
+  for f in "$FIX"/.claude/state/selftest.* "$FIX"/.claude/state/run.lock \
+           "$FIX"/.claude/state/run.lock.*; do
+    [ -e "$f" ] && l="$l ${f##*/}"
+  done
+  printf '%s' "${l# }"
+}
+
+# h_last <name>   The last line of $HW/out.<name>.
+h_last() { awk 'END { print }' "$HW/out.$1"; }
+
+# h_exact <line> <file>   How many lines of <file> are exactly <line>.
+h_exact() { grep -cxF -- "$1" "$2"; }
+
+# h_same <a> <b>   `identical` or the first lines of the difference.
+h_same() {
+  if cmp -s "$1" "$2"; then printf identical
+  else printf 'differ:\n%s' "$(diff "$1" "$2" 2>&1 | awk 'NR <= 12')"; fi
 }
 
 # ---------------------------------------------------------------------------
-describe "MT-042 controls  the instruments below measure what they claim to"
+describe "HARNESS-036 AC-1  SELFTEST_JOBS unset, empty or 1 runs today's sequential loop, byte for byte"
 
-# The concurrency probe, driven WITHOUT the runner: two probe suites started
-# side by side by hand must see each other, and one alone must see only itself.
-# Without this pair a peak of 1 could mean "the runner is serial" or "the probe
-# cannot count", and every concurrency verdict below would be ambiguous.
-reset_suites; reset_marks
-probe_suite alpha 1 4
-probe_suite bravo 1 4
-( cd "$FIX" && { bash .claude/tests/alpha.test.sh >/dev/null 2>&1 &
-                 bash .claude/tests/bravo.test.sh >/dev/null 2>&1 & wait; } )
-assert_eq "two probe suites started side by side see a peak of 2" 2 "$(peak_of alpha bravo)"
-assert_eq "and each names the other" "bravo alpha" \
-  "$(cat "$MARKS/saw.alpha") $(cat "$MARKS/saw.bravo")"
-reset_marks
-( cd "$FIX" && bash .claude/tests/alpha.test.sh >/dev/null 2>&1 )
-assert_eq "one probe suite alone sees a peak of 1" 1 "$(peak_of alpha)"
-assert_eq "and sees nobody beside it" "" "$(cat "$MARKS/saw.alpha")"
-
-# The transcript instrument, on text: interleaving and misordering must both
-# change it, or the AC-4 comparison below proves nothing.
-good="$(printf '\n=== aa ===\naa line 1\naa line 2\n\n=== bb ===\nbb line 1\n')"
-mixed="$(printf '\n=== aa ===\naa line 1\nbb line 1\naa line 2\n\n=== bb ===\n')"
-swapped="$(printf '\n=== bb ===\nbb line 1\n\n=== aa ===\naa line 1\naa line 2\n')"
-want="$(expect_transcript aa:2 bb:1)"
-assert_eq "the transcript of contiguous, ordered output is the expected one" \
-  "$want" "$(transcript "$good")"
-assert_not_contains "an interleaved line changes the transcript" \
-  "$want" "$(transcript "$mixed")"
-assert_not_contains "and so does a swapped suite order" \
-  "$want" "$(transcript "$swapped")"
-
-# ---------------------------------------------------------------------------
-describe "MT-042 AC-2  an early suite that fails FIRST still fails the whole run"
-
-# The classic bug, in the shape that exposes it: the failing suite is first in
-# glob order and finishes first, and every suite after it passes and runs
-# longer. A runner that reports the last job's status, or reads a bare
-# `wait`'s $?, exits 0 here.
-reset_suites; reset_marks
-probe_suite alpha 2 0 fail
-probe_suite bravo 3 3
-probe_suite charlie 4 5
+# Five suites: one that holds until the second has started (pre-released for
+# the sequential runs, so it never blocks there), one that writes stderr and
+# ends in blank lines, one that exits 3 with its floor met, one below its
+# floor, one with no summary line. 3 of 5 fail, for three different reasons.
+reset_suites
+held a1-holds  N=3 WAIT_START=a2-stderr LONELY=30
+held a2-stderr N=2 ERRLINE=1 TRAIL=1
+held a3-exits3 N=4 EXIT_RC=3
+held a4-short  N=1
+held a5-silent NOSUM=1
 floors <<'FLOORS'
-floor | alpha   | 2
-floor | bravo   | 3
-floor | charlie | 4
+floor | a1-holds  | 4
+floor | a2-stderr | 3
+floor | a3-exits3 | 5
+floor | a4-short  | 3
+floor | a5-silent | 1
 FLOORS
-selftest
-assert_eq "the run exits non-zero" 1 "$RC"
-assert_eq "and its last line is the shipped FAILED count" \
-  "1 of 3 harness suite(s) FAILED." "$(last_line)"
-a="$(block alpha)"
-assert_contains "the failing suite's failure is shown under its own header" \
-  "FAIL alpha is the one that is wrong" "$a"
-assert_contains "with the detail under it" "expected: want" "$a"
-assert_contains "and its stderr too, in full" "alpha-stderr" "$a"
-assert_contains "and its own summary line" "alpha: 2 passed, 1 failed" "$a"
-assert_not_contains "the run does not also claim success" "harness suite(s) passed." "$out"
 
-# Two failures, not adjacent, both before a passing suite: the count must be 2
-# of 5, not 1 (a status overwritten by the next job) and not 0.
-reset_suites; reset_marks
-probe_suite alpha   1 3
-probe_suite bravo   1 0 fail
-probe_suite charlie 1 3
-probe_suite delta   1 1 fail
-probe_suite echo    1 2
-floors <<'FLOORS'
-floor | alpha   | 1
-floor | bravo   | 1
-floor | charlie | 1
-floor | delta   | 1
-floor | echo    | 1
-FLOORS
-selftest
-assert_eq "two non-adjacent failures exit non-zero" 1 "$RC"
-assert_eq "and are counted as two of five" \
-  "2 of 5 harness suite(s) FAILED." "$(last_line)"
+# THE GOLDEN: stdout of the release-77 scripts/selftest.sh (c9260a7, the one
+# in the tree at RED) on exactly this fixture, captured in RED. Its stderr was
+# empty and it exited 1. Only text the synthetic suites print and selftest.sh's
+# own lines - no paths, no pids.
+cat > "$HW/golden" <<'GOLDEN'
 
-# ---------------------------------------------------------------------------
-describe "MT-042 AC-3  the interface is unchanged"
+=== a1-holds ===
 
-# Exactly one suite: one header, and the markers prove the others never ran -
-# not merely that their output was not printed.
-reset_suites; reset_marks
-probe_suite alpha   1 0
-probe_suite bravo   1 0
-probe_suite charlie 1 0
-floors <<'FLOORS'
-floor | alpha   | 1
-floor | bravo   | 1
-floor | charlie | 1
-FLOORS
-selftest bravo
-assert_eq "a named suite runs and passes" 0 "$RC"
-assert_eq "exactly one header is printed, and it is that suite's" "=== bravo ===" "$(headers)"
-assert_eq "and no other suite ran at all" "bravo" "$(ran_list alpha bravo charlie)"
-assert_eq "and the run reports one suite passed" "1 harness suite(s) passed." "$(last_line)"
+  a1-holds
+a1-holds: a line of its own output
 
-# No such suite: the shipped message, on stderr, exit 1, nothing run.
-reset_marks
-err="$( cd "$FIX" && bash scripts/selftest.sh nosuchsuite 2>&1 >/dev/null )"; rc=$?
-assert_eq "an unknown suite exits 1" 1 "$rc"
-assert_eq "with the shipped message, on stderr" \
-  "No suites matched 'nosuchsuite'. Looked in .claude/tests/*.test.sh" "$err"
-assert_eq "and runs nothing" "" "$(ran_list alpha bravo charlie)"
+a1-holds: 4 passed, 0 failed
 
-# VERBOSE reaches every suite on a FULL run - the concurrent path - and its
-# absence reaches them too: the negative control, so a probe that always writes
-# the marker cannot pass this.
-reset_marks
-VERBOSE=1 selftest
-assert_eq "a full VERBOSE run exits 0" 0 "$RC"
-assert_eq "VERBOSE reached every suite" "alpha bravo charlie" \
-  "$(for n in alpha bravo charlie; do [ -e "$MARKS/verbose.$n" ] && printf '%s ' "$n"; done | sed 's/ $//')"
-assert_contains "and every suite names its passing assertions" "ok   alpha case 0" "$(block alpha)"
-assert_contains "under its own header" "ok   charlie case 0" "$(block charlie)"
-assert_eq "a full passing run ends with the shipped passed line" \
-  "3 harness suite(s) passed." "$(last_line)"
-reset_marks
-VERBOSE= selftest
-assert_eq "without VERBOSE no suite sees it" "" \
-  "$(for n in alpha bravo charlie; do [ -e "$MARKS/verbose.$n" ] && printf '%s ' "$n"; done)"
-assert_not_contains "and no passing assertion is named" "ok   alpha case 0" "$out"
+=== a2-stderr ===
 
-# ---------------------------------------------------------------------------
-describe "MT-042 AC-4  suites print contiguously, in glob order, whatever order they finish in"
+  a2-stderr
+a2-stderr: a line of its own output
+a2-stderr: a line on stderr
 
-# alpha is first in the glob and takes longest; charlie is last and finishes
-# first. Each prints numbered lines WHILE the others are running, so a runner
-# that streams interleaves them and a runner that prints on completion prints
-# charlie first. Both change the transcript.
-reset_suites; reset_marks
-probe_suite alpha   3 5
-probe_suite bravo   5 2
-probe_suite charlie 8 1
-floors <<'FLOORS'
-floor | alpha   | 3
-floor | bravo   | 4
-floor | charlie | 7
-FLOORS
-selftest
-assert_eq "the run passes" 0 "$RC"
-assert_eq "each suite's lines sit contiguously under its own header, in glob order" \
-  "$(expect_transcript alpha:5 bravo:2 charlie:1)" "$(transcript "$out")"
-# AC-6 rides on the same run: distinct counts and floors per suite, so a count
-# read from the wrong buffer changes a total.
-assert_contains "and every count was read from its own suite" \
-  "assertion floors: all 3 suite(s) met their declared floor (16 assertions executed, 14 declared)." "$out"
+a2-stderr: 3 passed, 0 failed
 
-# ---------------------------------------------------------------------------
-describe "MT-042 AC-6  each suite's floor is read from its own output"
+=== a3-exits3 ===
 
-# bravo is below its floor and finishes first; alpha and charlie are above
-# theirs and finish later. Exactly one shortfall line, naming bravo, with
-# bravo's numbers.
-reset_suites; reset_marks
-probe_suite alpha   5 5
-probe_suite bravo   4 0
-probe_suite charlie 9 2
-floors <<'FLOORS'
-floor | alpha   | 3
-floor | bravo   | 6
-floor | charlie | 8
-FLOORS
-selftest
-assert_eq "a suite below its floor fails the run beside passing neighbours" 1 "$RC"
-assert_eq "exactly one shortfall is reported, and it is bravo's, with bravo's numbers" \
-  "FAIL bravo  did 4 units of work, below the floor of 6 in .claude/tests/floors.conf" \
-  "$(printf '%s\n' "$out" | grep -F 'below the floor')"
-assert_contains "the floors line counts the other two as met" \
-  "assertion floors: 2 of 3 suite(s) met their declared floor." "$out"
-assert_eq "and the run ends with one failed suite" \
-  "1 of 3 harness suite(s) FAILED." "$(last_line)"
+  a3-exits3
+a3-exits3: a line of its own output
 
-# A suite with no summary line, between two slower passing ones.
-reset_suites; reset_marks
-probe_suite alpha  2 4
-probe_suite bravo  3 0 silent
-probe_suite charlie 2 3
-floors <<'FLOORS'
-floor | alpha   | 2
-floor | bravo   | 7
-floor | charlie | 2
-FLOORS
-selftest
-assert_eq "a silent suite fails the run under concurrency too" 1 "$RC"
-assert_eq "and it alone is named as having printed no summary" \
-  "FAIL bravo  printed no summary line, so its floor of 7 could not be checked" \
-  "$(printf '%s\n' "$out" | grep -F 'printed no summary line')"
-assert_eq "the run ends with one failed suite" \
-  "1 of 3 harness suite(s) FAILED." "$(last_line)"
+a3-exits3: 5 passed, 0 failed
 
-# ---------------------------------------------------------------------------
-describe "MT-042 C-2  suites actually run concurrently, and never more than the bound"
+=== a4-short ===
 
-# Four suites, a bound of two. The peak must be EXACTLY two: above it is an
-# unbounded runner, below it is a serial one. This is the fixture-level proxy
-# for AC-1, which cannot hold unless this does.
-reset_suites; reset_marks
-for n in alpha bravo charlie delta; do probe_suite "$n" 1 3; done
-floors <<'FLOORS'
-floor | alpha   | 1
-floor | bravo   | 1
-floor | charlie | 1
-floor | delta   | 1
-FLOORS
-SELFTEST_JOBS=2 selftest
-assert_eq "SELFTEST_JOBS=2 passes" 0 "$RC"
-assert_eq "and runs exactly two suites at a time" 2 "$(peak_of alpha bravo charlie delta)"
+  a4-short
+a4-short: a line of its own output
 
-# The default bound is 4: five suites, and the peak is 3 or 4 - more than a
-# bound of 2 could produce, and never the 5 an nproc- or unbounded runner would.
-reset_suites; reset_marks
-for n in alpha bravo charlie delta echo; do probe_suite "$n" 1 4; done
-floors <<'FLOORS'
-floor | alpha   | 1
-floor | bravo   | 1
-floor | charlie | 1
-floor | delta   | 1
-floor | echo    | 1
-FLOORS
-selftest
-assert_eq "the default run passes" 0 "$RC"
-p="$(peak_of alpha bravo charlie delta echo)"
-if [ "$p" -ge 3 ] && [ "$p" -le 4 ]; then
-  _ok "with no SELFTEST_JOBS, at least 3 and at most 4 suites run at once"
-else
-  _bad "with no SELFTEST_JOBS, at least 3 and at most 4 suites run at once" "peak observed: $p"
-fi
+a4-short: 2 passed, 0 failed
+FAIL a4-short  did 2 units of work, below the floor of 3 in .claude/tests/floors.conf
 
-# SELFTEST_JOBS=1 is the serial runner, and the negative control for the peak
-# counter under the runner: it must not over-count.
-reset_suites; reset_marks
-for n in alpha bravo charlie; do probe_suite "$n" 1 3; done
-floors <<'FLOORS'
-floor | alpha   | 1
-floor | bravo   | 1
-floor | charlie | 1
-FLOORS
-SELFTEST_JOBS=1 selftest
-assert_eq "SELFTEST_JOBS=1 passes" 0 "$RC"
-assert_eq "and runs one suite at a time" 1 "$(peak_of alpha bravo charlie)"
+=== a5-silent ===
 
-# A bound of zero would never start anything; a word is a typo. Both are
-# refused before any suite runs, never read as "the default". The suites take
-# no steps: a runner that ignores the bound should not cost seconds to catch.
-for n in alpha bravo charlie; do probe_suite "$n" 1 0; done
-for bad in 0 lots; do
-  reset_marks
-  SELFTEST_JOBS="$bad" selftest
-  assert_eq "SELFTEST_JOBS=$bad is refused with exit 1" 1 "$RC"
-  assert_contains "and the refusal names the variable" "SELFTEST_JOBS" "$out"
-  assert_eq "and no suite ran" "" "$(ran_list alpha bravo charlie)"
-done
+  a5-silent
+a5-silent: a line of its own output
+FAIL a5-silent  printed no summary line, so its floor of 1 could not be checked
 
-# ---------------------------------------------------------------------------
-describe "MT-042 C-2  output buffers live under the script's own .claude/state, and are cleaned up"
+assertion floors: 3 of 5 suite(s) met their declared floor.
+3 of 5 harness suite(s) FAILED.
+GOLDEN
 
-# Run from a SUBDIRECTORY of the fixture with no .claude/state at all: a
-# buffer resolved from $PWD lands in src/.claude, and one that assumes the
-# directory exists fails to write.
-reset_suites; reset_marks
-probe_suite alpha 1 1
-probe_suite bravo 1 1
-floors <<'FLOORS'
-floor | alpha | 1
-floor | bravo | 1
-FLOORS
-rm -rf "$FIX/.claude/state" "$FIX/src/.claude"
-out="$( cd "$FIX/src" && bash ../scripts/selftest.sh 2>&1 )"; RC=$?
-assert_eq "a run from a subdirectory, with no state directory, passes" 0 "$RC"
-assert_eq "each suite's output went to .claude/state/selftest/<name>.out under the script's root" \
-  "alpha bravo" "$(for n in alpha bravo; do [ -e "$MARKS/buffered.$n" ] && printf '%s ' "$n"; done | sed 's/ $//')"
-assert_eq "nothing was written relative to the working directory" "" \
-  "$( [ -e "$FIX/src/.claude" ] && echo "src/.claude exists" )"
-assert_eq "and no buffer outlives a passing run" "" "$(leftover_buffers)"
-
-reset_marks
-probe_suite bravo 1 1 fail
-selftest
-assert_eq "a failing run fails" 1 "$RC"
-assert_eq "and still used the buffers" "alpha bravo" \
-  "$(for n in alpha bravo; do [ -e "$MARKS/buffered.$n" ] && printf '%s ' "$n"; done | sed 's/ $//')"
-assert_eq "and no buffer outlives a failing run either" "" "$(leftover_buffers)"
-mkdir -p "$FIX/.claude/state"
-
-# ---------------------------------------------------------------------------
-describe "MT-042 C-2  the runner stays within bash 3.2"
-
-# macOS ships bash 3.2.57. Job control is where bash 4+ features are most
-# tempting: `wait -n` (4.3), `wait -p` (5.1), associative arrays, mapfile.
-# Read from the code, because nothing here can run the other bash. Comments may
-# mention them; code may not.
-bash4() {
-  grep -nE '(wait[[:space:]]+-[np]|(declare|local|typeset)[[:space:]]+-[A-Za-z]*A|\bmapfile\b|\breadarray\b|\bcoproc\b|BASHPID|EPOCHREALTIME|EPOCHSECONDS)' "$1" \
-    | grep -vE '^[0-9]+:[[:space:]]*#' || true
-}
-printf '# wait -n is bash 4.3\nwait -n\ndeclare -A seen\n' > "$FIX/bash4-sample.sh"
-assert_eq "control: the check finds bash-4 job control in code, not in comments" \
-  "2:wait -n
-3:declare -A seen" "$(bash4 "$FIX/bash4-sample.sh")"
-assert_eq "scripts/selftest.sh uses no bash-4 feature" "" "$(bash4 "$REPO_ROOT/scripts/selftest.sh")"
-
-# ---------------------------------------------------------------------------
-describe "MT-042 C-3  the serial escape hatch ships, empty, and works"
-
-assert_eq "scripts/selftest.sh carries the list, and it ships empty" \
-  'SERIAL_SUITES=""' "$(grep -E '^SERIAL_SUITES=' "$REPO_ROOT/scripts/selftest.sh")"
-
-# Pin bravo and delta in the fixture's copy. Six suites, a bound of 4: the
-# unpinned ones must overlap each other (or the runner is merely serial and the
-# rest proves nothing), and neither pinned suite may see anyone beside it, nor
-# be seen. delta is also below its floor: a pinned suite's floor is still read.
-reset_suites; reset_marks
-for n in alpha bravo charlie delta echo foxtrot; do probe_suite "$n" 2 3; done
-probe_suite delta 1 3
-floors <<'FLOORS'
-floor | alpha   | 2
-floor | bravo   | 2
-floor | charlie | 2
-floor | delta   | 2
-floor | echo    | 2
-floor | foxtrot | 2
-FLOORS
-sed 's/^SERIAL_SUITES=""$/SERIAL_SUITES="bravo delta"/' "$FIX/scripts/selftest.sh" > "$FIX/selftest.sh.pinned"
-cp "$FIX/selftest.sh.pinned" "$FIX/scripts/selftest.sh"
-assert_eq "the fixture's runner now pins bravo and delta" \
-  'SERIAL_SUITES="bravo delta"' "$(grep -E '^SERIAL_SUITES=' "$FIX/scripts/selftest.sh")"
-SELFTEST_JOBS=4 selftest
-restore_runner
-assert_eq "the pinned run fails, because delta is below its floor" 1 "$RC"
-assert_eq "and delta, pinned, is the suite named short" \
-  "FAIL delta  did 1 units of work, below the floor of 2 in .claude/tests/floors.conf" \
-  "$(printf '%s\n' "$out" | grep -F 'below the floor')"
-p="$(peak_of alpha charlie echo foxtrot)"
-if [ "$p" -ge 2 ]; then _ok "the unpinned suites still ran concurrently"
-else _bad "the unpinned suites still ran concurrently" "peak observed among them: $p"; fi
-assert_eq "bravo, pinned, saw no other suite alive" "" "$(cat "$MARKS/saw.bravo" 2>/dev/null)"
-assert_eq "delta, pinned, saw no other suite alive" "" "$(cat "$MARKS/saw.delta" 2>/dev/null)"
-seen=""
-for n in alpha charlie echo foxtrot; do
-  case " $(cat "$MARKS/saw.$n" 2>/dev/null) " in
-    *" bravo "*|*" delta "*) seen="$seen $n" ;;
+for mode in unset empty 1; do
+  mk_reset; release a1-holds
+  case "$mode" in
+    unset) jrun - ;;
+    empty) jrun "" ;;
+    1)     jrun 1 ;;
   esac
+  keep "ac1-$mode"
+  assert_eq "SELFTEST_JOBS $mode: the run exits 1, as release 77 does on this fixture" 1 "$JRC"
+  assert_eq "SELFTEST_JOBS $mode: stdout is byte-identical to release 77's" identical \
+    "$(h_same "$HW/golden" "$HW/out")"
+  assert_eq "SELFTEST_JOBS $mode: stderr is identical to release 77's, which was empty" "" \
+    "$(cat "$HW/err")"
+  assert_eq "SELFTEST_JOBS $mode: precondition - all five suites ran" 5 "$(h_count finished)"
+  assert_eq "SELFTEST_JOBS $mode: no two suites were ever alive at once" 1 "$(h_peak)"
+  assert_eq "SELFTEST_JOBS $mode: no suite saw a .claude/state/selftest.* entry while it ran" 0 \
+    "$(h_saw_re '^selftest\.')"
+  assert_eq "SELFTEST_JOBS $mode: and none is left after it, nor a run.lock" "" "$(h_left)"
 done
-assert_eq "and no unpinned suite saw a pinned one" "" "$seen"
-assert_eq "pinned suites still print in glob order" \
-  "=== alpha ===
-=== bravo ===
-=== charlie ===
-=== delta ===
-=== echo ===
-=== foxtrot ===" "$(headers)"
+
+describe "HARNESS-036 AC-1  control: the same fixture at SELFTEST_JOBS=3 is concurrent"
+
+mk_reset
+jrun 3
+assert_eq "SELFTEST_JOBS=3: suites were alive together (peak above 1)" yes \
+  "$(yn [ "$(h_peak)" -ge 2 ])"
+assert_eq "SELFTEST_JOBS=3: a suite saw a .claude/state/selftest.<pid> buffer directory while it ran" yes \
+  "$(yn [ "$(h_saw_re '^selftest\.[0-9]+$')" -ge 1 ])"
+assert_eq "SELFTEST_JOBS=3: and the same fixture still exits 1" 1 "$JRC"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-036 AC-2  concurrent output is the serial output, failures included"
+
+# b1 is first in glob order and finishes LAST (it holds until every other
+# suite has finished). b2 exits 3 with its floor met, and holds until b3 has
+# finished, so it is neither first nor last to finish, nor first or last in
+# glob order. b3 is below its floor, b4 prints no summary line, b5 writes
+# stderr and ends in blank lines.
+reset_suites
+held b1-last   N=1 "WAIT_FIN='b2-exits3 b3-short b4-silent b5-stderr b6-plain'" LONELY=30
+held b2-exits3 N=2 EXIT_RC=3 WAIT_FIN=b3-short LONELY=30
+held b3-short  N=1
+held b4-silent NOSUM=1
+held b5-stderr N=1 ERRLINE=1 TRAIL=1
+held b6-plain  N=1
+floors <<'FLOORS'
+floor | b1-last   | 2
+floor | b2-exits3 | 3
+floor | b3-short  | 3
+floor | b4-silent | 1
+floor | b5-stderr | 2
+floor | b6-plain  | 2
+FLOORS
+
+mk_reset; release b1-last b2-exits3
+jrun 1; keep ac2f-1; rc1="$JRC"
+mk_reset
+jrun 3; keep ac2f-3; rc3="$JRC"
+assert_eq "SELFTEST_JOBS=1 over the failing fixture exits 1" 1 "$rc1"
+assert_eq "SELFTEST_JOBS=3 over the failing fixture exits 1" 1 "$rc3"
+assert_eq "SELFTEST_JOBS=1's last line counts the three failures" \
+  "3 of 6 harness suite(s) FAILED." "$(h_last ac2f-1)"
+assert_eq "SELFTEST_JOBS=3's last line counts the same three failures" \
+  "3 of 6 harness suite(s) FAILED." "$(h_last ac2f-3)"
+assert_eq "SELFTEST_JOBS=3's stdout is byte-identical to SELFTEST_JOBS=1's" identical \
+  "$(h_same "$HW/out.ac2f-1" "$HW/out.ac2f-3")"
+assert_eq "SELFTEST_JOBS=3's stderr is identical to SELFTEST_JOBS=1's" identical \
+  "$(h_same "$HW/err.ac2f-1" "$HW/err.ac2f-3")"
+assert_eq "precondition: all six suites ran at SELFTEST_JOBS=3" 6 "$(h_count finished)"
+assert_eq "control: at SELFTEST_JOBS=3 the first suite in glob order finished last" 5 \
+  "$(h_lines "$MK/finbefore/b1-last")"
+assert_eq "control: and b2-exits3 was neither the first nor the last to finish" yes \
+  "$(yn grep -qxF b3-short "$MK/finbefore/b2-exits3")"
+
+describe "HARNESS-036 AC-2  an all-passing fixture: the same totals, the same verdict"
+
+reset_suites
+held c1-last   N=2 "WAIT_FIN='c2-plain c3-stderr c4-plain'" LONELY=30
+held c2-plain  N=1
+held c3-stderr N=3 ERRLINE=1 TRAIL=1
+held c4-plain  N=2
+floors <<'FLOORS'
+floor | c1-last   | 3
+floor | c2-plain  | 2
+floor | c3-stderr | 4
+floor | c4-plain  | 3
+FLOORS
+mk_reset; release c1-last
+jrun 1; keep ac2p-1; rc1="$JRC"
+mk_reset
+jrun 3; keep ac2p-3; rc3="$JRC"
+FLOORLINE="assertion floors: all 4 suite(s) met their declared floor (12 assertions executed, 12 declared)."
+assert_eq "SELFTEST_JOBS=1 over the passing fixture exits 0" 0 "$rc1"
+assert_eq "SELFTEST_JOBS=3 over the passing fixture exits 0" 0 "$rc3"
+assert_eq "SELFTEST_JOBS=3's stdout is byte-identical to SELFTEST_JOBS=1's" identical \
+  "$(h_same "$HW/out.ac2p-1" "$HW/out.ac2p-3")"
+assert_eq "SELFTEST_JOBS=3's stderr is identical to SELFTEST_JOBS=1's" identical \
+  "$(h_same "$HW/err.ac2p-1" "$HW/err.ac2p-3")"
+assert_eq "SELFTEST_JOBS=1 prints the all-met floors line once" 1 "$(h_exact "$FLOORLINE" "$HW/out.ac2p-1")"
+assert_eq "SELFTEST_JOBS=3 prints the all-met floors line once" 1 "$(h_exact "$FLOORLINE" "$HW/out.ac2p-3")"
+assert_eq "SELFTEST_JOBS=1 ends with 4 harness suite(s) passed." \
+  "4 harness suite(s) passed." "$(h_last ac2p-1)"
+assert_eq "SELFTEST_JOBS=3 ends with 4 harness suite(s) passed." \
+  "4 harness suite(s) passed." "$(h_last ac2p-3)"
+assert_eq "control: at SELFTEST_JOBS=3 the first suite in glob order finished last" 3 \
+  "$(h_lines "$MK/finbefore/c1-last")"
+
+describe "HARNESS-036 AC-2  one named suite at SELFTEST_JOBS=3 is the same single-suite run"
+
+# A suite with no floor line, so the single-suite WARNING lines on stderr are
+# part of what must be identical.
+held c5-nofloor N=1 ERRLINE=1
+mk_reset
+jrun 1 c5-nofloor; keep ac2s-1; rc1="$JRC"
+mk_reset
+jrun 3 c5-nofloor; keep ac2s-3; rc3="$JRC"
+assert_eq "SELFTEST_JOBS=1 c5-nofloor exits 0" 0 "$rc1"
+assert_eq "SELFTEST_JOBS=3 c5-nofloor exits 0" 0 "$rc3"
+assert_eq "SELFTEST_JOBS=3 c5-nofloor: stdout byte-identical to SELFTEST_JOBS=1's" identical \
+  "$(h_same "$HW/out.ac2s-1" "$HW/out.ac2s-3")"
+assert_eq "SELFTEST_JOBS=3 c5-nofloor: stderr identical to SELFTEST_JOBS=1's, its WARNING lines included" identical \
+  "$(h_same "$HW/err.ac2s-1" "$HW/err.ac2s-3")"
+assert_eq "precondition: that stderr does carry the no-floor WARNING" 1 \
+  "$(h_exact "WARNING: whether that suite did any work. Declare one before the full run." "$HW/err.ac2s-3")"
+assert_eq "SELFTEST_JOBS=3 c5-nofloor runs exactly one suite: one header, its own" "=== c5-nofloor ===" \
+  "$(grep -E '^=== .* ===$' "$HW/out.ac2s-3")"
+assert_eq "and only that suite started" 1 "$(h_count started)"
+
+describe "HARNESS-036 AC-2  a name that matches nothing at SELFTEST_JOBS=3"
+
+mk_reset
+jrun 3 nosuchsuite
+assert_eq "SELFTEST_JOBS=3 nosuchsuite exits 1" 1 "$JRC"
+assert_eq "with the shipped No suites matched line, alone, on stderr" \
+  "No suites matched 'nosuchsuite'. Looked in .claude/tests/*.test.sh" "$(cat "$HW/err")"
+assert_eq "and nothing on stdout" "" "$(cat "$HW/out")"
+assert_eq "and no suite started" 0 "$(h_count started)"
+
+describe "HARNESS-036 AC-2  a finished suite is printed while a later one is still held"
+
+reset_suites
+held d1-quick N=1
+held d2-held  N=1 WAIT_REL=1
+held d3-held  N=1 WAIT_REL=1
+floors <<'FLOORS'
+floor | d1-quick | 2
+floor | d2-held  | 2
+floor | d3-held  | 2
+FLOORS
+mk_reset
+jstart 3
+if h_wait "$MK/started/d2-held" "$MK/started/d3-held"; then both=yes; else both=no; fi
+assert_eq "precondition: at SELFTEST_JOBS=3, d2-held and d3-held are both running and held" yes "$both"
+# The runner may back off between polls; give it up to 30 s to print.
+i=0; shown=no
+while [ "$i" -lt 150 ]; do
+  if [ "$(h_exact '=== d1-quick ===' "$HW/out")" = 1 ] && \
+     [ "$(h_exact 'd1-quick: 2 passed, 0 failed' "$HW/out")" = 1 ]; then shown=yes; break; fi
+  sleep 0.2; i=$((i+1))
+done
+heldnow="d2-held=$(present "$MK/finished/d2-held") d3-held=$(present "$MK/finished/d3-held")"
+assert_eq "while both later suites are concurrently held, d1-quick's whole block is already on stdout" \
+  "both-held=yes printed=yes finished: d2-held=absent d3-held=absent" \
+  "both-held=$both printed=$shown finished: $heldnow"
+release all
+wait "$HP"; rc="$?"
+assert_eq "released, the run exits 0" 0 "$rc"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-036 AC-3  at most SELFTEST_JOBS suites alive at once, and exactly that many"
+
+# Each suite holds until K suites have started, then 1 s more, so the first K
+# are alive together and an over-eager runner has time to start one more.
+peak_case() { # <jobs> <suites> <K>
+  local j="$1" n="$2" k="$3" s=1
+  reset_suites
+  : > "$FIX/.claude/tests/floors.conf"
+  while [ "$s" -le "$n" ]; do
+    held "e$s" N=1 WAIT_COUNT="$k" SETTLE=1 LONELY=30
+    printf 'floor | e%s | 2\n' "$s" >> "$FIX/.claude/tests/floors.conf"
+    s=$((s+1))
+  done
+  mk_reset
+  jrun "$j"
+  assert_eq "SELFTEST_JOBS=$j over $n held suites exits 0" 0 "$JRC"
+  assert_eq "SELFTEST_JOBS=$j over $n: precondition - all $n ran" "$n" "$(h_count finished)"
+  assert_eq "SELFTEST_JOBS=$j over $n: the most suites alive at once is exactly $k" "$k" "$(h_peak)"
+}
+peak_case 2 4 2
+peak_case 3 5 3
+peak_case 10 4 4
+
+describe "HARNESS-036 AC-3  a free slot is refilled when ANY suite exits, not the oldest"
+
+# w1 holds (20 s) until w4, the last in glob order, has started. With two
+# slots that needs w2 and w3 to come and go beside a w1 that is still
+# running. Padding makes w1 the largest file and w4 the smallest, so a
+# largest-first start order starts the same two first as glob order does.
+work_case() {
+  reset_suites
+  held w1-first N=1 WAIT_START=w4-last BOUND=20 PAD=40
+  held w2-mid   N=1 PAD=10
+  held w3-mid   N=1 PAD=10
+  held w4-last  N=1
+  floors <<'FLOORS'
+floor | w1-first | 2
+floor | w2-mid   | 2
+floor | w3-mid   | 2
+floor | w4-last  | 2
+FLOORS
+  mk_reset
+}
+work_case
+jrun 2
+assert_eq "SELFTEST_JOBS=2: the run completes and exits 0" 0 "$JRC"
+assert_eq "SELFTEST_JOBS=2: w1-first's hold cleared, it did not time out" absent "$(present "$MK/timeout/w1-first")"
+
+work_case
+jrun 1
+assert_eq "control: SELFTEST_JOBS=1 over the same fixture exits 1" 1 "$JRC"
+assert_eq "control: because w1-first reports that its hold timed out" 1 \
+  "$(h_exact '    FAIL w1-first: its hold cleared before its bound' "$HW/out")"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-036 AC-4  a bad SELFTEST_JOBS is refused before anything runs"
+
+reset_suites
+held h1 N=1
+held h2 N=1
+floors <<'FLOORS'
+floor | h1 | 2
+floor | h2 | 2
+FLOORS
+refusal() {
+  printf "selftest: SELFTEST_JOBS must be a whole number of suites to run at once, 1 or more; got '%s'. Nothing was run." "$1"
+}
+for v in 0 00 -1 abc 1.5 ' 2' 2x; do
+  for target in full h1; do
+    mk_reset
+    if [ "$target" = full ]; then jrun "$v"; else jrun "$v" h1; fi
+    assert_eq "SELFTEST_JOBS='$v', $target run: exits 2" 2 "$JRC"
+    assert_eq "SELFTEST_JOBS='$v', $target run: stderr is exactly the one refusal line" \
+      "$(refusal "$v")" "$(cat "$HW/err")"
+    assert_eq "SELFTEST_JOBS='$v', $target run: nothing on stdout" "" "$(cat "$HW/out")"
+    assert_eq "SELFTEST_JOBS='$v', $target run: no suite started" 0 "$(h_count started)"
+    assert_eq "SELFTEST_JOBS='$v', $target run: no run.lock and no selftest.* left" "" "$(h_left)"
+  done
+done
+
+describe "HARNESS-036 AC-4  the value is checked before the floors file"
+
+floors <<'FLOORS'
+floor | h1 | 2
+floor | h2 | 2
+this is not a floor
+FLOORS
+mk_reset
+jrun abc
+assert_eq "SELFTEST_JOBS=abc over a malformed floors.conf: exits 2, not the floors audit's 1" 2 "$JRC"
+assert_eq "and stderr is the refusal line, alone" "$(refusal abc)" "$(cat "$HW/err")"
+assert_eq "and no floors fault is printed: stdout is empty" "" "$(cat "$HW/out")"
+
+describe "HARNESS-036 AC-4  control: a value above the number of suites is accepted"
+
+floors <<'FLOORS'
+floor | h1 | 2
+floor | h2 | 2
+FLOORS
+mk_reset
+jrun 10
+assert_eq "SELFTEST_JOBS=10 over two suites exits 0" 0 "$JRC"
+assert_eq "and both passed" 1 "$(h_exact '2 harness suite(s) passed.' "$HW/out")"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-036 AC-5  buffers under .claude/state/selftest.<pid>/, the lock held to the end"
+
+# f1 holds until f2 and f3 have finished, so which suite finishes last is a
+# state the test controls (found in RED: picking "the suite whose finbefore
+# lists the other two" is a race when suites finish together - none may).
+reset_suites
+held f1 N=1 "WAIT_FIN='f2 f3'" LONELY=30
+held f2 N=1
+held f3 N=1
+floors <<'FLOORS'
+floor | f1 | 2
+floor | f2 | 2
+floor | f3 | 2
+FLOORS
+mk_reset
+jstart 3
+wait "$HP"; rc="$?"
+assert_eq "SELFTEST_JOBS=3 over three passing suites exits 0" 0 "$rc"
+assert_eq "every suite saw .claude/state/selftest.<pid>, <pid> being selftest.sh's own (\$!)" 3 \
+  "$(h_saw_line state "selftest.$HP")"
+assert_eq "C-2: and its own buffer, <name>.out, already in it" 3 "$(h_saw_line buf '@NAME@.out')"
+assert_eq "precondition: f1 finished last, after f2 and f3" 2 "$(h_lines "$MK/finbefore/f1")"
+assert_eq "the suite that finished last still saw run.lock recording selftest.sh's pid" "$HP" \
+  "$(awk -F'\t' '$1 == "pid" { print $2; exit }' "$MK/lockend/f1" 2>/dev/null)"
+assert_eq "after exit 0: no selftest.* and no run.lock or run.lock.* remain" "" "$(h_left)"
+
+held f1 N=1
+held f2 N=1 EXIT_RC=1
+mk_reset
+jstart 3
+wait "$HP"; rc="$?"
+assert_eq "SELFTEST_JOBS=3 with one suite exiting 1 (floor met) exits 1" 1 "$rc"
+assert_eq "after exit 1: no selftest.* and no run.lock or run.lock.* remain" "" "$(h_left)"
+
+describe "HARNESS-036 AC-5  TERM drains the running suites, starts no more, and cleans up"
+
+reset_suites
+held t1-held N=1 WAIT_REL=1 FINISH_DELAY=1
+held t2-held N=1 WAIT_REL=1 FINISH_DELAY=1
+held t3-queued N=1
+floors <<'FLOORS'
+floor | t1-held   | 2
+floor | t2-held   | 2
+floor | t3-queued | 2
+FLOORS
+mk_reset
+jstart 2
+if h_wait "$MK/started/t1-held" "$MK/started/t2-held"; then both=yes; else both=no; fi
+assert_eq "precondition: at SELFTEST_JOBS=2, t1-held and t2-held are both running and held" yes "$both"
+kill -TERM "$HP" 2>/dev/null
+sleep 1
+assert_eq "sent TERM, selftest.sh is still alive one second later, while its suites are held" yes \
+  "$(yn kill -0 "$HP" 2>/dev/null)"
+assert_eq "and still holds run.lock while it drains" present "$(present "$FIX/.claude/state/run.lock")"
+release all
+wait "$HP"; rc="$?"
+assert_eq "released, the run exits 143" 143 "$rc"
+assert_eq "t1-held wrote its finished marker before the run exited" present "$(present "$MK/finished/t1-held")"
+assert_eq "t2-held wrote its finished marker before the run exited" present "$(present "$MK/finished/t2-held")"
+assert_eq "the queued t3-queued never started" absent "$(present "$MK/started/t3-queued")"
+assert_eq "after TERM: no selftest.* and no run.lock or run.lock.* remain" "" "$(h_left)"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-036 AC-6  state, suite and portability hygiene, in this repository"
+
+README="$REPO_ROOT/.claude/state/README.md"
+# state_row <path cell>   Table rows with that path cell whose last cell is yes.
+state_row() {
+  local p; p="$(printf '%s' "$1" | sed 's/[.*]/\\&/g')"
+  tr -d '\r' < "$README" | grep -cE -- "^\\| \`$p\` +\\|.*\\| yes +\\|\$"
+}
+assert_eq "README has one selftest.<pid>/*.out row, hand-editable yes" 1 "$(state_row 'selftest.<pid>/*.out')"
+assert_eq "control: the same reader finds the existing run.lock.<pid> row" 1 "$(state_row 'run.lock.<pid>')"
+
+git -C "$REPO_ROOT" check-ignore -q --no-index .claude/state/selftest.12345/gates.out; rc=$?
+assert_eq ".claude/state/selftest.<pid>/<name>.out is gitignored here" 0 "$rc"
+git -C "$REPO_ROOT" check-ignore -q --no-index .claude/state/README.md; rc=$?
+assert_eq "control: the same check reports .claude/state/README.md as not ignored" 1 "$rc"
+
+# C-2 pins this line, exactly, because DV-1's single sed expression targets it.
+assert_eq "scripts/selftest.sh defines suite_status on exactly the one line DV-1 mutates" 1 \
+  "$(grep -cxF 'suite_status() { wait "$1"; }' "$REPO_ROOT/scripts/selftest.sh")"
+assert_eq "and defines it nowhere else" 1 \
+  "$(grep -cE '^[[:space:]]*suite_status[[:space:]]*\(\)' "$REPO_ROOT/scripts/selftest.sh")"
+
+# forbidden <file>   "<line>: <construct>" for each code line - full-line
+# comments skipped, a trailing ` # ...` stripped - holding a construct bash
+# 3.2 lacks or that would need one.
+forbidden() {
+  awk '
+    /^[[:space:]]*#/ { next }
+    { line = $0; sub(/[[:space:]]#.*$/, "", line)
+      n = split("wait -n|wait -p|mapfile|readarray|coproc|declare -A|local -A|typeset -A", w, "|")
+      for (i = 1; i <= n; i++) if (index(line, w[i])) printf "%d: %s\n", FNR, w[i] }' "$1"
+}
+assert_eq "scripts/selftest.sh's code lines use no wait -n, wait -p, mapfile, readarray, coproc or associative array" \
+  "" "$(forbidden "$REPO_ROOT/scripts/selftest.sh")"
+printf '%s\n' '  wait -n' '# wait -n, mapfile and coproc, in a comment' 'x=1  # declare -A in a trailing comment' \
+  '  local -A seen' > "$HW/__probe_forbidden.sh"
+assert_eq "control: the same reader flags them on code lines and not in comments" "1: wait -n
+4: local -A" "$(forbidden "$HW/__probe_forbidden.sh")"
 
 summary "selftest"

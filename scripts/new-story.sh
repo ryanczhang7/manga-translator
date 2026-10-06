@@ -29,6 +29,12 @@ status: todo
 phase: PLANNED
 branch: story/$id-$slug
 depends_on: []      # story ids; phase.sh refuses to start this story until they are DONE
+EOF
+# The rest of the frontmatter interpolates nothing, and the touches: comment
+# names a command in backticks - so it goes in a QUOTED heredoc, for the
+# reason above.
+cat >> "$file" <<'EOF'
+touches: []         # files this story expects to write; `plan.sh conflicts` reads it
 required_gates: []  # gate ids that are optional for the repo but binding for THIS story
 ---
 EOF
@@ -62,6 +68,12 @@ cat >> "$file" <<'TEMPLATE'
      acceptance criteria: the criteria are frozen and change only through
      ## Amendments; this is a working agreement RED is expected to sharpen.
      One block per thing the story touches:
+       * the files it WRITES, on one line at column 0 that starts
+         `**Writes:**`, each path backticked and repository-relative:
+           **Writes:** `src/core/world.ts`, `tests/world.test.ts`
+         `bash scripts/plan.sh conflicts` compares it with `touches:` and prints
+         DRIFT for a written file `touches:` does not cover. Without the line
+         there is no DRIFT at all, and files the prose merely cites never count
        * module paths and exported names, exactly
        * exact signatures, and the types the assertions will destructure
        * THE SEMANTICS BEHIND EACH NUMBER - not clamp(latitude) but "latitude
@@ -73,6 +85,12 @@ cat >> "$file" <<'TEMPLATE'
          mechanical - see story-authoring)
        * baseline measurements the story may read out rather than re-derive,
          each with what it was measured on
+       * TEST-ONLY DEPENDENCIES this story is likely to need, by name. RED
+         may add them itself, but only inside the dev block - so a library
+         production will ALSO use is a GREEN change and is better decided
+         here than discovered mid-phase. Where the ecosystem has no dev
+         block at all (go.mod, requirements.txt, *.csproj), RED cannot
+         declare one and the phase round trip is yours to plan for
        * FOR EVERY EXISTING EXPORT WHOSE SIGNATURE THIS STORY CHANGES: every
          caller, source and test, grep-listed here before dispatch. RED cannot
          find these itself - the old signature still exists during RED, so a
@@ -92,17 +110,25 @@ cat >> "$file" <<'TEMPLATE'
        * what it verifies, as a falsifiable condition - "with one field dropped
          from the encoder, AC-1's property test MUST fail"
        * why the phase that wants it cannot run it
-       * THE PHASE THAT OWNS IT, by name. check-boundaries.sh refuses a PR
+       * THE PHASE THAT OWNS IT, declared as `Owner: GATES` (or RED, GREEN,
+         REVIEW). check-boundaries.sh refuses a PR
          whose block names no phase
        * the RESULT, pasted, once that phase runs it: what was mutated, what
          failed, and that the file was restored - or the word WAIVED with the
-         reason. check-boundaries.sh refuses a PR that has neither
+         reason. check-boundaries.sh refuses a PR that has neither. A result
+         counts only as a block: a line beginning with three backticks or
+         three tildes (a fence), or a line indented by exactly four spaces.
+         Prose does not count, nor inline code in backticks, nor a tab, nor
+         anything inside an HTML comment
      Schedule it into GATES rather than RED where you can: source is writable
      there, and a story that bounced back to RED mid-cycle gets its corrected
-     assertions earned by the same mutation, for free. Do THREE mutations rather
-     than one, and make one of them a wrong VALUE rather than a missing field: a
-     suite that catches an omission can be blind to a corruption, and a codec
-     that is uniformly wrong round-trips through itself perfectly. -->
+     assertions earned by the same mutation, for free. How many entries is the
+     budget in rules.md, `Mutation work per story`: by default ONE
+     "defect put back" entry for the story's central claim, run against the one
+     suite that holds its assertion. A format or codec story may add one wrong VALUE
+     mutation - a codec that is uniformly wrong round-trips through itself
+     perfectly. Exhaustive earning of assertions that passed on arrival is not
+     an entry here; it goes to `/audit-mutations`. -->
 
 ## Amendments
 
@@ -110,7 +136,8 @@ cat >> "$file" <<'TEMPLATE'
      out to be wrong or unsatisfiable, stop, put it to the product owner, and
      record the change here: which AC, what it said, what it says now, who
      approved it and why. check-boundaries.sh fails a PR whose criteria differ
-     from the base branch without an entry here. Omit the section if unused.
+     from their last committed PLANNED state (else the base branch) without an
+     entry here. Omit the section if unused.
      Where the change came from a subagent's claim that the criterion was
      wrong, record the ORCHESTRATOR'S OWN reproduction of it - different
      inputs, not the subagent's code. That claim is also what an agent says
@@ -118,9 +145,19 @@ cat >> "$file" <<'TEMPLATE'
 
 ## Model guidance
 
-<!-- Optional, written by the Lead PO BEFORE the phase it applies to. Use it
-     when a phase of this story is worth running on a different model from the
-     default, and make it falsifiable rather than folklore:
+<!-- FILLED BY A TOOL, not by hand: `bash scripts/plan.sh write <id>`, as the
+     last step of PLANNED once the ## Contract exists. It renders the per-phase
+     plan from .claude/harness/models.conf with the reason for each row. Run it
+     again after amending the contract; it replaces the section rather than
+     appending to it.
+
+     Not at story creation: the plan depends on the contract, and the "no
+     contract, so RED stays on the stronger model" exception would be baked in
+     before anybody had a chance to write one.
+
+     What you add BY HAND is the other half - a departure from the plan, and
+     the model each dispatch RESOLVED to. Make a departure falsifiable rather
+     than folklore:
        * which phase, which model, and why that phase specifically
        * THE RESOLVED MODEL ACTUALLY DISPATCHED, by name - never the word
          "default". An agent definition's `model:` field, or the session's
@@ -191,7 +228,11 @@ cat >> "$file" <<'TEMPLATE'
          correctness, a BEFORE/AFTER measurement taken under the gate command -
          not the plain test command, which is the faster one.
          PASTE THE OUTPUT. check-boundaries.sh refuses a PR whose Regressions
-         or Gate probes section describes a failure without showing one
+         or Gate probes section describes a failure without showing one.
+         A result counts only as a block: a line beginning with three
+         backticks or three tildes (a fence), or a line indented by exactly
+         four spaces. Prose does not count, nor inline code in backticks, nor
+         a tab, nor anything inside an HTML comment
        * whether GREEN was a no-op, and the command output proving the source
          was untouched and still passes -->
 
@@ -207,7 +248,11 @@ cat >> "$file" <<'TEMPLATE'
 <!-- REQUIRED if this story adds or changes a gate, its command, or its
      evidence line. Omit the section entirely otherwise.
      A gate that has never been observed to fail is not a gate: break the thing
-     it guards, run the gate, paste the failure, revert. One block per gate:
+     it guards, run the gate, paste the failure, revert. A result counts
+     only as a block: a line beginning with three backticks or three tildes
+     (a fence), or a line indented by exactly four spaces. Prose does not
+     count, nor inline code in backticks, nor a tab, nor anything inside an
+     HTML comment. One block per gate:
        * what was broken, and where
        * the gate output proving it failed
        * confirmation the probe was reverted -->

@@ -18,37 +18,77 @@ HOOK_INPUT="$(cat)"
 
 
 load_state
-[ "$PHASE" = "IDLE" ] && exit 0
-# The separator write_candidates puts between a target and its role. Written as
-# an escape rather than as a literal tab so that an editor or a patch stripping
-# trailing whitespace cannot quietly turn it into a space - and with $'' rather
-# than $(printf) because this runs on every hook invocation and the 15 s
-# PreToolUse budget is spent on forks, not on parsing.
-TAB=$'\t'
+# An idle root is not the end of it when another worktree of this repository
+# has a story active: an absolute path into that worktree is ITS lock's
+# business, whichever tree the session happens to be rooted in (HARNESS-035).
+# Pure bash, so the ordinary idle call still costs no process.
+if [ "$PHASE" = "IDLE" ]; then any_active_worktree || exit 0; fi
 [ -f "$HARNESS_DIR/paths.conf" ] || exit 0
 
 TOOL="$(json_get_string tool_name || true)"
 
-# check_path <path> [role]   The optional role is MT-033 AC-6: which operand of
-# the command the refused token was. It becomes ONE line, immediately after
-# `path:` and never before or inside it - `path:` keeps its exact spelling,
-# indent and position because 99 assertions match `path:     <p>` followed by a
-# space or end of string. Empty for every candidate whose role is not ambiguous.
+# JUDGED_IN   The worktree a judgement was borrowed from, for the denial's
+# `worktree:` line; empty while judging the session's own tree.
+JUDGED_IN=""
+
+# check_path <path> [role]   Judges one target by the lock of the worktree that
+# owns it. Relative paths are relative to the root.
+#
+# The owner is the nearest ancestor holding `.git` (lib.sh, worktree_top). When
+# that is ANOTHER worktree of this repository - a linked one beside the root, or
+# one nested under it as `.claude/worktrees/<name>` - the path is classified by
+# that tree's paths.conf and judged by that tree's current-story.env, and the
+# root's own state is put back afterwards. Anything else is judged here, as it
+# always was: a nested repository that is not a worktree of this one is still
+# this root's path, and a path outside the root is still outside.
 check_path() {
-  local raw="$1" role="${2:-}" rel cat operand=""
+  local raw="$1" role="${2:-}" abs owner sv_root sv_id sv_slug sv_phase sv_type sv_branch
+  [ -z "$raw" ] && return 0
+  if path_is_absolute "$raw"; then abs=$__lib_fs; else _to_slashes "$HARNESS_ROOT/$raw"; abs=$__lib_fs; fi
+  if worktree_top "$abs" && ! is_root "$__lib_wt"; then
+    owner=$__lib_wt
+    if same_repo "$owner" "$HARNESS_ROOT"; then
+      sv_root=$HARNESS_ROOT; sv_id=$STORY_ID; sv_slug=$STORY_SLUG
+      sv_phase=$PHASE; sv_type=$STORY_TYPE; sv_branch=$BRANCH
+      set_harness_root "$owner"; load_state; JUDGED_IN="$owner"
+      if [ "$PHASE" != "IDLE" ] && [ -f "$HARNESS_DIR/paths.conf" ]; then
+        judge_path "$abs" "$role"
+      fi
+      set_harness_root "$sv_root"; JUDGED_IN=""
+      STORY_ID=$sv_id; STORY_SLUG=$sv_slug; PHASE=$sv_phase
+      STORY_TYPE=$sv_type; BRANCH=$sv_branch
+      return 0
+    fi
+  fi
+  judge_path "$raw" "$role"
+}
+
+# judge_path <path> [role]   Classifies one path against the CURRENT root and
+# denies it if the current phase forbids that category.
+judge_path() {
+  local raw="$1" role="${2:-}" rel cat operand tree
   [ -z "$raw" ] && return 0
   rel="$(to_rel "$raw")"
   [ -z "$rel" ] && return 0
   cat="$(classify "$rel")"
-  [ -n "$role" ] && operand="
-  operand:  $role"
   if ! phase_allows "$cat"; then
+    # The role goes on its own line IMMEDIATELY AFTER path:, never before it
+    # and never inside it. `path:` keeps its exact spelling, indent and
+    # position because the suite - and anyone reading a denial - anchors on it.
+    operand=""
+    [ -n "$role" ] && operand="
+  operand:  $role"
+    # A judgement borrowed from another worktree says so: the story and phase
+    # above are that tree's, and phase.sh has to be run there to change them.
+    tree=""
+    [ -n "$JUDGED_IN" ] && tree="
+  worktree: $JUDGED_IN"
     deny "BLOCKED by the harness phase lock.
 
   story:    ${STORY_ID:-unknown}
   phase:    $PHASE
   path:     $rel$operand
-  category: $cat
+  category: $cat$tree
 
 $(phase_message)
 
@@ -70,22 +110,21 @@ decline() {
   return 0
 }
 
-# no_candidate <command>   The other half of the same trace, and the one that
-# was missing: a command that NAMES a write-capable tool and yet yields no
-# target the guard can judge. `find src -name '*.ts' | xargs rm` deletes source
-# in RED and no operand parse can see it - the shell has not written the path
-# down. So the guard allows it, as it must, and says so here.
+# no_candidate <command>   A command that WAS a write and from which no target
+# could be parsed. The other half of decline(): that one is a parse the guard
+# could not BELIEVE, this one is a target it could not FIND, and one event gets
+# exactly one line so the log stays readable.
 #
-# Same file as decline(), deliberately: .claude/state/README.md and
-# .claude/settings.json agree on the state files that exist, and
-# .claude/tests/settings.test.sh checks that agreement in both directions. One
-# event gets one line, and the two markers are distinct - a DECLINED candidate
-# is a parse the guard could not believe, not an absent one.
+# It exists because an empty candidate list means two different things - "the
+# command was never a write" and "it was a write and the parse yielded nothing"
+# - and while they were indistinguishable a bypass was invisible: the log was
+# empty after a permitted write and empty after a missed one. write_candidates'
+# verdict line is what tells them apart. The command is folded onto one line and
+# truncated: a transcript nobody reads is the same as no record.
 no_candidate() {
-  local frag="${1//$'\n'/ }"
-  frag="${frag//$'\t'/ }"
-  printf 'no-candidate %s in %s: no write target parsed from: %s\n' \
-    "${STORY_ID:-none}" "$PHASE" "${frag:0:200}" \
+  printf 'declined %s in %s: no-candidate write command: %s\n' \
+    "${STORY_ID:-none}" "$PHASE" \
+    "$(printf '%s' "$1" | tr '\n\r\t' '   ' | cut -c1-200)" \
     >> "$HARNESS_ROOT/.claude/state/phase-guard-declined.log" 2>/dev/null || true
   return 0
 }
@@ -101,62 +140,36 @@ case "$TOOL" in
     # Quoted spans, heredoc bodies and backslash escapes are DATA, not shell
     # syntax. Masking them first is what stops a sed script's `|` or an arrow
     # inside an awk program from being read as an operator; see lib.sh. The
-    # extractors below run against the masked text, and each candidate is
-    # unmasked again before it is classified.
+    # parser below runs against the masked text, and each candidate is unmasked
+    # again before it is classified.
     MASKED="$(printf '%s' "$CMD" | mask_shell_quotes)"
-    # Candidate write targets. Deliberately conservative: we only look at
-    # constructs that unambiguously name a destination file.
-    #
-    # Not by leading command. Exempting `grep`, `awk` and friends as "read-only"
-    # is tempting after a run of false positives on them, and it is wrong:
-    # `grep -r export src > src/index.ts` writes, and so does every read-only
-    # tool on the left of a redirect. What those false positives had in common
-    # was quoting, which masking handles, and unparseable output, which
-    # path_is_implausible handles. Neither is a property of the command name.
-    #
-    # Parentheses terminate a target like `;` does: `(cd src && echo x > a.ts)`
-    # used to yield `a.ts)`, which the guard declined as unreadable - a hole
-    # in the shape of a subshell. `>|` is a redirect too. And `<` ends the
-    # rm/touch operand list, because `xargs touch < list` reads `list`.
-    #
-    # The five greps that used to live here read the LAST WORD of a match, not
-    # an operand, which is four bypasses and two false positives in one line of
-    # awk - see write_candidates in lib.sh and MT-031. One pass over the command
-    # string now, rather than five: this hook runs on every Bash, Write, Edit,
-    # MultiEdit and NotebookEdit call, under a 15 s PreToolUse timeout, and a
-    # hook that times out fails OPEN, which is the lock silently off.
-    PARSED="$(write_candidates "$MASKED" 2>/dev/null)"
-    WRITE_CMD="${PARSED%%$'\n'*}"
-    CANDIDATES=""
-    # A candidate line may carry a tab-separated role (MT-033 C-5). Every anchor
-    # below still judges the PATH, because the role is a suffix: `^-` keeps an
-    # option out (it is the load-bearing one - `mv -f`, `mv -v` and `cp -t` are
-    # asserted), `^/dev/` short-circuits the commonest redirect in the repo, and
-    # `\*` drops a glob. The role strings contain no quote, no `*` and no tab, so
-    # `tr -d` and `sort -u` see them as inert trailing text.
-    case "$PARSED" in
-      *$'\n'*) CANDIDATES="$(
-        printf '%s\n' "${PARSED#*$'\n'}" \
-          | sed 's/["'"'"']//g' | grep -vE '^\s*$|^-|\*|^/dev/' | sort -u
-      )" ;;
-    esac
-    # AC-8. A write-capable command whose operands the guard cannot see -
-    # `find src -name '*.ts' | xargs rm`, `xargs touch < list` - is ALLOWED and
-    # unexamined, and those are different facts. Until this line they were
-    # indistinguishable from outside, which is how the redirect bypass stayed
-    # invisible: after it the log was empty, and after a permitted write the log
-    # was empty too. A redirect operator alone does not count - `cmd >
-    # /dev/null` is ubiquitous and its target is dropped on purpose, so tracing
-    # it would drown the file this trace exists to make readable.
-    if [ -z "$CANDIDATES" ] && [ "$WRITE_CMD" = "W" ]; then
-      no_candidate "$CMD"
+    # Which paths this command would write, ASKED rather than re-derived. The
+    # rules live in lib.sh's write_candidates - one parser, one place, the rule
+    # rules.md states for classify.sh - so a test that needs this answer can ask
+    # for the same one the lock uses. The answer is a verdict line followed by
+    # `TARGET` or `TARGET<TAB>ROLE` lines, target first so the filter below can
+    # keep anchoring on the path.
+    ANSWER="$(write_candidates "$MASKED")"
+    VERDICT="${ANSWER%%$'\n'*}"
+    CANDIDATES="${ANSWER#*$'\n'}"
+    [ "$CANDIDATES" = "$ANSWER" ] && CANDIDATES=""
+    # `$` is NOT filtered out here. It was, silently, which made the ONE recipe
+    # the harness pushes an agent towards in RED - mutate the production file,
+    # watch the corrected test fail, revert - pass unchecked. A candidate whose
+    # variable the command text assigns is resolved; one it does not is declined
+    # and logged, which is what the guard already does with every other parse it
+    # cannot believe. See lib.sh.
+    CANDIDATES="$(printf '%s\n' "$CANDIDATES" | grep -vE '^\s*$|^-|\*|^/dev/' | sort -u)"
+    # A write command from which NOTHING could be parsed is the case an empty
+    # candidate list cannot express on its own, and it is the one worth a trace:
+    # before it existed, "the parser found nothing to judge" and "it found
+    # candidates and every one was permitted" looked identical from outside.
+    # The verdict is what separates them, so this fires when, and only when, the
+    # command was a write and the filtered list is empty.
+    if [ -z "$CANDIDATES" ]; then
+      [ "$VERDICT" = "W" ] && no_candidate "$CMD"
+      exit 0
     fi
-    # `$` is no longer filtered out here. It was, silently, which made the ONE
-    # recipe the harness pushes an agent towards in RED - mutate the production
-    # file, watch the corrected test fail, revert - pass unchecked. A candidate
-    # whose variable the command text assigns is resolved; one it does not is
-    # declined and logged, which is what the guard already does with every other
-    # parse it cannot believe. See lib.sh.
     ASSIGNMENTS="$(shell_assignments "$MASKED")"
     # The FILE argument of a scripts/mutate.sh invocation, resolved the same way
     # so that `mutate.sh "$F"` is exempt for the same reason `mutate.sh src/a.ts`
@@ -170,23 +183,19 @@ $(resolve_vars "$m" "$ASSIGNMENTS")"
     # Where the shell will actually be when those targets are written. A
     # relative path means nothing without it: `cd /tmp/scratch && rm -rf
     # gate-logs` names no repo path at all. An unaccountable cwd skips relative
-    # candidates rather than blocking them - fail open.
+    # candidates rather than blocking them - fail open. The shell starts in the
+    # session's cwd, which is not always the root (HARNESS-035).
     CWD_PREFIX=""; CWD_KNOWN=1
-    CWD_PREFIX="$(command_cwd "$MASKED")" || CWD_KNOWN=0
-    while IFS= read -r line; do
-      [ -z "$line" ] && continue
-      # A candidate is `TARGET` or `TARGET<TAB>ROLE` (MT-033 C-5, AC-6). Split
-      # FIRST: everything below - resolve_vars, the $EXEMPT membership test,
-      # path_is_implausible, the unmask, check_path - is about the path alone,
-      # and $EXEMPT in particular is an exact string comparison against the
-      # resolved mutate.sh FILE argument, which a role left on the string would
-      # silently stop matching. Neither a target nor a role can contain a tab.
-      role=""
-      target="$line"
-      case "$line" in
-        *"$TAB"*) target="${line%%"$TAB"*}"; role="${line#*"$TAB"}" ;;
-      esac
-      [ -z "$target" ] && continue
+    CWD_PREFIX="$(command_cwd "$MASKED" "$SESSION_CWD")" || CWD_KNOWN=0
+    while IFS= read -r candidate; do
+      [ -z "$candidate" ] && continue
+      # The ROLE comes off FIRST - before resolution, before the exemption test
+      # and before the plausibility test. $EXEMPT is an exact string compare
+      # against the resolved mutate.sh argument, and a role left on the string
+      # would silently un-exempt the one diagnostic this harness requires in RED.
+      target="${candidate%%$'\t'*}"
+      role="${candidate#*$'\t'}"
+      [ "$role" = "$candidate" ] && role=""
       # Resolved before it is judged, so that `"$F"` is either a real path or an
       # honest decline. Still masked at this point, so a value carrying a quoted
       # space survives as one token.
@@ -203,10 +212,22 @@ $target"*) continue ;; esac
       # A restored candidate spanning a newline is not a filename; a guard that
       # cannot say what it is looking at does not block. Fail open, as ever.
       case "$target" in *$'\n'*) continue ;; esac
+      # A DIRECTORY operand keeps its trailing slash through normalisation. It
+      # is not cosmetic: `mv -t docs/ x` and `mv -t docs x` are different
+      # questions for classify - only `docs/` matches the docs rule - so folding
+      # them together would answer one of them with the other's category.
+      SLASH=""; case "$target" in */) SLASH="/" ;; esac
       if path_is_absolute "$target"; then
         check_path "$target" "$role"
+      elif [ "$CWD_KNOWN" = 1 ] && path_is_absolute "$CWD_PREFIX"; then
+        # The shell is somewhere outside the root that the guard can name - a
+        # sibling worktree, a scratch directory. The target is judged as the
+        # absolute path it is, by whichever lock owns it (HARNESS-035).
+        abs_norm "$CWD_PREFIX/$target" || continue
+        check_path "$__lib_abs$SLASH" "$role"
       elif [ "$CWD_KNOWN" = 1 ]; then
         target="$(normalize_rel "${CWD_PREFIX:+$CWD_PREFIX/}$target")" || continue
+        [ -n "$target" ] && target="$target$SLASH"
         check_path "$target" "$role"
       fi
     done <<< "$CANDIDATES"

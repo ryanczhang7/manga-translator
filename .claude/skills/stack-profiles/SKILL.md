@@ -56,3 +56,38 @@ value depends on a test runner that is fast, deterministic and scriptable.
 
 Mixed-stack projects are normal - a Godot client with a Python service is two
 profiles, two sets of gates with distinct ids, and one `paths.conf`.
+
+## Guards that scan the source tree
+
+Most stacks eventually grow a *guard*: a test asserting a property of all
+production code rather than of one module - no import crossing a boundary, no
+module-level constant of some shape, no direct use of a banned API. Two rules
+make the difference between a guard and a test that merely looks like one, and
+both are stack-independent.
+
+**Do not write your own "is this a source file?".** Ask:
+
+```bash
+bash scripts/classify.sh --list source src     # the phase lock's own answer
+```
+
+Shell out to it from whatever language the tests are in, once per suite, and
+cache the list. Every stack has a tempting one-liner instead - a `glob`, a
+`readdirSync` filter, `Path.rglob("*.py")` - and each one is a private copy of a
+rule that lives in `paths.conf`. One project ended up with four of them; two had
+drifted to exclude a file extension the other two did not, and all four returned
+probe artifacts as production source for six stories.
+
+**Name probe artifacts `__probe_*` and let the classifier do the rest.** A guard
+that tests a *rule* - that the linter would reject a bad import, not that today's
+imports are good - has to write an offending module and run the real tool over
+it, at the real path, because lint overrides are path-scoped. That file is a test
+artifact living in the source tree; `paths.conf` classifies `__probe_*.*` and
+`__*_probe.*` as `test`, so scanners skip it and RED may write it. Do not invent
+a per-project name: the scanner and the lock have to agree, and one rule in
+`paths.conf` is what makes them.
+
+A probe writer and a tree scanner in the same suite race, whatever the runner
+claims about isolation - worker isolation isolates module state, not the
+filesystem. `tdd-cycle` has the case in full, including why catching the
+resulting `ENOENT` is the wrong fix.

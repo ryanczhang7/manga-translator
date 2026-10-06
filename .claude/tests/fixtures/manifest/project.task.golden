@@ -1,0 +1,20 @@
+$ task.sh
+Available tasks:
+  pipes      printf 'a
+  	where	    	printf 'in %s\n' "${PWD##*/}"; printf 'arg=%s\n'
+  idle       <unconfigured>
+rc=0
+$ task.sh pipes extra
+[a|b]
+args:extra
+rc=0
+$ task.sh where extra
+in src
+arg=extra
+rc=0
+$ task.sh idle extra
+task 'idle' is not configured in project.conf
+rc=1
+$ task.sh nope extra
+no such task: nope
+rc=1

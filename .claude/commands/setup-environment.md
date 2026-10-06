@@ -71,5 +71,6 @@ Run `bash scripts/doctor.sh` again. Every executable a gate or task names must
 be found. Then run `bash scripts/gates.sh --list` and confirm the commands
 match what `stack.md` says.
 
-Report: what was already present, what the user still needs to install, the
-exact commands, and whether the bootstrap story can now start.
+Report as `rules.md`, "Reporting to the user" says: what was already present,
+what the user still needs to install, the exact commands, whether the bootstrap
+story can now start, and last, what to run next from `bash scripts/plan.sh after`.

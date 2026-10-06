@@ -1,0 +1,5 @@
+# HARNESS-024's goldens are byte-for-byte oracles, and some of them contain a
+# carriage return (task.sh's listing of a CRLF manifest). The repository's
+# `* text=auto eol=lf` would normalise those on commit and turn a golden into
+# a different golden. Nothing in this directory is converted.
+* -text

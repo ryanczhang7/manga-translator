@@ -1,0 +1,24 @@
+ok   ok           evidence: Tests +[1-9][0-9]* passed
+FAIL nan          floor 'forty' is not a number
+FAIL blind        floor needs an evidence regex to measure, and blind has none
+FAIL hush         marked slow with no reason; say what makes it too slow for --fast
+FAIL idle         marked on-request with no reason; say why it is not run per story
+FAIL needed       an on-request gate cannot be required: no full run would ever judge it
+FAIL guess        ci-factor 'about 3' is not a number
+FAIL anon         ci-factor has no source; say which CI run it was measured from
+FAIL nowhere      cwd does not exist: missing-dir
+WARN bare         no evidence line; a vacuous pass would go unnoticed
+FAIL bypass       has a waiver but is required; waivers are for optional gates only
+FAIL empty        no command
+FAIL ghost        a `slow` line names no configured gate
+FAIL phantom      a `blocked-when` line names no configured gate
+FAIL ok           a `blocked-when` line has no pattern
+FAIL phantom      a `covers` line names no configured gate
+FAIL ok           a `covers` line has no glob
+
+1 required gate(s) have no evidence line. Add one per gate:
+  evidence | <id> | <regex proving the tool did work>
+Use `evidence | <id> | -` only where no such output exists, and say why in the story.
+
+15 manifest problem(s).
+rc=1

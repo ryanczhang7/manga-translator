@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# The process-count instrument - MT-041 AC-1 and AC-4.
+# The process-count instrument - MT-041 AC-1 and AC-4 (manga-translator MT-041;
+# upstream HARNESS-025).
 #
 # Sourced by a suite AFTER _lib.sh (it uses json_str and REPO_ROOT). It counts
 # the EXTERNAL processes one run of the real phase-guard hook spawns, read off
-# a `bash -x` trace, which is how MT-041's baseline of 44 was measured.
+# a `bash -x` trace, which is how the upstream baseline of 46 was measured, at
+# b6b4f27 (manga-translator MT-041; upstream HARNESS-025).
 #
 # What counts as a spawn: a traced simple command whose name is neither a bash
 # builtin nor a keyword and resolves to an executable on PATH. Functions
 # (classify, to_rel, ...) never resolve on PATH, so they are not counted; a
 # `$( )` subshell that runs only builtins forks but execs nothing, and is not
-# counted either - the story's 44 is a count of tools, not of forks.
+# counted either - the baseline's 46 is a count of tools, not of forks.
 #
 # Two keys are refined because the criteria name them:
 #
@@ -40,7 +42,7 @@ SPAWN_PS4='+|xt| '
 # `set -x` then `.` is `bash -x` for this script - it reads its own directory
 # from BASH_SOURCE, which a sourced file sets exactly as an executed one does.
 spawn_trace() {
-  printf '{"tool_name":"%s","tool_input":{"%s":"%s"}}' "$2" "$3" "$(json_str "$4")" \
+  printf '{%s"tool_name":"%s","tool_input":{"%s":"%s"}}' "$(hook_cwd_field)" "$2" "$3" "$(json_str "$4")" \
     | CLAUDE_PROJECT_DIR="$1" \
       bash -c 'PS4="$0"; set -x; . "$1"' "$SPAWN_PS4" "$REPO_ROOT/.claude/hooks/phase-guard.sh" \
       >"$5.out" 2>"$5"
@@ -83,7 +85,8 @@ _spawn_commands() {
         }
         # A backslash OUTSIDE quotes escapes the next character. xtrace spells
         # an embedded single quote as '\'' - without this, that escaped quote
-        # opened a span and the word after it became a "command" (MT-041 R-1).
+        # opened a span and the word after it became a "command"
+        # (manga-translator MT-041 R-1; upstream HARNESS-025).
         if (c == "\\") { i += 2; continue }
         i++
       }

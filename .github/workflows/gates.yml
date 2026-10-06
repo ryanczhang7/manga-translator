@@ -52,6 +52,18 @@ jobs:
       - name: Harness self-test
         run: bash scripts/selftest.sh
 
+      # Two harness guards (from agentic-dev-harness release 81; doctor.sh asks
+      # for both). A pipefail matcher that a closed pipe can turn into 141, and a
+      # `grep -c` fallback that prints a second value: both report the opposite
+      # of the truth while every process exits cleanly. The first is a race on
+      # the pipe buffer, so the run that matters is this one, on the runner.
+      # Bash and git only, like the self-test.
+      - name: Refuse pipefail SIGPIPE matchers
+        run: bash scripts/check-sigpipe.sh
+
+      - name: Refuse a printing grep -c fallback
+        run: bash scripts/check-grep-count.sh
+
       - name: Show configured gates
         run: bash scripts/gates.sh --list
 
