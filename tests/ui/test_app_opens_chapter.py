@@ -73,6 +73,12 @@ from mangatl.ui.canvas import EMPTY, LOADED
 from mangatl.ui.main_window import WINDOW_TITLE, MainWindow
 from mangatl.ui.workspace import Workspace
 
+#: MT-072 (`tests/ui/conftest.py`): every Project `mangatl.app` opens here is
+#: closed by teardown (AC-2), because every window `build_window` returns is.
+pytestmark = pytest.mark.usefixtures(
+    "every_opened_project_is_closed", "every_built_window_is_closed"
+)
+
 # --- The chapter on disk -----------------------------------------------------------
 #: Ordinal order, deliberately NOT alphabetical: a strip sorted by name fails.
 PAGES = ("b-first.png", "a-second.png")
