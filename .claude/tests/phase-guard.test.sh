@@ -1354,12 +1354,28 @@ h035_reason() { guard "$H035_A" "$1" "$2" "$3"; }
 describe "HARNESS-035 premise: B and W are linked worktrees of A, C is not"
 
 _common() { (cd "$1" && cd "$(git rev-parse --git-common-dir)" && pwd); }
-assert_eq "B shares A's .git" "$(_common "$H035_A")" "$(_common "$H035_B")"
-assert_eq "W shares A's .git" "$(_common "$H035_A")" "$(_common "$H035_W")"
-case "$(_common "$H035_C")" in
-  "$(_common "$H035_A")") _bad "C is a separate repository" "C shares A's .git" ;;
-  *) _ok "C is a separate repository" ;;
-esac
+# _same_dir <a> <b>   One directory, under whatever spelling: a string match or
+# `-ef`, exactly as same_repo in lib.sh compares. A linked worktree's side is
+# reached through the path git wrote into its `.git` file - Windows form under
+# Git for Windows - while A's is reached through the path mktemp returned, and
+# on windows-latest those two spellings of ONE directory do not come back from
+# `pwd` the same (HARNESS-038). A string compare alone fails the premise there.
+_same_dir() { [ "$1" = "$2" ] || [ "$1" -ef "$2" ]; }
+h035_ga="$(_common "$H035_A")"
+# h035_shares <label> <tree>   The premise for one linked tree, with the same
+# expected/actual report assert_eq gives.
+h035_shares() {
+  local g; g="$(_common "$2")"
+  if _same_dir "$h035_ga" "$g"; then _ok "$1"
+  else _bad "$1" "expected: $h035_ga
+actual:   $g"; fi
+}
+h035_shares "B shares A's .git" "$H035_B"
+h035_shares "W shares A's .git" "$H035_W"
+h035_gt="$(_common "$H035_C")"
+if _same_dir "$h035_ga" "$h035_gt"; then
+  _bad "C is a separate repository" "C shares A's .git: $h035_gt is $h035_ga"
+else _ok "C is a separate repository"; fi
 assert_eq "B's folder name is not A's" "no" "$([ "${H035_B##*/}" = "${H035_A##*/}" ] && echo yes || echo no)"
 
 describe "HARNESS-035 AC-1: the session's tree follows the hook input's cwd"

@@ -186,15 +186,25 @@ assert_eq "but not the README that documents the directory" 1 "$rc"
 # A worktree and not a copy: both linked trees resolve their common git
 # directory to the main checkout's `.git`, and their own git directory is
 # somewhere else. A copied directory has `.git` of its own and fails both.
+#
+# Compared as one directory, not one spelling: a string match or `-ef`, exactly
+# as same_repo in lib.sh does. The linked side is reached through the path git
+# wrote into the tree's `.git` file - Windows form under Git for Windows - and
+# the main side through the path mktemp returned; on windows-latest those two
+# spellings of ONE directory do not come back from `pwd` the same (HARNESS-038).
+# The `own` check gets the same comparison, so a second spelling of the common
+# dir cannot pass it by merely looking different.
+_same_dir() { [ "$1" = "$2" ] || [ "$1" -ef "$2" ]; }
 main_git="$(cd "$FIX/.git" && pwd)"
 for wt in "$WA" "$WB"; do
   common="$(cd "$wt" && cd "$(git rev-parse --git-common-dir)" && pwd)"
   own="$(cd "$wt" && cd "$(git rev-parse --git-dir)" && pwd)"
-  assert_eq "$(basename "$wt"): shares the main checkout's .git" "$main_git" "$common"
-  case "$own" in
-    "$main_git") _bad "$(basename "$wt"): has its own git dir, so it is linked, not main" "git-dir is the common dir: $own" ;;
-    *) _ok "$(basename "$wt"): has its own git dir, so it is linked, not main" ;;
-  esac
+  if _same_dir "$main_git" "$common"; then _ok "$(basename "$wt"): shares the main checkout's .git"
+  else _bad "$(basename "$wt"): shares the main checkout's .git" "expected: $main_git
+actual:   $common"; fi
+  if _same_dir "$main_git" "$own"; then
+    _bad "$(basename "$wt"): has its own git dir, so it is linked, not main" "git-dir is the common dir: $own"
+  else _ok "$(basename "$wt"): has its own git dir, so it is linked, not main"; fi
 done
 assert_eq "git lists three worktrees" 3 "$(count '.' "$(git -C "$FIX" worktree list)")"
 # The linked worktrees start with NO runtime state at all - the measurement
