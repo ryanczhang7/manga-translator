@@ -72,6 +72,12 @@ from mangatl.ui.main_window import MainWindow
 from mangatl.ui.summary import ChapterSummary
 from mangatl.ui.workspace import STATUS_COLOR_TOKENS, TranslationRow, Workspace
 
+#: MT-072 (`tests/ui/conftest.py`): every Project `mangatl.app` opens here is
+#: closed by teardown (AC-2), because every window `build_window` returns is.
+pytestmark = pytest.mark.usefixtures(
+    "every_opened_project_is_closed", "every_built_window_is_closed"
+)
+
 T = tokens_gen.TOKENS
 
 # --- components.md, read out by name ----------------------------------------------
