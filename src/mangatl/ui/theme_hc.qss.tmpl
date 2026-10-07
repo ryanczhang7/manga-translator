@@ -64,3 +64,10 @@ QPushButton:disabled {
 QLineEdit:disabled, QPlainTextEdit:disabled {
     border-color: @{hc.DisabledText};
 }
+
+/* A-15.8: focus takes the foreground of the ground it sits on. The primary
+   button is the one Highlight-ground focus selector, so its ring is
+   HighlightedText, not the WindowText every other ring resolves to. */
+QPushButton[variant="primary"]:focus {
+    border-color: @{hc.HighlightedText};
+}
