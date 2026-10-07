@@ -193,8 +193,9 @@ def system_palette() -> dict[str, str]:
     """The five roles `resolve` reads, from Windows' own `GetSysColor` (PO-7).
 
     Windows, not Qt, is the source because DV-4 measured Qt's `QPalette` wrong
-    under Night sky for one role: `HighlightedText #FFFFFF` where Windows' pair
-    is `#2B2B2B` on `#D6B4FD` (1.78:1 against 7.96:1). This is the bounded
+    under Night sky for one role: Qt's `HighlightedText` gave 1.78:1 against
+    `Highlight` where Windows' own pair gives 7.96:1 (the values are in
+    MT-028's DV-4 result). This is the bounded
     fallback `high-contrast.md` section 2.2 names: the source of the five-key
     mapping changes, nothing else does.
 
