@@ -1006,12 +1006,14 @@ def test_with_no_palette_provider_windows_is_not_asked_for_colours_while_high_co
     app = _RecordingApp()
     source = FixedContrastSource(False)
 
-    apply_theme(app, source)
+    controller = apply_theme(app, source)
 
+    assert controller.high_contrast is False
     assert calls == [], f"High Contrast is off and GetSysColor was called with {calls}"
     assert app.sheets == [_packaged_theme()]
 
     source.set_value(True)
 
+    assert controller.high_contrast is True
     assert sorted(set(calls)) == [5, 8, 13, 14, 17], f"GetSysColor was called with {calls}"
     assert app.sheets[-1] == _expected_hc_sheet(NIGHT_SKY)
