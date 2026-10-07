@@ -30,10 +30,10 @@ import re
 from collections.abc import Callable, Mapping
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 
-from mangatl.ui.contrast import ContrastSource, palette_snapshot
+from mangatl.ui import contrast
+from mangatl.ui.contrast import ContrastSource
 from mangatl.ui.link import LiveRegion
 from mangatl.ui.stylesheet import base_template, hc_template
 from mangatl.ui.tokens import _PLACEHOLDER, HC_ROLES, STATIC
@@ -137,9 +137,14 @@ def compose_stylesheet(
 
 
 def _system_palette() -> dict[str, str]:
-    # The class-level palette: reading it never touches the application object,
-    # so with High Contrast off nothing but `setStyleSheet` reaches `app` (PO-4).
-    return palette_snapshot(QGuiApplication.palette())
+    # Windows' own colours, not Qt's (PO-7, Contract block 2b): DV-4 measured
+    # Qt's `HighlightedText` wrong under Night sky. `contrast.system_palette` is
+    # looked up here, when the provider is called, so a stubbed `ctypes.windll`
+    # reaches it through `apply_theme`; it falls back to Qt's palette itself.
+    # Neither source touches the application object, and the provider is called
+    # only when applying High Contrast, so with it off nothing but
+    # `setStyleSheet` reaches `app` (PO-4).
+    return contrast.system_palette()
 
 
 class ThemeController(QObject):

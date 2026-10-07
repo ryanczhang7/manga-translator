@@ -15,6 +15,10 @@ theme, never an HC mapping against a palette that may be unpopulated.
 
 `palette_snapshot` is the adapter section 4.1/4.3 describes: a real `QPalette`
 in, the plain five-role mapping `theme.resolve` reads out, and nothing else.
+
+`system_palette` is where that mapping comes from by default (PO-7): the same
+five roles read from Windows' `GetSysColor`, with `palette_snapshot` of Qt's
+palette as its fallback where the Windows call is unavailable.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from __future__ import annotations
 import ctypes
 
 from PySide6.QtCore import QAbstractNativeEventFilter, QByteArray, QCoreApplication, QObject, Signal
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QGuiApplication, QPalette
 
 __all__ = [
     "HCF_HIGHCONTRASTON",
@@ -33,6 +37,7 @@ __all__ = [
     "SystemContrastSource",
     "palette_snapshot",
     "read_system_high_contrast",
+    "system_palette",
 ]
 
 #: Win32 `SystemParametersInfoW` action that fills a `HIGHCONTRASTW`.
@@ -165,3 +170,39 @@ def palette_snapshot(palette: QPalette) -> dict[str, str]:
         "HighlightedText": _hex(palette.color(_ACTIVE, _ROLE.HighlightedText)),
         "DisabledText": _hex(palette.color(_DISABLED, _ROLE.WindowText)),
     }
+
+
+#: `GetSysColor` index for each role, Win32, in `palette_snapshot`'s key order.
+#: `DisabledText` is `COLOR_GRAYTEXT`, the colour Windows draws disabled text in.
+_SYS_COLOR_INDEX = (
+    ("Window", 5),  # COLOR_WINDOW
+    ("WindowText", 8),  # COLOR_WINDOWTEXT
+    ("Highlight", 13),  # COLOR_HIGHLIGHT
+    ("HighlightedText", 14),  # COLOR_HIGHLIGHTTEXT
+    ("DisabledText", 17),  # COLOR_GRAYTEXT
+)
+
+
+def _colorref_hex(colorref: int) -> str:
+    """A Win32 `COLORREF` (`0x00BBGGRR`, red in the LOW byte) as `#RRGGBB`."""
+    red, green, blue = colorref & 0xFF, (colorref >> 8) & 0xFF, (colorref >> 16) & 0xFF
+    return f"#{red:02X}{green:02X}{blue:02X}"
+
+
+def system_palette() -> dict[str, str]:
+    """The five roles `resolve` reads, from Windows' own `GetSysColor` (PO-7).
+
+    Windows, not Qt, is the source because DV-4 measured Qt's `QPalette` wrong
+    under Night sky for one role: `HighlightedText #FFFFFF` where Windows' pair
+    is `#2B2B2B` on `#D6B4FD` (1.78:1 against 7.96:1). This is the bounded
+    fallback `high-contrast.md` section 2.2 names: the source of the five-key
+    mapping changes, nothing else does.
+
+    `ctypes.windll` is looked up here, at call time. Where it is absent, or any
+    one call raises, the whole mapping is `palette_snapshot` of Qt's palette -
+    never a partial mix of the two, and never a raise."""
+    try:
+        get_sys_color = ctypes.windll.user32.GetSysColor  # type: ignore[attr-defined, unused-ignore]
+        return {role: _colorref_hex(int(get_sys_color(index))) for role, index in _SYS_COLOR_INDEX}
+    except Exception:
+        return palette_snapshot(QGuiApplication.palette())
