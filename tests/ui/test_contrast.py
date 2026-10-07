@@ -354,3 +354,162 @@ def test_the_snapshot_is_total_over_a_default_palette() -> None:
         assert len(value) == 7 and value.startswith("#"), f"{key}: {value!r}"
         assert value == value.upper(), f"{key}: {value!r} is not upper-case"
         int(value[1:], 16)
+
+
+# =============================================================================
+# Contract block 2b (PO-7): the five roles read from Windows (mechanical, pinned)
+# =============================================================================
+#
+# `system_palette` is imported INSIDE each test, through the module attribute,
+# so that while it does not exist only these tests fail - a top-level import
+# would turn every test above into one collection error.
+
+#: `GetSysColor` indices, Win32 (Contract block 2b), in block 2's key order.
+SYS_COLOR_INDEX = {
+    "Window": 5,  # COLOR_WINDOW
+    "WindowText": 8,  # COLOR_WINDOWTEXT
+    "Highlight": 13,  # COLOR_HIGHLIGHT
+    "HighlightedText": 14,  # COLOR_HIGHLIGHTTEXT
+    "DisabledText": 17,  # COLOR_GRAYTEXT
+}
+
+#: DV-4's real reading of `GetSysColor` under Windows 11's Night sky theme.
+NIGHT_SKY = {
+    "Window": "#000000",
+    "WindowText": "#FFFFFF",
+    "Highlight": "#D6B4FD",
+    "HighlightedText": "#2B2B2B",
+    "DisabledText": "#A6A6A6",
+}
+
+
+def _system_palette() -> Callable[[], dict[str, str]]:
+    from mangatl.ui import contrast
+
+    return contrast.system_palette  # type: ignore[attr-defined,no-any-return]
+
+
+def _colorref(rgb: str) -> int:
+    """`#RRGGBB` as a Win32 `COLORREF`, `0x00BBGGRR`: red is the LOW byte."""
+    red, green, blue = int(rgb[1:3], 16), int(rgb[3:5], 16), int(rgb[5:7], 16)
+    return red | (green << 8) | (blue << 16)
+
+
+def _sys_colors(
+    colours: dict[str, str], calls: list[int], raise_on: int | None = None
+) -> SimpleNamespace:
+    """A `ctypes.windll` whose `user32.GetSysColor(index)` answers `colours` by
+    role as COLORREFs, records each index it is called with, and raises on
+    `raise_on`. An index outside the five fails the test by name."""
+    by_index = {SYS_COLOR_INDEX[role]: _colorref(value) for role, value in colours.items()}
+
+    def get_sys_color(index: int) -> int:
+        calls.append(index)
+        if index == raise_on:
+            raise OSError(f"GetSysColor({index}) failed")
+        if index not in by_index:
+            pytest.fail(f"GetSysColor was called with {index!r}, which is none of the five roles")
+        return by_index[index]
+
+    return SimpleNamespace(user32=SimpleNamespace(GetSysColor=get_sys_color))
+
+
+def test_the_colorref_encoder_puts_red_in_the_low_byte() -> None:
+    """Fixture check: the instrument against Contract block 2b's own literal."""
+    assert _colorref("#123456") == 0x563412
+    assert _colorref("#D6B4FD") == 0xFDB4D6
+
+
+def test_the_windows_palette_is_the_five_roles_read_from_get_sys_color_under_night_sky(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block 2b: DV-4's real Night sky values come back exactly, as uppercase
+    `#RRGGBB`, in block 2's key order - `HighlightedText` is `#2B2B2B`, Windows'
+    value, not the `#FFFFFF` Qt reports."""
+    calls: list[int] = []
+    monkeypatch.setattr(ctypes, "windll", _sys_colors(NIGHT_SKY, calls), raising=False)
+
+    palette = _system_palette()()
+
+    assert type(palette) is dict
+    assert palette == NIGHT_SKY
+    assert list(palette) == list(ROLES)
+
+
+def test_the_windows_palette_asks_get_sys_color_once_for_each_of_the_five_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block 2b: indices 5, 8, 13, 14, 17, one call each, one integer argument."""
+    calls: list[int] = []
+    monkeypatch.setattr(ctypes, "windll", _sys_colors(NIGHT_SKY, calls), raising=False)
+
+    _system_palette()()
+
+    assert sorted(calls) == [5, 8, 13, 14, 17], f"GetSysColor was called with {calls}"
+
+
+def test_the_windows_palette_reads_red_from_the_low_byte_of_the_colorref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block 2b: every role asymmetric (red != blue) and lettered, so a
+    byte-order or case slip on any one of them cannot pass. `Highlight` is
+    COLORREF 0x563412, which is `#123456` - read the other way it is `#563412`."""
+    colours = {
+        "Window": "#0A0B0C",
+        "WindowText": "#F1E2D3",
+        "Highlight": "#123456",
+        "HighlightedText": "#ABCDEF",
+        "DisabledText": "#9C8B7A",
+    }
+    calls: list[int] = []
+    monkeypatch.setattr(ctypes, "windll", _sys_colors(colours, calls), raising=False)
+
+    palette = _system_palette()()
+
+    assert palette == colours
+    assert palette["Highlight"] == "#123456"
+
+
+@pytest.fixture
+def decoyed_app_palette(qapp: Any) -> Any:
+    """The application palette set to `_decoyed_palette()`, so "fell back to
+    Qt's palette" has an exact, recognisable answer; restored afterwards."""
+    from PySide6.QtGui import QGuiApplication
+
+    original = QGuiApplication.palette()
+    QGuiApplication.setPalette(_decoyed_palette())
+    try:
+        yield qapp
+    finally:
+        QGuiApplication.setPalette(original)
+
+
+def test_with_no_windows_api_the_palette_falls_back_to_qts(
+    decoyed_app_palette: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Block 2b: `ctypes.windll` absent -> `palette_snapshot(QGuiApplication.palette())`."""
+    from PySide6.QtGui import QGuiApplication
+
+    monkeypatch.delattr(ctypes, "windll", raising=False)
+    assert palette_snapshot(QGuiApplication.palette()) == EXPECTED_SNAPSHOT  # precondition
+
+    palette = _system_palette()()
+
+    assert palette == EXPECTED_SNAPSHOT
+    assert list(palette) == list(ROLES)
+
+
+@pytest.mark.parametrize("failing", list(SYS_COLOR_INDEX), ids=list(SYS_COLOR_INDEX))
+def test_when_any_get_sys_color_call_raises_the_whole_palette_falls_back_to_qts(
+    decoyed_app_palette: Any, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    """Block 2b: never a partial dict, never a raise - one failed role means the
+    whole five-key mapping comes from Qt's palette, not four from Windows."""
+    calls: list[int] = []
+    windll = _sys_colors(NIGHT_SKY, calls, raise_on=SYS_COLOR_INDEX[failing])
+    monkeypatch.setattr(ctypes, "windll", windll, raising=False)
+
+    palette = _system_palette()()
+
+    assert palette == EXPECTED_SNAPSHOT, f"GetSysColor({failing}) raised; got {palette}"
+    assert list(palette) == list(ROLES)

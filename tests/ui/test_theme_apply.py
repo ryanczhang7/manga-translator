@@ -929,3 +929,89 @@ def test_a_change_signal_carrying_the_current_mode_reapplies_and_announces_nothi
     assert len(app.sheets) == sheets, "a non-change re-applied the sheet"
     assert len(_alerts(recorded_alerts)) == alerts, "a non-change was announced"
     assert controller.high_contrast is mode
+
+
+# =============================================================================
+# Contract block 2b (PO-7): with no provider given, the palette is Windows'
+# =============================================================================
+
+#: DV-4's real `GetSysColor` reading under Windows 11's Night sky theme. Qt's
+#: `QPalette` reports `HighlightedText #FFFFFF` there (1.78:1 on `Highlight`);
+#: Windows' own value is `#2B2B2B` (7.96:1).
+NIGHT_SKY: dict[str, str] = {
+    "Window": "#000000",
+    "WindowText": "#FFFFFF",
+    "Highlight": "#D6B4FD",
+    "HighlightedText": "#2B2B2B",
+    "DisabledText": "#A6A6A6",
+}
+
+#: `GetSysColor` indices (Win32): COLOR_WINDOW, _WINDOWTEXT, _HIGHLIGHT,
+#: _HIGHLIGHTTEXT, _GRAYTEXT.
+SYS_COLOR_INDEX = {
+    "Window": 5,
+    "WindowText": 8,
+    "Highlight": 13,
+    "HighlightedText": 14,
+    "DisabledText": 17,
+}
+
+
+def _night_sky_windll(calls: list[int]) -> SimpleNamespace:
+    """A `ctypes.windll` whose `user32.GetSysColor(index)` answers Night sky as
+    `COLORREF`s (`0x00BBGGRR`, red in the low byte) and records each index."""
+    by_index = {}
+    for role, value in NIGHT_SKY.items():
+        red, green, blue = int(value[1:3], 16), int(value[3:5], 16), int(value[5:7], 16)
+        by_index[SYS_COLOR_INDEX[role]] = red | (green << 8) | (blue << 16)
+
+    def get_sys_color(index: int) -> int:
+        calls.append(index)
+        return by_index[index]
+
+    return SimpleNamespace(user32=SimpleNamespace(GetSysColor=get_sys_color))
+
+
+def test_with_no_palette_provider_high_contrast_takes_its_colours_from_windows(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Block 2b / PO-7: the default palette source is `GetSysColor`, so Night
+    sky's `HighlightedText #2B2B2B` reaches the sheet - a pressed button is
+    `#2B2B2B` on `#D6B4FD`, not Qt's illegible `#FFFFFF`."""
+    calls: list[int] = []
+    monkeypatch.setattr(ctypes, "windll", _night_sky_windll(calls), raising=False)
+    app = _RecordingApp()
+
+    apply_theme(app, FixedContrastSource(True))
+
+    assert len(app.sheets) == 1, f"setStyleSheet was called {len(app.sheets)} times"
+    pressed = _effective(app.sheets[0], "QPushButton:pressed")
+    assert pressed.get("color") == "#2B2B2B", (
+        f"QPushButton:pressed is {pressed}; Windows' HighlightedText under Night sky is #2B2B2B"
+    )
+    assert pressed.get("background-color") == "#D6B4FD", pressed
+    assert app.sheets[0] == _expected_hc_sheet(NIGHT_SKY)
+    assert sorted(set(calls)) == [5, 8, 13, 14, 17], f"GetSysColor was called with {calls}"
+    assert app.touched == []
+
+
+def test_with_no_palette_provider_windows_is_not_asked_for_colours_while_high_contrast_is_off(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Block 2b keeps PO-4: off, nothing reads the palette - not even Windows'.
+    Then switched on, the same default provider is what is asked (so the
+    "no call" half is not vacuous)."""
+    calls: list[int] = []
+    monkeypatch.setattr(ctypes, "windll", _night_sky_windll(calls), raising=False)
+    app = _RecordingApp()
+    source = FixedContrastSource(False)
+
+    apply_theme(app, source)
+
+    assert calls == [], f"High Contrast is off and GetSysColor was called with {calls}"
+    assert app.sheets == [_packaged_theme()]
+
+    source.set_value(True)
+
+    assert sorted(set(calls)) == [5, 8, 13, 14, 17], f"GetSysColor was called with {calls}"
+    assert app.sheets[-1] == _expected_hc_sheet(NIGHT_SKY)
