@@ -41,9 +41,10 @@ from mangatl.domain.page import Chapter
 from mangatl.pipeline.stage import Stage
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
 from mangatl.store.project import SchemaTooNew, open_project, project_dir_for
+from mangatl.ui.contrast import SystemContrastSource
 from mangatl.ui.main_window import MainWindow
 from mangatl.ui.run import RunSetup
-from mangatl.ui.stylesheet import apply_base_stylesheet
+from mangatl.ui.theme import ThemeController, apply_theme
 from mangatl.ui.workspace import Workspace
 
 __all__ = [
@@ -65,6 +66,10 @@ UNREADABLE_PAGE_ERROR = (
     " Remove or replace it, then choose the folder again."
 )
 UNLISTABLE_ERROR = "Windows would not let this app read {folder}.\n{os_error}"
+
+#: The running theme controller (MT-028): `main` keeps it here so a live
+#: contrast change still reaches it after `main`'s locals are gone.
+_theme: ThemeController | None = None
 
 
 class IntakeError(str):
@@ -164,10 +169,13 @@ def build_window(arguments: Sequence[str], *, run_setup: RunSetup | None = None)
 
 def main(argv: list[str] | None = None) -> int:
     """Run the application. Returns the Qt exit code."""
+    global _theme
     argv = argv if argv is not None else sys.argv
     app = QApplication(argv)
-    # Before any window is built, so none is ever shown unthemed (MT-061).
-    apply_base_stylesheet(app)
+    # Before any window is built, so none is ever shown unthemed (MT-061). The
+    # controller follows the system contrast theme from here on (MT-028), so it
+    # is held on the module, past `main`'s locals.
+    _theme = apply_theme(app, SystemContrastSource())
     window = build_window(argv[1:])
     window.show()
     return app.exec()

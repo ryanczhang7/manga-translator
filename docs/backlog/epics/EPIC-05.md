@@ -2,7 +2,7 @@
 id: EPIC-05
 title: The review workspace — the one place a human can catch an error
 status: todo
-stories: [MT-025, MT-015, MT-048, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-054, MT-055, MT-056, MT-018, MT-062, MT-063, MT-057, MT-061, MT-058, MT-059, MT-060, MT-026, MT-028]
+stories: [MT-025, MT-015, MT-048, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-054, MT-055, MT-056, MT-018, MT-062, MT-063, MT-057, MT-061, MT-058, MT-059, MT-060, MT-026, MT-028, MT-073, MT-074]
 ---
 
 ## Goal
@@ -109,10 +109,21 @@ amend `components.md` §2 to match (MT-057 PO-4 and PO-5, MT-058 PO-1).
   near-ceiling and aborted states.
 - **MT-026** — Windows High Contrast, part one: token resolution. Pure functions
   over a token name, a boolean and a plain dict — no Qt, no display.
-- **MT-028** — Windows High Contrast, part two: the widgets and the scene
-  actually use it, and a live toggle loses no uncommitted work.
+- **MT-028** — Windows High Contrast, part two: the theme path — detection
+  behind an interface, stylesheet re-composition and application, the override
+  rules that exist, and a live toggle that loses no uncommitted work. Cut down
+  on 2026-10-07 (its PO-1, user-approved): as drafted it carried thirteen
+  criteria across six modules, four of them on components the dark theme does
+  not have.
+- **MT-073** — the canvas under High Contrast: the `color.canvas.frame` line and
+  viewport focus ring MT-015 deferred, then exactly three deltas — dimming
+  stops, the frame becomes `WindowText` at 2 px, the ring follows — each
+  mat-checked at runtime (A-15.9). The markers do not change.
+- **MT-074** — status glyphs that survive one colour: the `CostReadout`'s
+  (figure, glyph, meter) triple with §10.6's outline-vs-filled triangles, and
+  the row-gutter glyphs. Independent of MT-028; can run alongside it.
 
-The last two exist because the user decided on 2026-09-12 that a contrast theme
+The High Contrast stories exist because the user decided on 2026-09-12 that a contrast theme
 is **supported**, not detected and declined. The split is at the seam between
 *what colour a token is* and *that the screen uses it* — the same seam as MT-025
 against MT-015/MT-016. The Lead PO and the Lead Designer reached it
