@@ -2,7 +2,7 @@
 id: EPIC-07
 title: Knowing whether it worked, and getting it onto the machine
 status: todo
-stories: [MT-029, MT-022, MT-023, MT-024]
+stories: [MT-029, MT-022, MT-023, MT-075, MT-024]
 ---
 
 ## Goal
