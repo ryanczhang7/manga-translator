@@ -33,17 +33,22 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Sequence
+from importlib.resources import files
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMainWindow
 
+from mangatl.app_paths import bundled_manifest, bundled_models_dir
 from mangatl.domain.page import Chapter
+from mangatl.models.manifest import ModelHashMismatch, load_manifest, verify_bundled_models
+from mangatl.models.providers import select_providers
 from mangatl.pipeline.stage import Stage
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
 from mangatl.store.project import SchemaTooNew, open_project, project_dir_for
 from mangatl.ui.contrast import SystemContrastSource
 from mangatl.ui.main_window import MainWindow
 from mangatl.ui.run import RunSetup
+from mangatl.ui.stylesheet import BASE_TEMPLATE_RESOURCE, HC_TEMPLATE_RESOURCE, THEME_RESOURCE
 from mangatl.ui.theme import ThemeController, apply_theme
 from mangatl.ui.workspace import Workspace
 
@@ -51,9 +56,11 @@ __all__ = [
     "IntakeError",
     "build_stages",
     "build_window",
+    "check_bundled_models",
     "main",
     "open_folder",
     "resolve_models",
+    "self_check",
 ]
 
 # The folder is always resolved, so the text names it the same way from any
@@ -124,12 +131,12 @@ def _read(folder: Path) -> Chapter | IntakeError:
 
 
 def resolve_models() -> Path | None:
-    """The models folder `$MANGATL_MODELS` names, read now, or `None` when it
-    names none (PO-4: the environment is the only source until MT-024)."""
+    """The models folder `$MANGATL_MODELS` names, read now, else the bundled
+    weights when they are there (MT-024 AC-9), or `None` when neither is."""
     from mangatl.compose import ModelsNotFound, resolve_models_dir
 
     try:
-        return resolve_models_dir(None, os.environ)
+        return resolve_models_dir(None, os.environ, bundled_models_dir())
     except ModelsNotFound:
         return None
 
@@ -167,15 +174,108 @@ def build_window(arguments: Sequence[str], *, run_setup: RunSetup | None = None)
     return outcome
 
 
+def check_bundled_models() -> str | None:
+    """Why the bundled weights cannot be trusted, or `None` (MT-024 AC-5, C-6).
+
+    `None` when there is no bundled models directory (a plain checkout) or every
+    weight verifies; the `ModelHashMismatch` message otherwise. Verified against
+    `bundled_manifest()`, which in a checkout sits beside the download directory
+    rather than inside it. The seam `main` calls and tests replace.
+    """
+    root = bundled_models_dir()
+    if not root.is_dir():
+        return None
+    try:
+        verify_bundled_models(root, bundled_manifest())
+    except ModelHashMismatch as error:
+        return str(error)
+    return None
+
+
+def self_check(report: Path) -> int:
+    """`mangatl --check <report>`: does the installed app load what it ships?
+
+    MT-024 C-6, AC-7. Writes six lines to `report` - the three theme resources,
+    the fonts, the weights and the provider the detector actually runs on - and
+    returns 0, or 1 when any line failed, with its reason on that line. A file,
+    never stdout: the frozen binary is `console=False` and has none. Every
+    check is caught, because an exception here would open a traceback window
+    on a machine nobody is watching.
+    """
+    lines: list[str] = []
+    failed = False
+    for label, resource in (
+        ("theme", THEME_RESOURCE),
+        ("theme-template", BASE_TEMPLATE_RESOURCE),
+        ("theme-hc-template", HC_TEMPLATE_RESOURCE),
+    ):
+        try:
+            size = len(files("mangatl.ui").joinpath(resource).read_bytes())
+        except OSError as error:
+            lines.append(f"{label}: {error}")
+            failed = True
+        else:
+            lines.append(f"{label}: ok ({size} bytes)")
+
+    from mangatl.typeset.font import FACE_FILES, FONT_DIR, OFL_FILENAME
+
+    shipped = [*FACE_FILES.values(), FONT_DIR / OFL_FILENAME]
+    absent = [path.name for path in shipped if not path.is_file()]
+    if absent:
+        lines.append(f"fonts: missing {', '.join(absent)}")
+        failed = True
+    else:
+        lines.append(f"fonts: ok ({len(FACE_FILES)} faces, {OFL_FILENAME})")
+
+    try:
+        verify_bundled_models(bundled_models_dir(), bundled_manifest())
+        count = len(load_manifest(bundled_manifest()))
+    except (ModelHashMismatch, OSError, ValueError) as error:
+        lines.append(f"models: {error}")
+        failed = True
+    else:
+        lines.append(f"models: ok ({count} verified)")
+
+    # The detector alone: one session answers which provider is in use.
+    from mangatl.compose import DETECTOR_FILENAME, available_providers
+    from mangatl.detect.session import load_detector, selected_provider
+
+    try:
+        detector = load_detector(
+            bundled_models_dir() / DETECTOR_FILENAME, select_providers(available_providers())
+        )
+        lines.append(f"provider: {selected_provider(detector)}")
+    except Exception as error:  # reported on its line, never raised (see above)
+        lines.append(f"provider: failed ({error})")
+        failed = True
+
+    report.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+    return 1 if failed else 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Run the application. Returns the Qt exit code."""
+    """Run the application. Returns the Qt exit code.
+
+    `mangatl --check <report>` - exactly that shape - is `self_check`, returned
+    before any `QApplication` exists. Otherwise, after the theme and before any
+    window, the bundled weights are verified; a weight that does not verify
+    opens a notice naming it and `main` returns 1 (MT-024 AC-5).
+    """
     global _theme
     argv = argv if argv is not None else sys.argv
+    if len(argv) == 3 and argv[1] == "--check":
+        return self_check(Path(argv[2]))
     app = QApplication(argv)
     # Before any window is built, so none is ever shown unthemed (MT-061). The
     # controller follows the system contrast theme from here on (MT-028), so it
     # is held on the module, past `main`'s locals.
     _theme = apply_theme(app, SystemContrastSource())
+    error = check_bundled_models()
+    if error is not None:
+        notice = MainWindow(notice=error)
+        notice.show()
+        app.exec()
+        return 1
     window = build_window(argv[1:])
     window.show()
     return app.exec()

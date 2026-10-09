@@ -40,6 +40,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from mangatl.app_paths import bundled_models_dir
 from mangatl.compose import MODELS_ENV, ModelsNotFound, build_pipeline, resolve_models_dir
 from mangatl.domain.events import PageSkipped, PageStarted, RunEvent
 from mangatl.pipeline.bake import bake_chapter
@@ -88,7 +89,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         # fails in one line and leaves nothing behind for the user to delete
         # (MT-036 C-3). The real environment, read at call time: `$MANGATL_MODELS`
         # is a working branch of PO-4's resolution order, not documentation.
-        models_dir = resolve_models_dir(arguments.models, os.environ)
+        # The bundled weights come last (MT-024 AC-9), asked for now.
+        models_dir = resolve_models_dir(arguments.models, os.environ, bundled_models_dir())
     except ModelsNotFound as error:
         return _fail(str(error))
 
