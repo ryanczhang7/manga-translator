@@ -67,6 +67,12 @@ class _SeedingStage:
 @pytest.fixture(autouse=True)
 def _no_ambient_models_directory(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(_MODELS_ENV, raising=False)
+    # MT-078 (C-2, C-3): `main` now selects a provider out of the real
+    # environment before it asks for the stages, so this file pins exactly one
+    # key. The story's caller list missed this file; RED added it.
+    for name in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "MANGATL_PROVIDER"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
 
 @pytest.fixture
@@ -78,7 +84,9 @@ def models_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def seeding_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    def build(models_dir: Path, *, translate: bool | None = None) -> tuple[Stage, ...]:
+    def build(
+        models_dir: Path, *, translate: bool | None = None, selection: object = None
+    ) -> tuple[Stage, ...]:
         return (_SeedingStage(),)
 
     monkeypatch.setattr("mangatl.cli.build_pipeline", build)

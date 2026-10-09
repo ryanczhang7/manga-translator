@@ -1693,3 +1693,112 @@ def test_a_fake_stage_list_satisfies_the_stage_protocol() -> None:
     stages: Sequence[Stage] = (FakeStage("detect", calls), PassThroughStage())
 
     assert [s.name for s in stages] == ["detect", "passthrough"]
+
+
+# =============================================================================
+# MT-078 AC-8: a provider refusal at Start is shown, not raised out of the slot
+# =============================================================================
+#
+# C-4: `MainWindow._start` wraps `setup.build_stages(models)` in
+# `except ProviderError as error: self.show_error(str(error)); return`. Since
+# MT-078 the real `app.build_stages` -> `compose.build_pipeline(selection=None)`
+# selects from the environment and can refuse (C-2); here the builder is a fake
+# whose call raises, so the test is about the window and nothing else.
+#
+# "Rather than letting the exception escape the slot" is observed twice: the
+# drop target's headline holds the message (it can only get there through
+# `show_error`), and pytest-qt fails any test during which an exception
+# reaches Qt's event loop. No run starts: `window.run` and `window.run_panel`
+# stay `None`.
+#
+# The messages are AC-3's and C-2's exact texts (`test_translate_provider.py`
+# pins them); the window shows `str(error)`, so whatever the exception says is
+# what the headline says.
+#
+# RED: `mangatl.translate.provider` does not exist, so each case fails on the
+# import inside it; the rest of this file still collects and runs.
+
+_REFUSALS = {
+    "NoApiKey": (
+        "no API key is set: set ANTHROPIC_API_KEY, GEMINI_API_KEY or OPENAI_API_KEY,"
+        " or run with --no-translate"
+    ),
+    "ProviderUnavailable": "translation with gemini is not available yet",
+    "AmbiguousProvider": (
+        "API keys are set for more than one provider (anthropic, gemini);"
+        " choose one with --provider or MANGATL_PROVIDER"
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(_REFUSALS))
+def test_a_provider_refusal_at_start_is_shown_as_the_windows_error(
+    qtbot,  # type: ignore[no-untyped-def]
+    world: World,
+    tmp_path: Path,
+    page_png: bytes,
+    name: str,
+) -> None:
+    import mangatl.translate.provider as provider
+
+    message = _REFUSALS[name]
+    error_type = getattr(provider, name)
+    assert issubclass(error_type, provider.ProviderError), f"precondition: {name} is a refusal"
+
+    def refuse() -> None:
+        raise error_type(message)
+
+    builder = Builder(on_call=refuse)
+    folder = _pages_folder(tmp_path, "ch", 2, page_png)
+    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder))
+
+    _press_start(window)
+
+    assert builder.calls == [tmp_path], "precondition: Start reached the stage builder"
+    target = window.centralWidget()
+    assert isinstance(target, FolderDropTarget), (
+        f"after a {name} at Start the central widget is {type(target).__name__},"
+        " not the drop target's error state (AC-8: shown through show_error)"
+    )
+    assert target.state == "error"
+    assert target.headline.text() == message, (
+        f"the window shows {target.headline.text()!r}; AC-8 is the exception's message"
+    )
+    assert window.run is None and window.run_panel is None, "a run started after the refusal"
+
+
+def test_control_an_error_that_is_not_a_provider_refusal_is_not_swallowed(
+    qtbot,  # type: ignore[no-untyped-def]
+    world: World,
+    tmp_path: Path,
+    page_png: bytes,
+) -> None:
+    """C-4 catches `ProviderError`, not everything: a `RuntimeError` out of the
+    builder is a bug, and showing it as a headline would hide it. Its escape is
+    observed through pytest-qt's capture of exceptions in Qt's event loop -
+    which is also the mechanism the test above relies on to say "nothing
+    escaped", so this is that mechanism's control.
+
+    **Green on arrival** (today's `_start` catches nothing). It earns its place
+    as the control of the capture mechanism, not as a red test.
+    """
+
+    def explode() -> None:
+        raise RuntimeError("a bug, not a refusal")
+
+    builder = Builder(on_call=explode)
+    window = _window(
+        qtbot,
+        world,
+        _pages_folder(tmp_path, "ch", 1, page_png),
+        RunSetup(_models(tmp_path), builder),
+    )
+
+    with qtbot.capture_exceptions() as caught:
+        _press_start(window)
+
+    assert [type(error) for _, error, _ in caught] == [RuntimeError], (
+        f"a RuntimeError out of build_stages reached Qt as {caught!r}; C-4 catches"
+        " ProviderError only"
+    )
+    assert not isinstance(window.centralWidget(), FolderDropTarget)
