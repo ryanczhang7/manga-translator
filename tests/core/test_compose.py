@@ -274,6 +274,19 @@ class _FakeInpaintSession:
         return ["CPUExecutionProvider"]
 
 
+@dataclass
+class _FakeDetectorSession:
+    """A `DetectorSession` as far as `selected_provider` reads one (MT-024 AC-6):
+    `get_providers()` reports what the session *actually* runs on, which is
+    not necessarily what it was asked for."""
+
+    path: Path
+    reports: list[str]
+
+    def get_providers(self) -> Sequence[str]:
+        return list(self.reports)
+
+
 class _Loaders:
     """The four weight loaders `build_pipeline` calls, replaced at its own names.
 
@@ -285,19 +298,30 @@ class _Loaders:
     required gates read, with no weights on the machine and no GPU.
     """
 
+    #: What the fake detector session reports from `get_providers()`: `None`
+    #: means "the first provider it was asked for" (a machine where the request
+    #: was honoured); a list means "this, whatever was asked" (MT-024 AC-6's
+    #: CUDA-requested, CPU-delivered case).
+    detector_reports: list[str] | None = None
+
     def __init__(self) -> None:
         self.detector_paths: list[Path] = []
+        self.detector_providers: list[tuple[str, ...]] = []
+        self.ocr_providers: list[tuple[str, ...]] = []
         self.ocr_dirs: list[Path] = []
         self.vocab_paths: list[Path] = []
         self.inpainter_loads: list[tuple[Path, tuple[str, ...]]] = []
         self.inpainters: list[_FakeInpaintSession] = []
 
-    def load_detector(self, path: Path, providers: tuple[str, ...]) -> object:
+    def load_detector(self, path: Path, providers: tuple[str, ...]) -> _FakeDetectorSession:
         self.detector_paths.append(path)
-        return f"detector-session({path})"
+        self.detector_providers.append(tuple(providers))
+        reports = self.detector_reports
+        return _FakeDetectorSession(path, list(providers[:1]) if reports is None else list(reports))
 
     def load_ocr(self, directory: Path, providers: tuple[str, ...]) -> object:
         self.ocr_dirs.append(directory)
+        self.ocr_providers.append(tuple(providers))
         return f"ocr-session({directory})"
 
     def load_vocab(self, path: Path) -> object:
@@ -352,6 +376,17 @@ def loaders(monkeypatch: pytest.MonkeyPatch) -> _Loaders:
     # MT-065 C-1 (b): without this every `build_pipeline` call in the file
     # reaches the real onnxruntime on an empty directory.
     monkeypatch.setattr("mangatl.compose.load_inpainter", stubs.load_inpainter)
+    # MT-024 AC-6 (C-5): `build_pipeline` requests
+    # `select_providers(available_providers())`, so without this every assertion
+    # about the providers requested would be about THIS machine's onnxruntime.
+    # CUDA and CPU both "available", so the selection is PROVIDER_PREFERENCE and
+    # the `:530` assertion below stays about selection. `raising=False`: the
+    # name does not exist until GREEN.
+    monkeypatch.setattr(
+        "mangatl.compose.available_providers",
+        lambda: ["CPUExecutionProvider", "CUDAExecutionProvider"],
+        raising=False,
+    )
     return stubs
 
 
@@ -694,3 +729,258 @@ def test_the_failure_is_an_exception_a_caller_can_catch_by_name() -> None:
     # as it catches `NoPagesFound` (C-3). A bare `RuntimeError` there would
     # either be caught too broadly or reach the user as a traceback.
     assert issubclass(ModelsNotFound, Exception)
+
+
+# -- MT-024 AC-6: the providers requested are selected, and the one used is logged --
+#
+# `build_pipeline` requests `select_providers(available_providers())` - not the
+# constant - from all three ONNX loaders, and then logs `inference provider:
+# <name>` at INFO on the `mangatl.compose` logger, where `<name>` is
+# `selected_provider(detector)`: what the detector session reports it runs on,
+# never what was asked for (MT-002 E2: onnxruntime falls back to CPU silently).
+# `available_providers` is replaced at its own name: the `loaders` fixture
+# installs CPU+CUDA, and each test below that needs another list sets it.
+#
+# RED: `build_pipeline` passes `PROVIDER_PREFERENCE` regardless and logs
+# nothing, so these fail on their assertions. DV-3 reorders the preference and
+# the log assertion must move with it.
+
+_CUDA = "CUDAExecutionProvider"
+_CPU = "CPUExecutionProvider"
+
+
+def _available(monkeypatch: pytest.MonkeyPatch, names: list[str]) -> None:
+    monkeypatch.setattr("mangatl.compose.available_providers", lambda: list(names), raising=False)
+
+
+def _provider_lines(caplog: pytest.LogCaptureFixture) -> list[tuple[int, str]]:
+    return [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if record.name == "mangatl.compose" and record.getMessage().startswith("inference provider")
+    ]
+
+
+def test_available_providers_is_onnxruntimes_own_list() -> None:
+    import onnxruntime
+
+    import mangatl.compose as module
+
+    assert module.available_providers() == onnxruntime.get_available_providers()
+
+
+def test_on_a_machine_with_only_the_cpu_every_loader_is_asked_for_the_cpu_only(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    keyless: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _available(monkeypatch, [_CPU])
+
+    build_pipeline(weights_dir)
+
+    assert loaders.detector_providers == [(_CPU,)], (
+        f"the detector was asked for {loaders.detector_providers}; with only the CPU"
+        " available, select_providers gives ('CPUExecutionProvider',) - a constant"
+        " request is AC-6's defect"
+    )
+    assert loaders.ocr_providers == [(_CPU,)]
+    assert [providers for _, providers in loaders.inpainter_loads] == [(_CPU,)]
+
+
+def test_with_cuda_available_every_loader_is_asked_for_cuda_then_cpu(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    keyless: None,
+) -> None:
+    build_pipeline(weights_dir, translate=False)
+
+    assert loaders.detector_providers == [(_CUDA, _CPU)]
+    assert loaders.ocr_providers == [(_CUDA, _CPU)]
+    assert [providers for _, providers in loaders.inpainter_loads] == [(_CUDA, _CPU)]
+
+
+def test_an_unknown_provider_on_the_machine_is_never_requested(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    keyless: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _available(monkeypatch, ["DmlExecutionProvider", "TensorrtExecutionProvider", _CPU])
+
+    build_pipeline(weights_dir, translate=False)
+
+    assert loaders.detector_providers == [(_CPU,)]
+    assert loaders.ocr_providers == [(_CPU,)]
+    assert [providers for _, providers in loaders.inpainter_loads] == [(_CPU,)]
+
+
+@pytest.mark.parametrize("translate", [True, False], ids=["translating", "no-translate"])
+def test_the_provider_in_use_is_logged_once_at_info_on_the_compose_logger(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    keyless: None,
+    caplog: pytest.LogCaptureFixture,
+    translate: bool,
+) -> None:
+    caplog.set_level("INFO", logger="mangatl.compose")
+
+    build_pipeline(weights_dir, translate=translate)
+
+    assert _provider_lines(caplog) == [(20, f"inference provider: {_CUDA}")], (
+        f"mangatl.compose logged {_provider_lines(caplog)}; AC-6 is exactly one INFO"
+        " line naming selected_provider(detector)"
+    )
+
+
+def test_the_log_names_the_provider_the_detector_runs_on_not_the_one_requested(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    keyless: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CUDA requested, CPU delivered - MT-002 E2's silent fallback, the case
+    the log line exists for. The request is asserted too, so this cannot pass
+    by never having asked for CUDA."""
+    caplog.set_level("INFO", logger="mangatl.compose")
+    loaders.detector_reports = [_CPU]
+
+    build_pipeline(weights_dir, translate=False)
+
+    assert loaders.detector_providers == [(_CUDA, _CPU)], "CUDA was not requested"
+    assert _provider_lines(caplog) == [(20, f"inference provider: {_CPU}")], (
+        f"mangatl.compose logged {_provider_lines(caplog)}; the detector reported the"
+        " CPU, so the honest line names the CPU (AC-6: the provider in use, not the"
+        " one requested)"
+    )
+
+
+def test_the_log_follows_the_selection_when_only_the_cpu_is_available(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    keyless: None,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caplog.set_level("INFO", logger="mangatl.compose")
+    _available(monkeypatch, [_CPU])
+
+    build_pipeline(weights_dir, translate=False)
+
+    assert _provider_lines(caplog) == [(20, f"inference provider: {_CPU}")]
+
+
+def test_the_fake_detector_honours_the_request_unless_told_otherwise() -> None:
+    """Fixture check on `_Loaders`: the default fake reports the first provider
+    requested, and a set `detector_reports` overrides it. Without this the
+    CUDA-requested-CPU-delivered test could be satisfied by a fake that always
+    says CPU."""
+    stubs = _Loaders()
+    honoured = stubs.load_detector(Path("d.onnx"), (_CUDA, _CPU))
+    stubs.detector_reports = [_CPU]
+    overridden = stubs.load_detector(Path("d.onnx"), (_CUDA, _CPU))
+
+    assert list(honoured.get_providers()) == [_CUDA]
+    assert list(overridden.get_providers()) == [_CPU]
+
+
+# -- MT-024 AC-9: the bundled models directory, the last branch ----------------------
+#
+# `resolve_models_dir(override, env, bundled=None)`: override, then
+# `env[MODELS_ENV]`, then `bundled` if it is a directory, else `ModelsNotFound`
+# as before. The two-argument tests above are the "behaves exactly as today"
+# half and are unchanged.
+#
+# RED: the function takes two arguments, so each three-argument call raises
+# `TypeError` - the missing parameter C-5 names.
+
+
+def test_the_resolver_takes_the_bundled_directory_as_an_optional_third_argument() -> None:
+    parameters = inspect.signature(resolve_models_dir).parameters
+
+    assert list(parameters) == ["override", "env", "bundled"]
+    assert parameters["bundled"].default is None
+
+
+def test_with_no_flag_and_no_variable_the_bundled_directory_is_used(tmp_path: Path) -> None:
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+
+    assert resolve_models_dir(None, {}, bundled) == bundled
+    assert resolve_models_dir(None, {}, bundled=bundled) == bundled
+
+
+def test_an_empty_variable_falls_through_to_the_bundled_directory(tmp_path: Path) -> None:
+    # `MANGATL_MODELS=` is the same statement as unset (see `Path("")` above).
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+
+    assert resolve_models_dir(None, {MODELS_ENV: ""}, bundled) == bundled
+
+
+def test_the_variable_still_wins_over_the_bundled_directory(tmp_path: Path) -> None:
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+    from_env = tmp_path / "from-the-environment"
+    from_env.mkdir()
+
+    assert resolve_models_dir(None, {MODELS_ENV: str(from_env)}, bundled) == from_env
+
+
+def test_the_override_still_wins_over_the_bundled_directory(tmp_path: Path) -> None:
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+    override = tmp_path / "from-the-flag"
+    override.mkdir()
+
+    assert resolve_models_dir(override, {}, bundled) == override
+
+
+def test_a_variable_naming_no_directory_is_refused_even_with_bundled_weights(
+    tmp_path: Path,
+) -> None:
+    """C-5: env, *then* bundled. A `$MANGATL_MODELS` the user set and mistyped
+    is refused by name as today, not silently replaced by the bundled weights."""
+    bundled = tmp_path / "bundled"
+    bundled.mkdir()
+    missing = tmp_path / "typo"
+
+    with pytest.raises(ModelsNotFound) as raised:
+        resolve_models_dir(None, {MODELS_ENV: str(missing)}, bundled)
+
+    assert missing.name in str(raised.value)
+
+
+@pytest.mark.parametrize("case", ["missing", "a file", "none"])
+def test_a_bundled_directory_that_is_not_there_is_the_old_refusal(
+    tmp_path: Path, case: str
+) -> None:
+    """A checkout with no fetched weights behaves exactly as today: the same
+    exception, the same sentence naming the variable the user could set."""
+    bundled: Path | None
+    if case == "missing":
+        bundled = tmp_path / "packaging" / "models"
+    elif case == "a file":
+        bundled = tmp_path / "models"
+        bundled.write_bytes(b"not a folder")
+    else:
+        bundled = None
+
+    with pytest.raises(ModelsNotFound) as raised:
+        resolve_models_dir(None, {}, bundled)
+
+    assert MODELS_ENV in str(raised.value), str(raised.value)
+
+
+def test_resolving_the_bundled_directory_does_not_check_the_weights(tmp_path: Path) -> None:
+    empty = tmp_path / "bundled"
+    empty.mkdir()
+
+    assert resolve_models_dir(None, {}, empty) == empty
+    assert list(empty.iterdir()) == []

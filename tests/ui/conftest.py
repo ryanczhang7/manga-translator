@@ -55,6 +55,41 @@ from PySide6.QtWidgets import QMainWindow
 from mangatl import app as app_module
 from mangatl.store.project import Project
 
+#: Where the UI tests' bundled models live: nowhere (MT-024).
+_NO_BUNDLE = "no bundled models here"
+
+
+def bundle_models_at(monkeypatch: pytest.MonkeyPatch, directory: Path) -> None:
+    """`bundled_models_dir()` answers `directory` for `mangatl.app`, at both
+    names it could reach it by - the name `mangatl.app` binds and the module
+    `mangatl.app_paths` (MT-024 C-3, C-5). `raising=False`: neither exists
+    before MT-024's GREEN."""
+    monkeypatch.setattr("mangatl.app.bundled_models_dir", lambda: directory, raising=False)
+    monkeypatch.setattr("mangatl.app_paths.bundled_models_dir", lambda: directory, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def original_check_bundled_models(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> object:
+    """MT-024 suite isolation, for every UI test.
+
+    Once a developer has run `packaging/fetch_models.py`, a real
+    `packaging/models/` holds 728 MB of weights. Without this, every `main()`
+    in the suite would hash all of it at startup (`check_bundled_models`, C-6),
+    and every real `resolve_models()` would answer that directory where the
+    tests expect `None` (AC-9) - green on CI, red on the developer's machine.
+
+    So `mangatl.app.check_bundled_models` is replaced with `lambda: None` and
+    `bundled_models_dir()` points at a directory that does not exist.
+    `test_app_startup_check.py` overrides either per test. The original
+    function (or `None`, before GREEN) is the fixture's value, for the tests
+    that exercise the real one."""
+    original = getattr(app_module, "check_bundled_models", None)
+    monkeypatch.setattr(app_module, "check_bundled_models", lambda: None, raising=False)
+    bundle_models_at(monkeypatch, tmp_path_factory.mktemp("bundle") / _NO_BUNDLE)
+    return original
+
 
 @pytest.fixture
 def every_opened_project_is_closed(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Project]]:

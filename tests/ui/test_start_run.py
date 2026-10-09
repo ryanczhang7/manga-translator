@@ -1485,6 +1485,51 @@ def test_resolve_models_reads_the_environment_at_call_time(
     assert app_module.resolve_models() == models_dir
 
 
+# MT-024 AC-9: `app.resolve_models()` passes the bundled directory
+# (`resolve_models_dir(None, os.environ, bundled_models_dir())`, C-5). The two
+# tests above stay true on a developer machine that has fetched the weights
+# because `tests/ui/conftest.py` points `bundled_models_dir` at a missing
+# directory for every UI test; these point it somewhere of their own.
+
+
+def _bundle_at(monkeypatch: pytest.MonkeyPatch, directory: Path) -> None:
+    """`bundled_models_dir()` answers `directory`, at the name `mangatl.app`
+    binds and at `mangatl.app_paths` (C-3, C-5); `raising=False` until GREEN."""
+    monkeypatch.setattr("mangatl.app.bundled_models_dir", lambda: directory, raising=False)
+    monkeypatch.setattr("mangatl.app_paths.bundled_models_dir", lambda: directory, raising=False)
+
+
+def test_resolve_models_finds_the_bundled_weights_when_nothing_else_names_a_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bundled = tmp_path / "bundled-models"
+    bundled.mkdir()
+    _bundle_at(monkeypatch, bundled)
+    monkeypatch.delenv(MODELS, raising=False)
+
+    assert app_module.resolve_models() == bundled
+
+
+def test_resolve_models_prefers_the_variable_to_the_bundled_weights(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, models_dir: Path
+) -> None:
+    bundled = tmp_path / "bundled-models"
+    bundled.mkdir()
+    _bundle_at(monkeypatch, bundled)
+    monkeypatch.setenv(MODELS, str(models_dir))
+
+    assert app_module.resolve_models() == models_dir
+
+
+def test_resolve_models_is_none_when_the_bundled_folder_is_missing_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _bundle_at(monkeypatch, tmp_path / "packaging" / "models")
+    monkeypatch.delenv(MODELS, raising=False)
+
+    assert app_module.resolve_models() is None
+
+
 def test_build_stages_is_build_pipeline_with_translation_on(
     monkeypatch: pytest.MonkeyPatch, models_dir: Path
 ) -> None:

@@ -49,16 +49,19 @@ for a client.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
 
+import onnxruntime as ort
 from anthropic import Anthropic
 
 from mangatl.clean.page import clean_page_image
 from mangatl.clean.session import load_inpainter
 from mangatl.detect.page import detect_page_regions
-from mangatl.detect.session import load_detector
+from mangatl.detect.session import load_detector, selected_provider
+from mangatl.models.providers import PROVIDER_PREFERENCE, select_providers
 from mangatl.ocr.page import transcribe_page_regions
 from mangatl.ocr.session import VOCAB_FILENAME, load_ocr, load_vocab
 from mangatl.pipeline.stage import Stage
@@ -78,8 +81,8 @@ __all__ = [
 
 #: The environment variable PO-4 told the user about, on 2026-09-17. A promise
 #: to a person typing it into a shell, so it is spelled out here and nowhere
-#: else. MT-024's AC-7 replaces the *last* branch of the resolution order with a
-#: bundled directory; this variable is not thrown away by that.
+#: else. MT-024's AC-9 puts the bundled directory *after* it in the resolution
+#: order; this variable is not thrown away by that, and still wins.
 MODELS_ENV: str = "MANGATL_MODELS"
 
 #: The detector graph, directly under the models directory (C-6).
@@ -98,16 +101,22 @@ INPAINTER_FILENAME: str = "lama_fp32.onnx"
 #: re-spelled.
 OCR_SUBDIR: str = "manga-ocr"
 
-#: The interim provider preference: CUDA, then CPU.
-#:
-#: **Not** CUDA/DirectML/CPU. D3's correction in `architecture.md` records that
-#: the chain is a packaging choice between mutually exclusive wheels rather than
-#: a runtime fallback, and this project installs `onnxruntime-gpu[cuda,cudnn]`.
-#: MT-024 owns the real `select_providers`; this constant is the interim and is
-#: the whole of provider selection until that story lands. Requesting CUDA is
-#: not getting it - `detect.session.selected_provider` is the honest answer,
-#: after the fact.
-PROVIDER_PREFERENCE: tuple[str, ...] = ("CUDAExecutionProvider", "CPUExecutionProvider")
+#: `PROVIDER_PREFERENCE` (CUDA, then CPU) is `mangatl.models.providers`' since
+#: MT-024, imported above and kept in `__all__` under the same name, so the two
+#: cannot drift. `build_pipeline` no longer requests it as a constant: it
+#: requests `select_providers(available_providers())`.
+
+_log = logging.getLogger("mangatl.compose")
+
+
+def available_providers() -> list[str]:
+    """The execution providers this onnxruntime build offers (MT-024 C-5).
+
+    What is *offered*, not what a session ends up on: that is
+    `selected_provider`, and `build_pipeline` logs it. A module attribute so
+    tests replace it by name rather than asking this machine.
+    """
+    return list(ort.get_available_providers())
 
 
 class ModelsNotFound(Exception):
@@ -120,13 +129,21 @@ class ModelsNotFound(Exception):
     """
 
 
-def resolve_models_dir(override: Path | None, env: Mapping[str, str]) -> Path:
-    """Where the weights are: `override` first, then `env[MODELS_ENV]`.
+def resolve_models_dir(
+    override: Path | None, env: Mapping[str, str], bundled: Path | None = None
+) -> Path:
+    """Where the weights are: `override`, then `env[MODELS_ENV]`, then `bundled`.
 
     **No silent default** (PO-4). A default pointing at a missing directory
     produces an onnxruntime error about a missing file instead of a sentence
-    naming the two things the user can do about it, so the third branch is a
+    naming the two things the user can do about it, so the last branch is a
     refusal rather than a guess.
+
+    **`bundled` is the weights the installer ships** (MT-024 AC-9): used only
+    when neither the flag nor the variable names anything, and only when it is
+    a directory - a checkout with no fetched weights refuses exactly as before.
+    A variable that is set and names no directory is still refused by name:
+    the user's typo is not silently replaced by the bundled weights.
 
     The environment arrives as an argument rather than being read out of
     `os.environ` here, which is what makes every branch below testable without
@@ -145,6 +162,8 @@ def resolve_models_dir(override: Path | None, env: Mapping[str, str]) -> Path:
         # is `Path(".")` and `Path(".").is_dir()` is `True`, so a resolver that
         # asked only whether the variable was present would answer "the
         # directory the user happened to be standing in" for `MANGATL_MODELS=`.
+        if bundled is not None and bundled.is_dir():
+            return bundled
         raise ModelsNotFound(
             "no models directory: pass --models PATH or set"
             f" ${MODELS_ENV} to the directory holding the model weights"
@@ -180,12 +199,19 @@ def build_pipeline(models_dir: Path, *, translate: bool = True) -> tuple[Stage, 
 
     Layout is C-6: the detector and the inpainter (`INPAINTER_FILENAME`, MT-065
     C-7) directly under `models_dir`, the OCR export in `OCR_SUBDIR`.
+
+    **Providers** (MT-024 AC-6): all three loaders are asked for
+    `select_providers(available_providers())`, and the provider the detector
+    session actually runs on is logged once at INFO - onnxruntime falls back to
+    the CPU silently (MT-002 E2), so the request is not the answer.
     """
+    providers = select_providers(available_providers())
     ocr_dir = models_dir / OCR_SUBDIR
-    detector = load_detector(models_dir / DETECTOR_FILENAME, PROVIDER_PREFERENCE)
-    ocr = load_ocr(ocr_dir, PROVIDER_PREFERENCE)
+    detector = load_detector(models_dir / DETECTOR_FILENAME, providers)
+    ocr = load_ocr(ocr_dir, providers)
     vocab = load_vocab(ocr_dir / VOCAB_FILENAME)
-    inpainter = load_inpainter(models_dir / INPAINTER_FILENAME, PROVIDER_PREFERENCE)
+    inpainter = load_inpainter(models_dir / INPAINTER_FILENAME, providers)
+    _log.info("inference provider: %s", selected_provider(detector))
     return build_stages(
         partial(detect_page_regions, detector),
         partial(clean_page_image, inpainter),

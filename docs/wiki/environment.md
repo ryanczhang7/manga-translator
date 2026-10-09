@@ -339,3 +339,17 @@ Code signing is not currently budgeted or decided.
 |---|---|---|
 | `mutmut` | the `mutation` gate and `/audit-mutations` | **Yes.** Optional gate, installed by `uv sync --all-extras` when it exists; never blocks a story |
 | CUDA execution provider | the `integration` gate's `gpu`-marked tests, and real-speed inference | **Yes for the gates** — `integration` is optional and CI skips it. **No for actually using the app** at usable speed |
+
+### Inno Setup, for the `installer` gate (MT-024 PO-4)
+
+**Measured 2026-10-08 on the development machine.** `winget install --id
+JRSoftware.InnoSetup -e --silent` installed Inno Setup **6.7.3**
+(`innosetup-6.7.3.exe`, hash verified by winget) as a **per-user** install at
+`%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`. It is **not** on `PATH`, and
+`C:\Program Files (x86)\Inno Setup 6\` does not exist here. The gate command in
+`project.conf` tries the per-user path, then the Program Files one, and is
+`blocked-when` neither is a file - so a machine without it reports BLOCKED, not
+FAIL. GitHub's `windows-latest` image lists Inno Setup under
+`C:\Program Files (x86)\Inno Setup 6\`: read from the image manifest, not yet
+observed in a run; MT-024's first CI run on the gate is where that becomes a
+measurement. Override with `ISCC=/path/to/ISCC.exe` in the environment.

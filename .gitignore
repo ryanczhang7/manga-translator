@@ -79,3 +79,8 @@ htmlcov/
 # Spike scratch — throwaway probe code and sample scans. Never committed.
 # MT-002 introduced this; see docs/backlog/stories/MT-002.md.
 spikes/
+
+# MT-024: the model weights the build gate fetches from Hugging Face by pinned
+# revision and SHA-256 (packaging/models.json). Generated, ~730 MB, never
+# authored; the manifest, not the files, is what is committed.
+packaging/models/
