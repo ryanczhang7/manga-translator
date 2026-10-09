@@ -171,6 +171,10 @@ def test_nothing_below_the_entry_point_imports_ui() -> None:
     # back door out of this one: `cli` stays listed and the new module that does
     # the constructing is listed beside it, so neither the entry point nor the
     # composition root can reach a widget. Eleven entries.
+    #
+    # MT-024 C-2 adds `mangatl.models` (twelve): the manifest parser and the
+    # provider selection are imported by the app's startup check and by the
+    # build's fetch script, and neither may pull in a widget.
     contract = _contract(UI)
     assert contract.get("type") == "forbidden"
     assert _modules(contract, "forbidden_modules") == ["mangatl.ui"]
@@ -181,6 +185,7 @@ def test_nothing_below_the_entry_point_imports_ui() -> None:
         "mangatl.compose",
         "mangatl.detect",
         "mangatl.domain",
+        "mangatl.models",
         "mangatl.ocr",
         "mangatl.pipeline",
         "mangatl.store",
@@ -231,6 +236,8 @@ def test_only_translate_may_import_anthropic() -> None:
     # for all eleven modules, `mangatl.pipeline` included, and the chain
     # `pipeline -> translate -> anthropic` is the one MT-011 C-1 exists to stop.
     # The test below keeps `mangatl.pipeline` listed, which is that confinement.
+    # MT-024 C-2: **ten** entries, `mangatl.models` added - the startup check
+    # and the fetch script import it, and it has no business reaching the SDK.
     contract = _contract(ANTHROPIC)
     assert contract.get("type") == "forbidden"
     assert _modules(contract, "forbidden_modules") == ["anthropic"]
@@ -239,6 +246,7 @@ def test_only_translate_may_import_anthropic() -> None:
         "mangatl.clean",
         "mangatl.detect",
         "mangatl.domain",
+        "mangatl.models",
         "mangatl.ocr",
         "mangatl.pipeline",
         "mangatl.store",
@@ -314,12 +322,15 @@ def test_only_detect_ocr_and_clean_may_import_onnxruntime() -> None:
     # removing that single name returns `5 kept, 0 broken` with the import still
     # in place. `allow_indirect_imports` is deliberately NOT added: it would
     # weaken the rule for all seven of the modules still listed here.
+    # MT-024 C-2: **eight** entries, `mangatl.models` added - C-2 says the
+    # startup check and the fetch must import it without the inference runtime.
     contract = _contract(ONNX)
     assert contract.get("type") == "forbidden"
     assert _modules(contract, "forbidden_modules") == ["onnxruntime"]
     assert _modules(contract, "source_modules") == [
         "mangatl.bench",
         "mangatl.domain",
+        "mangatl.models",
         "mangatl.pipeline",
         "mangatl.store",
         "mangatl.translate",

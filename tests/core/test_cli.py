@@ -133,10 +133,22 @@ class _CompositionRoot:
         return (self.stage,)
 
 
+def _bundle_at(monkeypatch: pytest.MonkeyPatch, directory: Path) -> None:
+    """`bundled_models_dir()` answers `directory`, at both names `main` could
+    reach it by: the name `mangatl.cli` binds (C-5) and the module
+    `mangatl.app_paths` (C-3). `raising=False`: neither exists before MT-024's
+    GREEN."""
+    monkeypatch.setattr("mangatl.cli.bundled_models_dir", lambda: directory, raising=False)
+    monkeypatch.setattr("mangatl.app_paths.bundled_models_dir", lambda: directory, raising=False)
+
+
 @pytest.fixture(autouse=True)
-def _no_ambient_models_directory(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`MANGATL_MODELS` out of the environment for every test in this file."""
+def _no_ambient_models_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`MANGATL_MODELS` out of the environment for every test in this file -
+    and, since MT-024, no bundled weights either: a developer who has run the
+    fetch has a real `packaging/models/`, and `main` would find it (AC-9)."""
     monkeypatch.delenv(_MODELS_ENV, raising=False)
+    _bundle_at(monkeypatch, tmp_path / "no bundled models here")
 
 
 @pytest.fixture
@@ -513,6 +525,25 @@ def test_the_models_flag_wins_over_the_environment_variable(
     assert main([str(source_dir), "--models", str(models_dir)]) == 0
 
     assert composition_root.models_dirs == [models_dir]
+
+
+def test_with_no_flag_and_no_variable_the_cli_runs_on_the_bundled_weights(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MT-024 AC-9: *"`mangatl-run` passes the bundled directory"* (C-5:
+    `resolve_models_dir(arguments.models, os.environ, bundled_models_dir())`).
+    RED: `main` passes two arguments and the run fails on PO-4's sentence."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    bundled = tmp_path / "bundled-models"
+    bundled.mkdir()
+    _bundle_at(monkeypatch, bundled)
+
+    assert main([str(source_dir)]) == 0
+
+    assert composition_root.models_dirs == [bundled]
 
 
 def test_a_run_with_no_models_directory_fails_before_it_creates_anything(
