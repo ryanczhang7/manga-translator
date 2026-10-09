@@ -151,6 +151,8 @@ detector licence, and 1.75 GB of CUDA runtime — both recorded in the audit.
 | `anthropic` (Python SDK) | 1.x | Official SDK for the chosen model. |
 | Model | **`claude-opus-5`**, adaptive thinking, `output_config.effort: "medium"` | Decision O4, §5. The brief's axis is accuracy, and this is the strongest model whose cost survives the $2 ceiling with headroom. |
 | Fallback model | `claude-sonnet-5` | Configurable, for a user who wants a cheaper run; ~40% of the Opus 5 cost at the same call shape. |
+| `google-genai` (Python SDK), model **`gemini-3.1-pro`** | *planned, EPIC-08 / MT-080* | **Added 2026-10-09 at the user's request.** Used when `GEMINI_API_KEY` is the key set (MT-078 PO-1). Same prompt, same 1,568 px image, same ledger. Rates **unverified** at planning ($2 in / $12 out per MTok, ≈90% cached discount, from a web search, not the official page); the row in `domain.rates` is pinned from the official page in MT-080 and the measured per-page cost lands in §5/O4's provider note. |
+| `openai` (Python SDK), model **`gpt-6.1-sol`** | *planned, EPIC-08 / MT-081* | **Added 2026-10-09 at the user's request.** Used when `OPENAI_API_KEY` is the key set. The flagship `gpt-6-astra` ($10/$50 per MTok) estimates ≈$2.24/chapter, over the ceiling, and was rejected by the user. Rates **unverified** at planning ($2 in / $10 out, cached input 0.1× listed for `gpt-6-astra`); pinned in MT-081. |
 
 ### Development tooling
 
@@ -378,6 +380,24 @@ no error is raised and `usage.cache_read_input_tokens` simply stays at zero. If
 Opus 5's minimum is above ≈1,500 tokens, the 19 cache reads never happen.
 MT-038 AC-2 is the measurement; a zero there is a finding about this estimate,
 not a defect in the code.
+
+**Other providers (added 2026-10-09, EPIC-08).** The table above and
+`cost-model.awk` are Claude's and stay so. Gemini (`gemini-3.1-pro`, MT-080)
+and OpenAI (`gpt-6.1-sol`, MT-081) are sent the *same* prompt and the same
+1,568 px page, so their costs are comparable with this one, and each story
+records its own measured per-page cost × 20 beside the $2.00 ceiling rather
+than re-deriving this table. Two facts that make the estimate different per
+provider, both to be confirmed from the official pages before a rate row is
+pinned: image tokens are counted by a different rule on each (the budget guard
+is unaffected - it projects from the observed mean, not from an image-token
+estimate; MT-078 `## Context`), and cached input is priced differently (no
+cache-write surcharge is expected on either; cache reads at ≈0.1× input,
+unverified). Measured figures:
+
+| Provider / model | Per page, measured | × 20 | Recorded in |
+|---|---|---|---|
+| Gemini `gemini-3.1-pro` | *pending MT-080 AC-8* | | MT-080 `## Notes` |
+| OpenAI `gpt-6.1-sol` | *pending MT-081 AC-8* | | MT-081 `## Notes` |
 
 ### O6 — vertical text and furigana
 

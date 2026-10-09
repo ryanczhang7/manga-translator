@@ -112,6 +112,16 @@ pass over stories whose artifact nothing exercised — the failure mode
    and `compose` (below), which is the composition root and has no display.
 4. **Only `translate` imports `anthropic`.** This is the contract that makes
    "one place spend can originate" a checked fact.
+   *Planned extension, 2026-10-09 (EPIC-08, at the user's request):* the same
+   rule, one contract each, for `google.genai` (MT-080) and `openai`
+   (MT-081), with the same ten `source_modules` and the same composition-root
+   exemption below - `compose` constructs each provider's client, exactly as
+   it constructs `Anthropic()`. `translate.provider` (MT-078) selects the
+   provider from the environment and imports **no** SDK, so selection is
+   tested with no credential and this rule is untouched by it. Each contract
+   is probed red before it counts (`## Gate probes` of the story that adds
+   it). This paragraph is amended into the rule proper when those stories
+   land.
 5. **Only `detect`, `ocr` and `clean` import `onnxruntime`** — *and the
    composition root, which is `mangatl.compose` and `mangatl.cli`.*
 
