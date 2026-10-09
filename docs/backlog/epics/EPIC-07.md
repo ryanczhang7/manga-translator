@@ -2,7 +2,7 @@
 id: EPIC-07
 title: Knowing whether it worked, and getting it onto the machine
 status: todo
-stories: [MT-029, MT-022, MT-023, MT-075, MT-024]
+stories: [MT-029, MT-022, MT-023, MT-075, MT-024, MT-076, MT-077]
 ---
 
 ## Goal
@@ -58,6 +58,15 @@ nothing in this epic supplies either.
 - **MT-024** — the Windows installer: frozen build, bundled weights with hash
   verification, and a test over the built tree proving the harness directories
   are absent from it.
+- **MT-076** — the installer carries its notices: `architecture.md` D13's five
+  obligations (GPL-3.0 text, component identification, corresponding-source
+  offer, Manga109-s attribution, and a drift test tying notices to the model
+  manifest). Split from MT-024 by its PO-3, 2026-10-08.
+- **MT-077** — first run asks for the API key and writes it to
+  `settings.json`; `compose` reads it from there. Without this the installed
+  app needs an environment variable, which the brief's section 6 forbids —
+  the gap between the installer and this epic's done-when. Split from MT-024
+  by its PO-3, 2026-10-08.
 
 ## Deliberately not in this epic
 
