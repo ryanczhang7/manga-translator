@@ -872,12 +872,19 @@ def test_start_run_anyway_on_an_over_budget_chapter_does_the_same(
     assert _hashes(folder) == before
 
 
-def test_start_follows_mangatl_runs_order_models_then_create_then_build_then_run(
+def test_start_follows_the_order_models_then_build_then_create_then_run(
     qtbot,  # type: ignore[no-untyped-def]
     world: World,
     tmp_path: Path,
     page_png: bytes,
 ) -> None:
+    """**Corrected in RED for MT-078 (A-1, amended C-4; `## Regressions` R-1).**
+    It was MT-059 C-3's order, "models, then create, then build, then run",
+    and asserted `"build (project exists: True)"`. MT-078's user decision
+    makes the window match `mangatl-run`: the stages are built **before** the
+    project exists, so a `ProviderError` from the builder leaves no
+    `<folder>.mtproj`. The run still comes after the create - the worker
+    opens the project, so the stage sees it."""
     folder = _pages_folder(tmp_path, "ch", 2, page_png)
     database = _project_dir(folder) / "project.db"
     order: list[str] = []
@@ -890,6 +897,7 @@ def test_start_follows_mangatl_runs_order_models_then_create_then_build_then_run
         if not order[-1].startswith("run"):
             order.append(
                 f"run on the GUI thread: {threading.current_thread() is threading.main_thread()}"
+                f" (project exists: {database.exists()})"
             )
 
     calls = Calls()
@@ -904,9 +912,12 @@ def test_start_follows_mangatl_runs_order_models_then_create_then_build_then_run
 
     assert order == [
         "models (project exists: False)",
-        "build (project exists: True)",
-        "run on the GUI thread: False",
-    ]
+        "build (project exists: False)",
+        "run on the GUI thread: False (project exists: True)",
+    ], (
+        f"Start ran {order}; MT-078 C-4 (A-1) is models, build, create, run - the"
+        " builder must see no project, the run must see one"
+    )
     assert builder.calls == [tmp_path], "the builder was not called exactly once with the models"
 
 
@@ -1765,6 +1776,12 @@ def test_a_provider_refusal_at_start_is_shown_as_the_windows_error(
         f"the window shows {target.headline.text()!r}; AC-8 is the exception's message"
     )
     assert window.run is None and window.run_panel is None, "a run started after the refusal"
+    # A-1 / amended C-4: the stages are built before the project is created,
+    # so a refusal leaves nothing beside the scans - as `mangatl-run` (AC-7).
+    assert not _project_dir(folder).exists(), (
+        f"a {name} at Start left {_project_dir(folder).name} beside the scans; AC-8 (A-1)"
+        " says no project directory is created"
+    )
 
 
 def test_control_an_error_that_is_not_a_provider_refusal_is_not_swallowed(
@@ -1779,20 +1796,21 @@ def test_control_an_error_that_is_not_a_provider_refusal_is_not_swallowed(
     which is also the mechanism the test above relies on to say "nothing
     escaped", so this is that mechanism's control.
 
-    **Green on arrival** (today's `_start` catches nothing). It earns its place
-    as the control of the capture mechanism, not as a red test.
+    The capture half is **green on arrival** (today's `_start` catches
+    nothing); it earns its place as the control of the capture mechanism.
+
+    The last assertion is amended C-4's order (A-1), reachable here because
+    this test imports nothing from `mangatl.translate.provider`: the builder
+    runs before `create_project`, so a builder that raises - anything - leaves
+    no project. Red today, because today's `_start` creates first.
     """
 
     def explode() -> None:
         raise RuntimeError("a bug, not a refusal")
 
     builder = Builder(on_call=explode)
-    window = _window(
-        qtbot,
-        world,
-        _pages_folder(tmp_path, "ch", 1, page_png),
-        RunSetup(_models(tmp_path), builder),
-    )
+    folder = _pages_folder(tmp_path, "ch", 1, page_png)
+    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder))
 
     with qtbot.capture_exceptions() as caught:
         _press_start(window)
@@ -1802,3 +1820,7 @@ def test_control_an_error_that_is_not_a_provider_refusal_is_not_swallowed(
         " ProviderError only"
     )
     assert not isinstance(window.centralWidget(), FolderDropTarget)
+    assert not _project_dir(folder).exists(), (
+        f"{_project_dir(folder).name} was created although build_stages raised; amended"
+        " C-4 (A-1) builds the stages before it creates the project"
+    )
