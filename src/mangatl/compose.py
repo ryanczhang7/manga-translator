@@ -32,24 +32,22 @@ of the *"Only translate imports anthropic"* contract's source list for it,
 leaving ten entries and adding no `allow_indirect_imports` - so `pipeline` is
 still confined, and `pipeline -> translate -> anthropic` is still caught.
 
-**The API key is `Anthropic()`'s own environment lookup for now.**
-`%APPDATA%\\mangatl\\settings.json` is MT-024's. Measured: with
-`ANTHROPIC_API_KEY` absent, `Anthropic()` constructs successfully and leaves
-`api_key` as `None`, raising at request time rather than at construction. So
-`mangatl-run` on a keyless machine still starts, still detects, cleans and OCRs,
-and fails on the first page that needs a call - reaching the user as
-`run aborted: <error>` through the runner's general arm rather than as a
-traceback out of this function. That is the behaviour to expect, not a defect,
-and MT-044 A-1 records that the user chose to keep it: a run that *silently*
-did not translate is the failure mode EPIC-04's budget work exists to make
-visible. The way to run without a key is `mangatl-run --no-translate`, which
-this module answers with `translate=False` and a stage list that never reaches
-for a client.
+**The provider is selected before anything loads** (MT-078 C-2). Which
+provider translates is `mangatl.translate.provider.select_provider`'s answer
+(PO-1: the one key set, else `--provider` / `MANGATL_PROVIDER`), and a keyless
+or ambiguous environment is a `ProviderError` raised before any weight is read
+- where MT-044 A-1 let a keyless run load, detect, clean and OCR and then abort
+on its first page (PO-4: the same loud failure, made cheaper). The Anthropic
+client is still `Anthropic()`'s own environment lookup; passing the key
+explicitly is MT-077's. The way to run without a key is still
+`mangatl-run --no-translate`, which this module answers with `translate=False`,
+no selection and a stage list that never reaches for a client.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
@@ -66,7 +64,14 @@ from mangatl.ocr.page import transcribe_page_regions
 from mangatl.ocr.session import VOCAB_FILENAME, load_ocr, load_vocab
 from mangatl.pipeline.stage import Stage
 from mangatl.pipeline.stages import build_stages
+from mangatl.pipeline.translate_stage import PageTranslator
 from mangatl.translate.client import translate_page
+from mangatl.translate.provider import (
+    PROVIDER_VAR,
+    ProviderUnavailable,
+    Selection,
+    select_provider,
+)
 
 __all__ = [
     "DETECTOR_FILENAME",
@@ -171,7 +176,9 @@ def resolve_models_dir(
     return _directory(Path(value))
 
 
-def build_pipeline(models_dir: Path, *, translate: bool = True) -> tuple[Stage, ...]:
+def build_pipeline(
+    models_dir: Path, *, translate: bool = True, selection: Selection | None = None
+) -> tuple[Stage, ...]:
     """Load the weights out of `models_dir` and bind them into the stage list.
 
     The one function in the project that may construct an inference session or
@@ -204,7 +211,20 @@ def build_pipeline(models_dir: Path, *, translate: bool = True) -> tuple[Stage, 
     `select_providers(available_providers())`, and the provider the detector
     session actually runs on is logged once at INFO - onnxruntime falls back to
     the CPU silently (MT-002 E2), so the request is not the answer.
+
+    **`selection` says which translation provider to bind** (MT-078 C-2), and
+    is keyword-only and ignored under `translate=False` - no selection is made
+    at all then. Under `translate=True` with `selection=None` this function
+    selects for itself from the real environment (`MANGATL_PROVIDER`, else the
+    one key set; an empty choice is no choice, PO-7) - the window's path. Either
+    way the provider is resolved, and a refusal raised, **before** any weight is
+    loaded, so a keyless machine fails in milliseconds. `anthropic` binds
+    `partial(translate_page, Anthropic())` exactly as before - the bare client,
+    its own key lookup (MT-044 C-13); the key in the selection is unused for it
+    in this story. Every other provider is `ProviderUnavailable` until its
+    adapter story adds an arm to the `match` (PO-5).
     """
+    translator = _translator(selection) if translate else None
     providers = select_providers(available_providers())
     ocr_dir = models_dir / OCR_SUBDIR
     detector = load_detector(models_dir / DETECTOR_FILENAME, providers)
@@ -216,8 +236,20 @@ def build_pipeline(models_dir: Path, *, translate: bool = True) -> tuple[Stage, 
         partial(detect_page_regions, detector),
         partial(clean_page_image, inpainter),
         partial(transcribe_page_regions, ocr, vocab),
-        partial(translate_page, Anthropic()) if translate else None,
+        translator,
     )
+
+
+def _translator(selection: Selection | None) -> PageTranslator:
+    """The page translator for `selection`, or the environment's choice when
+    there is none; a `ProviderError` when there is no translator to bind."""
+    if selection is None:
+        selection = select_provider(os.environ.get(PROVIDER_VAR) or None, os.environ)
+    match selection.provider:
+        case "anthropic":
+            return partial(translate_page, Anthropic())
+        case other:
+            raise ProviderUnavailable(f"translation with {other} is not available yet")
 
 
 def _directory(path: Path) -> Path:

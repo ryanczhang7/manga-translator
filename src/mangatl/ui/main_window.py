@@ -40,6 +40,7 @@ from PySide6.QtWidgets import QLabel, QMainWindow, QWidget
 from mangatl.domain.page import Chapter
 from mangatl.pipeline.runner import RUN_FINISHED, RunOutcome
 from mangatl.store.project import create_project, project_dir_for
+from mangatl.translate.provider import ProviderError
 from mangatl.ui.intake import FolderDropTarget, choose_folder_dialog
 from mangatl.ui.progress import RunProgressPanel
 from mangatl.ui.run import NO_MODELS, RunController, RunSetup
@@ -115,20 +116,27 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _start(self, chapter: Chapter) -> None:
-        """The Start sequence, in `mangatl-run`'s order: models, then create,
-        then build, then run (C-3) - "read" is `chapter`, already read. Nothing
-        is created without a models folder (AC-7)."""
+        """The Start sequence: models, then build, then create, then run -
+        "read" is `chapter`, already read. Nothing is created without a models
+        folder (AC-7), nor when the stages cannot be built: a `ProviderError`
+        (no key, several keys, no adapter yet) is shown as the window's error
+        and leaves no project behind, matching `mangatl-run` (MT-078 C-4, A-1).
+        Any other exception from the builder propagates."""
         setup = self._run_setup
         models = setup.resolve_models() if setup is not None else None
         if setup is None or models is None:
             self.show_error(NO_MODELS)
+            return
+        try:
+            stages = setup.build_stages(models)
+        except ProviderError as error:
+            self.show_error(str(error))
             return
         project_dir = project_dir_for(chapter.source_dir)
         # Closed again here: the worker opens its own, as a `Project` crosses
         # no thread (C-1).
         with create_project(chapter, project_dir):
             pass
-        stages = setup.build_stages(models)
 
         panel = RunProgressPanel(chapter=chapter)
         # The summary is deleted with its focused button; focus must not be

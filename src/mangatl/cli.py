@@ -26,10 +26,14 @@ a machine with no weights where it used to write an empty translation.
 paying for it.** The flag asks the composition root for a detect, clean and OCR
 stage list (MT-065 PO-1: cleaning is local and free, so the flag keeps it),
 and with it no API client is constructed and nothing is billed. It is an
-opt-out the user types: without it, a machine with no `ANTHROPIC_API_KEY` still
-aborts on the first page that needs a call, because a run that quietly did not
-translate is the failure mode EPIC-04's budget work exists to make visible
-(A-1).
+opt-out the user types, because a run that quietly did not translate is the
+failure mode EPIC-04's budget work exists to make visible (A-1).
+
+**MT-078: the provider is the one whose key is set.** Without the flag, the run
+selects a provider before it reads or creates anything - `--provider`, else
+`MANGATL_PROVIDER`, else the one key set - and a machine with no key, or with
+several and no choice, gets one line and exit 1 with nothing loaded and nothing
+left behind.
 """
 
 from __future__ import annotations
@@ -47,6 +51,13 @@ from mangatl.pipeline.bake import bake_chapter
 from mangatl.pipeline.runner import RUN_FINISHED, run_chapter
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
 from mangatl.store.project import ProjectExists, create_project, open_project, project_dir_for
+from mangatl.translate.provider import (
+    PROVIDER_VAR,
+    PROVIDERS,
+    ProviderError,
+    Selection,
+    select_provider,
+)
 
 __all__ = ["main"]
 
@@ -81,6 +92,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="detect, clean and transcribe only; make no API calls and spend nothing",
     )
+    parser.add_argument(
+        "--provider",
+        choices=PROVIDERS,
+        default=None,
+        help=f"the translation provider, when more than one API key is set (or set {PROVIDER_VAR})",
+    )
     arguments = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     source_dir: Path = arguments.folder
 
@@ -93,6 +110,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         models_dir = resolve_models_dir(arguments.models, os.environ, bundled_models_dir())
     except ModelsNotFound as error:
         return _fail(str(error))
+
+    # MT-078 C-3: which provider translates, decided before anything is read
+    # or created, so a keyless or ambiguous run fails in one line and leaves
+    # nothing behind. The flag beats the variable; an empty variable is no
+    # choice (PO-7). `--no-translate` makes no selection at all.
+    selection: Selection | None = None
+    if not arguments.no_translate:
+        try:
+            selection = select_provider(
+                arguments.provider or os.environ.get(PROVIDER_VAR) or None, os.environ
+            )
+        except ProviderError as error:
+            return _fail(str(error))
 
     if not source_dir.is_dir():
         return _fail(f"no such folder: {source_dir}")
@@ -119,7 +149,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # the tool does with a user's money is a decision this entry point makes
     # out loud, not one it leaves to whatever the builder's default happens to
     # be on the day someone changes it.
-    stages = build_pipeline(models_dir, translate=not arguments.no_translate)
+    stages = build_pipeline(models_dir, translate=not arguments.no_translate, selection=selection)
     with project:
         filenames = {page.ordinal: page.filename for page in project.pages()}
         outcome = run_chapter(project, stages, _reporter(filenames), _never)
