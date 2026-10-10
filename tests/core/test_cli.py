@@ -982,3 +982,141 @@ def test_the_provider_flag_beats_the_choice_variable(
     assert [_pair(s) for s in composition_root.selections] == [
         ("openai", _OTHER_KEYS["OPENAI_API_KEY"])
     ], f"the flag did not beat the variable: {composition_root.selections!r}"
+
+
+# -- MT-078 AC-7 as amended by A-2: a provider with no translator yet ----------
+#
+# With only a Gemini or only an OpenAI key, selection succeeds and it is
+# `compose.build_pipeline` that refuses, with `ProviderUnavailable` (C-2).
+# Amended C-3 calls `build_pipeline` after `read_chapter` and BEFORE
+# `create_project`, inside `except ProviderError -> _fail(str(error))`.
+#
+# **These run through the REAL `mangatl.compose.build_pipeline`**, not the
+# `composition_root` double, with its four loaders, `available_providers` and
+# `Anthropic` replaced at `mangatl.compose`'s own names. A double taught to
+# raise `ProviderUnavailable` for a non-anthropic selection would restate
+# compose's dispatch inside this file, so the test would pass against the
+# double's idea of compose rather than compose itself. With the real function
+# the criterion is observed end to end: compose refuses, main catches the
+# refusal, and the recorders show that no weight and no client were reached.
+# The loaders record and then raise, so a build that went past the refusal
+# fails loudly here instead of carrying fake sessions on.
+
+
+class _LoaderReached(Exception):
+    """A loader was called: the refusal did not precede the weights."""
+
+
+class _WeightsRecorder:
+    """`mangatl.compose`'s loaders and client, replaced, recording each reach."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.reached: list[str] = []
+        for name in ("load_detector", "load_ocr", "load_vocab", "load_inpainter", "Anthropic"):
+            monkeypatch.setattr(f"mangatl.compose.{name}", self._recorder(name))
+        monkeypatch.setattr("mangatl.compose.available_providers", lambda: ["CPUExecutionProvider"])
+
+    def _recorder(self, name: str) -> Callable[..., object]:
+        def record(*args: object, **kwargs: object) -> object:
+            self.reached.append(name)
+            raise _LoaderReached(name)
+
+        return record
+
+
+_UNAVAILABLE_CASES = {
+    "gemini-key-only": ({"GEMINI_API_KEY": "sk-SECRET-gem-4567"}, [], "gemini"),
+    "openai-key-only-with-flag": (
+        {"OPENAI_API_KEY": "sk-SECRET-oai-89ab"},
+        ["--provider", "openai"],
+        "openai",
+    ),
+    "two-keys-variable-chooses-gemini": (
+        {"ANTHROPIC_API_KEY": _DEFAULT_KEY, "GEMINI_API_KEY": "sk-SECRET-gem-4567"},
+        [],
+        "gemini",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_UNAVAILABLE_CASES))
+def test_a_provider_with_no_translator_yet_is_refused_in_one_line_and_leaves_nothing(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    models_dir: Path,
+    case: str,
+) -> None:
+    """**AC-7 as amended by A-2.** The orchestrator reproduced this under PO-9:
+    `ProviderUnavailable` raised by `build_pipeline` after `create_project`
+    reached the user as a traceback and left a `.mtproj` behind. Assertions:
+    a non-zero exit, exactly one stderr line, empty stdout, no traceback, no key
+    printed, no project, no output folder, and no loader or client reached."""
+    env, extra_arguments, provider = _UNAVAILABLE_CASES[case]
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    if case == "two-keys-variable-chooses-gemini":
+        monkeypatch.setenv("MANGATL_PROVIDER", "gemini")
+    weights = _WeightsRecorder(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes)
+
+    escaped: BaseException | None = None
+    code = None
+    try:
+        code = main([str(source_dir), "--models", str(models_dir), *extra_arguments])
+    except Exception as error:  # the defect A-2 exists to remove
+        escaped = error
+
+    left_behind = project_dir_for(source_dir).exists()
+    assert escaped is None, (
+        f"main let {type(escaped).__name__}: {escaped} escape - a traceback for the"
+        f" user (AC-7, A-2); project left beside the scans: {left_behind}"
+    )
+    captured = capsys.readouterr()
+    assert code is not None and code != 0, f"the run reported {code!r}"
+    assert captured.err.splitlines() == [
+        f"mangatl-run: translation with {provider} is not available yet"
+    ], f"stderr was {captured.err!r}"
+    assert captured.out == "", f"the refusal printed to stdout as well: {captured.out!r}"
+    assert "Traceback" not in captured.err
+    leaked = [v for v in env.values() if v in captured.err + captured.out]
+    assert leaked == [], f"a key value reached the terminal (C-6): {leaked}"
+    assert not left_behind, (
+        "a project was created beside the scans before the run found out its"
+        " provider has no translator (AC-7: before any project directory is created)"
+    )
+    assert not _output_dir_for(source_dir).exists()
+    assert weights.reached == [], (
+        f"{weights.reached} was reached before the refusal (AC-7: before the weights are loaded)"
+    )
+
+
+def test_the_composition_root_is_asked_before_the_project_is_created(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Amended C-3's order for a run that proceeds: `read_chapter`, then
+    `build_pipeline`, then `create_project`. The double records whether the
+    project existed when it was asked. Before A-2 it did, because `main`
+    created the project first."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    root = _CompositionRoot()
+    seen: list[bool] = []
+
+    def build(models_dir: Path, **keywords: object) -> tuple[Stage, ...]:
+        seen.append(project_dir_for(source_dir).exists())
+        return root(models_dir, **keywords)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("mangatl.cli.build_pipeline", build)
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    assert seen == [False], (
+        f"build_pipeline saw the project existing: {seen}; amended C-3 (A-2) builds"
+        " before it creates, so a refusal leaves nothing behind"
+    )
+    assert root.stage.ran == list(range(len(_SOURCE_PAGES))), "the run did not walk the chapter"
