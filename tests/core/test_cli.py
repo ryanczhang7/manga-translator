@@ -75,6 +75,14 @@ _FILENAMES: list[str] = [name for name, _, _ in _SOURCE_PAGES]
 #: file for one string. `test_compose.py` is where the constant is pinned.
 _MODELS_ENV = "MANGATL_MODELS"
 
+#: MT-078 PO-1's three key variables and the choice variable, spelled out for
+#: the same reason `_MODELS_ENV` is.
+_PROVIDER_VARS = ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "MANGATL_PROVIDER")
+
+#: The dummy Anthropic key every test starts with. Recognisable, so a test can
+#: assert it never reaches the user's terminal (C-6).
+_DEFAULT_KEY = "sk-SECRET-test-key-0123"
+
 
 # -- the composition root, replaced at the seam C-3 names ----------------------
 
@@ -125,11 +133,20 @@ class _CompositionRoot:
     def __init__(self) -> None:
         self.models_dirs: list[Path] = []
         self.translate_flags: list[bool | None] = []
+        #: MT-078 C-3: `selection=` as `main` passed it, or `None` where it passed none.
+        self.selections: list[object] = []
         self.stage = _CountingStage()
 
-    def __call__(self, models_dir: Path, *, translate: bool | None = None) -> tuple[Stage, ...]:
+    def __call__(
+        self,
+        models_dir: Path,
+        *,
+        translate: bool | None = None,
+        selection: object = None,
+    ) -> tuple[Stage, ...]:
         self.models_dirs.append(models_dir)
         self.translate_flags.append(translate)
+        self.selections.append(selection)
         return (self.stage,)
 
 
@@ -149,6 +166,24 @@ def _no_ambient_models_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     fetch has a real `packaging/models/`, and `main` would find it (AC-9)."""
     monkeypatch.delenv(_MODELS_ENV, raising=False)
     _bundle_at(monkeypatch, tmp_path / "no bundled models here")
+
+
+@pytest.fixture(autouse=True)
+def _exactly_one_provider_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**MT-078 (C-2's caller list): every test starts with exactly
+    `ANTHROPIC_API_KEY` set**, to a dummy, and the other two keys and
+    `MANGATL_PROVIDER` deleted.
+
+    Since MT-078 `main` selects a provider out of the real environment before
+    it asks for the stages (C-3), so every translating run in this file -
+    which, before this fixture, controlled no key variable at all - would pass
+    on a developer's machine with one key exported and fail on a keyless CI
+    runner, or the other way round with two. The AC-7 tests below set their
+    own environment on top of this one.
+    """
+    for name in _PROVIDER_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", _DEFAULT_KEY)
 
 
 @pytest.fixture
@@ -672,3 +707,416 @@ def test_the_flag_is_one_the_parser_knows_about_and_tells_the_user_about(
     assert "--no-translate" in capsys.readouterr().out, (
         "mangatl-run --help does not mention --no-translate"
     )
+
+
+def test_the_provider_flag_is_one_the_parser_knows_about_and_tells_the_user_about(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """MT-078 C-3: `--provider` is declared, so it is in `--help` and a typo
+    in it is refused by argparse rather than sniffed out of `argv`."""
+    with pytest.raises(SystemExit) as raised:
+        main(["--help"])
+
+    assert raised.value.code == 0
+    assert "--provider" in capsys.readouterr().out, "mangatl-run --help does not mention --provider"
+
+
+# -- MT-078 AC-4/AC-7: choosing a provider, and refusing before anything runs --
+#
+# `main` selects after resolving the models directory and before `is_dir`,
+# `read_chapter` and `create_project` (C-3): `select_provider(arguments.provider
+# or os.environ.get("MANGATL_PROVIDER"), os.environ)`, unless `--no-translate`.
+# A refusal is `_fail(str(error))`: exit non-zero, ONE line on stderr - the
+# `mangatl-run: ` prefix every `_fail` line carries, then the exception's
+# message, pinned exactly - nothing on stdout, no traceback, the composition
+# root never asked (that is "before the weights are loaded") and no project
+# beside the scans.
+#
+# The messages are spelled out, not imported: importing
+# `mangatl.translate.provider` at the top of this file would take every test in
+# it dark in RED, and the words are a promise to the user (C-1, pinned in
+# `test_translate_provider.py` and repeated here so the two cannot drift
+# silently - a change to one fails the other).
+
+_NO_KEY = (
+    "no API key is set: set ANTHROPIC_API_KEY, GEMINI_API_KEY or OPENAI_API_KEY,"
+    " or run with --no-translate"
+)
+_AMBIGUOUS_ANTHROPIC_OPENAI = (
+    "API keys are set for more than one provider (anthropic, openai);"
+    " choose one with --provider or MANGATL_PROVIDER"
+)
+_OTHER_KEYS = {"GEMINI_API_KEY": "sk-SECRET-gem-4567", "OPENAI_API_KEY": "sk-SECRET-oai-89ab"}
+
+
+def _refused(
+    capsys: pytest.CaptureFixture[str],
+    code: int,
+    source_dir: Path,
+    composition_root: _CompositionRoot,
+) -> list[str]:
+    """The common half of every AC-7 refusal; returns stderr's lines."""
+    captured = capsys.readouterr()
+    assert code != 0, "a run that could not select a provider reported success"
+    assert "Traceback" not in captured.err + captured.out, "a traceback reached the user"
+    assert captured.out == "", f"the refusal printed to stdout as well: {captured.out!r}"
+    secrets = [_DEFAULT_KEY, *_OTHER_KEYS.values()]
+    leaked = [s for s in secrets if s in captured.err + captured.out]
+    assert leaked == [], f"a key value reached the terminal (C-6): {leaked}"
+    assert composition_root.models_dirs == [], (
+        "the composition root was asked to load the weights before the provider"
+        " was settled (AC-7: before the weights are loaded)"
+    )
+    assert not project_dir_for(source_dir).exists(), (
+        "a project was created beside the scans before the run found out it had no"
+        " provider (AC-7: before any project directory is created)"
+    )
+    assert not _output_dir_for(source_dir).exists()
+    return captured.err.splitlines()
+
+
+def test_with_no_key_the_run_refuses_in_one_line_before_anything_is_built(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**AC-7, no key** (AC-3's message). Notes PO-4: MT-044 left this run
+    loading the weights and aborting on the first page; now it is one line."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    lines = _refused(capsys, code, source_dir, composition_root)
+    assert lines == [f"mangatl-run: {_NO_KEY}"]
+
+
+def test_with_two_keys_and_no_choice_the_run_refuses_to_guess(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**AC-7, several keys and no choice** (AC-2's message). The keys are
+    recognisable, and `_refused` checks neither reached the terminal (C-6)."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    monkeypatch.setenv("OPENAI_API_KEY", _OTHER_KEYS["OPENAI_API_KEY"])
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    lines = _refused(capsys, code, source_dir, composition_root)
+    assert lines == [f"mangatl-run: {_AMBIGUOUS_ANTHROPIC_OPENAI}"]
+
+
+@pytest.mark.parametrize("how", ["flag", "variable"])
+def test_a_chosen_provider_whose_key_is_missing_is_refused_by_name(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    how: str,
+) -> None:
+    """**AC-7, a missing key for the chosen provider** (AC-4's refusal), by
+    either route to the choice. Only Anthropic's key is set: falling back to it
+    is the guess PO-1 forbids."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    arguments = [str(source_dir), "--models", str(models_dir)]
+    if how == "flag":
+        arguments += ["--provider", "openai"]
+    else:
+        monkeypatch.setenv("MANGATL_PROVIDER", "openai")
+
+    code = main(arguments)
+
+    lines = _refused(capsys, code, source_dir, composition_root)
+    assert lines == ["mangatl-run: provider openai was chosen but OPENAI_API_KEY is not set"]
+
+
+def test_an_unknown_provider_in_the_variable_is_refused_with_the_valid_names(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**AC-7 / AC-5 through `MANGATL_PROVIDER`**, the path argparse cannot
+    guard (C-3): `UnknownProvider`'s message, one line."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    monkeypatch.setenv("MANGATL_PROVIDER", "Anthropic")
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    lines = _refused(capsys, code, source_dir, composition_root)
+    assert lines == [
+        "mangatl-run: unknown provider 'Anthropic': choose one of anthropic, gemini, openai"
+    ]
+
+
+def test_an_unknown_provider_flag_is_argparses_usage_error(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**AC-7 / AC-5 at the flag** (C-3: `choices=PROVIDERS`). argparse's own
+    refusal is the accepted form: exit 2, the bad value and "invalid choice"
+    named, and still nothing built and nothing created."""
+    source_dir = _build_source(tmp_path, png_bytes)
+
+    with pytest.raises(SystemExit) as raised:
+        main([str(source_dir), "--models", str(models_dir), "--provider", "bogus"])
+
+    assert raised.value.code == 2
+    err = capsys.readouterr().err
+    assert "invalid choice" in err and "'bogus'" in err, f"argparse said: {err!r}"
+    assert composition_root.models_dirs == []
+    assert not project_dir_for(source_dir).exists()
+
+
+def test_with_no_translate_no_selection_is_attempted_even_with_no_key(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**AC-7's last clause**: `--no-translate` attempts no selection, so none
+    of the refusals can occur - here with no key at all AND a choice variable
+    that is not a provider, which would refuse two different ways.
+
+    **Green on arrival** (today's `main` selects nothing): it is a guard on
+    GREEN's ordering, not a red test. Its probe needs GREEN's code - see the
+    story's handoff.
+    """
+    source_dir = _build_source(tmp_path, png_bytes)
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    monkeypatch.setenv("MANGATL_PROVIDER", "claude")
+
+    code = main([str(source_dir), "--models", str(models_dir), "--no-translate"])
+
+    assert code == 0, f"--no-translate with no key failed: {capsys.readouterr().err!r}"
+    assert composition_root.translate_flags == [False]
+    assert composition_root.stage.ran == list(range(len(_SOURCE_PAGES)))
+
+
+def _pair(selection: object) -> tuple[object, object]:
+    """`(provider, api_key)` of what `main` passed, or the bare value when it
+    passed something that is not a selection (`None`: it passed nothing)."""
+    return (getattr(selection, "provider", selection), getattr(selection, "api_key", None))
+
+
+def test_the_selection_main_makes_is_handed_to_the_composition_root(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """C-3: `selection=selection` reaches `build_pipeline`. With the fixture's
+    one Anthropic key, that is Anthropic with that key - so the composition
+    root does not select a second time from an environment `main` already
+    read."""
+    source_dir = _build_source(tmp_path, png_bytes)
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    assert [_pair(s) for s in composition_root.selections] == [("anthropic", _DEFAULT_KEY)], (
+        f"main handed the composition root {composition_root.selections!r}; C-3 passes"
+        " the Selection it made"
+    )
+    from mangatl.translate.provider import Selection
+
+    assert composition_root.selections == [Selection("anthropic", _DEFAULT_KEY)]
+
+
+def test_the_choice_variable_picks_among_several_keys(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    monkeypatch: pytest.MonkeyPatch,
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """AC-4 through the variable: all three keys set, `MANGATL_PROVIDER=gemini`,
+    and the selection is gemini with gemini's key. (The composition root is
+    replaced, so gemini's missing adapter is not reached here.)"""
+    source_dir = _build_source(tmp_path, png_bytes)
+    for name, value in _OTHER_KEYS.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("MANGATL_PROVIDER", "gemini")
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    assert [_pair(s) for s in composition_root.selections] == [
+        ("gemini", _OTHER_KEYS["GEMINI_API_KEY"])
+    ]
+
+
+def test_the_provider_flag_beats_the_choice_variable(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    monkeypatch: pytest.MonkeyPatch,
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**AC-4: "the flag winning when both are given"** - which C-1 makes the
+    caller's job, so it is pinned here, at the caller. `--provider openai`
+    with `MANGATL_PROVIDER=gemini` and every key set: openai, with openai's
+    key. A `main` that let the variable win hands over gemini."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    for name, value in _OTHER_KEYS.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("MANGATL_PROVIDER", "gemini")
+
+    code = main([str(source_dir), "--models", str(models_dir), "--provider", "openai"])
+
+    assert code == 0
+    assert [_pair(s) for s in composition_root.selections] == [
+        ("openai", _OTHER_KEYS["OPENAI_API_KEY"])
+    ], f"the flag did not beat the variable: {composition_root.selections!r}"
+
+
+# -- MT-078 AC-7 as amended by A-2: a provider with no translator yet ----------
+#
+# With only a Gemini or only an OpenAI key, selection succeeds and it is
+# `compose.build_pipeline` that refuses, with `ProviderUnavailable` (C-2).
+# Amended C-3 calls `build_pipeline` after `read_chapter` and BEFORE
+# `create_project`, inside `except ProviderError -> _fail(str(error))`.
+#
+# **These run through the REAL `mangatl.compose.build_pipeline`**, not the
+# `composition_root` double, with its four loaders, `available_providers` and
+# `Anthropic` replaced at `mangatl.compose`'s own names. A double taught to
+# raise `ProviderUnavailable` for a non-anthropic selection would restate
+# compose's dispatch inside this file, so the test would pass against the
+# double's idea of compose rather than compose itself. With the real function
+# the criterion is observed end to end: compose refuses, main catches the
+# refusal, and the recorders show that no weight and no client were reached.
+# The loaders record and then raise, so a build that went past the refusal
+# fails loudly here instead of carrying fake sessions on.
+
+
+class _LoaderReached(Exception):
+    """A loader was called: the refusal did not precede the weights."""
+
+
+class _WeightsRecorder:
+    """`mangatl.compose`'s loaders and client, replaced, recording each reach."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.reached: list[str] = []
+        for name in ("load_detector", "load_ocr", "load_vocab", "load_inpainter", "Anthropic"):
+            monkeypatch.setattr(f"mangatl.compose.{name}", self._recorder(name))
+        monkeypatch.setattr("mangatl.compose.available_providers", lambda: ["CPUExecutionProvider"])
+
+    def _recorder(self, name: str) -> Callable[..., object]:
+        def record(*args: object, **kwargs: object) -> object:
+            self.reached.append(name)
+            raise _LoaderReached(name)
+
+        return record
+
+
+_UNAVAILABLE_CASES = {
+    "gemini-key-only": ({"GEMINI_API_KEY": "sk-SECRET-gem-4567"}, [], "gemini"),
+    "openai-key-only-with-flag": (
+        {"OPENAI_API_KEY": "sk-SECRET-oai-89ab"},
+        ["--provider", "openai"],
+        "openai",
+    ),
+    "two-keys-variable-chooses-gemini": (
+        {"ANTHROPIC_API_KEY": _DEFAULT_KEY, "GEMINI_API_KEY": "sk-SECRET-gem-4567"},
+        [],
+        "gemini",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_UNAVAILABLE_CASES))
+def test_a_provider_with_no_translator_yet_is_refused_in_one_line_and_leaves_nothing(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    models_dir: Path,
+    case: str,
+) -> None:
+    """**AC-7 as amended by A-2.** The orchestrator reproduced this under PO-9:
+    `ProviderUnavailable` raised by `build_pipeline` after `create_project`
+    reached the user as a traceback and left a `.mtproj` behind. Assertions:
+    a non-zero exit, exactly one stderr line, empty stdout, no traceback, no key
+    printed, no project, no output folder, and no loader or client reached."""
+    env, extra_arguments, provider = _UNAVAILABLE_CASES[case]
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    if case == "two-keys-variable-chooses-gemini":
+        monkeypatch.setenv("MANGATL_PROVIDER", "gemini")
+    weights = _WeightsRecorder(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes)
+
+    escaped: BaseException | None = None
+    code = None
+    try:
+        code = main([str(source_dir), "--models", str(models_dir), *extra_arguments])
+    except Exception as error:  # the defect A-2 exists to remove
+        escaped = error
+
+    left_behind = project_dir_for(source_dir).exists()
+    assert escaped is None, (
+        f"main let {type(escaped).__name__}: {escaped} escape - a traceback for the"
+        f" user (AC-7, A-2); project left beside the scans: {left_behind}"
+    )
+    captured = capsys.readouterr()
+    assert code is not None and code != 0, f"the run reported {code!r}"
+    assert captured.err.splitlines() == [
+        f"mangatl-run: translation with {provider} is not available yet"
+    ], f"stderr was {captured.err!r}"
+    assert captured.out == "", f"the refusal printed to stdout as well: {captured.out!r}"
+    assert "Traceback" not in captured.err
+    leaked = [v for v in env.values() if v in captured.err + captured.out]
+    assert leaked == [], f"a key value reached the terminal (C-6): {leaked}"
+    assert not left_behind, (
+        "a project was created beside the scans before the run found out its"
+        " provider has no translator (AC-7: before any project directory is created)"
+    )
+    assert not _output_dir_for(source_dir).exists()
+    assert weights.reached == [], (
+        f"{weights.reached} was reached before the refusal (AC-7: before the weights are loaded)"
+    )
+
+
+def test_the_composition_root_is_asked_before_the_project_is_created(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Amended C-3's order for a run that proceeds: `read_chapter`, then
+    `build_pipeline`, then `create_project`. The double records whether the
+    project existed when it was asked. Before A-2 it did, because `main`
+    created the project first."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    root = _CompositionRoot()
+    seen: list[bool] = []
+
+    def build(models_dir: Path, **keywords: object) -> tuple[Stage, ...]:
+        seen.append(project_dir_for(source_dir).exists())
+        return root(models_dir, **keywords)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("mangatl.cli.build_pipeline", build)
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    assert seen == [False], (
+        f"build_pipeline saw the project existing: {seen}; amended C-3 (A-2) builds"
+        " before it creates, so a refusal leaves nothing behind"
+    )
+    assert root.stage.ran == list(range(len(_SOURCE_PAGES))), "the run did not walk the chapter"

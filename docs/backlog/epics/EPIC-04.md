@@ -84,4 +84,8 @@ silent deferral.
 No editing surface — that is EPIC-05. No retry-on-disagreement or second-opinion
 pass: `architecture.md` D5 shows two passes per page at $2.29, over the ceiling,
 so a second pass is a change to a stated constraint and goes back to the user.
-No language pair but Japanese to English.
+No language pair but Japanese to English. **No provider but Claude** - the
+cost model, the measurement (MT-038) and the call shape here are Claude's;
+Gemini and OpenAI are **EPIC-08** (added 2026-10-09 at the user's request),
+which puts a provider seam under `compose` and leaves everything in this epic
+byte-for-byte unchanged.

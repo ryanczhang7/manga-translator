@@ -872,12 +872,19 @@ def test_start_run_anyway_on_an_over_budget_chapter_does_the_same(
     assert _hashes(folder) == before
 
 
-def test_start_follows_mangatl_runs_order_models_then_create_then_build_then_run(
+def test_start_follows_the_order_models_then_build_then_create_then_run(
     qtbot,  # type: ignore[no-untyped-def]
     world: World,
     tmp_path: Path,
     page_png: bytes,
 ) -> None:
+    """**Corrected in RED for MT-078 (A-1, amended C-4; `## Regressions` R-1).**
+    It was MT-059 C-3's order, "models, then create, then build, then run",
+    and asserted `"build (project exists: True)"`. MT-078's user decision
+    makes the window match `mangatl-run`: the stages are built **before** the
+    project exists, so a `ProviderError` from the builder leaves no
+    `<folder>.mtproj`. The run still comes after the create - the worker
+    opens the project, so the stage sees it."""
     folder = _pages_folder(tmp_path, "ch", 2, page_png)
     database = _project_dir(folder) / "project.db"
     order: list[str] = []
@@ -890,6 +897,7 @@ def test_start_follows_mangatl_runs_order_models_then_create_then_build_then_run
         if not order[-1].startswith("run"):
             order.append(
                 f"run on the GUI thread: {threading.current_thread() is threading.main_thread()}"
+                f" (project exists: {database.exists()})"
             )
 
     calls = Calls()
@@ -904,9 +912,12 @@ def test_start_follows_mangatl_runs_order_models_then_create_then_build_then_run
 
     assert order == [
         "models (project exists: False)",
-        "build (project exists: True)",
-        "run on the GUI thread: False",
-    ]
+        "build (project exists: False)",
+        "run on the GUI thread: False (project exists: True)",
+    ], (
+        f"Start ran {order}; MT-078 C-4 (A-1) is models, build, create, run - the"
+        " builder must see no project, the run must see one"
+    )
     assert builder.calls == [tmp_path], "the builder was not called exactly once with the models"
 
 
@@ -1693,3 +1704,123 @@ def test_a_fake_stage_list_satisfies_the_stage_protocol() -> None:
     stages: Sequence[Stage] = (FakeStage("detect", calls), PassThroughStage())
 
     assert [s.name for s in stages] == ["detect", "passthrough"]
+
+
+# =============================================================================
+# MT-078 AC-8: a provider refusal at Start is shown, not raised out of the slot
+# =============================================================================
+#
+# C-4: `MainWindow._start` wraps `setup.build_stages(models)` in
+# `except ProviderError as error: self.show_error(str(error)); return`. Since
+# MT-078 the real `app.build_stages` -> `compose.build_pipeline(selection=None)`
+# selects from the environment and can refuse (C-2); here the builder is a fake
+# whose call raises, so the test is about the window and nothing else.
+#
+# "Rather than letting the exception escape the slot" is observed twice: the
+# drop target's headline holds the message (it can only get there through
+# `show_error`), and pytest-qt fails any test during which an exception
+# reaches Qt's event loop. No run starts: `window.run` and `window.run_panel`
+# stay `None`.
+#
+# The messages are AC-3's and C-2's exact texts (`test_translate_provider.py`
+# pins them); the window shows `str(error)`, so whatever the exception says is
+# what the headline says.
+#
+# RED: `mangatl.translate.provider` does not exist, so each case fails on the
+# import inside it; the rest of this file still collects and runs.
+
+_REFUSALS = {
+    "NoApiKey": (
+        "no API key is set: set ANTHROPIC_API_KEY, GEMINI_API_KEY or OPENAI_API_KEY,"
+        " or run with --no-translate"
+    ),
+    "ProviderUnavailable": "translation with gemini is not available yet",
+    "AmbiguousProvider": (
+        "API keys are set for more than one provider (anthropic, gemini);"
+        " choose one with --provider or MANGATL_PROVIDER"
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(_REFUSALS))
+def test_a_provider_refusal_at_start_is_shown_as_the_windows_error(
+    qtbot,  # type: ignore[no-untyped-def]
+    world: World,
+    tmp_path: Path,
+    page_png: bytes,
+    name: str,
+) -> None:
+    import mangatl.translate.provider as provider
+
+    message = _REFUSALS[name]
+    error_type = getattr(provider, name)
+    assert issubclass(error_type, provider.ProviderError), f"precondition: {name} is a refusal"
+
+    def refuse() -> None:
+        raise error_type(message)
+
+    builder = Builder(on_call=refuse)
+    folder = _pages_folder(tmp_path, "ch", 2, page_png)
+    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder))
+
+    _press_start(window)
+
+    assert builder.calls == [tmp_path], "precondition: Start reached the stage builder"
+    target = window.centralWidget()
+    assert isinstance(target, FolderDropTarget), (
+        f"after a {name} at Start the central widget is {type(target).__name__},"
+        " not the drop target's error state (AC-8: shown through show_error)"
+    )
+    assert target.state == "error"
+    assert target.headline.text() == message, (
+        f"the window shows {target.headline.text()!r}; AC-8 is the exception's message"
+    )
+    assert window.run is None and window.run_panel is None, "a run started after the refusal"
+    # A-1 / amended C-4: the stages are built before the project is created,
+    # so a refusal leaves nothing beside the scans - as `mangatl-run` (AC-7).
+    assert not _project_dir(folder).exists(), (
+        f"a {name} at Start left {_project_dir(folder).name} beside the scans; AC-8 (A-1)"
+        " says no project directory is created"
+    )
+
+
+def test_control_an_error_that_is_not_a_provider_refusal_is_not_swallowed(
+    qtbot,  # type: ignore[no-untyped-def]
+    world: World,
+    tmp_path: Path,
+    page_png: bytes,
+) -> None:
+    """C-4 catches `ProviderError`, not everything: a `RuntimeError` out of the
+    builder is a bug, and showing it as a headline would hide it. Its escape is
+    observed through pytest-qt's capture of exceptions in Qt's event loop -
+    which is also the mechanism the test above relies on to say "nothing
+    escaped", so this is that mechanism's control.
+
+    The capture half is **green on arrival** (today's `_start` catches
+    nothing); it earns its place as the control of the capture mechanism.
+
+    The last assertion is amended C-4's order (A-1), reachable here because
+    this test imports nothing from `mangatl.translate.provider`: the builder
+    runs before `create_project`, so a builder that raises - anything - leaves
+    no project. Red today, because today's `_start` creates first.
+    """
+
+    def explode() -> None:
+        raise RuntimeError("a bug, not a refusal")
+
+    builder = Builder(on_call=explode)
+    folder = _pages_folder(tmp_path, "ch", 1, page_png)
+    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder))
+
+    with qtbot.capture_exceptions() as caught:
+        _press_start(window)
+
+    assert [type(error) for _, error, _ in caught] == [RuntimeError], (
+        f"a RuntimeError out of build_stages reached Qt as {caught!r}; C-4 catches"
+        " ProviderError only"
+    )
+    assert not isinstance(window.centralWidget(), FolderDropTarget)
+    assert not _project_dir(folder).exists(), (
+        f"{_project_dir(folder).name} was created although build_stages raised; amended"
+        " C-4 (A-1) builds the stages before it creates the project"
+    )

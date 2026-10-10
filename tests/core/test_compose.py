@@ -54,8 +54,10 @@ import inspect
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import partial
 from io import BytesIO
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
@@ -78,11 +80,41 @@ from mangatl.pipeline.clean_stage import CleanStage
 from mangatl.pipeline.detect_stage import DetectStage
 from mangatl.pipeline.ocr_stage import OcrStage
 from mangatl.pipeline.translate_stage import TranslateStage
+from mangatl.translate.client import translate_page
+
+if TYPE_CHECKING:
+    from mangatl.translate.provider import Selection
 
 #: `ANTHROPIC_API_KEY`, spelled out rather than read off the SDK. AC-6 is a
 #: promise about a machine whose environment does not hold this name, and the
 #: name is the SDK's contract with a person typing it into a shell.
 _API_KEY_ENV = "ANTHROPIC_API_KEY"
+
+#: MT-078 PO-1's other two key variables and the choice variable, spelled out
+#: for the same reason. `keyless` deletes all four.
+_PROVIDER_ENV = ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "MANGATL_PROVIDER")
+
+
+def _selection(provider: str, api_key: str = "test-key") -> Selection:
+    """`Selection(provider, api_key)`, imported at call time.
+
+    **MT-078, why not a top-level import.** `mangatl.translate.provider` does
+    not exist in RED, and a top-level import would take every test in this file
+    dark with it - the ~40 MT-036/044/065/024 tests that have nothing to do with
+    selection. Imported here, only the tests that build a translating pipeline
+    fail, each on the named absence.
+    """
+    from mangatl.translate.provider import Selection
+
+    return Selection(provider, api_key)  # type: ignore[arg-type]
+
+
+def _anthropic_if(translate: bool) -> Selection | None:
+    """The parametrised MT-065/MT-024 tests' provider: Anthropic when the build
+    translates, and nothing when it does not - `translate=False` consults no
+    selection (C-2), so the call does not pretend to supply one."""
+    return _selection("anthropic") if translate else None
+
 
 # -- the module's shape --------------------------------------------------------
 
@@ -232,8 +264,9 @@ def test_the_pipeline_builders_only_positional_argument_is_the_models_directory(
     """
     parameters = inspect.signature(build_pipeline).parameters
 
-    assert list(parameters) == ["models_dir", "translate"], (
-        f"build_pipeline takes {list(parameters)}; C-14 makes it (models_dir, *, translate)"
+    assert list(parameters) == ["models_dir", "translate", "selection"], (
+        f"build_pipeline takes {list(parameters)}; MT-078 C-2 makes it"
+        " (models_dir, *, translate, selection)"
     )
     assert parameters["models_dir"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD, (
         "the models directory stopped being positional; every caller in the"
@@ -248,6 +281,17 @@ def test_the_pipeline_builders_only_positional_argument_is_the_models_directory(
         f"translate defaults to {parameters['translate'].default!r}. C-14: the"
         " default is True because translating is what the tool is for - the flag"
         " is an opt-out a user types, never a state the program drifts into"
+    )
+    # MT-078 C-2, amended in RED for that story: a third parameter, keyword-only
+    # for the reason `translate` is, and defaulting to `None` - "select from the
+    # environment", which is the window's path (`app.build_stages` passes
+    # nothing new, C-5).
+    assert parameters["selection"].kind is inspect.Parameter.KEYWORD_ONLY, (
+        f"selection is {parameters['selection'].kind}, not keyword-only (MT-078 C-2)"
+    )
+    assert parameters["selection"].default is None, (
+        f"selection defaults to {parameters['selection'].default!r}; MT-078 C-2 is None,"
+        " meaning build_pipeline selects from the environment itself"
     )
 
 
@@ -357,13 +401,20 @@ class _ClientSpy:
 
     def __init__(self) -> None:
         self.clients: list[object] = []
+        #: MT-078: what each construction was called with. Recorded rather than
+        #: refused, so the existing count assertions still read a count; the
+        #: one MT-078 test that pins the call shape reads this.
+        self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     def __call__(self, *args: object, **kwargs: object) -> object:
         # `*args`/`**kwargs` rather than `()`: C-13 pins `Anthropic()` with no
         # arguments, and this double is here to count constructions, not to
-        # re-pin the call shape at a second site.
+        # re-pin the call shape at a second site. MT-078 AC-6 is the one test
+        # that does pin it - a `Selection` now carries a key, and passing it is
+        # MT-077's change, not this story's - and it reads `calls`.
         client = f"anthropic-client-{len(self.clients)}"
         self.clients.append(client)
+        self.calls.append((args, dict(kwargs)))
         return client
 
 
@@ -403,8 +454,15 @@ def keyless(monkeypatch: pytest.MonkeyPatch) -> None:
 
     A developer with a key exported in their shell must not see different
     behaviour from CI on the one clause this criterion is about.
+
+    **MT-078:** all three key variables and `MANGATL_PROVIDER` go, not only
+    Anthropic's - a developer with a Gemini key exported must not see a
+    different selection from CI either. A translating build under this fixture
+    now has to say its provider (`selection=_selection("anthropic")`), because
+    `selection=None` selects from this empty environment and refuses (C-2).
     """
-    monkeypatch.delenv(_API_KEY_ENV, raising=False)
+    for name in _PROVIDER_ENV:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
@@ -495,8 +553,13 @@ def test_the_unflagged_build_still_translates_and_constructs_exactly_one_client(
     `compose.py` and the translate stage in `stages.py` - both reverted, both
     pasted into `## Regressions` R-10. (That was MT-044's arrival. MT-065
     makes the list four stages, so in MT-065's RED it is red by assertion.)
+
+    **MT-078 (C-2) names the provider; it still omits `translate`.** Under
+    `keyless` a `selection=None` build selects from an empty environment and
+    refuses, so the provider is explicit - and AC-6's first half is exactly
+    this: `selection=anthropic` binds one `Anthropic()`, as today.
     """
-    stages = build_pipeline(weights_dir)
+    stages = build_pipeline(weights_dir, selection=_selection("anthropic"))
 
     assert [type(stage) for stage in stages] == [
         DetectStage,
@@ -544,6 +607,223 @@ def test_the_flagged_build_needs_no_api_key_in_the_environment(
     assert _API_KEY_ENV not in os.environ, "the premise of this test was not established"
 
 
+# -- MT-078 AC-6: the provider decides the translator, before any weight loads --
+#
+# `build_pipeline(models_dir, *, translate=True, selection=None)` (C-2). An
+# `anthropic` selection binds `partial(translate_page, Anthropic())` exactly as
+# MT-044 built it; `gemini` and `openai` raise `ProviderUnavailable` naming the
+# provider until MT-080/081 register adapters. `selection=None` with
+# `translate=True` selects from `os.environ` itself, reading `MANGATL_PROVIDER`
+# as the choice. Every refusal happens BEFORE the loaders: "no loader called" is
+# asserted on all four of `_Loaders`' records, so a build that loaded the
+# weights and then refused - the keyless machine paying seconds of ONNX session
+# construction for a one-line error - fails here.
+#
+# RED: `build_pipeline` has no `selection` keyword (TypeError) and
+# `mangatl.translate.provider` does not exist (ModuleNotFoundError).
+
+
+#: `ProviderUnavailable`'s exact text (C-1/C-2: "naming the provider"). Pinned
+#: whole, because "contains 'gemini'" is also satisfied by a message listing
+#: every provider.
+def _unavailable(provider: str) -> str:
+    return f"translation with {provider} is not available yet"
+
+
+_NO_KEY = (
+    "no API key is set: set ANTHROPIC_API_KEY, GEMINI_API_KEY or OPENAI_API_KEY,"
+    " or run with --no-translate"
+)
+
+
+def _nothing_loaded(loaders: _Loaders) -> list[str]:
+    """The names of every loader `build_pipeline` reached, in `_Loaders`' terms."""
+    records = {
+        "load_detector": loaders.detector_paths,
+        "load_ocr": loaders.ocr_dirs,
+        "load_vocab": loaders.vocab_paths,
+        "load_inpainter": loaders.inpainter_loads,
+    }
+    return [name for name, record in records.items() if record]
+
+
+def _provider_env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
+    """Exactly `values` among the four provider variables; the rest deleted."""
+    for name in _PROVIDER_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+
+def test_an_anthropic_selection_binds_translate_page_to_one_bare_anthropic_client(
+    weights_dir: Path, loaders: _Loaders, client_spy: _ClientSpy, keyless: None
+) -> None:
+    """**AC-6, first half.** Four stages (MT-065 AC-7's list), one client, and
+    the translator is `partial(translate_page, <that client>)`.
+
+    **`Anthropic()` with no arguments** - MT-044 C-13 unchanged. The
+    `Selection` carries a key now, and passing it as `api_key=` is the
+    plausible wrong move: it is MT-077's change (story `## Out of scope`), and
+    it would make the SDK's own environment lookup - the thing C-13 relies on -
+    dead code. `keyless` is in force, so the build cannot be reading the key
+    out of the environment either: the selection is the only source, and it is
+    ignored for Claude in this story.
+    """
+    stages = build_pipeline(weights_dir, selection=_selection("anthropic", "sk-SECRET-ant"))
+
+    assert [type(stage) for stage in stages] == [
+        DetectStage,
+        CleanStage,
+        OcrStage,
+        TranslateStage,
+    ]
+    assert client_spy.calls == [((), {})], (
+        f"Anthropic was constructed as {client_spy.calls}; AC-6 is exactly one"
+        " Anthropic() with no arguments (MT-044 C-13) - passing the key is MT-077's"
+    )
+    (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
+    translator = translate_stage.translate
+    assert isinstance(translator, partial), f"the translator is {translator!r}, not a partial"
+    assert translator.func is translate_page, f"the translator binds {translator.func!r}"
+    assert translator.args == (client_spy.clients[0],) and translator.keywords == {}, (
+        f"translate_page is bound to {translator.args}/{translator.keywords}, not the one client"
+    )
+
+
+@pytest.mark.parametrize("provider", ["gemini", "openai"])
+def test_a_provider_with_no_adapter_yet_is_refused_by_name_before_anything_is_built(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    keyless: None,
+    provider: str,
+) -> None:
+    """**AC-6, second half - the control the first half needs.** A
+    `build_pipeline` that ignored the selection and always built `Anthropic()`
+    satisfies the test above; here it builds a client (the spy counts it) and
+    returns instead of raising. *No client of any kind*, and *before any weight
+    is loaded* (C-2: selection precedes `select_providers` and the loaders)."""
+    from mangatl.translate.provider import ProviderUnavailable
+
+    with pytest.raises(ProviderUnavailable) as raised:
+        build_pipeline(weights_dir, selection=_selection(provider))
+
+    assert str(raised.value) == _unavailable(provider)
+    assert client_spy.clients == [], (
+        f"a {provider} selection constructed {len(client_spy.clients)} Anthropic client(s)"
+    )
+    assert _nothing_loaded(loaders) == [], (
+        f"a {provider} selection reached {_nothing_loaded(loaders)} before refusing;"
+        " C-2 refuses before any weight is loaded"
+    )
+
+
+def test_an_explicit_selection_is_not_second_guessed_by_the_environment(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C-2: a given `selection` is the decision. The environment here would
+    select gemini (and refuse it); the build must not consult it."""
+    _provider_env(
+        monkeypatch,
+        GEMINI_API_KEY="sk-SECRET-gem",
+        OPENAI_API_KEY="sk-SECRET-oai",
+        MANGATL_PROVIDER="gemini",
+    )
+
+    stages = build_pipeline(weights_dir, selection=_selection("anthropic"))
+
+    assert len(stages) == 4
+    assert len(client_spy.clients) == 1
+
+
+def test_with_no_selection_the_one_key_in_the_environment_decides(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C-2, the window's path: `selection=None, translate=True` selects from
+    `os.environ`. Exactly `ANTHROPIC_API_KEY` is set, so Claude is bound - the
+    explicit form of the lookup `Anthropic()` already did."""
+    _provider_env(monkeypatch, ANTHROPIC_API_KEY="sk-SECRET-ant")
+
+    stages = build_pipeline(weights_dir)
+
+    assert [type(stage) for stage in stages][-1] is TranslateStage
+    assert client_spy.calls == [((), {})]
+
+
+def test_with_no_selection_mangatl_provider_is_the_choice(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C-2: `select_provider(os.environ.get(PROVIDER_VAR), os.environ)`. Two
+    keys are set, so a build that did not pass the variable through would
+    refuse as ambiguous - a different exception - and one that ignored it would
+    bind Claude. Gemini has no adapter, so the variable being read shows as
+    `ProviderUnavailable` naming gemini, with nothing loaded."""
+    from mangatl.translate.provider import ProviderUnavailable
+
+    _provider_env(
+        monkeypatch,
+        ANTHROPIC_API_KEY="sk-SECRET-ant",
+        GEMINI_API_KEY="sk-SECRET-gem",
+        MANGATL_PROVIDER="gemini",
+    )
+
+    with pytest.raises(ProviderUnavailable) as raised:
+        build_pipeline(weights_dir)
+
+    assert str(raised.value) == _unavailable("gemini")
+    assert client_spy.clients == []
+    assert _nothing_loaded(loaders) == []
+
+
+def test_with_no_selection_and_no_key_the_build_refuses_before_loading_anything(
+    weights_dir: Path, loaders: _Loaders, client_spy: _ClientSpy, keyless: None
+) -> None:
+    """AC-3 through `build_pipeline` (C-2, and Notes PO-4): a keyless machine
+    fails in milliseconds with `NoApiKey`, not after loading the weights - and
+    not, as MT-044 left it, on the first page that needs a call."""
+    from mangatl.translate.provider import NoApiKey
+
+    with pytest.raises(NoApiKey) as raised:
+        build_pipeline(weights_dir, translate=True)
+
+    assert str(raised.value) == _NO_KEY
+    assert _nothing_loaded(loaders) == [], (
+        f"a keyless build reached {_nothing_loaded(loaders)} before refusing (C-2)"
+    )
+    assert client_spy.clients == []
+
+
+def test_the_flagged_build_attempts_no_selection_at_all(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C-2's first bullet and AC-7's last clause at this seam: `translate=False`
+    selects nothing, so an environment that would refuse every way - two keys,
+    and a choice that is not a provider - builds the three-stage list."""
+    _provider_env(
+        monkeypatch,
+        ANTHROPIC_API_KEY="sk-SECRET-ant",
+        OPENAI_API_KEY="sk-SECRET-oai",
+        MANGATL_PROVIDER="claude",
+    )
+
+    stages = build_pipeline(weights_dir, translate=False)
+
+    assert [type(stage) for stage in stages] == [DetectStage, CleanStage, OcrStage]
+    assert client_spy.clients == []
+
+
 # -- MT-065 AC-6/AC-7: the clean stage, built from `load_inpainter` ------------
 
 
@@ -560,7 +840,7 @@ def test_the_inpainter_is_loaded_once_from_lama_fp32_in_the_models_directory(
     under **both** values of `translate`, because `--no-translate` still
     cleans (AC-7, PO-1). The file name is the literal, spelled here because
     AC-6 names it (DV-6 turns this red)."""
-    build_pipeline(weights_dir, translate=translate)
+    build_pipeline(weights_dir, translate=translate, selection=_anthropic_if(translate))
 
     assert loaders.inpainter_loads == [(weights_dir / "lama_fp32.onnx", PROVIDER_PREFERENCE)], (
         f"the inpainter loads were {loaders.inpainter_loads}; AC-6 is exactly one,"
@@ -583,7 +863,7 @@ def test_the_clean_stage_runs_the_loaded_inpainter_through_clean_page_image(
     page's size, and the session `load_inpainter` returned is the one that ran.
     A stage bound to anything else - a second session, a lambda, the identity -
     leaves the counter at zero."""
-    stages = build_pipeline(weights_dir, translate=translate)
+    stages = build_pipeline(weights_dir, translate=translate, selection=_anthropic_if(translate))
     (clean_stage,) = [stage for stage in stages if isinstance(stage, CleanStage)]
     (session,) = loaders.inpainters
     width, height = 64, 48
@@ -778,7 +1058,7 @@ def test_on_a_machine_with_only_the_cpu_every_loader_is_asked_for_the_cpu_only(
 ) -> None:
     _available(monkeypatch, [_CPU])
 
-    build_pipeline(weights_dir)
+    build_pipeline(weights_dir, selection=_selection("anthropic"))
 
     assert loaders.detector_providers == [(_CPU,)], (
         f"the detector was asked for {loaders.detector_providers}; with only the CPU"
@@ -829,7 +1109,7 @@ def test_the_provider_in_use_is_logged_once_at_info_on_the_compose_logger(
 ) -> None:
     caplog.set_level("INFO", logger="mangatl.compose")
 
-    build_pipeline(weights_dir, translate=translate)
+    build_pipeline(weights_dir, translate=translate, selection=_anthropic_if(translate))
 
     assert _provider_lines(caplog) == [(20, f"inference provider: {_CUDA}")], (
         f"mangatl.compose logged {_provider_lines(caplog)}; AC-6 is exactly one INFO"
