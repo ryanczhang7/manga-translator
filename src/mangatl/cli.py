@@ -133,6 +133,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         # thing the user can act on.
         return _fail(str(error))
 
+    # The stage list is the composition root's, asked for after the chapter is
+    # read - a folder with nothing to translate should not pay for the ONNX
+    # sessions - and before the project is created (MT-078 C-3, A-2): the
+    # builder can still refuse (`ProviderUnavailable`, a provider with no
+    # translator yet), and it does so before any weight loads, so a refusal
+    # is one line and leaves no `.mtproj` behind. The window builds before it
+    # creates for the same reason (A-1).
+    #
+    # `translate=` is passed on every call, flagged or not (MT-044 C-14): what
+    # the tool does with a user's money is a decision this entry point makes
+    # out loud, not one it leaves to whatever the builder's default happens to
+    # be on the day someone changes it.
+    try:
+        stages = build_pipeline(
+            models_dir, translate=not arguments.no_translate, selection=selection
+        )
+    except ProviderError as error:
+        return _fail(str(error))
+
     try:
         project = create_project(chapter, project_dir_for(source_dir))
     except ProjectExists:
@@ -141,15 +160,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         project = open_project(project_dir_for(source_dir))
 
     output_dir = source_dir.with_name(source_dir.name + _OUTPUT_SUFFIX)
-    # The stage list is the composition root's, and asking for it is the last
-    # thing that happens before the walk: it is where the ONNX sessions are
-    # built, and a chapter with nothing to translate should not pay for them.
-    #
-    # `translate=` is passed on every call, flagged or not (MT-044 C-14): what
-    # the tool does with a user's money is a decision this entry point makes
-    # out loud, not one it leaves to whatever the builder's default happens to
-    # be on the day someone changes it.
-    stages = build_pipeline(models_dir, translate=not arguments.no_translate, selection=selection)
     with project:
         filenames = {page.ordinal: page.filename for page in project.pages()}
         outcome = run_chapter(project, stages, _reporter(filenames), _never)
