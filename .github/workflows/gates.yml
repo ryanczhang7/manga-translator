@@ -46,23 +46,11 @@ jobs:
         with:
           enable-cache: true
 
-      # The harness's own tests. They need nothing but bash and git, and they
-      # guard the machinery every other check in this workflow depends on: the
-      # phase lock, the path classifier, the quote-aware command parsing.
-      - name: Harness self-test
-        run: bash scripts/selftest.sh
-
-      # Two harness guards (from agentic-dev-harness release 81; doctor.sh asks
-      # for both). A pipefail matcher that a closed pipe can turn into 141, and a
-      # `grep -c` fallback that prints a second value: both report the opposite
-      # of the truth while every process exits cleanly. The first is a race on
-      # the pipe buffer, so the run that matters is this one, on the runner.
-      # Bash and git only, like the self-test.
-      - name: Refuse pipefail SIGPIPE matchers
-        run: bash scripts/check-sigpipe.sh
-
-      - name: Refuse a printing grep -c fallback
-        run: bash scripts/check-grep-count.sh
+      # The harness self-test and its two guards (check-sigpipe.sh,
+      # check-grep-count.sh) are NOT here: they run in boundaries.yml, on
+      # ubuntu-latest. They need only bash and git, and this job is Windows for
+      # PyInstaller's sake, where the self-test is ~21-27 min of process spawn
+      # against ~31 s on Linux. Do not move them back.
 
       - name: Show configured gates
         run: bash scripts/gates.sh --list

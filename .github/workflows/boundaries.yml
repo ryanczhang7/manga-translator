@@ -16,6 +16,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The harness's own tests, and they run FIRST - before check-boundaries.sh,
+      # because they guard the machinery that script is built out of: the phase
+      # lock, the path classifier, the quote-aware command parsing. They live
+      # here rather than in gates.yml (windows-latest, for PyInstaller) because
+      # a full run is ~21-27 min of process spawn on Windows and ~31 s on Linux,
+      # measured upstream on the same suites. They need only bash and git.
+      - name: Harness self-test
+        run: bash scripts/selftest.sh
+
+      # Two harness guards (from agentic-dev-harness release 81; doctor.sh asks
+      # for both). A pipefail matcher that a closed pipe can turn into 141, and a
+      # `grep -c` fallback that prints a second value: both report the opposite
+      # of the truth while every process exits cleanly. The first is a race on
+      # the pipe buffer, so the run that matters is this one, on the runner.
+      # Bash and git only, like the self-test.
+      - name: Refuse pipefail SIGPIPE matchers
+        run: bash scripts/check-sigpipe.sh
+
+      - name: Refuse a printing grep -c fallback
+        run: bash scripts/check-grep-count.sh
+
       # The checkout here is a detached merge commit, so the script takes the
       # story from GITHUB_HEAD_REF (set by Actions) and recomputes the gate tree
       # hash at the PR head rather than at the merge.
