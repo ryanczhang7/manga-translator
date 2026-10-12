@@ -106,12 +106,20 @@ pass over stories whose artifact nothing exercised — the failure mode
    A later story that genuinely needs a stage-to-stage import amends this
    deliberately — that is what the gate is for.
 2. **`domain` is independent.** It may import the standard library and nothing
-   else of ours — and not `numpy`, `PIL`, `PySide6`, `onnxruntime` or
-   `anthropic`.
+   else of ours — and not `numpy`, `PIL`, `PySide6`, `onnxruntime`,
+   `anthropic` or `google` (the Gemini SDK, MT-080).
 3. **Nothing imports `ui`.** Including `bench`, which must be runnable headless,
    and `compose` (below), which is the composition root and has no display.
-4. **Only `translate` imports `anthropic`.** This is the contract that makes
-   "one place spend can originate" a checked fact.
+4. **Only `translate` imports `anthropic` — or `google.genai`.** This is the
+   contract that makes "one place spend can originate" a checked fact.
+   *Second SDK, 2026-10-12 (MT-080):* `google-genai` (Gemini) is confined by
+   its own contract, *"Only translate imports google.genai"*, with the same
+   ten `source_modules` and the same composition-root exemption
+   (`compose`, `cli`, `app`): `compose` constructs
+   `google.genai.Client(api_key=...)` and binds `translate.gemini.translate_page`
+   to it. The contract forbids `google`, not `google.genai`, because
+   import-linter 2.15 refuses a subpackage of an external package (MT-080
+   RA-2). `openai` (MT-081) is still planned.
    *Planned extension, 2026-10-09 (EPIC-08, at the user's request):* the same
    rule, one contract each, for `google.genai` (MT-080) and `openai`
    (MT-081), with the same ten `source_modules` and the same composition-root

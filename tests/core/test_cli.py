@@ -1024,17 +1024,22 @@ class _WeightsRecorder:
         return record
 
 
+#: MT-080: the two gemini cases became openai ones. Gemini has an adapter from
+#: MT-080 on, so through the real `build_pipeline` it binds instead of refusing;
+#: openai is the provider still without one (MT-081). The three routes to a
+#: selection - one key alone, the flag, and the variable choosing between two
+#: keys - are kept, each now observed on openai.
 _UNAVAILABLE_CASES = {
-    "gemini-key-only": ({"GEMINI_API_KEY": "sk-SECRET-gem-4567"}, [], "gemini"),
+    "openai-key-only": ({"OPENAI_API_KEY": "sk-SECRET-oai-89ab"}, [], "openai"),
     "openai-key-only-with-flag": (
         {"OPENAI_API_KEY": "sk-SECRET-oai-89ab"},
         ["--provider", "openai"],
         "openai",
     ),
-    "two-keys-variable-chooses-gemini": (
-        {"ANTHROPIC_API_KEY": _DEFAULT_KEY, "GEMINI_API_KEY": "sk-SECRET-gem-4567"},
+    "two-keys-variable-chooses-openai": (
+        {"ANTHROPIC_API_KEY": _DEFAULT_KEY, "OPENAI_API_KEY": "sk-SECRET-oai-89ab"},
         [],
-        "gemini",
+        "openai",
     ),
 }
 
@@ -1057,8 +1062,8 @@ def test_a_provider_with_no_translator_yet_is_refused_in_one_line_and_leaves_not
     monkeypatch.delenv("ANTHROPIC_API_KEY")
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    if case == "two-keys-variable-chooses-gemini":
-        monkeypatch.setenv("MANGATL_PROVIDER", "gemini")
+    if case == "two-keys-variable-chooses-openai":
+        monkeypatch.setenv("MANGATL_PROVIDER", "openai")
     weights = _WeightsRecorder(monkeypatch)
     source_dir = _build_source(tmp_path, png_bytes)
 

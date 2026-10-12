@@ -1,4 +1,4 @@
-"""The five import contracts of `architecture.md` §3, pinned as configuration.
+"""The six import contracts of `architecture.md` §3, pinned as configuration.
 
 These tests read `pyproject.toml` and `.claude/harness/project.conf` as data.
 They deliberately do **not** shell out to `lint-imports`: whether a contract
@@ -7,8 +7,11 @@ this story's `## Gate probes`, and `tests/core` is run by three gates (`unit`,
 `coverage`, `coverage-core`), so anything expensive here is paid three times per
 gate run.
 
-What they catch that `floor | lint | 5` cannot: the count staying at five while
+What they catch that `floor | lint | 6` cannot: the count staying at six while
 a module is quietly dropped from one contract's source list.
+
+MT-080 C-6 added the sixth, `GENAI` (V-9: after `ANTHROPIC`), mirroring the
+anthropic contract for the second translation SDK.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ LAYERS = "Imports go down the layers only"
 DOMAIN = "domain is independent"
 UI = "Nothing imports ui"
 ANTHROPIC = "Only translate imports anthropic"
+GENAI = "Only translate imports google.genai"
 ONNX = "Only detect, ocr and clean import onnxruntime"
 
 STAGE_LAYER = frozenset(
@@ -99,8 +103,9 @@ def _manifest(kind: str, gate: str) -> list[str]:
     return values
 
 
-def test_all_five_boundaries_of_the_architecture_are_configured_as_contracts() -> None:
-    assert _names() == [LAYERS, DOMAIN, UI, ANTHROPIC, ONNX]
+def test_all_six_boundaries_of_the_architecture_are_configured_as_contracts() -> None:
+    # MT-080 C-6 / V-9: six, GENAI immediately after ANTHROPIC.
+    assert _names() == [LAYERS, DOMAIN, UI, ANTHROPIC, GENAI, ONNX]
 
 
 def test_the_linter_analyses_the_mangatl_package() -> None:
@@ -150,10 +155,13 @@ def test_domain_imports_nothing_of_ours_and_no_third_party_library() -> None:
     contract = _contract(DOMAIN)
     assert contract.get("type") == "forbidden"
     assert _modules(contract, "source_modules") == ["mangatl.domain"]
+    # MT-080 C-6: `google` joins the list - the namespace package the Gemini
+    # SDK lives under, so `google.genai` and any sibling are both refused.
     assert _modules(contract, "forbidden_modules") == [
         "PIL",
         "PySide6",
         "anthropic",
+        "google",
         "mangatl.*",
         "numpy",
         "onnxruntime",
@@ -308,6 +316,75 @@ def test_the_composition_root_is_exempt_from_anthropic_and_the_pipeline_is_not()
     )
 
 
+#: The ten modules both SDK contracts confine (MT-080 C-6: "the same ten the
+#: anthropic contract lists"). Written out rather than read off the anthropic
+#: contract, so a module dropped from both at once is still caught.
+_SDK_CONFINED = [
+    "mangatl.bench",
+    "mangatl.clean",
+    "mangatl.detect",
+    "mangatl.domain",
+    "mangatl.models",
+    "mangatl.ocr",
+    "mangatl.pipeline",
+    "mangatl.store",
+    "mangatl.typeset",
+    "mangatl.ui",
+]
+
+
+def test_only_translate_may_import_google_genai() -> None:
+    """MT-080 C-6 **as amended in RED**: `forbidden_modules = ["google"]` over
+    the same ten source modules as the anthropic contract, for the same
+    measured reason (`compose` constructs the client; `cli` and `app` import
+    `compose`).
+
+    `["google"]` alone, not C-6's `["google.genai", "google"]`: import-linter
+    2.15 refuses the leaf outright - measured 2026-10-12 with a scratch config,
+    `Invalid forbidden module google.genai: subpackages of external packages
+    are not valid.` - and grimp records every external import under its root,
+    so `"google"` catches `from google.genai import Client` (probe in
+    `src/mangatl/pipeline/__probe_genai.py`, reported as
+    `mangatl.pipeline.__probe_genai -> google (l.1)`, then deleted). The
+    contract's *name* still says google.genai, which is what it is for.
+
+    No `allow_indirect_imports`, which would stop the chain
+    `pipeline -> translate.gemini -> google` being reported."""
+    contract = _contract(GENAI)
+    assert contract.get("type") == "forbidden"
+    assert _modules(contract, "forbidden_modules") == ["google"]
+    assert _modules(contract, "source_modules") == _SDK_CONFINED
+    assert _modules(contract, "source_modules") == _modules(
+        _contract(ANTHROPIC), "source_modules"
+    ), "the two SDK contracts confine different modules; C-6 says the same ten"
+    assert "allow_indirect_imports" not in contract, (
+        "allow_indirect_imports would stop import-linter reporting the chain"
+        " pipeline -> translate.gemini -> google.genai"
+    )
+
+
+def test_the_composition_root_is_exempt_from_google_genai_and_the_pipeline_is_not() -> None:
+    """MT-080 C-6, the anthropic exemption's decision restated for the second
+    SDK: `compose` constructs `GeminiClient` (V-8), `cli` and `app` import
+    `compose`, so all three are absent; the pipeline and the window stay
+    confined; and `compose` is still in *"Nothing imports ui"*."""
+    confined = _contract(GENAI).get("source_modules", [])
+
+    assert "mangatl.compose" not in confined
+    assert "mangatl.cli" not in confined
+    assert "mangatl.app" not in confined
+    assert "mangatl.translate" not in confined, (
+        "mangatl.translate is forbidden from importing google.genai - the one"
+        " import the architecture requires of it"
+    )
+    assert "mangatl.pipeline" in confined, (
+        "mangatl.pipeline was exempted from the google.genai confinement; the"
+        " chain pipeline -> translate -> SDK is the one C-6 keeps reportable"
+    )
+    assert "mangatl.ui" in confined
+    assert "mangatl.compose" in _contract(UI).get("source_modules", [])
+
+
 def test_only_detect_ocr_and_clean_may_import_onnxruntime() -> None:
     # MT-059 PO-3 (C-8): **seven** entries. `mangatl.app` came out as the third
     # instance of the composition-root exception: its `resolve_models` and
@@ -387,8 +464,10 @@ def test_the_package_that_owns_a_dependency_is_not_forbidden_from_importing_it()
     assert offenders == [], f"{offenders} may not be forbidden from importing onnxruntime"
 
 
-def test_the_lint_gate_floors_the_contract_count_at_five() -> None:
-    assert _manifest("floor", "lint") == ["5"]
+def test_the_lint_gate_floors_the_contract_count_at_six() -> None:
+    # MT-080 V-9: raised from 5 in `project.conf` once the sixth contract is
+    # observed kept (GATES' edit; a harness path).
+    assert _manifest("floor", "lint") == ["6"]
 
 
 def test_the_lint_gate_counts_the_contracts_import_linter_kept() -> None:

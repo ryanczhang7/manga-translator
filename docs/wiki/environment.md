@@ -327,6 +327,36 @@ file is absent those tests skip, which the `skipped-when` line reports as
 (`PIL.features.check("raqm")` is `False`), so the tests lay vertical text out
 glyph by glyph rather than with `direction="ttb"`.
 
+### API keys for translation
+
+*Added by MT-080, 2026-10-12.* Translation needs exactly one cloud key in the
+environment, and which one is set chooses the provider (MT-078 PO-1,
+`src/mangatl/translate/provider.py`):
+
+| Variable | Provider | Model | Adapter |
+|---|---|---|---|
+| `ANTHROPIC_API_KEY` | `anthropic` | `claude-opus-5` | `translate/client.py` |
+| `GEMINI_API_KEY` | `gemini` | `gemini-3.1-pro-preview` | `translate/gemini.py` (MT-080) |
+| `OPENAI_API_KEY` | `openai` | — | none yet: refused as unavailable until MT-081 |
+
+- **More than one key set** needs an explicit choice: `mangatl-run --provider
+  NAME`, else `MANGATL_PROVIDER=NAME`. Without one the run refuses before any
+  weight loads. An empty value counts as unset.
+- **No key at all** is a refusal too; `mangatl-run --no-translate` is the way
+  to run without one.
+- **`GOOGLE_API_KEY` is not read.** The `google-genai` SDK would otherwise pick
+  it up on its own; `compose.py` passes `GEMINI_API_KEY`'s value explicitly
+  (MT-080 AC-6), so only the variable PO-1 names counts.
+- **The live tests** (`tests/integration/test_gemini_live.py`, under the
+  optional `integration` gate, `-m network`) skip without the key, and **each
+  run with it makes two paid calls**. A rejected key reports `BLOCKED`, not
+  `FAIL` (`blocked-when` in `project.conf`).
+
+**Measured on the development machine, 2026-10-12:** `GEMINI_API_KEY` is set;
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY` and `MANGATL_PROVIDER`
+are not. So a bare `mangatl-run` here translates with Gemini. The key's value
+is not recorded anywhere in this repository.
+
 ### Installer signing
 
 Not an environment prerequisite, but it lands in MT-024: an unsigned PyInstaller

@@ -58,6 +58,13 @@ dependencies = [
     # needed or wanted. The floor is a release carrying `output_config.format`
     # and adaptive thinking, which C-5 pins the call shape on.
     "anthropic>=0.75,<1",
+    # Added by MT-080 (C-6), the second cloud SDK: `translate/gemini.py` sends a
+    # page to Gemini through `client.models.generate_content`, and `compose.py`
+    # constructs the `google.genai.Client` it binds. Pinned at the release the
+    # call shape was introspected from (MT-080 V-3/V-4, 2.29.0, 2026-10-07),
+    # below the next major. Confined to `mangatl.translate` (and the composition
+    # root) by the *"Only translate imports google.genai"* contract below.
+    "google-genai>=2.29,<3",
     # Added by MT-020 (C-8), the first story that reads a font. `typeset.font`
     # loads the four vendored Shantell Sans faces and `typeset.measure` reads
     # cmap, hmtx and ink bounds (BoundsPen over the glyph set, so the faces'
@@ -244,6 +251,8 @@ forbidden_modules = [
     "PySide6",
     "onnxruntime",
     "anthropic",
+    # MT-080: the Gemini SDK's top-level package (see RA-2 on the contract below).
+    "google",
 ]
 
 [[tool.importlinter.contracts]]
@@ -315,6 +324,33 @@ source_modules = [
     "mangatl.ui",
 ]
 forbidden_modules = ["anthropic"]
+
+[[tool.importlinter.contracts]]
+name = "Only translate imports google.genai"
+type = "forbidden"
+# MT-080 (C-6): the second cloud SDK, confined exactly as the first. The same
+# ten source modules as the anthropic contract above, for the same measured
+# reason: `mangatl.compose` constructs the `google.genai.Client` that
+# `partial(gemini.translate_page, client)` binds, and `mangatl.cli` and
+# `mangatl.app` import `compose`, so those three are exempt and nothing else is.
+# No `allow_indirect_imports`, so `pipeline -> translate -> google` is still
+# reported. `forbidden_modules` is `google`, not `google.genai` (RA-2):
+# import-linter 2.15 refuses a subpackage of an external package ("subpackages
+# of external packages are not valid"), and `google` alone was measured to
+# catch `from google.genai import Client` in a probe under `mangatl.pipeline`.
+source_modules = [
+    "mangatl.domain",
+    "mangatl.models",
+    "mangatl.store",
+    "mangatl.detect",
+    "mangatl.ocr",
+    "mangatl.clean",
+    "mangatl.typeset",
+    "mangatl.pipeline",
+    "mangatl.bench",
+    "mangatl.ui",
+]
+forbidden_modules = ["google"]
 
 [[tool.importlinter.contracts]]
 name = "Only detect, ocr and clean import onnxruntime"
