@@ -396,7 +396,7 @@ unverified). Measured figures:
 
 | Provider / model | Per page, measured | × 20 | Recorded in |
 |---|---|---|---|
-| Gemini `gemini-3.1-pro` | *pending MT-080 AC-8* | | MT-080 `## Notes` |
+| Gemini `gemini-3.1-pro-preview` | **$0.0054-$0.0057** (2 calls, page 011, 2026-10-12; ~1,600 prompt tokens, ~209 output, 0 thinking reported) | **$0.11** (5.6 % of $2.00) | MT-080 `## Notes` PO-8 |
 | OpenAI `gpt-6.1-sol` | *pending MT-081 AC-8* | | MT-081 `## Notes` |
 
 ### O6 — vertical text and furigana
