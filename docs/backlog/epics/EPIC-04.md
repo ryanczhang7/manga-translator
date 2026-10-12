@@ -2,7 +2,7 @@
 id: EPIC-04
 title: Translating with the page in view, under a hard budget
 status: todo
-stories: [MT-011, MT-012, MT-013, MT-044, MT-014, MT-038, MT-045]
+stories: [MT-011, MT-012, MT-013, MT-044, MT-014, MT-045]
 ---
 
 ## Goal
@@ -61,6 +61,19 @@ ledger rows, `chapter_total()` is permanently $0 and MT-013's guard is inert
 however correct its arithmetic. Filing MT-044 is what stops that being a third
 silent deferral.
 
+
+*Amended 2026-10-12 by the user: v1 is Gemini-only.* *"do not assume we will
+add an anthropic or open ai key for v1 or this project. assume that we are
+proceeding just with the gemini key."* There will be no Anthropic credential,
+so **MT-038 (Claude's measurement) is parked** (`docs/backlog/parked/`) and
+out of this epic. The requirement this section states - *a measured number,
+not "cost looks fine"* - is met for the provider v1 actually ships with:
+**MT-080 measured Gemini at $0.0054-$0.0057 per page, ≈ $0.11 per 20-page
+chapter against $2.00** (MT-080 `## Notes` PO-8; `stack.md` §5/O4). The
+$1.14 Claude estimate stays an estimate and is no longer v1's cost. MT-045
+(the live continuity evidence) is re-targeted to Gemini and depends on
+MT-080 instead of MT-038.
+
 ## Stories
 
 - **MT-011** — one call per page: prompt assembly, the capped page image, the
@@ -74,9 +87,8 @@ silent deferral.
   **before** the call is made.
 - **MT-014** — continuity: a running glossary of names, honorifics and place
   names carried across pages.
-- **MT-038** — the measurement: one real call, `response.usage` recorded, and
-  the cost model re-run against it rather than against its own assumptions.
-- **MT-045** — the evidence: a name translated live on two pages, with the
+- ~~**MT-038** — Claude's measurement~~ — **parked 2026-10-12**; v1's measured cost is Gemini's, from MT-080.
+- **MT-045** — the evidence: a name translated live on two pages **on Gemini** (re-targeted 2026-10-12), with the
   glossary on and off, K runs each (split out of MT-014, PO-1, 2026-09-28).
 
 ## Deliberately not in this epic
@@ -84,7 +96,7 @@ silent deferral.
 No editing surface — that is EPIC-05. No retry-on-disagreement or second-opinion
 pass: `architecture.md` D5 shows two passes per page at $2.29, over the ceiling,
 so a second pass is a change to a stated constraint and goes back to the user.
-No language pair but Japanese to English. **No provider but Claude** - the
+No language pair but Japanese to English. *(Superseded 2026-10-12: v1 ships on Gemini - see the amendment above.)* **No provider but Claude** - the
 cost model, the measurement (MT-038) and the call shape here are Claude's;
 Gemini and OpenAI are **EPIC-08** (added 2026-10-09 at the user's request),
 which puts a provider seam under `compose` and leaves everything in this epic

@@ -27,6 +27,17 @@ there is no behaviour to specify first.
 Change phase only through `scripts/phase.sh` - it keeps the story frontmatter
 and the harness lock in agreement.
 
+## Parked stories
+
+`docs/backlog/parked/` holds stories a product decision has taken out of
+scope without their ever being started. Nothing in `scripts/` reads that
+folder, so a parked story is off the board and out of every `plan.sh`
+recommendation; it is not in any epic's `stories:` list; and no live story
+may name it in `depends_on`. Each carries a dated `## Parked` section quoting
+the decision. Un-parking is moving the file back into `stories/` and its id
+back into its epic. (First used 2026-10-12: MT-038 and MT-081, when v1
+became Gemini-only.)
+
 ## The story file is the protocol
 
 Agents do not share a context. Everything the next one needs must be written

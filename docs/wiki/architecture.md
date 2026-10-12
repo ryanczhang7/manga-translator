@@ -502,7 +502,7 @@ There is none, in the server sense. The deliverable is a Windows installer:
 2. The `.onnx` weights are bundled as data, with a manifest of file hashes the
    app verifies at startup. **The user never downloads or places a weight.**
 3. Inno Setup wraps the folder into a double-clickable installer.
-4. First run asks for the Anthropic API key and writes it to
+4. First run asks for the **Gemini** API key (v1 is Gemini-only since 2026-10-12; MT-077) and writes it to
    `%APPDATA%\mangatl\settings.json`. That is the only setup step, and it is the
    one the brief permits.
 
