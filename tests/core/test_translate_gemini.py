@@ -512,6 +512,32 @@ def test_translate_page_carries_the_converted_usage_and_the_responses_own_identi
     assert result.call == CallInfo(request_id=_RESPONSE_ID, model_id=_REPORTED_MODEL)
 
 
+def test_usage_metadata_that_is_missing_entirely_raises_rather_than_counting_zero(
+    gemini: ModuleType,
+) -> None:
+    """R-1. A response with no `usage_metadata` at all is not a free call:
+    pricing it as `TokenUsage(0, 0, 0, 0)` spends money and reports none - the
+    failure `domain.rates` calls its worst. Distinct from AC-4's absent C or T,
+    which ARE zero."""
+    with pytest.raises(ValueError, match="no usage"):
+        gemini._usage_of(None)
+
+
+def test_a_page_whose_response_reports_no_usage_raises_instead_of_pricing_it_at_nothing(
+    gemini: ModuleType,
+) -> None:
+    """R-1 through `translate_page`: the guard holds where the cost is
+    recorded, so no zero-priced `TranslationResult` ever reaches the ledger."""
+    response = _response(_body("well-formed"))
+    response.usage_metadata = None
+    client = _FakeGeminiClient(response)
+
+    with pytest.raises(ValueError, match="no usage"):
+        gemini.translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+    assert client.calls == 1
+
+
 def test_a_response_with_no_id_records_an_empty_request_id(gemini: ModuleType) -> None:
     """V-4: `response_id` is `Optional[str]`, and `CallInfo.request_id` is a
     required `str` - `None` becomes `""`."""
