@@ -36,6 +36,14 @@ A body that is not JSON at all - Opus 5 can return HTTP 200 with
 That is loud rather than silent, which is this story's accepted answer; handling
 a refusal properly means a fallback or a retry path and `architecture.md` D5
 puts a second pass over the budget. See MT-011 `## Out of scope`.
+
+**The split at the text** (MT-079 C-3). `parse_lines_text` and
+`parse_terms_text` take the JSON text itself and are the entry points every
+provider shares; `parse_lines` and `parse_terms` keep their `Message`
+signatures and delegate through `first_text_block`, which is the only part of
+this module that knows a Claude response's shape. `GLOSSARY_KEY` lives in
+`page_prompt` (so that module never loads the SDK through this one) and is
+re-exported here for every existing caller.
 """
 
 from __future__ import annotations
@@ -47,12 +55,17 @@ from typing import Any
 from anthropic.types import Message
 
 from mangatl.domain.glossary import ProposedTerm
+from mangatl.translate.page_prompt import GLOSSARY_KEY
 
-__all__ = ["GLOSSARY_KEY", "UnknownRegionIndex", "parse_lines", "parse_terms"]
-
-#: The one response key that is not a reading index (MT-014 C-3/C-4). It can
-#: never collide with one: a reading index is always digits.
-GLOSSARY_KEY: str = "glossary"
+__all__ = [
+    "GLOSSARY_KEY",
+    "UnknownRegionIndex",
+    "first_text_block",
+    "parse_lines",
+    "parse_lines_text",
+    "parse_terms",
+    "parse_terms_text",
+]
 
 _TERM_FIELDS = ("term_ja", "term_en", "note")
 
@@ -64,7 +77,32 @@ class UnknownRegionIndex(Exception):
     """
 
 
+def first_text_block(response: Message) -> str:
+    """The text of the response's first `text` block - not `content[0]`, which
+    may be a `thinking` block (see the module docstring, point 1).
+
+    Raises `ValueError` naming the missing text block when there is none,
+    rather than letting a bare `StopIteration` escape (MT-079 C-3 as amended).
+    """
+    for block in response.content:
+        if block.type == "text":
+            return block.text
+    raise ValueError("the response has no text block to read the JSON answer from")
+
+
 def parse_lines(response: Message, region_indices: Sequence[int]) -> dict[int, str]:
+    """The page's proposed English, keyed by reading index: `parse_lines_text`
+    over the response's first text block."""
+    return parse_lines_text(first_text_block(response), region_indices)
+
+
+def parse_terms(response: Message) -> tuple[ProposedTerm, ...]:
+    """The glossary terms the response proposed: `parse_terms_text` over the
+    response's first text block."""
+    return parse_terms_text(first_text_block(response))
+
+
+def parse_lines_text(text: str, region_indices: Sequence[int]) -> dict[int, str]:
     """The page's proposed English, keyed by reading index.
 
     Sparse: a region the model omitted is simply absent, which is AC-5's
@@ -79,7 +117,7 @@ def parse_lines(response: Message, region_indices: Sequence[int]) -> dict[int, s
     known = set(region_indices)
 
     lines: dict[int, str] = {}
-    for key, english in _body(response).items():
+    for key, english in _body(text).items():
         # MT-014 C-4: exactly this key and no other - a case-folded or prefix
         # match would silently turn a malformed key into a dropped one.
         if key == GLOSSARY_KEY:
@@ -94,7 +132,7 @@ def parse_lines(response: Message, region_indices: Sequence[int]) -> dict[int, s
     return lines
 
 
-def parse_terms(response: Message) -> tuple[ProposedTerm, ...]:
+def parse_terms_text(text: str) -> tuple[ProposedTerm, ...]:
     """The glossary terms the response proposed, in the order it gave them.
 
     `()` when the response has no `glossary` key. **An item that is not an
@@ -103,7 +141,7 @@ def parse_terms(response: Message) -> tuple[ProposedTerm, ...]:
     which cost real money - over a malformed glossary item would be the wrong
     trade. The neighbours of a bad item are kept.
     """
-    items = _body(response).get(GLOSSARY_KEY, [])
+    items = _body(text).get(GLOSSARY_KEY, [])
     return tuple(
         ProposedTerm(item["term_ja"], item["term_en"], item["note"])
         for item in items
@@ -111,10 +149,8 @@ def parse_terms(response: Message) -> tuple[ProposedTerm, ...]:
     )
 
 
-def _body(response: Message) -> dict[str, Any]:
-    """The JSON object in the response's first `text` block - not `content[0]`,
-    which may be a `thinking` block (see the module docstring, point 1)."""
-    text = next(block.text for block in response.content if block.type == "text")
+def _body(text: str) -> dict[str, Any]:
+    """The JSON object the answer text carries."""
     body: dict[str, Any] = json.loads(text)
     return body
 

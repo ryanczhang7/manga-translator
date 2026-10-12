@@ -30,10 +30,14 @@ beyond four files of ~120 bytes.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from collections.abc import Callable
 
 import pytest
 
+from mangatl.domain.glossary import ProposedTerm
+from mangatl.translate import parse
 from mangatl.translate.parse import UnknownRegionIndex, parse_lines
 
 #: The fixture page's reading indices. Four regions, 0..3 (C-4: "the page's
@@ -290,3 +294,224 @@ def test_only_the_exact_glossary_key_is_skipped_and_its_neighbours_still_raise(
 
     with pytest.raises(UnknownRegionIndex, match=key.strip()):
         parse_lines(fake_message(body), _REGION_INDICES)
+
+
+# =============================================================================
+# MT-079: the split at the text
+# =============================================================================
+#
+# The new names are reached as `parse.<name>` at call time, not imported at the
+# top, so that every test above still collects while they do not exist: the
+# RED failure for each test below is an `AttributeError` naming the missing
+# function, and nothing else in this file goes dark.
+#
+# These are new names over logic MT-011/MT-014 already built, so once GREEN
+# lands they may pass on arrival. Deferred verification 2 earns AC-3's by
+# returning string keys from `parse_lines_text` (owner: GATES).
+
+_WELL_FORMED_TERMS = (
+    '{"0": "Sakura!", "glossary": ['
+    '{"term_ja": "さくら", "term_en": "Sakura", "note": "name"}, '
+    '{"term_ja": "先輩", "term_en": "senpai", "note": "honorific"}]}'
+)
+_MALFORMED_TERMS = (
+    '{"glossary": ['
+    '{"term_ja": "さくら", "term_en": "Sakura", "note": "name"}, '
+    '"not an object", '
+    '{"term_ja": "東京", "term_en": "Tokyo"}, '
+    '{"term_ja": "醜鬼", "term_en": 7, "note": ""}, '
+    '{"term_ja": "東京", "term_en": "Tokyo", "note": "place"}]}'
+)
+
+
+# -- AC-3 ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fixture", ["well-formed", "omits-region-3"])
+def test_parse_lines_text_returns_what_parse_lines_returns_for_the_same_body(
+    response_body: Callable[[str], str],
+    fake_message: Callable[..., object],
+    fixture: str,
+) -> None:
+    """AC-3: the text entry point and the `Message` entry point agree, on the
+    fixture keyed out of order and on the one that omits a region. The literal
+    is compared too, so the two cannot agree on a wrong answer."""
+    body = response_body(fixture)
+    expected = _EXPECTED if fixture == "well-formed" else {i: _EXPECTED[i] for i in (0, 1, 2)}
+
+    lines = parse.parse_lines_text(body, _REGION_INDICES)
+
+    assert lines == parse_lines(fake_message(body), _REGION_INDICES)
+    assert lines == expected
+    assert lines != _POSITION_BUG
+
+
+def test_parse_lines_text_returns_int_keys_not_the_strings_json_carries(
+    response_body: Callable[[str], str],
+) -> None:
+    """AC-3 with C-4's key conversion: a string-keyed dict makes every region
+    read as untranslated. This is the assertion Deferred verification 2's
+    mutation (string keys back) must turn red."""
+    lines = parse.parse_lines_text(response_body("well-formed"), _REGION_INDICES)
+
+    assert all(type(key) is int for key in lines), f"got keys {sorted(map(repr, lines))}"
+    assert set(lines) == set(_REGION_INDICES)
+
+
+@pytest.mark.parametrize(
+    ("body", "named"),
+    [
+        ('{"7": "A line for no bubble."}', r"\b7\b"),
+        ('{"first": "A line keyed by a word."}', "first"),
+        ('{"-1": "A line before the first bubble."}', "-1"),
+    ],
+    ids=["out-of-range", "non-integer", "negative"],
+)
+def test_parse_lines_text_raises_unknown_region_index_where_parse_lines_does(
+    fake_message: Callable[..., object], body: str, named: str
+) -> None:
+    """AC-3's "including raising `UnknownRegionIndex` for the same inputs" -
+    naming the key, as MT-011 AC-6 requires of `parse_lines`."""
+    with pytest.raises(UnknownRegionIndex, match=named):
+        parse_lines(fake_message(body), _REGION_INDICES)
+    with pytest.raises(UnknownRegionIndex, match=named):
+        parse.parse_lines_text(body, _REGION_INDICES)
+
+
+def test_parse_lines_text_skips_the_glossary_key() -> None:
+    """MT-014 C-4 through the text entry point: `"glossary"` is not a region."""
+    assert parse.parse_lines_text(_WELL_FORMED_TERMS, _REGION_INDICES) == {0: "Sakura!"}
+
+
+def test_parse_lines_text_on_a_non_json_body_is_loud() -> None:
+    """C-3: "the non-JSON body still raises out of `json.loads`"."""
+    with pytest.raises(json.JSONDecodeError):
+        parse.parse_lines_text("I'm not able to help with that.", _REGION_INDICES)
+
+
+def test_parse_lines_delegates_to_parse_lines_text_with_the_first_text_block(
+    monkeypatch: pytest.MonkeyPatch,
+    response_body: Callable[[str], str],
+    fake_message: Callable[..., object],
+) -> None:
+    """AC-3's last clause: `parse_lines(message, ...)` **is**
+    `parse_lines_text(first_text_block(message), ...)`. Observed with a
+    recorder in place of `parse_lines_text`; a `parse_lines` that kept its own
+    copy of the loop would never call it. The leading thinking block makes
+    "first text block" and `content[0]` disagree."""
+    body = response_body("well-formed")
+    calls: list[tuple[str, object]] = []
+    sentinel = {99: "recorded"}
+
+    def recorder(text: str, region_indices: object) -> dict[int, str]:
+        calls.append((text, region_indices))
+        return sentinel
+
+    monkeypatch.setattr(parse, "parse_lines_text", recorder)
+
+    result = parse.parse_lines(fake_message(body, leading_thinking=True), _REGION_INDICES)
+
+    assert calls == [(body, _REGION_INDICES)], (
+        "parse_lines did not delegate to parse_lines_text with the first text block's text"
+    )
+    assert result is sentinel
+
+
+# -- first_text_block ----------------------------------------------------------
+
+
+def test_first_text_block_is_the_first_text_blocks_text_not_content_zero(
+    fake_message: Callable[..., object],
+) -> None:
+    """C-3: what `_body` read, now public. Behind a thinking block, because
+    `content[0]` is the bug MT-011 C-4's RED amendment names."""
+    message = fake_message('{"0": "x"}', leading_thinking=True)
+
+    assert parse.first_text_block(message) == '{"0": "x"}'
+
+
+def test_first_text_block_of_a_message_with_no_text_block_raises_value_error_naming_it(
+    fake_message: Callable[..., object],
+) -> None:
+    """C-3, pinned by RED (see the amendment in the story's `## Contract`): no
+    text block raises `ValueError` saying so, not a bare `StopIteration` - which
+    names nothing, and which PEP 479 turns into a `RuntimeError` the moment the
+    call sits inside a generator. Not a `JSONDecodeError` either: that is a
+    `ValueError` too, so the message is what tells them apart."""
+    with_thinking = fake_message("{}", leading_thinking=True)
+    thinking_only = dataclasses.replace(with_thinking, content=with_thinking.content[:1])
+
+    with pytest.raises(ValueError, match="text block") as raised:
+        parse.first_text_block(thinking_only)
+    assert not isinstance(raised.value, json.JSONDecodeError)
+
+
+# -- AC-4 ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            _WELL_FORMED_TERMS,
+            (ProposedTerm("さくら", "Sakura", "name"), ProposedTerm("先輩", "senpai", "honorific")),
+        ),
+        (
+            _MALFORMED_TERMS,
+            (ProposedTerm("さくら", "Sakura", "name"), ProposedTerm("東京", "Tokyo", "place")),
+        ),
+        ('{"0": "Sakura!"}', ()),
+        ('{"glossary": []}', ()),
+    ],
+    ids=["well-formed", "malformed-items-skipped", "no-glossary-key", "empty-glossary"],
+)
+def test_parse_terms_text_returns_what_parse_terms_returns_for_the_same_body(
+    fake_message: Callable[..., object],
+    body: str,
+    expected: tuple[ProposedTerm, ...],
+) -> None:
+    """AC-4: same terms, in the response's order; a malformed item (not an
+    object, a field missing, a field not a string) skipped with its neighbours
+    kept; `()` with no `glossary` key."""
+    terms = parse.parse_terms_text(body)
+
+    assert terms == expected
+    assert terms == parse.parse_terms(fake_message(body))
+
+
+def test_parse_terms_delegates_to_parse_terms_text_with_the_first_text_block(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_message: Callable[..., object],
+) -> None:
+    """AC-4's delegation, observed the same way as AC-3's."""
+    calls: list[str] = []
+    sentinel = (ProposedTerm("記録", "recorded", ""),)
+
+    def recorder(text: str) -> tuple[ProposedTerm, ...]:
+        calls.append(text)
+        return sentinel
+
+    monkeypatch.setattr(parse, "parse_terms_text", recorder)
+
+    result = parse.parse_terms(fake_message(_WELL_FORMED_TERMS, leading_thinking=True))
+
+    assert calls == [_WELL_FORMED_TERMS], (
+        "parse_terms did not delegate to parse_terms_text with the first text block's text"
+    )
+    assert result is sentinel
+
+
+def test_parse_exports_the_three_new_names_and_keeps_the_old_four() -> None:
+    """C-3: `__all__` grows by exactly three names. Pinned in the sorted order
+    the existing list already uses (isort-style, which ruff's RUF022 enforces),
+    and `GLOSSARY_KEY` still importable from `parse` with its value."""
+    assert parse.__all__ == [
+        "GLOSSARY_KEY",
+        "UnknownRegionIndex",
+        "first_text_block",
+        "parse_lines",
+        "parse_lines_text",
+        "parse_terms",
+        "parse_terms_text",
+    ]
+    assert parse.GLOSSARY_KEY == "glossary"

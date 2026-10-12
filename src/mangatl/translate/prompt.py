@@ -1,24 +1,19 @@
-"""The page image, the region list, and the one request they go in.
+"""Claude's request for one page: the call shape around the page prompt.
 
-MT-011 C-3, C-5 and C-7. Two numbers here are **budget constraints and not
-tuning knobs** (`architecture.md` D5, `stack.md` §5/O4):
+MT-011 C-3, C-5 and C-7. **What is asked** - the system prompt, the region
+listing, the context block, the capped page image and the response schema -
+moved to `page_prompt` in MT-079 so every provider asks the same question; the
+reasoning for each of those (the 1,568 px cap, `est_tokens`, listing an
+`ocr_empty` region) is in that module's docstring. `MAX_IMAGE_LONG_EDGE_PX` and
+`prepare_page_image` are re-exported from there unchanged. **How it is asked of
+Claude** stays here, and the request is byte-for-byte what it was before the
+move (MT-079 AC-1).
 
-- **one call per page** - two passes per page costs $2.29 against a $2.00
-  ceiling, so everything a page needs goes in a single `messages.create`;
-- **the page image capped at 1,568 px on the long edge** - an uncapped 2400x3400
-  scan costs $1.95 against $1.14 capped, and 1,568 px is Claude's documented
-  image long-edge cap, beyond which the image is downscaled server-side anyway.
-  Sending more is paying for bytes that are discarded.
-
-Changing either is a change to a stated constraint and goes back to the user.
-
-**`est_tokens` is `ceil(width x height / 750)` on the *capped* dimensions**
-(C-7). `ceil` rather than floor: a 1568x1098 page gives 1,721,664 / 750 =
-2295.552, and 2296 is the figure `stack.md` §5/O4 prints - and `ceil` is the
-safe direction for a number MT-013's budget guard projects spend with. On the
-capped dimensions rather than the original because the estimate has to describe
-what is actually sent; taking it before the resize is silent, leaves every image
-correctly capped, and inflates a 2400x3400 page's projection 4.7x.
+Two numbers are **budget constraints and not tuning knobs** (`architecture.md`
+D5, `stack.md` §5/O4): **one call per page** - two passes per page costs $2.29
+against a $2.00 ceiling, so everything a page needs goes in a single
+`messages.create` - and the 1,568 px cap `page_prompt` applies. Changing either
+is a change to a stated constraint and goes back to the user.
 
 **`build_request` returns `(kwargs, est_tokens)`, not one dict** (C-3's RED
 amendment, accepted as PO-9). `est_tokens` is not a parameter of the Messages
@@ -31,28 +26,24 @@ MT-037's, with a credential, after spending money.
 order is `tools` -> `system` -> `messages`, so the page image, the region list
 and MT-014's rolling context all sit *after* it, where they are free to vary per
 page. A breakpoint placed after the page image caches nothing across pages.
-
-**An `ocr_empty` region is listed like any other, with empty source text**
-(PO-11). `stack.md` §5/O3 chose local OCR over LLM-only OCR precisely because
-"the LLM then receives both the OCR text and the page image, so it can silently
-correct an OCR miss it can see - which is the safety net that makes the cheap
-option safe". A region OCR read nothing from is exactly that miss, so dropping
-it from the listing and the schema would remove the mechanism O3 relies on.
 """
 
 from __future__ import annotations
 
 import base64
 from collections.abc import Sequence
-from io import BytesIO
-from math import ceil
 from typing import Any
-
-from PIL import Image
 
 from mangatl.domain.glossary import EMPTY_CONTEXT, PromptContext
 from mangatl.domain.line import OcrResult
-from mangatl.translate.parse import GLOSSARY_KEY
+from mangatl.translate.page_prompt import (
+    MAX_IMAGE_LONG_EDGE_PX,
+    SYSTEM_PROMPT,
+    context_text,
+    prepare_page_image,
+    response_schema,
+    user_text,
+)
 
 __all__ = [
     "MAX_IMAGE_LONG_EDGE_PX",
@@ -62,9 +53,6 @@ __all__ = [
     "prepare_page_image",
 ]
 
-#: Claude's documented image long-edge cap, and `architecture.md` D5's budget.
-MAX_IMAGE_LONG_EDGE_PX: int = 1568
-
 #: The ceiling on one page's response. Required by the Messages API (PO-5: the
 #: contract's first draft omitted it), and well clear of the cost model's ~700
 #: visible output tokens per page.
@@ -72,102 +60,6 @@ MAX_OUTPUT_TOKENS: int = 4096
 
 #: `stack.md` §5/O4's model, and the one MT-012's rate table prices against.
 MODEL_ID: str = "claude-opus-5"
-
-#: Claude's published tokens-per-image divisor: `width x height / 750`.
-_PIXELS_PER_TOKEN = 750
-
-#: JPEG quality for the prepared page. Nothing in the contract pins it; 85 is
-#: the usual legibility/size trade-off and the bytes are what the model reads,
-#: not what the user sees.
-_JPEG_QUALITY = 85
-
-#: MT-014 C-3: the one non-index property of the response schema. Each item's
-#: `additionalProperties: false` keeps an invented field out of `parse_terms`;
-#: the note's enum is `domain.glossary.Note`.
-_GLOSSARY_SCHEMA: dict[str, Any] = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "term_ja": {"type": "string"},
-            "term_en": {"type": "string"},
-            "note": {"type": "string", "enum": ["name", "honorific", "place", ""]},
-        },
-        "required": ["term_ja", "term_en", "note"],
-        "additionalProperties": False,
-    },
-}
-
-#: The stable prefix, and the only block carrying a cache breakpoint. Nothing
-#: page-specific may appear here: everything in it is read again for every page
-#: of the chapter, and one volatile character invalidates the cache for all of
-#: them.
-_SYSTEM_PROMPT = """You translate Japanese manga into natural English.
-
-You are given one page image and the text OCR read from each of its regions, \
-listed in reading order (right to left, top to bottom). Translate every region \
-into English, using the art to decide pronouns, speaker attribution, honorifics \
-and continuity - that is why you are given the page and not just the text.
-
-Guidance:
-- Keep each line's register and tone. Manga dialogue is spoken, not literary.
-- A region whose source text is empty is one the OCR missed. If you can read \
-that bubble from the page image, translate what it says; if it genuinely has no \
-text, leave it out of your answer.
-- If you cannot read a region at all, leave it out of your answer rather than \
-guessing. An omitted region is recorded as untranslated, which is recoverable; \
-an invented line is not.
-- Answer with one entry per region, keyed by the region's reading index.
-
-Continuity across pages:
-- You may also be given a glossary of names, honorifics and place names this \
-chapter has already settled on, and the previous page's English in reading \
-order. Use the glossary's renderings exactly, every time, and read the previous \
-page for who is speaking and what is being continued.
-- When a character name, an honorific or a place name appears on this page that \
-the glossary does not have, add it under the "glossary" key: its Japanese as \
-written, the English you used, and a note of "name", "honorific" or "place" \
-("" for anything else). Do not repeat terms the glossary already has."""
-
-
-def prepare_page_image(page_image: bytes) -> tuple[bytes, int]:
-    """Cap one page for the request: `(JPEG bytes, est_tokens)`.
-
-    The long edge comes back at **at most** `MAX_IMAGE_LONG_EDGE_PX`, with the
-    aspect ratio preserved and the orientation unchanged. A page already at or
-    under the cap is **not upscaled** (AC-3): "at most 1568 px" includes 1568,
-    so a page already there is returned at its own size rather than resized to
-    itself, and an implementation scaling unconditionally by `1568 / longest`
-    would enlarge a 1567 px page into bytes the server throws away.
-
-    It is still re-encoded as JPEG, because the request's media type says JPEG
-    and the caller may hand over a PNG, a WebP or anything else `read_bytes`
-    found in the scans folder.
-
-    `est_tokens` is `ceil(w * h / 750)` on the dimensions of the image this
-    function actually returns - see the module docstring for why both halves of
-    that are load-bearing.
-    """
-    with Image.open(BytesIO(page_image)) as source:
-        width, height = source.size
-        longest = max(width, height)
-        # `.convert("RGB")` on both paths: JPEG has no alpha and no palette, so
-        # a page arriving as RGBA or as "P" raises on save without it.
-        if longest > MAX_IMAGE_LONG_EDGE_PX:
-            scale = MAX_IMAGE_LONG_EDGE_PX / longest
-            size = (
-                (MAX_IMAGE_LONG_EDGE_PX, max(1, round(height * scale)))
-                if width >= height
-                else (max(1, round(width * scale)), MAX_IMAGE_LONG_EDGE_PX)
-            )
-            prepared = source.resize(size, Image.Resampling.LANCZOS).convert("RGB")
-        else:
-            prepared = source.convert("RGB")
-        buffer = BytesIO()
-        prepared.save(buffer, format="JPEG", quality=_JPEG_QUALITY)
-        out_width, out_height = prepared.size
-
-    return buffer.getvalue(), ceil(out_width * out_height / _PIXELS_PER_TOKEN)
 
 
 def build_request(
@@ -195,13 +87,12 @@ def build_request(
     `[image, context, listing]`, the context being the non-empty halves of the
     glossary and rolling blocks joined by a blank line. Nothing page-specific
     enters `system` (AC-6), and no image but the current page's is ever sent
-    (AC-4). The response schema gains the `glossary` property the model
+    (AC-4). The response schema carries the `glossary` property the model
     proposes terms under; it is not required.
     """
     prepared, est_tokens = prepare_page_image(page_image)
-    reading_indices = [str(index) for index in range(len(ocr_results))]
     context_blocks: list[dict[str, Any]] = (
-        [] if context == EMPTY_CONTEXT else [{"type": "text", "text": _context_text(context)}]
+        [] if context == EMPTY_CONTEXT else [{"type": "text", "text": context_text(context)}]
     )
 
     return {
@@ -212,31 +103,12 @@ def build_request(
             # `medium` rather than the default `high`: `cost-model.awk` puts the
             # chapter over $2.00 at 3,200 thinking tokens per page.
             "effort": "medium",
-            "format": {
-                "type": "json_schema",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        index: {
-                            "type": "string",
-                            "description": f"The English for the region at reading index {index}.",
-                        }
-                        for index in reading_indices
-                    }
-                    | {GLOSSARY_KEY: _GLOSSARY_SCHEMA},
-                    # No `required`, and that is what makes AC-5 a real case: a
-                    # compliant model may omit a region only if the schema lets
-                    # it. `additionalProperties: false` is the other half - it
-                    # makes AC-6's unknown index the model disobeying rather
-                    # than the schema inviting it.
-                    "additionalProperties": False,
-                },
-            },
+            "format": {"type": "json_schema", "schema": response_schema(len(ocr_results))},
         },
         "system": [
             {
                 "type": "text",
-                "text": _SYSTEM_PROMPT,
+                "text": SYSTEM_PROMPT,
                 "cache_control": {"type": "ephemeral"},
             }
         ],
@@ -255,27 +127,8 @@ def build_request(
                         },
                     },
                     *context_blocks,
-                    {"type": "text", "text": _user_text(ocr_results)},
+                    {"type": "text", "text": user_text(ocr_results)},
                 ],
             }
         ],
     }, est_tokens
-
-
-def _context_text(context: PromptContext) -> str:
-    """The glossary block, then the rolling block, the empty one omitted."""
-    return "\n\n".join(block for block in (context.glossary_block, context.rolling_block) if block)
-
-
-def _user_text(ocr_results: Sequence[OcrResult]) -> str:
-    """The region listing: every region, once, by index and source text.
-
-    In reading order and never re-sorted - reading order is computed once, in
-    the domain (`architecture.md` D10), and a request that re-ordered it would
-    hand the model a different page from the one the review screen shows.
-    """
-    listing = "\n".join(f"[{index}] {result.text}" for index, result in enumerate(ocr_results))
-    return (
-        "Here is the page, and the text OCR read from each of its regions in"
-        f" reading order:\n\n{listing}"
-    )
