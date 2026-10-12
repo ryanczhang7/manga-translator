@@ -66,3 +66,37 @@ and can be watched — while `mangatl.translate` does not yet exist.
 `fixtures/**` classifies as `test` in `.claude/harness/paths.conf`, so GREEN
 cannot touch these files — a fixture quietly adjusted to make a test pass is the
 same move as editing a test.
+
+## `page-011-ocr.json` — real OCR input for the live Gemini test (MT-080)
+
+Not a response body: the **input** side of one real page.
+`tests/integration/test_gemini_live.py` (MT-080 AC-8) sends
+`spikes/MT-002/pages/011.jpg` together with these regions to Gemini, so the
+live test needs the network and a key but not the GPU or the weights, and the
+token count is that of a real page.
+
+A JSON list, one object per region **in reading order** (the order
+`DetectStage` stores them in: `sort_regions` over `detect_page_regions`), with
+exactly the two fields of `mangatl.domain.line.OcrResult`:
+`{"text": str, "ocr_empty": bool}`. Loaded by `load_ocr_fixture` in that test.
+
+**Provenance.** Recorded once by the Test Developer (`claude-opus-5-5`) in
+MT-080 RED on 2026-10-12, on the development machine, by running the real
+detector and OCR exactly as the pipeline does -
+`load_detector` / `load_ocr` / `load_vocab` with
+`select_providers(available_providers())` (ran on `CUDAExecutionProvider`),
+`sort_regions(detect_page_regions(...))`, then `transcribe_page_regions(...)`.
+Inputs (SHA-256):
+
+| file | sha256 |
+|---|---|
+| `spikes/MT-002/pages/011.jpg` | `408612e28fb4e0eca4fed057e008aa1419079b2ef0bb3e8d000d435eabe12d8b` |
+| `spikes/MT-002/models/comic-text-detector-onnx/comic-text-detector.onnx` | `1a86ace74961413cbd650002e7bb4dcec4980ffa21b2f19b86933372071d718f` |
+| `spikes/MT-002/models/manga-ocr-base-ONNX/onnx/encoder_model.onnx` | `df35f64c2400ea860c70a2d06f2a1f99892374a78c89fcf35308076557a3863f` |
+| `spikes/MT-002/models/manga-ocr-base-ONNX/onnx/decoder_model.onnx` | `31ca14d6dee6b3966144e128d0481d5a91f5083cbced81fe7a9571713fa50cd4` |
+| `spikes/MT-002/models/manga-ocr-base/vocab.txt` | `344fbb6b8bf18c57839e924e2c9365434697e0227fac00b88bb4899b78aa594d` |
+
+Result: **11 regions, none `ocr_empty`**; the fixture's own SHA-256 is
+`129da93c755c4ef9aa45c618926f422848898d0fc2000956692b518f496caf60`. It is a
+record of what OCR read, errors included, not a ground truth: nothing asserts
+OCR quality against it.

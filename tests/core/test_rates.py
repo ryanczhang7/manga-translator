@@ -240,12 +240,14 @@ def test_an_empty_model_id_is_refused_rather_than_priced_at_zero() -> None:
 def test_the_rate_table_carries_the_version_identifier_the_contract_pins() -> None:
     """AC-2's last clause depends on this existing at all: a ledger that cannot
     say which table priced a call cannot be reconciled against a bill."""
-    assert RATE_TABLE_VERSION == "2026-09-12"
+    # MT-080 C-4/V-2: bumped in the same commit as the Gemini row.
+    assert RATE_TABLE_VERSION == "2026-10-12"
 
 
 def test_the_shipped_table_carries_both_models_in_all_four_categories() -> None:
-    """AC-7's first clause, read off the shipped mapping."""
-    for model_id in ("claude-opus-5", "claude-sonnet-5"):
+    """AC-7's first clause, read off the shipped mapping. MT-080 AC-7 adds
+    `gemini-3.1-pro-preview` (V-1: the API's spelling of Gemini 3.1 Pro)."""
+    for model_id in ("claude-opus-5", "claude-sonnet-5", "gemini-3.1-pro-preview"):
         assert model_id in RATES, f"the rate table has {sorted(RATES)}"
         rates = RATES[model_id]
         for category in _CATEGORIES:
@@ -270,6 +272,52 @@ def test_the_shipped_rates_are_the_published_ones_to_the_cent() -> None:
     assert sonnet.output_per_mtok == Decimal("10.00")
     assert sonnet.cache_write_per_mtok == Decimal("2.50")
     assert sonnet.cache_read_per_mtok == Decimal("0.20")
+
+
+def test_the_gemini_row_is_the_published_paid_tier_under_200k() -> None:
+    """MT-080 AC-7, **settled** by V-2 - read out, not derived: the pricing page
+    (`ai.google.dev/gemini-api/docs/pricing`, "Last updated 2026-10-09"),
+    Gemini 3.1 Pro Preview, paid tier, prompts <=200k: input $2.00, output
+    $12.00 (thinking included), cached input $0.20. Cache write is $2.00 = the
+    input rate: implicit caching has no write surcharge and the adapter always
+    reports `cache_write_tokens=0` (C-3), so the figure is never multiplied and
+    carries no invented number.
+    """
+    row = RATES["gemini-3.1-pro-preview"]
+    assert row.input_per_mtok == Decimal("2.00")
+    assert row.output_per_mtok == Decimal("12.00")
+    assert row.cache_write_per_mtok == Decimal("2.00")
+    assert row.cache_read_per_mtok == Decimal("0.20")
+
+
+#: MT-080 AC-4's fixture usage as `gemini._usage_of` converts it (P=3200, C=700,
+#: K=450, T=1300 -> input 2500, output 1750, cache read 700, cache write 0).
+_GEMINI_USAGE = TokenUsage(
+    input_tokens=2500, output_tokens=1750, cache_read_tokens=700, cache_write_tokens=0
+)
+
+
+def test_a_gemini_call_prices_to_the_hand_computed_figure() -> None:
+    """MT-080 AC-7's hand-computed figure, in micro-dollars (tokens x $/MTok):
+
+        input       2500 x  2.00 =  5000
+        output      1750 x 12.00 = 21000
+        cache write    0 x  2.00 =     0
+        cache read   700 x  0.20 =   140
+                                  -----
+                                  26140   ->  $0.026140
+
+    Every term is already a whole number of micro-dollars, so PO-4's single
+    `ROUND_HALF_UP` changes nothing here. DV-2's control: swapping input and
+    cache read in `_usage_of` gives 700x2.00 + 1750x12.00 + 2500x0.20 =
+    1400 + 21000 + 500 = 22900, so the figure moves.
+    """
+    record = price("gemini-3.1-pro-preview", _GEMINI_USAGE)
+
+    assert record.cost.micro() == 26140
+    assert record.cost == Usd.from_micro(26140)
+    assert record.model_id == "gemini-3.1-pro-preview"
+    assert record.rate_table_version == "2026-10-12"
 
 
 def test_the_loader_accepts_a_complete_table_and_keeps_the_rates_it_was_given() -> None:

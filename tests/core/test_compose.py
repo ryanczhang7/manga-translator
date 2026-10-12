@@ -448,6 +448,37 @@ def client_spy(monkeypatch: pytest.MonkeyPatch) -> _ClientSpy:
     return spy
 
 
+class _GeminiClientSpy:
+    """A stand-in for `google.genai.Client`, at `mangatl.compose.GeminiClient`
+    (MT-080 V-8: `from google.genai import Client as GeminiClient`).
+
+    Records each construction's arguments, because AC-6 is a claim about the
+    call shape - `api_key=selection.api_key`, explicitly, and nothing else -
+    and not only about a count. A separate class from `_ClientSpy` so that a
+    client one spy returns can never be mistaken for the other's.
+    """
+
+    def __init__(self) -> None:
+        self.clients: list[object] = []
+        self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        client = f"gemini-client-{len(self.clients)}"
+        self.clients.append(client)
+        self.calls.append((args, dict(kwargs)))
+        return client
+
+
+@pytest.fixture
+def gemini_client_spy(monkeypatch: pytest.MonkeyPatch) -> _GeminiClientSpy:
+    """`raising=False`: the name arrives in GREEN (V-8), as
+    `available_providers` did for MT-024. Installed in RED, the gemini arm still
+    raises `ProviderUnavailable` - which is the right red."""
+    spy = _GeminiClientSpy()
+    monkeypatch.setattr("mangatl.compose.GeminiClient", spy, raising=False)
+    return spy
+
+
 @pytest.fixture
 def keyless(monkeypatch: pytest.MonkeyPatch) -> None:
     """`ANTHROPIC_API_KEY` out of the environment: AC-6's "no API key" machine.
@@ -690,7 +721,92 @@ def test_an_anthropic_selection_binds_translate_page_to_one_bare_anthropic_clien
     )
 
 
-@pytest.mark.parametrize("provider", ["gemini", "openai"])
+def test_a_gemini_selection_binds_the_gemini_adapter_to_one_client_built_with_its_key(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    gemini_client_spy: _GeminiClientSpy,
+    keyless: None,
+) -> None:
+    """**MT-080 AC-6.** Four stages; the translator is
+    `partial(gemini.translate_page, <the one GeminiClient>)`; that client was
+    constructed exactly once as `GeminiClient(api_key=<the selection's key>)`
+    - keyword, explicit, nothing else - and no `Anthropic` was constructed.
+
+    The key is passed explicitly because the SDK's own lookup reads two
+    variables (`GOOGLE_API_KEY` and `GEMINI_API_KEY`) and PO-1 names one.
+    `keyless` is in force, so the selection is the only place the key can come
+    from.
+    """
+    stages = build_pipeline(weights_dir, selection=_selection("gemini", "g-SECRET-key"))
+
+    from mangatl.translate import gemini
+
+    assert [type(stage) for stage in stages] == [
+        DetectStage,
+        CleanStage,
+        OcrStage,
+        TranslateStage,
+    ]
+    assert gemini_client_spy.calls == [((), {"api_key": "g-SECRET-key"})], (
+        f"GeminiClient was constructed as {gemini_client_spy.calls}; AC-6 is exactly"
+        " one GeminiClient(api_key=selection.api_key)"
+    )
+    assert client_spy.clients == [], (
+        f"a gemini selection constructed {len(client_spy.clients)} Anthropic client(s)"
+    )
+    (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
+    translator = translate_stage.translate
+    assert isinstance(translator, partial), f"the translator is {translator!r}, not a partial"
+    assert translator.func is gemini.translate_page, f"the translator binds {translator.func!r}"
+    assert translator.args == (gemini_client_spy.clients[0],) and translator.keywords == {}, (
+        f"gemini.translate_page is bound to {translator.args}/{translator.keywords}"
+    )
+
+
+def test_an_anthropic_selection_constructs_no_gemini_client(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    gemini_client_spy: _GeminiClientSpy,
+    keyless: None,
+) -> None:
+    """MT-080 AC-6's control from the other side: a `build_pipeline` that built
+    a `GeminiClient` for every translating selection (and then bound Claude)
+    passes the test above. Claude's arm is MT-078's, unchanged."""
+    build_pipeline(weights_dir, selection=_selection("anthropic", "sk-SECRET-ant"))
+
+    assert gemini_client_spy.calls == []
+    assert len(client_spy.clients) == 1
+
+
+def test_with_no_selection_a_lone_gemini_key_binds_gemini_with_that_key(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    gemini_client_spy: _GeminiClientSpy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MT-080 AC-6 through the window's path (`selection=None`): the one key
+    in the environment is `GEMINI_API_KEY`, so gemini is selected and its key
+    reaches the constructor - by the selection, not by the SDK's own lookup."""
+    _provider_env(monkeypatch, GEMINI_API_KEY="g-SECRET-env")
+
+    stages = build_pipeline(weights_dir)
+
+    from mangatl.translate import gemini
+
+    assert gemini_client_spy.calls == [((), {"api_key": "g-SECRET-env"})]
+    assert client_spy.clients == []
+    (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
+    assert isinstance(translate_stage.translate, partial)
+    assert translate_stage.translate.func is gemini.translate_page
+
+
+# MT-080: `gemini` left this list - it has an adapter now, and its arm is
+# pinned by `test_a_gemini_selection_binds_the_gemini_adapter_to_one_client...`
+# above. `openai` keeps the refusal observed until MT-081.
+@pytest.mark.parametrize("provider", ["openai"])
 def test_a_provider_with_no_adapter_yet_is_refused_by_name_before_anything_is_built(
     weights_dir: Path,
     loaders: _Loaders,
@@ -765,21 +881,25 @@ def test_with_no_selection_mangatl_provider_is_the_choice(
     """C-2: `select_provider(os.environ.get(PROVIDER_VAR), os.environ)`. Two
     keys are set, so a build that did not pass the variable through would
     refuse as ambiguous - a different exception - and one that ignored it would
-    bind Claude. Gemini has no adapter, so the variable being read shows as
-    `ProviderUnavailable` naming gemini, with nothing loaded."""
+    bind Claude. OpenAI has no adapter, so the variable being read shows as
+    `ProviderUnavailable` naming openai, with nothing loaded.
+
+    MT-080: was gemini/`GEMINI_API_KEY`, which has an adapter from this story
+    on and would now bind rather than refuse; openai is the provider still
+    without one. Same three-way discrimination, one provider along."""
     from mangatl.translate.provider import ProviderUnavailable
 
     _provider_env(
         monkeypatch,
         ANTHROPIC_API_KEY="sk-SECRET-ant",
-        GEMINI_API_KEY="sk-SECRET-gem",
-        MANGATL_PROVIDER="gemini",
+        OPENAI_API_KEY="sk-SECRET-oai",
+        MANGATL_PROVIDER="openai",
     )
 
     with pytest.raises(ProviderUnavailable) as raised:
         build_pipeline(weights_dir)
 
-    assert str(raised.value) == _unavailable("gemini")
+    assert str(raised.value) == _unavailable("openai")
     assert client_spy.clients == []
     assert _nothing_loaded(loaders) == []
 
