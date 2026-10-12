@@ -149,10 +149,10 @@ detector licence, and 1.75 GB of CUDA runtime — both recorded in the audit.
 | Thing | Candidate version | Why |
 |---|---|---|
 | `anthropic` (Python SDK) | 1.x | Official SDK for the chosen model. |
-| Model | **`claude-opus-5`**, adaptive thinking, `output_config.effort: "medium"` | Decision O4, §5. The brief's axis is accuracy, and this is the strongest model whose cost survives the $2 ceiling with headroom. |
+| Model | **`claude-opus-5`**, adaptive thinking, `output_config.effort: "medium"` | *Not v1's model since 2026-10-12 - v1 is Gemini-only (§5/O4); kept, tested, unused without an Anthropic key.* Decision O4, §5. The brief's axis is accuracy, and this is the strongest model whose cost survives the $2 ceiling with headroom. |
 | Fallback model | `claude-sonnet-5` | Configurable, for a user who wants a cheaper run; ~40% of the Opus 5 cost at the same call shape. |
 | `google-genai` (Python SDK), model **`gemini-3.1-pro-preview`** | `>=2.29,<3` (2.29.0 locked) | **Added 2026-10-09 at the user's request; in use since MT-080 (2026-10-12).** Used when `GEMINI_API_KEY` is the key set (MT-078 PO-1); the client gets that key explicitly. `gemini-3.1-pro-preview` is the API's only id for the user's `gemini-3.1-pro` (MT-080 V-1). Same prompt, same 1,568 px image, same ledger; thinking at `MEDIUM`, output capped at 4,096 (thinking included). Rates confirmed from ai.google.dev/gemini-api/docs/pricing on 2026-10-12 (V-2): $2.00 in / $12.00 out (thinking included) / $0.20 cached input per MTok, prompts ≤200k; `RATE_TABLE_VERSION` 2026-10-12. The measured per-page cost lands in §5/O4's provider note (MT-080 AC-8). |
-| `openai` (Python SDK), model **`gpt-6.1-sol`** | *planned, EPIC-08 / MT-081* | **Added 2026-10-09 at the user's request.** Used when `OPENAI_API_KEY` is the key set. The flagship `gpt-6-astra` ($10/$50 per MTok) estimates ≈$2.24/chapter, over the ceiling, and was rejected by the user. Rates **unverified** at planning ($2 in / $10 out, cached input 0.1× listed for `gpt-6-astra`); pinned in MT-081. |
+| `openai` (Python SDK), model **`gpt-6.1-sol`** | *not in v1 - MT-081 parked 2026-10-12* | **Added 2026-10-09 at the user's request.** Used when `OPENAI_API_KEY` is the key set. The flagship `gpt-6-astra` ($10/$50 per MTok) estimates ≈$2.24/chapter, over the ceiling, and was rejected by the user. Rates **unverified** at planning ($2 in / $10 out, cached input 0.1× listed for `gpt-6-astra`); pinned in MT-081. |
 
 ### Development tooling
 
@@ -324,6 +324,19 @@ measurement is a metric, so it needs controls, and these belong in MT-022):
 
 ### O4 — which model, and does the $2 ceiling survive
 
+**v1 ships on Gemini (the user's decision, 2026-10-12).** *"do not assume
+we will add an anthropic or open ai key for v1 or this project. assume that
+we are proceeding just with the gemini key."* The model v1 actually runs is
+**`gemini-3.1-pro-preview`** (MT-080), measured at **≈ $0.11 per 20-page
+chapter** (table below, "Other providers"). Everything from here to that
+table - the Claude model choice, the $1.14 estimate, `cost-model.awk` - is
+the original O4 analysis, kept as written: the Claude adapter exists in the
+tree and is tested, but no Anthropic key is expected, its cost was never
+measured (MT-038 is parked), and it is not v1's cost. The budget guard's
+`BOOTSTRAP_PAGE_ESTIMATE` ($0.06, Claude's figure) over-projects Gemini's
+first three pages by ~10× - conservative, never unsafe - and is left as is.
+
+
 **Model: `claude-opus-5`**, one call per page, adaptive thinking,
 `output_config.effort: "medium"`, with the stable prefix prompt-cached.
 
@@ -397,7 +410,7 @@ unverified). Measured figures:
 | Provider / model | Per page, measured | × 20 | Recorded in |
 |---|---|---|---|
 | Gemini `gemini-3.1-pro-preview` | **$0.0054-$0.0057** (2 calls, page 011, 2026-10-12; ~1,600 prompt tokens, ~209 output, 0 thinking reported) | **$0.11** (5.6 % of $2.00) | MT-080 `## Notes` PO-8 |
-| OpenAI `gpt-6.1-sol` | *pending MT-081 AC-8* | | MT-081 `## Notes` |
+| OpenAI `gpt-6.1-sol` | *not measured - MT-081 parked 2026-10-12 (v1 is Gemini-only)* | | `docs/backlog/parked/MT-081.md` |
 
 ### O6 — vertical text and furigana
 

@@ -1,8 +1,8 @@
 ---
 id: EPIC-08
-title: Translating with the key you have - Gemini and OpenAI beside Claude
-status: todo
-stories: [MT-078, MT-079, MT-080, MT-081]
+title: Translating with the key you have - Gemini beside Claude (v1 - Gemini only)
+status: done
+stories: [MT-078, MT-079, MT-080]
 ---
 
 *Added 2026-10-09 by lead-po on Claude Fable 5.1, from the user's request
@@ -11,6 +11,19 @@ OpenAI GPT API key as well." The product decisions it rests on (which key
 picks the provider, the default model per provider, MT-038 staying
 Claude-only) are the user's, dated 2026-10-09, recorded as PO-1 to PO-3 in
 MT-078 `## Context`.*
+
+
+*Amended 2026-10-12 by the user:* **v1 is Gemini-only.** *"do not assume we
+will add an anthropic or open ai key for v1 or this project. assume that we
+are proceeding just with the gemini key."* **MT-081 (OpenAI) is parked**
+(`docs/backlog/parked/`) and out of this epic. The done-when below is read
+with OpenAI struck out: with `GEMINI_API_KEY` set, `mangatl-run` and the
+window translate on Gemini; the refuse-to-guess rule (MT-078) still guards a
+machine that happens to hold two keys; and **MT-080's `## Notes` carry the
+measured Gemini cost - $0.0054-$0.0057 per page, ≈ $0.11 per 20-page chapter
+against $2.00 (PO-8)**. With MT-078, MT-079 and MT-080 DONE, the epic is
+done. The Claude adapter MT-011/MT-014 built stays in the tree, tested and
+unchanged; nothing here removes it.
 
 ## Goal
 
@@ -50,8 +63,7 @@ ceiling. Claude's request is byte-for-byte what MT-011/MT-014 send today.
   Claude's request unchanged (chore; runs beside MT-078).
 - **MT-080** — Gemini: the adapter, its rate row, its import contract, and
   its live measurement.
-- **MT-081** — OpenAI: the same, after MT-080 (they share `compose.py`,
-  `rates.py`, `pyproject.toml`).
+- ~~**MT-081** — OpenAI~~ — **parked 2026-10-12** (v1 is Gemini-only; see the amendment above).
 
 ## Deliberately not in this epic
 
