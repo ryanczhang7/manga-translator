@@ -55,7 +55,7 @@ __all__ = [
 #: change; a ledger that cannot say which table priced a call cannot be
 #: reconciled against the provider's bill, which is what the brief's S5 asks
 #: for. Bump it in the same commit as any number in `_PUBLISHED`.
-RATE_TABLE_VERSION: str = "2026-09-12"
+RATE_TABLE_VERSION: str = "2026-10-12"
 
 
 @dataclass(frozen=True)
@@ -155,8 +155,9 @@ def load_rates(table: Mapping[str, Mapping[str, Decimal]]) -> Mapping[str, Model
 
 
 #: The rates as published, in dollars per million tokens, transcribed from
-#: `docs/wiki/stack.md` section 3 line 330 by way of MT-012's `## Contract`:
-#: cache write is 1.25x the input rate and cache read is 0.1x of it. `Decimal`
+#: `docs/wiki/stack.md` section 3 line 330 by way of MT-012's `## Contract`
+#: (Claude's rows: cache write is 1.25x the input rate and cache read is 0.1x
+#: of it; the Gemini row cites its own page, MT-080). `Decimal`
 #: and never `float`, so that a rate is the number it is written as.
 #:
 #: **Thinking tokens are not a category.** The API reports them inside
@@ -173,6 +174,19 @@ _PUBLISHED: Mapping[str, Mapping[str, Decimal]] = {
         "input_per_mtok": Decimal("2.00"),
         "output_per_mtok": Decimal("10.00"),
         "cache_write_per_mtok": Decimal("2.50"),
+        "cache_read_per_mtok": Decimal("0.20"),
+    },
+    # MT-080 V-2: ai.google.dev/gemini-api/docs/pricing ("Last updated
+    # 2026-10-09", read 2026-10-12), Gemini 3.1 Pro Preview, paid tier, prompts
+    # <= 200k tokens. Output includes thinking tokens, as on Claude. Cache read
+    # is the "context caching" input price. Gemini's implicit caching has no
+    # write surcharge and `translate/gemini.py` always reports 0 cache-write
+    # tokens, so the write rate equals input rather than being an invented
+    # number. Keyed on the id the API lists (V-1), not "gemini-3.1-pro".
+    "gemini-3.1-pro-preview": {
+        "input_per_mtok": Decimal("2.00"),
+        "output_per_mtok": Decimal("12.00"),
+        "cache_write_per_mtok": Decimal("2.00"),
         "cache_read_per_mtok": Decimal("0.20"),
     },
 }

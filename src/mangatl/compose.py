@@ -42,6 +42,12 @@ client is still `Anthropic()`'s own environment lookup; passing the key
 explicitly is MT-077's. The way to run without a key is still
 `mangatl-run --no-translate`, which this module answers with `translate=False`,
 no selection and a stage list that never reaches for a client.
+
+**The same exception, a third time, for the Gemini client** (MT-080 C-6). A
+`gemini` selection binds `translate.gemini.translate_page` to a
+`google.genai.Client` built here with the selection's key, so this module
+imports `google.genai`; the *"Only translate imports google.genai"* contract
+exempts `compose`, `cli` and `app` for the reason the anthropic one does.
 """
 
 from __future__ import annotations
@@ -54,6 +60,7 @@ from pathlib import Path
 
 import onnxruntime as ort
 from anthropic import Anthropic
+from google.genai import Client as GeminiClient
 
 from mangatl.clean.page import clean_page_image
 from mangatl.clean.session import load_inpainter
@@ -65,6 +72,7 @@ from mangatl.ocr.session import VOCAB_FILENAME, load_ocr, load_vocab
 from mangatl.pipeline.stage import Stage
 from mangatl.pipeline.stages import build_stages
 from mangatl.pipeline.translate_stage import PageTranslator
+from mangatl.translate import gemini
 from mangatl.translate.client import translate_page
 from mangatl.translate.provider import (
     PROVIDER_VAR,
@@ -184,7 +192,7 @@ def build_pipeline(
     The one function in the project that may construct an inference session or
     an API client, and the reason this module exists. Everything it does is
     wiring: the sessions are `detect`'s, `clean`'s and `ocr`'s, the client is
-    `anthropic`'s, the binding is `functools.partial`, and the order of the
+    the selected provider's SDK's, the binding is `functools.partial`, and the order of the
     stages is `pipeline.stages.build_stages`'s. Nothing here decides anything a
     stage decides.
 
@@ -221,8 +229,11 @@ def build_pipeline(
     loaded, so a keyless machine fails in milliseconds. `anthropic` binds
     `partial(translate_page, Anthropic())` exactly as before - the bare client,
     its own key lookup (MT-044 C-13); the key in the selection is unused for it
-    in this story. Every other provider is `ProviderUnavailable` until its
-    adapter story adds an arm to the `match` (PO-5).
+    in this story. `gemini` binds `partial(gemini.translate_page,
+    GeminiClient(api_key=selection.api_key))` (MT-080 AC-6, V-8) - the key
+    passed explicitly, never the SDK's own two-variable lookup. Every other
+    provider (`openai`) is `ProviderUnavailable` until its adapter story adds
+    an arm to the `match` (PO-5).
     """
     translator = _translator(selection) if translate else None
     providers = select_providers(available_providers())
@@ -248,6 +259,10 @@ def _translator(selection: Selection | None) -> PageTranslator:
     match selection.provider:
         case "anthropic":
             return partial(translate_page, Anthropic())
+        case "gemini":
+            # The key is passed explicitly (MT-080 AC-6): the SDK's own lookup
+            # reads GOOGLE_API_KEY as well as GEMINI_API_KEY, and PO-1 names one.
+            return partial(gemini.translate_page, GeminiClient(api_key=selection.api_key))
         case other:
             raise ProviderUnavailable(f"translation with {other} is not available yet")
 
