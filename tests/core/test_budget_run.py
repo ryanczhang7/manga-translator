@@ -12,6 +12,12 @@ guard reading a ledger nothing writes - so `spent` was permanently $0 and the
 guard was inert in the running app, however correct its arithmetic. Everything
 below is a claim about the three of them joined up.
 
+MT-082 adds two tests pinning the guard's inputs through a whole run. Both
+were missed by the EPIC-04 mutation audit's survivors TS8 and TS2. One test
+uses a second cost table, `_HIGH_CALLS`, whose observed mean is above the
+bootstrap estimate. The other runs the chapter twice, so that the chapter's
+spend differs from the run's.
+
 Five conventions, each with a reason that was paid for somewhere:
 
 - **The oracles are imported, not re-derived.** `DEFAULT_CEILING`,
@@ -80,12 +86,12 @@ from mangatl.domain.money import Usd
 from mangatl.domain.rates import price
 from mangatl.domain.region import RawRegion
 from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
-from mangatl.pipeline.runner import BUDGET, RUN_ABORTED, RUN_FINISHED, run_chapter
+from mangatl.pipeline.runner import BUDGET, CANCELLED, RUN_ABORTED, RUN_FINISHED, run_chapter
 from mangatl.pipeline.stage import BudgetRefused, PageContext
 from mangatl.pipeline.stages import build_stages
 from mangatl.pipeline.translate_stage import TranslateStage, budget_for, pages_remaining
 from mangatl.store.intake import read_chapter
-from mangatl.store.ledger import chapter_call_costs, chapter_total, record_call
+from mangatl.store.ledger import chapter_call_costs, chapter_total, record_call, run_total
 from mangatl.store.project import (
     PAGE_DONE,
     PAGE_PENDING,
@@ -177,11 +183,12 @@ _CALLS: tuple[_Call, ...] = (
 #:   page 2: 2 samples, spent 100000, next 50000 (observed) -> 150000 > 120000  REFUSE
 #:
 #: Two pages rather than one because AC-1 says *"every page already translated
-#: is persisted"* and "every" over a single page is not a claim about many. The
-#: crossover is on page 2 rather than page 1 because the observed mean (50,000)
-#: is **below** the bootstrap estimate (60,000), so a ceiling that refused
-#: earlier would refuse on the estimate and never exercise the observed basis at
-#: all - and switching basis is what makes the guard bite on real spend.
+#: is persisted"* and "every" over a single page is not a claim about many.
+#: **This fixture does not tell the two projection bases apart** (MT-082): on
+#: page 2 the bootstrap estimate (100,000 + 60,000 = 160,000) and the observed
+#: mean (100,000 + 50,000 = 150,000) *both* exceed 120,000, so a guard that never
+#: left the estimate basis refuses page 2 here too. `_HIGH_CALLS` and
+#: `_HIGH_CEILING_MICRO` below are the fixture that does tell them apart.
 _CEILING_MICRO = 120_000
 
 #: The ordinal the run must stop before, under `_CEILING_MICRO`. Measured, above.
@@ -192,6 +199,34 @@ _REFUSED_ORDINAL = 2
 #: $0.00 + $0.06 is not <= $0.00, so page 0 is refused and the ledger stays
 #: empty. Measured out of framework on 2026-09-21.
 _ZERO_CEILING_REFUSED_ORDINAL = 0
+
+#: MT-082: a cost table whose observed mean is **above** the bootstrap
+#: estimate, so the observed basis refuses a page the estimate would permit.
+#: `_CALLS` is left as it is for the tests that use it.
+#:
+#: MEASURED out of framework by the PO, 2026-10-13 (MT-082 `## Notes` PO-2),
+#: against the shipped `domain.rates.price`:
+#:   claude-opus-5  2000 in, 3600 out -> 100000 micro  ($0.1000), every page
+_HIGH_USAGE = TokenUsage(
+    input_tokens=2000, output_tokens=3600, cache_read_tokens=0, cache_write_tokens=0
+)
+_HIGH_CALLS: tuple[_Call, ...] = tuple(
+    _Call(request_id=f"msg_high{index}", model_id="claude-opus-5", usage=_HIGH_USAGE, micro=100_000)
+    for index in range(_PAGE_COUNT)
+)
+
+#: The ceiling for `_HIGH_CALLS`: $0.27. The guard's walk, MEASURED against the
+#: shipped `Budget` (MT-082 Contract, Block 2):
+#:
+#:   page 0: 0 samples, spent      0, next  60000 (estimate) ->  60000 <= 270000 PERMIT
+#:   page 1: 1 sample,  spent 100000, next  60000 (estimate) -> 160000 <= 270000 PERMIT
+#:   page 2: 2 samples, spent 200000, next 100000 (observed) -> 300000 >  270000 REFUSE
+#:   page 2 had the guard stayed on the estimate:
+#:                      spent 200000, next  60000 (estimate) -> 260000 <= 270000 PERMIT
+_HIGH_CEILING_MICRO = 270_000
+
+#: The ordinal the run must stop before, under `_HIGH_CEILING_MICRO`.
+_HIGH_REFUSED_ORDINAL = 2
 
 
 def _ring(x: int, y: int) -> tuple[tuple[int, int], ...]:
@@ -402,18 +437,27 @@ class _Run:
     transcriber: _Transcriber
 
 
-def _run_chapter(fixture: _Fixture, *, ceiling_micro: int | None) -> _Run:
+def _run_chapter(
+    fixture: _Fixture,
+    *,
+    ceiling_micro: int | None,
+    calls: Sequence[_Call] = _CALLS,
+    cancelled: Callable[[], bool] = _never,
+) -> _Run:
     """Walk the fixture chapter through the **real** `build_stages` list.
 
     The stage list is built by `build_stages`, not assembled here, so AC-4's
     "the stage list contains the translate stage" is load-bearing for every
     assertion below: a list without it proposes nothing and bills nothing, and
     these tests go red rather than passing over a pipeline that does neither.
+
+    `calls` is the fake translator's cost table and `cancelled` the runner's
+    cancel check (MT-082); both default to what every older caller used.
     """
     _set_ceiling(fixture.project, ceiling_micro)
     detector = _Detector(fixture.mask)
     transcriber = _Transcriber()
-    translator = _Translator()
+    translator = _Translator(calls)
     events: list[RunEvent] = []
 
     outcome = run_chapter(
@@ -422,7 +466,7 @@ def _run_chapter(fixture: _Fixture, *, ceiling_micro: int | None) -> _Run:
         # decodable image of its own size, which is all `write_cleaned` checks.
         build_stages(detector, lambda image_bytes, regions: image_bytes, transcriber, translator),
         events.append,
-        _never,
+        cancelled,
     )
     return _Run(
         events=events,
@@ -651,6 +695,122 @@ def test_the_chapter_total_after_a_refusal_is_what_the_permitted_pages_cost(
     """
     assert chapter_total(fixture.project) == Usd.from_micro(40_000 + 60_000)
     assert chapter_total(fixture.project).micro() == 100_000
+
+
+# -- MT-082: the guard's two inputs, each pinned through a whole run -----------
+
+
+def test_a_chapter_costing_more_than_the_estimate_is_refused_on_its_observed_mean(
+    fixture: _Fixture,
+) -> None:
+    """**MT-082 AC-1**: once the chapter has priced calls, the guard projects
+    from what they *actually* cost. It does not keep using the $0.06 bootstrap
+    estimate.
+
+    Killed by mutant **TS8**, which projects from `()` instead of
+    `chapter_call_costs(...)` so every page is projected at the estimate. Under
+    TS8 page 2 is permitted (200,000 + 60,000 <= 270,000), the translator is
+    called a third time and the chapter ends at 300,000, past its ceiling.
+
+    The `refused` fixture could not catch this. Its observed mean (50,000) is
+    below the estimate (60,000), so both bases refuse its page 2. Here every
+    page costs 100,000, above the estimate. The last assertion is the
+    discriminator: on the estimate basis this exact page would have been
+    permitted, so a refusal can only have come from the observed basis.
+    """
+    run = _run_chapter(fixture, ceiling_micro=_HIGH_CEILING_MICRO, calls=_HIGH_CALLS)
+
+    aborted = [event for event in run.events if isinstance(event, RunAborted)]
+    assert len(aborted) == 1, (
+        f"the run emitted {len(aborted)} RunAborted events, not one: a chapter whose"
+        " pages cost more than the bootstrap estimate ran past its ceiling, so the"
+        " guard is projecting from the estimate, not from the observed spend"
+    )
+    assert aborted[0].reason == BUDGET
+    assert aborted[0].ordinal == _HIGH_REFUSED_ORDINAL
+    assert run.outcome.outcome == RUN_ABORTED
+    assert run.outcome.aborted_reason == BUDGET
+
+    # Refused *before* the call: D6.
+    assert run.translator.calls == _HIGH_REFUSED_ORDINAL, (
+        f"the translator was called {run.translator.calls} times; page"
+        f" {_HIGH_REFUSED_ORDINAL} should have been refused on its observed mean"
+        " before the call"
+    )
+    assert _rows_for(fixture.db_path, _HIGH_REFUSED_ORDINAL) == 0
+    assert _ledger(fixture.db_path) == [
+        (0, run.outcome.run_id, "msg_high0", "claude-opus-5", 100_000),
+        (1, run.outcome.run_id, "msg_high1", "claude-opus-5", 100_000),
+    ]
+    assert chapter_total(fixture.project).micro() == 200_000
+
+    # The discriminator: the estimate basis would have permitted this page.
+    assert (
+        Budget(Usd.from_micro(_HIGH_CEILING_MICRO))
+        .check(Usd.from_micro(200_000), Budget().project((), 1))
+        .permitted
+        is True
+    ), "the fixture does not separate the bases: the estimate would refuse page 2 too"
+
+
+def test_a_resumed_run_is_refused_on_what_the_chapter_spent_in_an_earlier_run(
+    fixture: _Fixture,
+) -> None:
+    """**MT-082 AC-2**: the ceiling is about the **chapter**, so a second run
+    starts from what earlier runs already spent. It does not start from zero.
+
+    Killed by mutant **TS2**, which compares `run_total(project, run_id)`
+    against the ceiling instead of `chapter_total(project)`. Under TS2 run 2
+    starts at spent 0, so 0 + 50,000 <= 120,000 and page 2 is permitted. The
+    translator is then called and the chapter ends at 140,000, past its
+    ceiling.
+
+    Every older guard test is a single run, where the run's spend and the
+    chapter's spend are the same number, so none of them could tell the two
+    apart. This test needs two runs. Run 1 is cancelled once page 1 is done
+    (the runner checks `cancelled()` at the top of each page) and leaves
+    100,000 in the ledger. Run 2 skips pages 0 and 1 as done. On page 2 it has
+    spent nothing itself, but the chapter has spent 100,000, and
+    100,000 + 50,000 > 120,000.
+    """
+    run1 = _run_chapter(
+        fixture,
+        ceiling_micro=_CEILING_MICRO,
+        cancelled=lambda: fixture.project.page_status(1) == PAGE_DONE,
+    )
+    # Precondition: run 1 stopped on the cancel, not on the budget.
+    assert run1.outcome.outcome == RUN_ABORTED
+    assert run1.outcome.aborted_reason == CANCELLED
+    assert fixture.project.page_status(0) == PAGE_DONE
+    assert fixture.project.page_status(1) == PAGE_DONE
+    assert fixture.project.page_status(2) == PAGE_PENDING
+    run1_rows = [
+        (0, run1.outcome.run_id, "msg_page0", "claude-opus-5", 40_000),
+        (1, run1.outcome.run_id, "msg_page1", "claude-sonnet-5", 60_000),
+    ]
+    assert _ledger(fixture.db_path) == run1_rows
+
+    run2 = _run_chapter(fixture, ceiling_micro=_CEILING_MICRO)
+
+    assert run2.outcome.run_id != run1.outcome.run_id
+    aborted = [event for event in run2.events if isinstance(event, RunAborted)]
+    assert len(aborted) == 1, (
+        f"the resumed run emitted {len(aborted)} RunAborted events, not one: it"
+        " ignored what the chapter spent in run 1 and ran past the ceiling"
+    )
+    assert aborted[0].reason == BUDGET
+    assert aborted[0].ordinal == _REFUSED_ORDINAL
+    assert run2.outcome.aborted_reason == BUDGET
+    assert run2.translator.calls == 0, (
+        f"the resumed run called the translator {run2.translator.calls} times; the"
+        " guard compared the run's own spend, not the chapter's, against the ceiling"
+    )
+    assert _ledger(fixture.db_path) == run1_rows
+    assert chapter_total(fixture.project).micro() == 100_000
+
+    # The discriminator: run 2 itself spent nothing, so a guard that read the
+    # run's spend would have permitted the page.
+    assert run_total(fixture.project, run2.outcome.run_id).micro() == 0
 
 
 # -- the controls that make the refusal mean something -------------------------
