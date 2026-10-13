@@ -100,3 +100,58 @@ Result: **11 regions, none `ocr_empty`**; the fixture's own SHA-256 is
 `129da93c755c4ef9aa45c618926f422848898d0fc2000956692b518f496caf60`. It is a
 record of what OCR read, errors included, not a ground truth: nothing asserts
 OCR quality against it.
+
+## `kakeru-p1.png`, `kakeru-p2.png`, `kakeru-ocr.json` — the synthetic name pair (MT-045)
+
+Two **synthetic** manga-style pages (MT-045 PO-1: the user chose a rendered
+pair over the spike scans) for `tests/integration/test_glossary_live.py`, the
+live measurement that a name keeps one reading across two pages with
+continuity on (AC-1) and drifts with it off (AC-2, the negative control).
+
+The name is **翔** - Shō / Sho / Shou / Kakeru are all defensible - as a bare
+kanji, **no furigana**, in exactly one bubble per page and in a different
+sentence position on each: page 1 `翔、こっちだ！` (first), page 2
+`もう翔けていったのか、翔は？` (last). No other name, no romaji.
+
+**Why page 2 says 翔けて (kakete, "dashed off") as well.** The first render had
+page 2 `もう行ったのか、翔は？`, and with continuity OFF Gemini read both pages'
+bare 翔 as `Sho` in 3 of 4 probe runs (the fourth read `Kakeru` on page 2) - a
+control that would come out around 7-8/10 consistent and so fail AC-2's
+"fixture does not exercise the mechanism" condition. C-1 lets RED change the
+dialogue, never the name or the bar: page 2's name bubble now also uses 翔 as
+the verb 翔ける (*kakeru*, to soar / dash), the wordplay a manga would make on
+this name, which makes the *Kakeru* reading salient on page 2 while page 1's
+bare 翔 still reads *Sho*. That is the exact drift a glossary exists to stop:
+a later page whose own text pulls the name toward another rendering. The
+bubble holds 翔 twice, once as the name; it is still the only bubble on the page
+that contains 翔, and the name itself is still bare kanji without furigana.
+Probe, continuity on/off alternated, 3 runs each (MT-045 Handoff):
+ON `Sho/Sho` 3 of 3; OFF `Sho/Kakeru` 3 of 3. Text is set
+vertically, right-to-left; 4 bubbles a page, different dialogue and panel
+layout on each page. White, 1000 × 1414 px portrait, so `prepare_page_image`
+(cap 1568 px) does not resize them.
+
+`kakeru-ocr.json` is `{"p1": [...], "p2": [...]}`, each a list of
+`{"text": str, "ocr_empty": bool}` **in reading order** - the bubble text as
+rendered, not a real OCR pass (the pages are clean renders of exactly that
+text). `NAME_REGION = {"p1": 1, "p2": 1}` in `tests/core/_glossary_live.py`
+is the index of the name bubble on each page; a non-live test asserts that
+region holds 翔 and no other does.
+
+**Provenance.** Rendered by the Test Developer (`claude-opus-5-5`) in MT-045
+RED on 2026-10-13 on the development machine with
+`uv run python fixtures/translate/kakeru_render.py` (Pillow 12.3.0, font
+`C:/Windows/Fonts/msgothic.ttc`, MS Gothic, 44 px). The font is not committed;
+nothing at test time needs it or the script. SHA-256, asserted by
+`test_the_committed_pages_are_the_ones_the_readme_records`:
+
+| file | sha256 |
+|---|---|
+| `kakeru-p1.png` | `ed017628ba66b3afdc1406118e3eecb8f9c310512aa2d9c50ead1fddd0421b9a` |
+| `kakeru-p2.png` | `0b18df2d3aa801df4b9118001fe2d426b0b689cb429e8c49e93a89ebae701611` |
+| `kakeru-ocr.json` | `934867f42ceb7a4d1cbfb8cea872a0cdb636b762d0e18633991e4ce3d9233249` |
+
+**If the control arm stops discriminating** (AC-2: continuity off comes out
+≥ 7/10 consistent), the dialogue, placement and rendering here are what
+change - re-render, update this table - never the bar, and never 翔 for a name
+with one obvious reading (C-1).

@@ -1,0 +1,38 @@
+{
+  "p1": [
+    {
+      "text": "おい、急げ！",
+      "ocr_empty": false
+    },
+    {
+      "text": "翔、こっちだ！",
+      "ocr_empty": false
+    },
+    {
+      "text": "待ってくれよ…",
+      "ocr_empty": false
+    },
+    {
+      "text": "電車が出ちゃうぞ！",
+      "ocr_empty": false
+    }
+  ],
+  "p2": [
+    {
+      "text": "あれ？",
+      "ocr_empty": false
+    },
+    {
+      "text": "もう翔けていったのか、翔は？",
+      "ocr_empty": false
+    },
+    {
+      "text": "うん、さっき駅の方へ走っていった。",
+      "ocr_empty": false
+    },
+    {
+      "text": "しょうがないな…",
+      "ocr_empty": false
+    }
+  ]
+}
