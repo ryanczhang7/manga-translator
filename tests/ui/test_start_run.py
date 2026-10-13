@@ -1544,19 +1544,32 @@ def test_resolve_models_is_none_when_the_bundled_folder_is_missing_too(
 def test_build_stages_is_build_pipeline_with_translation_on(
     monkeypatch: pytest.MonkeyPatch, models_dir: Path
 ) -> None:
-    """`translate=` has no default in the fake: the call must say it (MT-044 C-14)."""
-    seen: list[tuple[Path, bool]] = []
+    """`translate=` has no default in the fake: the call must say it (MT-044 C-14).
+
+    MT-077 C-3 (corrected in that story's RED, `## Handoff`): `build_stages`
+    now selects the provider itself and passes `selection=` - so the
+    environment holds exactly one key, and the fake records what it is handed.
+    Before MT-077 the fake took no `selection` and the real body passed none."""
+    from mangatl.translate.provider import Selection
+
+    for name in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "MANGATL_PROVIDER"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-not-a-key")
+    unset = object()
+    seen: list[tuple[Path, bool, object]] = []
     stage = PassThroughStage()
 
-    def fake_build_pipeline(models_dir: Path, *, translate: bool) -> tuple[Stage, ...]:
-        seen.append((models_dir, translate))
+    def fake_build_pipeline(
+        models_dir: Path, *, translate: bool, selection: object = unset
+    ) -> tuple[Stage, ...]:
+        seen.append((models_dir, translate, selection))
         return (stage,)
 
     monkeypatch.setattr(compose_module, "build_pipeline", fake_build_pipeline)
 
     stages = app_module.build_stages(models_dir)
 
-    assert seen == [(models_dir, True)]
+    assert seen == [(models_dir, True, Selection("gemini", "gemini-test-not-a-key"))]
     assert tuple(stages) == (stage,)
 
 

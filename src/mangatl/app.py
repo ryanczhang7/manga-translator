@@ -26,25 +26,44 @@ and the intake window is handed it, so a folder picked or dropped in the window
 behaves exactly as the same folder named on the command line.
 
 `build_window` is the seam and is tested in process; `main` is a shell over it.
+
+**The Gemini API key (MT-077).** At startup, after the bundled weights verify
+and before the window is built, `first_run` asks for the key once - only when
+neither `GEMINI_API_KEY` nor `settings.json` holds one - and stores what is
+entered there. Cancel stores nothing and the app opens for review only. At
+Start, `build_stages` reads the stored key into a *copy* of the environment
+(`translation_env`; a key set in the environment wins, PO-2) and selects the
+provider from that copy, so a keyless Start is refused before any weight loads.
+A key is never logged or shown in full - only as `mask_key` renders it.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from importlib.resources import files
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
-from mangatl.app_paths import bundled_manifest, bundled_models_dir
+from mangatl.app_paths import bundled_manifest, bundled_models_dir, settings_path
 from mangatl.domain.page import Chapter
 from mangatl.models.manifest import ModelHashMismatch, load_manifest, verify_bundled_models
 from mangatl.models.providers import select_providers
 from mangatl.pipeline.stage import Stage
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
 from mangatl.store.project import SchemaTooNew, open_project, project_dir_for
+from mangatl.store.settings import (
+    API_KEY_SETTING,
+    SettingsUnreadable,
+    gemini_api_key,
+    mask_key,
+    write_setting,
+)
+from mangatl.translate.provider import KEY_VARS, PROVIDER_VAR, select_provider
+from mangatl.ui.api_key_dialog import ask_api_key
 from mangatl.ui.contrast import SystemContrastSource
 from mangatl.ui.main_window import MainWindow
 from mangatl.ui.run import RunSetup
@@ -54,14 +73,23 @@ from mangatl.ui.workspace import Workspace
 
 __all__ = [
     "IntakeError",
+    "ask_api_key",
     "build_stages",
     "build_window",
     "check_bundled_models",
+    "first_run",
     "main",
     "open_folder",
     "resolve_models",
     "self_check",
+    "show_warning",
+    "translation_env",
 ]
+
+_log = logging.getLogger("mangatl.app")
+
+#: The variable a Gemini key is set in, never re-spelled (MT-078 PO-1).
+_GEMINI_VAR = KEY_VARS["gemini"]
 
 # The folder is always resolved, so the text names it the same way from any
 # working directory.
@@ -141,11 +169,60 @@ def resolve_models() -> Path | None:
         return None
 
 
+def translation_env(env: Mapping[str, str], settings_file: Path) -> dict[str, str]:
+    """A copy of `env` carrying the stored Gemini key when `env` has none.
+
+    A key set in the environment wins over the stored one (PO-2, AC-6); an
+    empty variable counts as unset. `env` itself is never changed.
+    """
+    result = dict(env)
+    if not result.get(_GEMINI_VAR):
+        stored = gemini_api_key(settings_file)
+        if stored:
+            result[_GEMINI_VAR] = stored
+    return result
+
+
 def build_stages(models_dir: Path) -> tuple[Stage, ...]:
-    """The real stage list, translation on - what `mangatl-run` runs."""
+    """The real stage list, translation on - what `mangatl-run` runs, with the
+    provider selected from the environment plus the stored key.
+
+    `select_provider` refuses (`NoApiKey`, ...) before `build_pipeline` is
+    called, so a refused Start loads no weight."""
     from mangatl.compose import build_pipeline
 
-    return build_pipeline(models_dir, translate=True)
+    env = translation_env(os.environ, settings_path())
+    selection = select_provider(os.environ.get(PROVIDER_VAR) or None, env)
+    return build_pipeline(models_dir, translate=True, selection=selection)
+
+
+def first_run(
+    settings_file: Path, env: Mapping[str, str], ask: Callable[[], str | None]
+) -> str | None:
+    """Ask for the Gemini key once when neither `env` nor `settings_file` has one.
+
+    A key entered is stored in `settings_file` beside whatever it held. Returns
+    `None`, or - when the file could not be written - why, as a message that
+    never carries the key (AC-5). Cancel (`ask()` returning `None`) writes
+    nothing: the app runs for review only.
+    """
+    if env.get(_GEMINI_VAR) or gemini_api_key(settings_file):
+        return None
+    key = ask()
+    if key is None:
+        return None
+    try:
+        write_setting(settings_file, API_KEY_SETTING, key)
+    except (SettingsUnreadable, OSError) as error:
+        _log.warning("Gemini API key not saved: %s", error)
+        return str(error)
+    _log.info("Gemini API key saved (%s)", mask_key(key))
+    return None
+
+
+def show_warning(message: str) -> None:
+    """A warning box titled "Settings". The seam `main` calls and tests replace."""
+    QMessageBox.warning(None, "Settings", message)
 
 
 def build_window(arguments: Sequence[str], *, run_setup: RunSetup | None = None) -> QMainWindow:
@@ -259,7 +336,10 @@ def main(argv: list[str] | None = None) -> int:
     `mangatl --check <report>` - exactly that shape - is `self_check`, returned
     before any `QApplication` exists. Otherwise, after the theme and before any
     window, the bundled weights are verified; a weight that does not verify
-    opens a notice naming it and `main` returns 1 (MT-024 AC-5).
+    opens a notice naming it and `main` returns 1 (MT-024 AC-5). When they
+    verify, `first_run` asks for the Gemini API key if none is set or stored
+    (MT-077), and a settings file it could not write is shown as a warning;
+    then the window is built.
     """
     global _theme
     argv = argv if argv is not None else sys.argv
@@ -276,6 +356,11 @@ def main(argv: list[str] | None = None) -> int:
         notice.show()
         app.exec()
         return 1
+    # `ask_api_key` and `show_warning` are looked up here, as module globals,
+    # so the seams tests replace are the ones used (MT-077 C-3).
+    problem = first_run(settings_path(), os.environ, ask_api_key)
+    if problem is not None:
+        show_warning(problem)
     window = build_window(argv[1:])
     window.show()
     return app.exec()

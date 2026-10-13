@@ -91,6 +91,48 @@ def original_check_bundled_models(
     return original
 
 
+class FirstRunSeams:
+    """What the autouse stubs saw: how many times `main` asked for the key, and
+    every message it passed to `show_warning` (MT-077)."""
+
+    def __init__(self) -> None:
+        self.asked = 0
+        self.warnings: list[str] = []
+        #: The real `mangatl.app.show_warning` (or `None`, before GREEN), for
+        #: the one test that exercises it.
+        self.original_show_warning: Any = None
+        self.original_ask_api_key: Any = None
+
+    def ask(self, parent: object = None) -> str | None:
+        self.asked += 1
+        return None
+
+    def show_warning(self, message: str) -> None:
+        self.warnings.append(message)
+
+
+@pytest.fixture(autouse=True)
+def first_run_seams(monkeypatch: pytest.MonkeyPatch) -> FirstRunSeams:
+    """MT-077 C-4, for every UI test.
+
+    `main` asks for the Gemini API key at first run (C-3) with
+    `mangatl.app.ask_api_key`, a modal `exec()`. On a machine with no
+    `GEMINI_API_KEY`, every existing `main(...)` caller would open that dialog
+    and block the suite. So the seam answers Cancel (`None`) and
+    `mangatl.app.show_warning` records instead of opening a `QMessageBox`.
+
+    A test that exercises the dialog path replaces either name with its own
+    `monkeypatch.setattr`, or reads this fixture's value. `raising=False`: the
+    names do not exist before MT-077's GREEN, and this fixture must load anyway,
+    or every UI test would fail at setup."""
+    seams = FirstRunSeams()
+    seams.original_show_warning = getattr(app_module, "show_warning", None)
+    seams.original_ask_api_key = getattr(app_module, "ask_api_key", None)
+    monkeypatch.setattr(app_module, "ask_api_key", seams.ask, raising=False)
+    monkeypatch.setattr(app_module, "show_warning", seams.show_warning, raising=False)
+    return seams
+
+
 @pytest.fixture
 def every_opened_project_is_closed(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Project]]:
     """AC-2: every Project `mangatl.app` opened during the test is closed once
