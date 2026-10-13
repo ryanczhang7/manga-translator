@@ -149,7 +149,7 @@ nothing at test time needs it or the script. SHA-256, asserted by
 |---|---|
 | `kakeru-p1.png` | `ed017628ba66b3afdc1406118e3eecb8f9c310512aa2d9c50ead1fddd0421b9a` |
 | `kakeru-p2.png` | `0b18df2d3aa801df4b9118001fe2d426b0b689cb429e8c49e93a89ebae701611` |
-| `kakeru-ocr.json` | `934867f42ceb7a4d1cbfb8cea872a0cdb636b762d0e18633991e4ce3d9233249` |
+| `kakeru-ocr.json` | `cbd3e049c8aaf4471e0f8b8e964b1a80c302c920192c100c2a7688bc79f7c325` |
 
 **If the control arm stops discriminating** (AC-2: continuity off comes out
 ≥ 7/10 consistent), the dialogue, placement and rendering here are what

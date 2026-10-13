@@ -96,9 +96,15 @@ def draw_vertical(
     draw = ImageDraw.Draw(page)
     pad_x, pad_y = 46, 56
     draw.ellipse(
-        (cx - width // 2 - pad_x, cy - height // 2 - pad_y,
-         cx + width // 2 + pad_x, cy + height // 2 + pad_y),
-        fill="white", outline="black", width=4,
+        (
+            cx - width // 2 - pad_x,
+            cy - height // 2 - pad_y,
+            cx + width // 2 + pad_x,
+            cy + height // 2 + pad_y,
+        ),
+        fill="white",
+        outline="black",
+        width=4,
     )
     # Columns run right to left.
     for col_index, col in enumerate(cols):
