@@ -2,9 +2,10 @@
 
 `layout.md` ("Review workspace", "Window") and `components.md` §3 settle every
 number here; they are read out, not tuned. Three regions sit in one horizontal
-splitter - `PageStrip` (96 px fixed), `PageCanvas` (all remaining width) and
-`TranslationColumn` (340 px, user-resizable 280-560) - between a 48 px header
-and a 44 px footer.
+splitter - `PageStrip` (a 28 px rail below 1440 px, 96 px at or above),
+`PageCanvas` (all remaining width) and `TranslationColumn` (300 px below 1440,
+380 at or above, user-resizable 280-560) - between a 48 px header and a 44 px
+footer.
 
 **The canvas carries the entire splitter stretch factor.** That is the brief's
 "the art is the largest thing on screen at all times" made mechanical:
@@ -37,7 +38,13 @@ explicitly whenever the dialog closes, because the offscreen platform does not
 reactivate the window by itself. The end of a render, finished or failed, is
 stated in the footer and announced.
 
-The 1440 px breakpoint in `layout.md` is not built yet (MT-015 PO-1, MT-048).
+**The 1440 px breakpoint** (MT-048, `layout.md` "The one breakpoint"). Judged
+on the window's width on every resize: below it the strip is a rail of 1-based
+page indices and the header hides the chapter name; at or above it the strip
+shows filenames and the name is shown. Only a resize that CROSSES the line
+reallocates the splitter, and then only if the user has not dragged the column
+since the chapter was opened; a resize on one side gives the whole delta to the
+canvas, as before.
 `mangatl.app` opens this window on a chapter folder (MT-054) and closes the
 project on `closed`, which is emitted after a render in flight has finished and
 the pending saves are written.
@@ -49,7 +56,14 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from PySide6.QtCore import QEvent, QSignalBlocker, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QColor, QEnterEvent, QPalette, QPixmap
+from PySide6.QtGui import (
+    QCloseEvent,
+    QColor,
+    QEnterEvent,
+    QPalette,
+    QPixmap,
+    QResizeEvent,
+)
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -77,19 +91,23 @@ from mangatl.ui.bake_dialog import BakeConfirmDialog
 from mangatl.ui.buttons import ActivatedByEnter
 from mangatl.ui.canvas import PageCanvas
 from mangatl.ui.cost_readout import CostReadout
+from mangatl.ui.intake import display_name
 from mangatl.ui.labels import plain_label
 from mangatl.ui.line_editor import LineEditor, SaveFn
 from mangatl.ui.link import LinkController, LiveRegion, OrderedRegion
 
 __all__ = [
+    "BREAKPOINT_WIDTH",
     "CANVAS_MIN_WIDTH",
-    "COLUMN_DEFAULT_WIDTH",
+    "COLUMN_DEFAULT_NARROW",
+    "COLUMN_DEFAULT_WIDE",
     "COLUMN_MAX_WIDTH",
     "COLUMN_MIN_WIDTH",
     "FOOTER_HEIGHT",
     "HEADER_HEIGHT",
     "STATUS_COLOR_TOKENS",
     "STATUS_GLYPHS",
+    "STRIP_RAIL_WIDTH",
     "STRIP_WIDTH",
     "PageStrip",
     "TranslationColumn",
@@ -97,8 +115,14 @@ __all__ = [
     "Workspace",
 ]
 
+#: Judged on `Workspace.width()`: `>=` is the wide layout (layout.md).
+BREAKPOINT_WIDTH = 1440
+#: The full strip, at or above the breakpoint.
 STRIP_WIDTH = 96
-COLUMN_DEFAULT_WIDTH = 340
+#: The rail of page indices, below the breakpoint.
+STRIP_RAIL_WIDTH = 28
+COLUMN_DEFAULT_NARROW = 300
+COLUMN_DEFAULT_WIDE = 380
 COLUMN_MIN_WIDTH = 280
 COLUMN_MAX_WIDTH = 560
 CANVAS_MIN_WIDTH = 520
@@ -140,13 +164,48 @@ _RENDER_LOADING_NAME = "Render pages, working"
 
 
 class PageStrip(QListWidget):
-    """The chapter's pages, one item per page in ordinal order, by filename."""
+    """The chapter's pages, one item per page in ordinal order.
+
+    Full (96 px) it shows each page's filename; as a rail (28 px) its 1-based
+    index. Every item reads "Page N of M, <filename>" in both modes."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("pageStrip")
         self.setAccessibleName("Pages")
+        self._filenames: list[str] = []
+        self._rail = False
         self.setFixedWidth(STRIP_WIDTH)
+
+    @property
+    def is_rail(self) -> bool:
+        return self._rail
+
+    def set_pages(self, filenames: Sequence[str]) -> None:
+        """Replace every item: one per filename, labelled for the current mode."""
+        self._filenames = list(filenames)
+        self.clear()
+        total = len(self._filenames)
+        for index, filename in enumerate(self._filenames):
+            item = QListWidgetItem()
+            item.setData(
+                Qt.ItemDataRole.AccessibleTextRole, f"Page {index + 1} of {total}, {filename}"
+            )
+            self.addItem(item)
+        self._relabel()
+
+    def set_rail(self, rail: bool) -> None:
+        """Switch between the rail and the full strip, relabelling in place so
+        the current row and the selection survive."""
+        if rail == self._rail:
+            return
+        self._rail = rail
+        self.setFixedWidth(STRIP_RAIL_WIDTH if rail else STRIP_WIDTH)
+        self._relabel()
+
+    def _relabel(self) -> None:
+        for index, filename in enumerate(self._filenames):
+            self.item(index).setText(str(index + 1) if self._rail else filename)
 
 
 def _row_accessible_text(ordinal: int, total: int, japanese: str | None, line: Line) -> str:
@@ -433,14 +492,26 @@ class Workspace(QMainWindow):
         self._render_output = ""
         #: The Render dialog last opened, kept after it closes; `None` before.
         self.bake_dialog: BakeConfirmDialog | None = None
+        #: The side of the breakpoint last laid out; `None` before the first resize.
+        self._wide: bool | None = None
+        #: The user dragged the column since the chapter was opened (Block 4).
+        self._column_dragged = False
+        #: Set while the breakpoint itself moves the splitter.
+        self._reallocating = False
 
         self.header = QWidget()
         self.header.setObjectName("workspaceHeader")
         self.header.setFixedHeight(HEADER_HEIGHT)
         # The chapter's cost after the run (MT-018 AC-9), at the header's end.
         self.cost_readout = CostReadout()
+        # The chapter's name, leading the header at or above the breakpoint;
+        # hidden, never removed, below it (MT-048 AC-5). The window opens narrow.
+        self.chapter_name = plain_label("chapterName", "")
+        self.chapter_name.setWordWrap(False)
+        self.chapter_name.setVisible(False)
         header_row = QHBoxLayout(self.header)
         header_row.setContentsMargins(tokens_gen.SPACE_S4, 0, tokens_gen.SPACE_S4, 0)
+        header_row.addWidget(self.chapter_name)
         header_row.addStretch(1)
         header_row.addWidget(self.cost_readout)
         self.footer = QWidget()
@@ -471,7 +542,8 @@ class Workspace(QMainWindow):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 0)
-        self.splitter.setSizes([STRIP_WIDTH, CANVAS_MIN_WIDTH, COLUMN_DEFAULT_WIDTH])
+        self.splitter.setSizes([STRIP_WIDTH, CANVAS_MIN_WIDTH, COLUMN_DEFAULT_NARROW])
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
 
         body = QWidget()
         layout = QVBoxLayout(body)
@@ -509,10 +581,12 @@ class Workspace(QMainWindow):
         self._project = project
         self._chapter = project.chapter
         self._page_ordinal = None
+        self._column_dragged = False
+        name = display_name(self._chapter.source_dir)
+        self.chapter_name.setText(name)
+        self.chapter_name.setAccessibleName(f"Chapter {name}")
         with QSignalBlocker(self.page_strip):
-            self.page_strip.clear()
-            for page in self._chapter.pages:
-                self.page_strip.addItem(page.filename)
+            self.page_strip.set_pages([page.filename for page in self._chapter.pages])
         self.page_canvas.set_page(None)
         self.set_regions([], [], [])
 
@@ -655,6 +729,36 @@ class Workspace(QMainWindow):
         self.render_status.setText(sentence)
         self.live_region.announce(sentence)
         self._set_render_loading(False)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._apply_breakpoint()
+
+    def _apply_breakpoint(self) -> None:
+        """Lay out the side of the breakpoint the window is on.
+
+        The splitter is reallocated only when the side CHANGES, and only if the
+        column was not dragged: a resize on one side leaves every size to the
+        canvas's stretch, so the art takes the whole delta."""
+        wide = self.width() >= BREAKPOINT_WIDTH
+        self.page_strip.set_rail(not wide)
+        self.chapter_name.setVisible(wide)
+        if wide == self._wide:
+            return
+        self._wide = wide
+        if not self._column_dragged:
+            strip = STRIP_WIDTH if wide else STRIP_RAIL_WIDTH
+            column = COLUMN_DEFAULT_WIDE if wide else COLUMN_DEFAULT_NARROW
+            remaining = self.splitter.width() - strip - column - 2 * self.splitter.handleWidth()
+            self._reallocating = True
+            try:
+                self.splitter.setSizes([strip, remaining, column])
+            finally:
+                self._reallocating = False
+
+    def _on_splitter_moved(self, _pos: int, index: int) -> None:
+        if not self._reallocating and index == 2:
+            self._column_dragged = True
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Wait for a render in flight, write every pending save (C-7), then close.

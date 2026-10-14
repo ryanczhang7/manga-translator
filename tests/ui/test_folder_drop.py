@@ -806,7 +806,10 @@ def test_a_dropped_folder_with_a_project_opens_the_review_workspace(
     qtbot.addWidget(window.opened)
     assert window.opened.isVisible(), "the Workspace was not shown"
     strip = window.opened.page_strip
-    assert [strip.item(i).text() for i in range(strip.count())] == list(PAGES)
+    # MT-048: at 1100 px the rail shows "1", "2"; the accessible text names the file at any width.
+    assert [
+        strip.item(i).data(Qt.ItemDataRole.AccessibleTextRole) for i in range(strip.count())
+    ] == [f"Page {i + 1} of {len(PAGES)}, {name}" for i, name in enumerate(PAGES)]
     assert strip.currentRow() == 0
     assert not window.isVisible(), "the intake window is still open"
 
