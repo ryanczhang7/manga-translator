@@ -605,7 +605,10 @@ def test_the_opened_workspace_lists_the_pages_and_shows_the_first(
     assert isinstance(workspace, Workspace)
     strip = workspace.page_strip
 
-    assert [strip.item(i).text() for i in range(strip.count())] == list(PAGES)
+    # MT-048: at 1100 px the rail shows "1", "2"; the accessible text names the file at any width.
+    assert [
+        strip.item(i).data(Qt.ItemDataRole.AccessibleTextRole) for i in range(strip.count())
+    ] == [f"Page {i + 1} of {len(PAGES)}, {name}" for i, name in enumerate(PAGES)]
     assert strip.currentRow() == 0
     assert workspace.page_canvas.state() == LOADED, f"canvas is {workspace.page_canvas.state()!r}"
     assert workspace.translation_column.list.count() == len(PAGE0_OCR)

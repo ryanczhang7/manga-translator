@@ -4,15 +4,18 @@ Every layout number here is READ OUT of `docs/wiki/design/layout.md` ("Review
 workspace" and "Window") and `docs/wiki/design/components.md` §3. None of them
 is derived from what the widgets happen to measure, and none is tuned:
 
-    PageStrip          96 px fixed
+    PageStrip          28 px rail below 1440, 96 px at or above (MT-048)
     PageCanvas         everything remaining; stretch 1; minimumWidth 520
-    TranslationColumn  340 px, user-resizable 280-560
+    TranslationColumn  300 / 380 px default either side of 1440 (MT-048),
+                       user-resizable 280-560
     header 48 px, footer 44 px, both full width
     window minimum     1100 x 720, enforced with setMinimumSize
     zoom range         10%-800%
 
-The 1440 px breakpoint in layout.md is deliberately NOT tested: it was deferred
-by the user (MT-015 PO-1) and is MT-047.
+MT-048 built the 1440 px breakpoint and superseded MT-015's AC-1 (96 / 340 at
+1100) and AC-2 (1100 -> 1900 leaves both sides unchanged); the tests below that
+it amended each carry a comment naming it. The breakpoint's own tests are in
+`test_workspace_breakpoint.py`.
 
 "The remaining width" is measured, never assumed (Contract, geometry
 semantics): the canvas is whatever the splitter has left after the two side
@@ -45,13 +48,16 @@ from mangatl.ui.canvas import (
     LOADED,
     PageCanvas,
 )
-from mangatl.ui.workspace import (
+from mangatl.ui.workspace import (  # MT-048: COLUMN_DEFAULT_WIDTH removed, four names added
+    BREAKPOINT_WIDTH,
     CANVAS_MIN_WIDTH,
-    COLUMN_DEFAULT_WIDTH,
+    COLUMN_DEFAULT_NARROW,
+    COLUMN_DEFAULT_WIDE,
     COLUMN_MAX_WIDTH,
     COLUMN_MIN_WIDTH,
     FOOTER_HEIGHT,
     HEADER_HEIGHT,
+    STRIP_RAIL_WIDTH,
     STRIP_WIDTH,
     PageStrip,
     TranslationColumn,
@@ -60,7 +66,10 @@ from mangatl.ui.workspace import (
 
 # --- Settled numbers, read out of layout.md / components.md §3 ---------------
 LAYOUT_STRIP = 96
-LAYOUT_COLUMN_DEFAULT = 340
+LAYOUT_STRIP_RAIL = 28  # MT-048: the rail below the breakpoint
+LAYOUT_BREAKPOINT = 1440  # MT-048
+LAYOUT_COLUMN_DEFAULT_NARROW = 300  # MT-048: replaces LAYOUT_COLUMN_DEFAULT = 340
+LAYOUT_COLUMN_DEFAULT_WIDE = 380  # MT-048
 LAYOUT_COLUMN_MIN = 280
 LAYOUT_COLUMN_MAX = 560
 LAYOUT_CANVAS_MIN = 520
@@ -73,6 +82,8 @@ DESIGN_ZOOM_MAX = 8.0
 # --- The widths the acceptance criteria name --------------------------------
 NARROW = 1100  # AC-1, and the start of AC-2
 WIDE = 1900  # the end of AC-2, and where AC-3's 560 end is observable
+BELOW = 1400  # MT-048: AC-2's narrow one-side resize ends here, under 1440
+ABOVE = 1500  # MT-048: AC-2's wide one-side resize starts here, over 1440
 HEIGHT = 720
 
 # Floating-point slack for a zoom read back through QTransform. A zoom is a
@@ -126,7 +137,11 @@ def _top_in_window(window: QMainWindow, widget) -> int:  # type: ignore[no-untyp
 
 def test_the_workspace_layout_constants_are_the_numbers_layout_md_settles() -> None:
     assert STRIP_WIDTH == LAYOUT_STRIP
-    assert COLUMN_DEFAULT_WIDTH == LAYOUT_COLUMN_DEFAULT
+    # MT-048: the 340 default became 300 / 380 either side of the breakpoint.
+    assert STRIP_RAIL_WIDTH == LAYOUT_STRIP_RAIL
+    assert BREAKPOINT_WIDTH == LAYOUT_BREAKPOINT
+    assert COLUMN_DEFAULT_NARROW == LAYOUT_COLUMN_DEFAULT_NARROW
+    assert COLUMN_DEFAULT_WIDE == LAYOUT_COLUMN_DEFAULT_WIDE
     assert COLUMN_MIN_WIDTH == LAYOUT_COLUMN_MIN
     assert COLUMN_MAX_WIDTH == LAYOUT_COLUMN_MAX
     assert CANVAS_MIN_WIDTH == LAYOUT_CANVAS_MIN
@@ -172,18 +187,20 @@ def test_the_canvas_carries_the_only_non_zero_splitter_stretch(qtbot) -> None:  
     assert window.translation_column.sizePolicy().horizontalStretch() == 0
 
 
-def test_at_1100_px_the_page_strip_is_96_px_wide(qtbot) -> None:  # type: ignore[no-untyped-def]
+def test_at_1100_px_the_page_strip_is_a_28_px_rail(qtbot) -> None:  # type: ignore[no-untyped-def]
+    # MT-048: was ..._is_96_px_wide; 1100 is below the breakpoint, so the rail.
     window = _open(qtbot, NARROW)
 
     assert window.width() == NARROW
-    assert window.page_strip.width() == LAYOUT_STRIP
+    assert window.page_strip.width() == LAYOUT_STRIP_RAIL
 
 
-def test_at_1100_px_the_translation_column_is_340_px_wide(qtbot) -> None:  # type: ignore[no-untyped-def]
+def test_at_1100_px_the_translation_column_is_300_px_wide(qtbot) -> None:  # type: ignore[no-untyped-def]
+    # MT-048: was ..._is_340_px_wide; the narrow default is 300.
     window = _open(qtbot, NARROW)
 
     assert window.width() == NARROW
-    assert window.translation_column.width() == LAYOUT_COLUMN_DEFAULT
+    assert window.translation_column.width() == LAYOUT_COLUMN_DEFAULT_NARROW
 
 
 def test_at_1100_px_the_canvas_takes_every_pixel_the_side_regions_leave(qtbot) -> None:  # type: ignore[no-untyped-def]
@@ -224,19 +241,23 @@ def test_the_header_is_above_the_regions_and_the_footer_below_them(qtbot) -> Non
 # =============================================================================
 
 
-def test_widening_the_window_by_800_px_widens_the_canvas_by_all_800(qtbot) -> None:  # type: ignore[no-untyped-def]
+def test_widening_the_window_by_300_px_below_the_breakpoint_widens_the_canvas_by_all_300(
+    qtbot,  # type: ignore[no-untyped-def]
+) -> None:
+    # MT-048: was 1100 -> 1900 (+800), which now crosses 1440 and reallocates;
+    # the one-side case 1100 -> 1400 keeps the full-delta claim (MT-048 AC-2).
     window = _open(qtbot, NARROW)
     # AC-2 starts from AC-1's layout. Without this, a column that carried the
     # stretch but started pinned at its 280 floor passes the delta vacuously
     # (measured in RED against a stand-in: 280 -> 280, canvas +800).
-    assert window.translation_column.width() == LAYOUT_COLUMN_DEFAULT
+    assert window.translation_column.width() == LAYOUT_COLUMN_DEFAULT_NARROW
     canvas_before = window.page_canvas.width()
 
-    window.resize(WIDE, HEIGHT)
+    window.resize(BELOW, HEIGHT)
     _settle()
 
-    assert window.width() == WIDE
-    assert window.page_canvas.width() - canvas_before == WIDE - NARROW
+    assert window.width() == BELOW
+    assert window.page_canvas.width() - canvas_before == BELOW - NARROW
 
 
 def test_widening_after_the_column_was_dragged_still_gives_the_whole_delta_to_the_canvas(
@@ -244,6 +265,8 @@ def test_widening_after_the_column_was_dragged_still_gives_the_whole_delta_to_th
 ) -> None:
     # A column resized by the user, with room left below its 560 maximum, is
     # where a misplaced stretch factor shows: it would grow and the art would not.
+    # MT-048: 1100 -> 1900 now crosses the breakpoint, so the strip grows 28 -> 96
+    # and the canvas gets 800 - 68 = 732; the dragged column is kept (MT-048 AC-4).
     window = _open(qtbot, NARROW)
     dragged = 400
     _drag_column_to(window, window.splitter.width() - window.splitter.handleWidth() - dragged)
@@ -253,16 +276,23 @@ def test_widening_after_the_column_was_dragged_still_gives_the_whole_delta_to_th
     window.resize(WIDE, HEIGHT)
     _settle()
 
-    assert window.page_canvas.width() - canvas_before == WIDE - NARROW
+    assert (
+        window.page_canvas.width() - canvas_before
+        == WIDE - NARROW - (LAYOUT_STRIP - LAYOUT_STRIP_RAIL)
+        == 732
+    )
     assert window.translation_column.width() == dragged
     assert window.page_strip.width() == LAYOUT_STRIP
 
 
 def test_widening_the_window_leaves_the_page_strip_and_column_widths_unchanged(qtbot) -> None:  # type: ignore[no-untyped-def]
-    window = _open(qtbot, NARROW)
+    # MT-048: was 1100 -> 1900, which now crosses 1440; the one-side wide case
+    # 1500 -> 1900 keeps the claim (MT-048 AC-2).
+    window = _open(qtbot, ABOVE)
     strip_before = window.page_strip.width()
     column_before = window.translation_column.width()
-    assert column_before == LAYOUT_COLUMN_DEFAULT
+    assert strip_before == LAYOUT_STRIP
+    assert column_before == LAYOUT_COLUMN_DEFAULT_WIDE
 
     window.resize(WIDE, HEIGHT)
     _settle()
@@ -421,7 +451,8 @@ def test_the_page_strip_lists_every_page_by_filename_in_ordinal_order(
     qtbot,  # type: ignore[no-untyped-def]
     two_page_project: Project,
 ) -> None:
-    window = _open(qtbot)
+    # MT-048: opened at WIDE, because below 1440 the rail shows "1", "2" instead.
+    window = _open(qtbot, WIDE)
 
     window.load_chapter(two_page_project)
     _settle()

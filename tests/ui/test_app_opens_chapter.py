@@ -383,7 +383,10 @@ def test_the_chapters_pages_are_listed_by_filename_in_ordinal_order(qtbot, sourc
     assert isinstance(window, Workspace)
     strip = window.page_strip
 
-    assert [strip.item(i).text() for i in range(strip.count())] == list(PAGES)
+    # MT-048: at 1100 px the rail shows "1", "2"; the accessible text names the file at any width.
+    assert [
+        strip.item(i).data(Qt.ItemDataRole.AccessibleTextRole) for i in range(strip.count())
+    ] == [f"Page {i + 1} of {len(PAGES)}, {name}" for i, name in enumerate(PAGES)]
 
 
 def test_the_first_page_is_current_and_shown_with_its_own_rows(qtbot, source: Path) -> None:  # type: ignore[no-untyped-def]
