@@ -2,7 +2,7 @@
 id: EPIC-05
 title: The review workspace — the one place a human can catch an error
 status: todo
-stories: [MT-025, MT-015, MT-048, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-054, MT-055, MT-056, MT-018, MT-062, MT-063, MT-057, MT-061, MT-058, MT-059, MT-060, MT-026, MT-028, MT-073, MT-074]
+stories: [MT-025, MT-015, MT-048, MT-086, MT-087, MT-088, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-054, MT-055, MT-056, MT-018, MT-062, MT-063, MT-057, MT-061, MT-058, MT-059, MT-060, MT-026, MT-028, MT-073, MT-074]
 ---
 
 ## Goal
@@ -43,7 +43,10 @@ in each story's frontmatter carries the real order.
   the source.
 - **MT-015** — the workspace shell: page canvas with pan and zoom, docked line
   column, page pager. Layout and tokens from `docs/wiki/design/`.
-- **MT-048** — the 1440 px breakpoint, split out of MT-015 (its PO-1).
+- **MT-048** — the 1440 px breakpoint, split out of MT-015 (its PO-1); narrowed 2026-10-14 to the reallocation (its PO-1).
+- **MT-086** — page-status glyphs on the strip (components.md §PageStrip), split out of MT-048.
+- **MT-087** — thumbnails on the 96 px strip, split out of MT-048.
+- **MT-088** — remembered window size, position and column width (layout.md §Window), split out of MT-048.
 - **MT-016** — the bubble-to-line link: selection both ways, hover, off-screen
   handling, overlapping bubbles, keyboard and screen-reader conveyance.
 - **MT-049** — fix: hover clears when the pointer leaves the canvas (§4.4). MT-016's
