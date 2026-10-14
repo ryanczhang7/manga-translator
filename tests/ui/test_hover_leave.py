@@ -223,7 +223,9 @@ def _hover_at_edge(window: Workspace, regions: Sequence[OrderedRegion], edge: st
 
 def _leave_onto_strip(window: Workspace) -> None:
     """Real input: the pointer goes from the canvas viewport onto the page strip."""
-    _pointer_to(window.page_strip.viewport(), QPoint(50, 220))
+    # MT-048: the centre is on the strip at the 28 px rail and the 96 px strip alike.
+    viewport = window.page_strip.viewport()
+    _pointer_to(viewport, viewport.rect().center())
 
 
 def _leave_to_nowhere(window: Workspace) -> None:
