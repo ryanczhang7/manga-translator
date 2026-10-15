@@ -157,6 +157,14 @@ assert_eq "AC-7 control: the same reader finds the existing gate-logs/*.log row"
   1 "$(failed_row "$README" 'gate-logs/*.log')"
 
 # ---------------------------------------------------------------------------
+describe "MT-053 AC-10: the logs kept for a signature have their own row"
+
+# `gate-logs/*.log` does not reach into a subdirectory, so kept/ needs a row of
+# its own, read by the same whole-row reader as the line above.
+assert_eq "AC-10: README has one gate-logs/kept/*.log row, written by scripts/gates.sh, hand-editable yes" \
+  1 "$(failed_row "$README" 'gate-logs/kept/*.log')"
+
+# ---------------------------------------------------------------------------
 describe "the two files that carry evidence stay denied"
 
 # Stated independently of the README, so that widening the column and the rules

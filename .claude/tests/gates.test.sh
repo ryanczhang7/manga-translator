@@ -2108,4 +2108,440 @@ git -C "$FIX" checkout -q -- . 2>/dev/null
 git -C "$FIX" checkout -q main 2>/dev/null
 set_phase "$FIX" ""
 
+# ============================================================================
+# MT-053 (LOCAL to manga-translator; report upstream before any refresh, PO-11):
+# a failing log with an unexplained signature outlives later failures
+# ============================================================================
+#
+# HARNESS-027 (= MT-046) keeps the LAST non-passing run of a gate in
+# <id>.failed.log, and the next ordinary failure replaces it. `keep-when |
+# <id> | <extended regex>` keeps a non-passing run whose cleaned log matches it
+# in .claude/state/gate-logs/kept/<id>.<seq6>.<YYYYMMDDTHHMMSSZ>.log, at most 5
+# per gate id, lowest <seq> evicted first, and changes nothing that is judged.
+#
+# Its own fixture, F53, so that nothing here has to clear another block's state:
+#   - project.conf and .claude/state/ are in F53's .git/info/exclude, so the
+#     manifest is read but neither tracked nor gated. AC-9 compares a run whose
+#     keep-when line matches with one whose line does not; with the conf
+#     tracked, the two `tree:` and `commit:` lines would differ because the
+#     MANIFEST differs, and the comparison would need a second mask. Excluded,
+#     every recorded line but `run:` is a fact about the same tree.
+#   - every scenario uses its own gate ids, so kept/ is never cleared and no
+#     test removes a path held in a variable.
+#   - a gate's output and exit status come from .claude/state/m53/<id>.out and
+#     <id>.rc (feed53), so changing a case is a write, never an rm.
+# Needles are whole lines (count_line) or anchored; the kept file's name is
+# matched by grep -E, never awk (mawk has no intervals, HARNESS-025).
+
+describe "MT-053 AC-1..AC-9  a failing log with an unexplained signature outlives later failures"
+
+F53="$(make_project_fixture)"
+trap '[ -n "$H30_SLEEP" ] && kill "$H30_SLEEP" 2>/dev/null; rm -rf "$FIX" "$H30W" "$F53"' EXIT
+mkdir -p "$F53/.git/info"
+printf '%s\n' .claude/harness/project.conf .claude/state/ >> "$F53/.git/info/exclude"
+story "$F53" T-1 GATES </dev/null
+git -C "$F53" add -A >/dev/null 2>&1
+git -C "$F53" -c user.email=t@t -c user.name=t commit -qm "MT-053 fixture story" >/dev/null 2>&1
+git -C "$F53" checkout -q -B story/T-1-fixture 2>/dev/null
+set_phase "$F53" ""
+L53="$F53/.claude/state/gate-logs"
+K53="$L53/kept"
+M53="$F53/.claude/state/m53"
+mkdir -p "$M53"
+
+# stdout only: AC-8 is a statement about stdout.
+g53() { ( cd "$F53" && bash scripts/gates.sh "$@" 2>/dev/null ); }
+# feed53 <id> <exit status> <output, printf %b>
+feed53() { printf '%b' "$3" > "$M53/$1.out"; printf '%s' "$2" > "$M53/$1.rc"; }
+# names53 <dir> [id]   File names in <dir>, C-sorted, space-separated. With <id>,
+# only that gate's kept files, by the Contract's anchored name: a glob of
+# `<id>*` would take coverage-core's files for coverage's.
+names53() {
+  local all; all="$(ls -1A "$1" 2>/dev/null | tr -d '\r')"
+  if [ -n "${2:-}" ]; then
+    all="$(printf '%s\n' "$all" | grep -E -- "^$2\\.[0-9]{6}\\.[0-9]{8}T[0-9]{6}Z\\.log\$")"
+  fi
+  printf '%s\n' "$all" | LC_ALL=C sort | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//'
+}
+kept53()   { names53 "$K53" "$1"; }
+kn53()     { printf '%s' "$(kept53 "$1")" | awk '{ n += NF } END { print n + 0 }'; }
+seqs53()   { kept53 "$1" | tr ' ' '\n' | cut -d. -f2 | tr '\n' ' ' | sed -e 's/ *$//'; }
+last53()   { kept53 "$1" | tr ' ' '\n' | tail -n 1; }
+# prefix53 <prefix>   How many entries of kept/, of ANY name, start with it.
+prefix53() { names53 "$K53" | tr ' ' '\n' | awk -v p="$1" 'index($0, p) == 1 { n++ } END { print n + 0 }'; }
+hdr53()    { [ -n "$1" ] && sed -n "$2p" "$K53/$1" 2>/dev/null | tr -d '\r'; }
+# body53 <kept file> <id>   AC-1: after the eight header lines, <id>.log byte for byte.
+body53() {
+  [ -n "$1" ] && [ -f "$K53/$1" ] || { printf 'no kept file [%s]' "$1"; return 0; }
+  if tail -n +9 "$K53/$1" | cmp -s - "$L53/$2.log"; then printf identical; else printf differs; fi
+}
+# sig53 <kept file> <regex>   The one stdout line AC-8 specifies.
+sig53() { printf 'signature log kept: .claude/state/gate-logs/kept/%s (matched: %s)' "$1" "$2"; }
+# snap53 <name> / same53 <name> [id]   A copy of kept/ now; later, whether
+# kept/ (or one gate's part of it) is the same set of names with the same bytes.
+snap53() { mkdir -p "$M53/snap.$1"; [ ! -d "$K53" ] || cp -R "$K53/." "$M53/snap.$1/"; }
+same53() {
+  local a b f
+  a="$(names53 "$M53/snap.$1" "${2:-}")"; b="$(names53 "$K53" "${2:-}")"
+  [ "$a" = "$b" ] || { printf 'kept/ changed: before [%s] after [%s]' "$a" "$b"; return 0; }
+  for f in $a; do cmp -s "$M53/snap.$1/$f" "$K53/$f" || { printf 'kept/%s changed' "$f"; return 0; }; done
+  printf unchanged
+}
+# in53 <kept file> <exact line>   Whole lines of a kept file equal to it.
+in53() {
+  [ -n "$1" ] && [ -f "$K53/$1" ] || { printf 'no kept file [%s]' "$1"; return 0; }
+  count_line "$2" "$(tr -d '\r' < "$K53/$1")"
+}
+# fhdr53 <id> <n>   Line <n> of MT-046's <id>.failed.log from the same run.
+fhdr53() { sed -n "$2p" "$L53/$1.failed.log" 2>/dev/null | tr -d '\r'; }
+t53()    { ( cd "$F53" && CLAUDE_PROJECT_DIR="$F53" bash -c '. .claude/hooks/lib.sh; gate_tree_hash' 2>/dev/null ); }
+c53() {
+  local c; c="$(git -C "$F53" rev-parse --short HEAD)"
+  [ -z "$(git -C "$F53" status --porcelain -- . ':!docs' 2>/dev/null)" ] \
+    || c="$c (working tree had uncommitted changes)"
+  printf '%s' "$c"
+}
+hline53() { printf '%s\n' "$2" | grep -m1 -n -- "^=== gate: $1 " | cut -d: -f1; }
+R53_RUN='^# run:     [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+
+write_conf "$F53" <<'EOF'
+gate      | sig   | required | . | cat .claude/state/m53/sig.out; exit "$(cat .claude/state/m53/sig.rc)"
+evidence  | sig   | -
+gate      | after | optional | . | printf 'after ran\n'
+evidence  | after | -
+keep-when | sig   | Windows fatal exception
+keep-when | sig   | Unknown C\+\+ exception
+EOF
+
+# --- AC-1 / AC-2 / AC-8: a failing run whose log carries a signature ----------
+feed53 sig 1 'cv2 imported\nWindows fatal exception: code 0x8007000e\nboom 1\n'
+out="$(g53)"
+assert_eq "AC-1 control: sig failed, required" 1 "$(count_re '^FAIL +sig \(' "$out")"
+assert_eq "AC-1 control: the optional gate after it ran" 1 "$(count_re '^=== gate: after ' "$out")"
+r1="$(kept53 sig)"
+assert_eq "AC-1: a failing run whose log matches a keep-when line leaves exactly one kept file for that gate" 1 "$(kn53 sig)"
+_run="$(fhdr53 sig 3)"; _run="${_run#'# run:     '}"
+_stamp="$(printf '%s' "$_run" | tr -d ':-')"
+assert_eq "AC-1 control: MT-046's failed.log gives a start time to derive the stamp from" 1 \
+  "$(printf '%s\n' "$_stamp" | grep -cE '^[0-9]{8}T[0-9]{6}Z$')"
+assert_eq "AC-1: the kept file is kept/sig.000001.<the run's start, without - and :>.log" "sig.000001.$_stamp.log" "$r1"
+assert_eq "AC-2 header 1 names the gate and why it was kept" \
+  "# gates.sh: failing run of gate 'sig' kept for a signature" "$(hdr53 "$r1" 1)"
+assert_eq "AC-2 header 2 is the outcome" "# outcome: fail" "$(hdr53 "$r1" 2)"
+assert_eq "AC-2 header 3 is a UTC time, YYYY-MM-DDTHH:MM:SSZ" 1 "$(hdr53 "$r1" 3 | grep -cE -- "$R53_RUN")"
+assert_eq "AC-2 header 3 is the run line of the same run's sig.failed.log" "$(fhdr53 sig 3)" "$(hdr53 "$r1" 3)"
+assert_eq "AC-2 header 4 is the commit line of the same run's sig.failed.log" "$(fhdr53 sig 4)" "$(hdr53 "$r1" 4)"
+assert_eq "AC-2 header 4 is the short HEAD, with the note only when the tree is dirty" "# commit:  $(c53)" "$(hdr53 "$r1" 4)"
+assert_eq "AC-2 header 5 is the tree line of the same run's sig.failed.log" "$(fhdr53 sig 5)" "$(hdr53 "$r1" 5)"
+assert_eq "AC-2 header 5 is gate_tree_hash, computed independently" "# tree:    $(t53)" "$(hdr53 "$r1" 5)"
+assert_eq "AC-2 header 6 is the keep-when regex that matched, verbatim" "# matched: Windows fatal exception" "$(hdr53 "$r1" 6)"
+assert_eq "AC-2 header 7 is the whole first log line it matched" \
+  "# line:    Windows fatal exception: code 0x8007000e" "$(hdr53 "$r1" 7)"
+assert_eq "AC-2 header 8 closes the header" "# ----" "$(hdr53 "$r1" 8)"
+assert_eq "AC-1: after eight header lines, the run's sig.log byte for byte" identical "$(body53 "$r1" sig)"
+assert_eq "AC-1: and it is this run's log" 1 "$(in53 "$r1" 'boom 1')"
+assert_eq "AC-3: a run that keeps for a signature still writes MT-046's sig.failed.log" \
+  "# gates.sh: last failing run of gate 'sig'" "$(fhdr53 sig 1)"
+assert_eq "AC-3: and still prints MT-046's kept line, once" 1 "$(count_line "$(kept_line sig)" "$out")"
+assert_eq "AC-8: the signature line is printed exactly once, naming the file and the regex" 1 \
+  "$(count_line "$(sig53 "$r1" 'Windows fatal exception')" "$out")"
+assert_eq "AC-8: and no other signature line is printed" 1 "$(count_re '^signature log kept:' "$out")"
+_hs="$(hline53 sig "$out")"; _ha="$(hline53 after "$out")"
+_fk="$(lineno "$(kept_line sig)" "$out")"; _sk="$(lineno "$(sig53 "$r1" 'Windows fatal exception')" "$out")"
+assert_eq "AC-8: it comes after sig's header and after MT-046's failing log kept line" yes \
+  "$([ -n "$_hs" ] && [ -n "$_fk" ] && [ -n "$_sk" ] && [ "$_hs" -lt "$_fk" ] && [ "$_fk" -lt "$_sk" ] && printf yes || printf "no (header ${_hs:-?}, failing log kept ${_fk:-absent}, signature ${_sk:-absent})")"
+assert_eq "AC-8: and before the next gate's header" yes \
+  "$([ -n "$_sk" ] && [ -n "$_ha" ] && [ "$_sk" -lt "$_ha" ] && printf yes || printf "no (signature ${_sk:-absent}, next header ${_ha:-?})")"
+[ -z "$r1" ] || cp "$K53/$r1" "$M53/r1.copy"
+
+# --- AC-2: two keep-when lines match; the first in MANIFEST order is named ----
+# The log's first matching line is the C++ one, so a "first line of the log"
+# reading names the wrong regex.
+feed53 sig 1 'cv2.error: Unknown C++ exception from OpenCV code\nWindows fatal exception: access violation\nboom 2\n'
+out="$(g53 --gate sig)"
+r2="$(last53 sig)"
+assert_eq "AC-2: a run matching two keep-when lines still produces exactly one kept file" 2 "$(kn53 sig)"
+assert_eq "AC-2: the next kept file takes <seq> 000002" "000001 000002" "$(seqs53 sig)"
+assert_eq "AC-2: the header names the first keep-when line in manifest order" \
+  "# matched: Windows fatal exception" "$(hdr53 "$r2" 6)"
+assert_eq "AC-2: and the first log line THAT regex matched" \
+  "# line:    Windows fatal exception: access violation" "$(hdr53 "$r2" 7)"
+assert_eq "AC-2: header 3 is the same run's failed.log run line" "$(fhdr53 sig 3)" "$(hdr53 "$r2" 3)"
+assert_eq "AC-1: the second kept file is the second run's log, byte for byte" identical "$(body53 "$r2" sig)"
+assert_eq "AC-8: one signature line, naming the manifest-first regex" 1 \
+  "$(count_line "$(sig53 "$r2" 'Windows fatal exception')" "$out")"
+assert_eq "AC-8: and only one" 1 "$(count_re '^signature log kept:' "$out")"
+assert_eq "AC-1: a later failing run WITH a signature leaves the first kept file byte-identical" identical \
+  "$(same "$M53/r1.copy" "$K53/$r1")"
+
+# --- AC-2: the escaped regex is named verbatim -------------------------------
+feed53 sig 1 'cv2.error: Unknown C++ exception from OpenCV code\nboom 3\n'
+out="$(g53 --gate sig)"
+r3="$(last53 sig)"
+assert_eq "AC-2: a log matching only the second keep-when line is kept" 3 "$(kn53 sig)"
+assert_eq "AC-2: its header names that regex verbatim, backslashes included" \
+  "# matched: Unknown C\\+\\+ exception" "$(hdr53 "$r3" 6)"
+assert_eq "AC-2: and the whole line it matched" \
+  "# line:    cv2.error: Unknown C++ exception from OpenCV code" "$(hdr53 "$r3" 7)"
+assert_eq "AC-8: the signature line carries the regex verbatim" 1 \
+  "$(count_line "$(sig53 "$r3" 'Unknown C\+\+ exception')" "$out")"
+
+# --- AC-1 / AC-3: a later failing run with NO signature ----------------------
+# The lower-case line is a decoy: matching is grep -E, case-sensitive.
+snap53 r4
+feed53 sig 1 'boom 4\nwindows fatal exception, in lower case\n'
+out="$(g53 --gate sig)"
+assert_eq "AC-3 control: sig failed again" 1 "$(count_re '^FAIL +sig \(' "$out")"
+assert_eq "AC-3: a failing run matching no signature leaves kept/ unchanged, byte for byte" unchanged "$(same53 r4)"
+assert_eq "AC-1: a later failing run WITHOUT a signature leaves the first kept file byte-identical" identical \
+  "$(same "$M53/r1.copy" "$K53/$r1")"
+assert_eq "AC-3: and prints no signature line" 0 "$(count_re '^signature log kept:' "$out")"
+assert_eq "AC-3: MT-046's failing log kept line is printed, once" 1 "$(count_line "$(kept_line sig)" "$out")"
+assert_eq "AC-3: MT-046's sig.failed.log header is unchanged" "# gates.sh: last failing run of gate 'sig'" "$(fhdr53 sig 1)"
+assert_eq "AC-3: MT-046's sig.failed.log holds this run after its six header lines" identical \
+  "$(tail -n +7 "$L53/sig.failed.log" | cmp -s - "$L53/sig.log" && printf identical || printf differs)"
+
+# --- AC-4: a pass, even one whose log carries a signature --------------------
+snap53 r5
+feed53 sig 0 'Windows fatal exception: code 0x8007000e\nall passed\n'
+out="$(g53)"
+assert_eq "AC-4 control: sig passed" 1 "$(count_re '^PASS +sig \(' "$out")"
+assert_eq "AC-4: a pass whose log matches a signature leaves kept/ unchanged" unchanged "$(same53 r5)"
+assert_eq "AC-4: and prints no signature line" 0 "$(count_re '^signature log kept:' "$out")"
+
+# --- AC-4: gates a run does not execute --------------------------------------
+feed53 sig 1 'Windows fatal exception: never executed\n'
+out="$(g53 --gate after)"
+assert_eq "AC-4 control: --gate after does not run sig" 0 "$(count_re '^=== gate: sig ' "$out")"
+assert_eq "AC-4: --gate after leaves kept/ unchanged" unchanged "$(same53 r5)"
+assert_eq "AC-4: --gate after prints no signature line" 0 "$(count_re '^signature log kept:' "$out")"
+out="$(g53 --list)"
+assert_eq "AC-4 control: --list lists sig" 1 "$(count_re '^sig +required ' "$out")"
+assert_eq "AC-4: --list leaves kept/ unchanged" unchanged "$(same53 r5)"
+assert_eq "AC-4: --list prints no signature line" 0 "$(count_re '^signature log kept:' "$out")"
+out="$(g53 --audit)"
+assert_eq "AC-7 control: a well-formed keep-when manifest passes --audit" 1 "$(count_line 'Manifest audit passed.' "$out")"
+assert_eq "AC-7 control: and no FAIL line names keep-when" 0 "$(count_re '^FAIL .*keep-when' "$out")"
+assert_eq "AC-4: --audit leaves kept/ unchanged" unchanged "$(same53 r5)"
+assert_eq "AC-4: --audit prints no signature line" 0 "$(count_re '^signature log kept:' "$out")"
+write_conf "$F53" <<'EOF'
+gate      | sig   | required | . | cat .claude/state/m53/sig.out; exit "$(cat .claude/state/m53/sig.rc)"
+evidence  | sig   | -
+gate      | after | optional | . | printf 'after ran\n'
+evidence  | after | -
+slow      | sig   | left out of --fast for MT-053 AC-4
+keep-when | sig   | Windows fatal exception
+keep-when | sig   | Unknown C\+\+ exception
+EOF
+out="$(g53 --fast)"
+assert_eq "AC-4 control: --fast leaves out the slow gate" 1 "$(count_line '--fast skipped: sig' "$out")"
+assert_eq "AC-4: --fast leaves kept/ unchanged for the gate it left out" unchanged "$(same53 r5)"
+assert_eq "AC-4: --fast prints no signature line" 0 "$(count_re '^signature log kept:' "$out")"
+
+# --- AC-1: a signature on the first line of a large log ----------------------
+# 20,000 filler lines after it, 348,917 bytes. `clean_log | grep -Em1` read as
+# a STATUS loses this match under pipefail - sed dies of SIGPIPE once grep has
+# left - and did so in 10 of 10 tries on this host (Contract, amended at RED).
+write_conf "$F53" <<'EOF'
+gate      | big   | required | . | awk 'BEGIN { print "Windows fatal exception: code 0x8007000e"; for (i = 0; i < 20000; i++) print "filler line " i }'; exit 1
+evidence  | big   | -
+keep-when | big   | Windows fatal exception
+EOF
+g53 --gate big >/dev/null
+rb="$(kept53 big)"
+assert_eq "AC-1: a 348,917-byte log whose first line is the signature is kept" 1 "$(kn53 big)"
+assert_eq "AC-1: after its header, the large log byte for byte" identical "$(body53 "$rb" big)"
+
+# --- AC-6: the signatures come from keep-when lines and nowhere else ---------
+write_conf "$F53" <<'EOF'
+gate      | nokw  | required | . | cat .claude/state/m53/nokw.out; exit "$(cat .claude/state/m53/nokw.rc)"
+evidence  | nokw  | -
+gate      | zebra | required | . | cat .claude/state/m53/zebra.out; exit "$(cat .claude/state/m53/zebra.rc)"
+evidence  | zebra | -
+gate      | alt   | optional | . | cat .claude/state/m53/alt.out; exit "$(cat .claude/state/m53/alt.rc)"
+evidence  | alt   | -
+keep-when | zebra | ZEBRA-[0-9]+
+keep-when | alt   | (QUAGGA|OKAPI) [0-9]+
+EOF
+feed53 nokw  1 'Windows fatal exception: code 0x8007000e\ncv2.error: Unknown C++ exception from OpenCV code\nZEBRA-9 in the wrong gate\n'
+feed53 zebra 1 'escaped: ZEBRA-42\n'
+feed53 alt   1 'an OKAPI 7 appeared\n'
+snap53 z
+out="$(g53)"
+assert_eq "AC-6 control: nokw failed" 1 "$(count_re '^FAIL +nokw \(' "$out")"
+assert_eq "AC-6: with no keep-when line, a log holding both shipped signatures keeps nothing" 0 "$(kn53 nokw)"
+assert_eq "AC-6: and no file of any name for nokw appears in kept/" 0 "$(prefix53 nokw)"
+assert_eq "AC-6: another gate's keep-when line never keeps nokw's log" unchanged "$(same53 z nokw)"
+rz="$(kept53 zebra)"
+assert_eq "AC-6: an arbitrary regex, ZEBRA-[0-9]+, keeps a failing log that matches it" 1 "$(kn53 zebra)"
+assert_eq "AC-6: naming it verbatim" "# matched: ZEBRA-[0-9]+" "$(hdr53 "$rz" 6)"
+assert_eq "AC-6: and the line it matched" "# line:    escaped: ZEBRA-42" "$(hdr53 "$rz" 7)"
+ra="$(kept53 alt)"
+assert_eq "AC-6: a regex containing | survives the manifest whole, and keeps an optional gate's failure" 1 "$(kn53 alt)"
+assert_eq "AC-6: named verbatim, alternation and all" "# matched: (QUAGGA|OKAPI) [0-9]+" "$(hdr53 "$ra" 6)"
+assert_eq "AC-6: alt's kept file says outcome fail (printed WARN)" "# outcome: fail" "$(hdr53 "$ra" 2)"
+assert_eq "AC-8: one signature line for zebra" 1 "$(count_line "$(sig53 "$rz" 'ZEBRA-[0-9]+')" "$out")"
+assert_eq "AC-8: one signature line for alt" 1 "$(count_line "$(sig53 "$ra" '(QUAGGA|OKAPI) [0-9]+')" "$out")"
+assert_eq "AC-8: and two in all" 2 "$(count_re '^signature log kept:' "$out")"
+assert_eq "AC-6: the earlier kept files are untouched by other gates' runs" identical "$(same "$M53/r1.copy" "$K53/$r1")"
+assert_eq "AC-6: scripts/gates.sh does not contain 'Windows fatal exception'" 0 \
+  "$(grep -cF -- 'Windows fatal exception' "$REPO_ROOT/scripts/gates.sh")"
+assert_eq "AC-6: scripts/gates.sh does not contain 'Unknown C++ exception'" 0 \
+  "$(grep -cF -- 'Unknown C++ exception' "$REPO_ROOT/scripts/gates.sh")"
+assert_eq "AC-6: nor its escaped form, 'Unknown C\\+\\+ exception'" 0 \
+  "$(grep -cF -- 'Unknown C\+\+ exception' "$REPO_ROOT/scripts/gates.sh")"
+
+# --- AC-5: at most 5 per gate id; the lowest <seq> goes; coverage-core is not coverage
+write_conf "$F53" <<'EOF'
+gate      | coverage      | required | . | cat .claude/state/m53/coverage.out; exit 1
+evidence  | coverage      | -
+gate      | coverage-core | required | . | cat .claude/state/m53/coverage-core.out; exit 1
+evidence  | coverage-core | -
+keep-when | coverage      | SIG
+keep-when | coverage-core | SIG
+EOF
+for _i in 1 2 3 4 5; do
+  feed53 coverage-core 1 "SIG core $_i\n"; g53 --gate coverage-core >/dev/null
+done
+assert_eq "AC-5 control: five kept coverage-core runs" "000001 000002 000003 000004 000005" "$(seqs53 coverage-core)"
+# Taken BEFORE any coverage run: an eviction that reaches coverage-core can
+# happen on the first coverage run, not only on the sixth.
+snap53 core5
+for _i in 1 2 3 4 5; do
+  feed53 coverage 1 "SIG cov $_i\n"; g53 --gate coverage >/dev/null
+done
+assert_eq "AC-5 control: five kept coverage runs, and no coverage-core file taken for one" \
+  "000001 000002 000003 000004 000005" "$(seqs53 coverage)"
+assert_eq "AC-5 control: five coverage runs leave coverage-core's five alone" \
+  "000001 000002 000003 000004 000005" "$(seqs53 coverage-core)"
+snap53 cov5
+_old="$(kept53 coverage | tr ' ' '\n' | sed -n 1p)"
+feed53 coverage 1 'SIG cov 6\n'
+out="$(g53 --gate coverage)"
+r6="$(last53 coverage)"
+assert_eq "AC-5: the sixth kept run leaves exactly 5 coverage files" 5 "$(kn53 coverage)"
+assert_eq "AC-5: the one removed is the lowest <seq>, and the new one is 000006" \
+  "000002 000003 000004 000005 000006" "$(seqs53 coverage)"
+assert_eq "AC-5: the oldest run's output is gone from every file in kept/" 0 \
+  "$(grep -rlxF -- 'SIG cov 1' "$K53" 2>/dev/null | awk 'END { print NR }')"
+assert_eq "AC-5 control: the second run's output is still in exactly one file" 1 \
+  "$(grep -rlxF -- 'SIG cov 2' "$K53" 2>/dev/null | awk 'END { print NR }')"
+_left=0
+for _f in $(kept53 coverage); do
+  [ "$_f" = "$r6" ] && continue
+  [ "$_f" != "$_old" ] && [ -f "$M53/snap.cov5/$_f" ] && cmp -s "$M53/snap.cov5/$_f" "$K53/$_f" && _left=$((_left + 1))
+done
+assert_eq "AC-5: the other four are byte-identical to before" 4 "$_left"
+assert_eq "AC-5: the new one is the sixth run's log" 1 "$(in53 "$r6" 'SIG cov 6')"
+assert_eq "AC-5: all five coverage-core files are unchanged, byte for byte" unchanged "$(same53 core5 coverage-core)"
+assert_eq "AC-5: kept/ holds exactly 5 + 5 files whose names start with coverage" 10 "$(prefix53 coverage)"
+assert_eq "AC-8: the eviction run prints one signature line, for the new file" 1 \
+  "$(count_line "$(sig53 "$r6" SIG)" "$out")"
+assert_eq "AC-8: eviction prints nothing else on stdout that names kept/" 1 "$(count_re 'kept/' "$out")"
+
+# --- AC-9: a keep and an eviction change nothing that is judged -------------
+# cap53 <name> [args]   A full run recorded into T-1 (--story); saves the exit
+# status, the summary (from `--- gate summary ---` to the end), last-gate-run's
+# RESULT= and FULL=, and the ## Gate results body with `run:` masked. `(<N>s` is
+# normalised in the summary and the record as HARNESS-024's goldens do: a
+# duration is a measurement of the run, not an output of the gate.
+cap53() {
+  local o r n="$1"; shift
+  o="$(g53 --story T-1 "$@")"; r=$?
+  printf '%s\n' "$r" > "$M53/$n.rc"
+  printf '%s\n' "$o" | awk '/^--- gate summary ---$/ { on = 1 } on' \
+    | sed -E 's/\(([0-9]+)s([,)])/(Ns\2/g' > "$M53/$n.summary"
+  tr -d '\r' < "$F53/.claude/state/last-gate-run" | grep -E '^(RESULT|FULL)=' > "$M53/$n.stamp"
+  tr -d '\r' < "$F53/docs/backlog/stories/T-1.md" \
+    | awk '/^## Gate results/ { on = 1; next } on && /^## / { on = 0 } on' \
+    | sed -E -e 's/^(    run:    ).*/\1<masked>/' -e 's/\(([0-9]+)s([,)])/(Ns\2/g' > "$M53/$n.record"
+  printf '%s\n' "$o" > "$M53/$n.out"
+}
+conf9() {
+  { printf '%s\n' \
+      "gate      | g9  | required | . | printf 'boom 9\\n'; exit 1" \
+      "evidence  | g9  | -" \
+      "gate      | ok9 | optional | . | printf 'fine\\n'" \
+      "evidence  | ok9 | -" \
+      "keep-when | g9  | $1"; } | write_conf "$F53"
+}
+conf9 boom
+cap53 a9
+assert_eq "AC-9 control: the matching run kept a file" 1 "$(kn53 g9)"
+assert_eq "AC-9 control: and printed its signature line" 1 "$(count_re '^signature log kept: ' "$(cat "$M53/a9.out")")"
+assert_eq "AC-9 control: the run was recorded into T-1" 1 "$(count_line '    run:    <masked>' "$(cat "$M53/a9.record")")"
+assert_eq "AC-9 control: the record carries g9's FAIL line" 1 "$(count_re '^    FAIL +g9 \(' "$(cat "$M53/a9.record")")"
+conf9 'ZEBRA-[0-9]+'
+cap53 b9
+assert_eq "AC-9 control: the non-matching run kept nothing" 1 "$(kn53 g9)"
+assert_eq "AC-9: exit status is the same whether or not a keep-when line matches" "$(cat "$M53/b9.rc")" "$(cat "$M53/a9.rc")"
+assert_eq "AC-9: every summary line is the same whether or not a keep-when line matches" identical "$(same "$M53/b9.summary" "$M53/a9.summary")"
+assert_eq "AC-9: last-gate-run's RESULT= and FULL= are the same whether or not a keep-when line matches" identical "$(same "$M53/b9.stamp" "$M53/a9.stamp")"
+assert_eq "AC-9: ## Gate results (run: masked) is the same whether or not a keep-when line matches" identical "$(same "$M53/b9.record" "$M53/a9.record")"
+conf9 boom
+for _i in 2 3 4; do g53 --gate g9 >/dev/null; done
+cap53 c9
+assert_eq "AC-9 control: the fifth kept run evicts nothing" "000001 000002 000003 000004 000005" "$(seqs53 g9)"
+cap53 d9
+assert_eq "AC-9 control: the sixth kept run evicts the first" "000002 000003 000004 000005 000006" "$(seqs53 g9)"
+assert_eq "AC-9: exit status is the same with and without an eviction" "$(cat "$M53/c9.rc")" "$(cat "$M53/d9.rc")"
+assert_eq "AC-9: every summary line is the same with and without an eviction" identical "$(same "$M53/c9.summary" "$M53/d9.summary")"
+assert_eq "AC-9: last-gate-run's RESULT= and FULL= are the same with and without an eviction" identical "$(same "$M53/c9.stamp" "$M53/d9.stamp")"
+assert_eq "AC-9: ## Gate results (run: masked) is the same with and without an eviction" identical "$(same "$M53/c9.record" "$M53/d9.record")"
+
+# --- AC-7: --audit refuses a malformed keep-when line ------------------------
+write_conf "$F53" <<'EOF'
+gate      | sig    | required | . | printf 'x\n'
+evidence  | sig    | -
+keep-when | nosuch | Windows fatal exception
+EOF
+out="$(g53 --audit)"; rc=$?
+assert_eq "AC-7: --audit fails a keep-when line that names no configured gate, naming it" 1 \
+  "$(count_line "$(printf 'FAIL %-12s a `keep-when` line names no configured gate' nosuch)" "$out")"
+assert_eq "AC-7: counted as a manifest problem" 1 "$(count_line '1 manifest problem(s).' "$out")"
+assert_eq "AC-7: and exits 1" 1 "$rc"
+write_conf "$F53" <<'EOF'
+gate      | sig    | required | . | printf 'x\n'
+evidence  | sig    | -
+keep-when | sig    |
+EOF
+out="$(g53 --audit)"; rc=$?
+assert_eq "AC-7: --audit fails a keep-when line with no pattern" 1 \
+  "$(count_line "$(printf 'FAIL %-12s a `keep-when` line has no pattern' sig)" "$out")"
+assert_eq "AC-7: counted as a manifest problem" 1 "$(count_line '1 manifest problem(s).' "$out")"
+assert_eq "AC-7: and exits 1" 1 "$rc"
+
+# --- AC-7: the shipped manifest ---------------------------------------------
+# Read from the real tree; --audit runs on a copy in F53, so nothing in this
+# checkout is written.
+SHIP53="$REPO_ROOT/.claude/harness/project.conf"
+kw53="$(tr -d '\r' < "$SHIP53" | awk -F'|' '
+  { k = $1; gsub(/^[ \t]+|[ \t]+$/, "", k) }
+  k != "keep-when" { next }
+  { id = $2; gsub(/^[ \t]+|[ \t]+$/, "", id)
+    r = $0; sub(/^[^|]*\|[^|]*\|/, "", r); gsub(/^[ \t]+|[ \t]+$/, "", r)
+    print id " | " r }' | LC_ALL=C sort)"
+want53="$(for _g in unit coverage coverage-core integration; do
+  printf '%s | %s\n' "$_g" 'Windows fatal exception' "$_g" 'Unknown C\+\+ exception'
+done | LC_ALL=C sort)"
+assert_eq "AC-7: the shipped project.conf keeps both signatures for unit, coverage, coverage-core and integration, and nothing else" \
+  "$want53" "$kw53"
+_fmt="$(tr -d '\r' < "$SHIP53" | grep -nxF -- '# Format:  keep-when | <gate id> | <extended regex>' | head -n 1 | cut -d: -f1)"
+_first="$(tr -d '\r' < "$SHIP53" | grep -nE -- '^keep-when *\|' | head -n 1 | cut -d: -f1)"
+assert_eq "AC-7: a comment block documents the format, as blocked-when's does, above the first keep-when line" yes \
+  "$([ -n "$_fmt" ] && [ -n "$_first" ] && [ "$_fmt" -lt "$_first" ] && printf yes || printf "no (format line at ${_fmt:-none}, first keep-when line at ${_first:-none})")"
+cp "$SHIP53" "$F53/.claude/harness/project.conf"
+out="$(g53 --audit)"; rc=$?
+assert_eq "AC-7: the shipped manifest's --audit still passes" 1 "$(count_line 'Manifest audit passed.' "$out")"
+assert_eq "AC-7: and exits 0" 0 "$rc"
+assert_eq "AC-7: with no FAIL line" 0 "$(count_re '^FAIL ' "$out")"
+assert_eq "AC-7: and today's one WARN, mutation's" "WARN mutation     no evidence line; a vacuous pass would go unnoticed" \
+  "$(printf '%s\n' "$out" | grep -E '^WARN ')"
+assert_eq "AC-7 control: the manifest fixture beside the goldens carries no keep-when line" 0 \
+  "$(grep -cE -- '^keep-when *\|' "$MANIFEST_FIXTURES/project.conf")"
+assert_eq "AC-7: project.audit.golden is byte-for-byte what it was (blob 336b0ed)" \
+  336b0ede549165e3bfa04bbb8b248e35b2186589 "$(git -C "$REPO_ROOT" hash-object -- "$MANIFEST_FIXTURES/project.audit.golden")"
+assert_eq "AC-7: project.list.golden is byte-for-byte what it was (blob 8569947)" \
+  8569947d5764058a64116cbdd32d079396735ae8 "$(git -C "$REPO_ROOT" hash-object -- "$MANIFEST_FIXTURES/project.list.golden")"
+
 summary "gates"
