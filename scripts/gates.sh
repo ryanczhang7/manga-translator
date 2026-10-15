@@ -48,6 +48,11 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONF="$ROOT/.claude/harness/project.conf"
 LOGDIR="$ROOT/.claude/state/gate-logs"
+# At most this many signature-kept logs per gate id under $LOGDIR/kept/, the
+# lowest <seq> evicted first. A bound on disk use, not a property of the
+# project, so it lives here rather than in project.conf. Why 5:
+# docs/backlog/stories/MT-053.md, "## Contract" and PO-2.
+KEEP_PER_GATE=5
 STAMP="$ROOT/.claude/state/last-gate-run"
 
 # THE MANIFEST MUST NOT CHANGE UNDER THE RUN.
@@ -137,7 +142,7 @@ ESC=$(printf '\033')
 # --- evidence, floor, waiver, slow and ondemand tables ----------------------
 # Read up front, so that --gate <id> still finds its own lines. Stored as
 # "<id><TAB><value>" lines; no associative arrays, for bash 3.2.
-EVIDENCE=""; WAIVERS=""; FLOORS=""; SLOWS=""; ONDEMANDS=""; CIFACTORS=""; COVERS=""; BLOCKEDWHEN=""; SKIPPEDWHEN=""; GATE_IDS=""
+EVIDENCE=""; WAIVERS=""; FLOORS=""; SLOWS=""; ONDEMANDS=""; CIFACTORS=""; COVERS=""; BLOCKEDWHEN=""; SKIPPEDWHEN=""; KEEPWHEN=""; GATE_IDS=""
 GATE_REQ=""   # "<id><TAB>required|optional" per gate, after any story escalation
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -152,7 +157,7 @@ while IFS= read -r line; do
   # line", and a misspelt `floor` id fails the audit outright, but a misspelt
   # `slow` id is silent - the gate it meant to exclude simply stays in --fast.
   [ "$kind" = "gate" ] && { GATE_IDS="$GATE_IDS $tid"; continue; }
-  case "$kind" in evidence|waiver|floor|slow|ondemand|ci-factor|covers|blocked-when|skipped-when) ;; *) continue ;; esac
+  case "$kind" in evidence|waiver|floor|slow|ondemand|ci-factor|covers|blocked-when|skipped-when|keep-when) ;; *) continue ;; esac
   # rest, not field, so that a regex containing `|` (alternation) survives.
   rest 3 "$line" tval
   [ -n "$tid" ] || continue
@@ -174,6 +179,8 @@ while IFS= read -r line; do
     blocked-when) BLOCKEDWHEN="$BLOCKEDWHEN$tid$TAB$tval
 " ;;
     skipped-when) SKIPPEDWHEN="$SKIPPEDWHEN$tid$TAB$tval
+" ;;
+    keep-when) KEEPWHEN="$KEEPWHEN$tid$TAB$tval
 " ;;
   esac
 done < "$CONF"
@@ -279,6 +286,75 @@ work_count() {
   clean_log "$1" | awk 'BEGIN { re = ARGV[1]; ARGV[1] = "" }
     !seen && match($0, re) { seen = 1; m = substr($0, RSTART, RLENGTH); if (match(m, /[0-9]+/)) out = substr(m, RSTART, RLENGTH) }
     END { if (out != "") print out; exit (out == "") ? 1 : 0 }' "($2).*"
+}
+
+# --- keep-when: a failing log with an unexplained signature (MT-053) ----------
+#
+#     keep-when | integration | SEGFAULT in worker [0-9]+
+#
+# <id>.failed.log below is the LAST non-passing run of a gate, and the next one
+# replaces it - every story's RED fails `unit` by design, so an ordinary RED
+# failure twice destroyed the only log of an intermittent nobody had explained
+# (docs/wiki/audits/opencv-unknown-exception-2026-09-28.md). A gate that ran and
+# did not pass, and one of whose cleaned log lines matches one of its keep-when
+# regexes (grep -E, case-sensitive, manifest order, first wins), is also copied
+# to $LOGDIR/kept/<id>.<seq6>.<YYYYMMDDTHHMMSSZ>.log: an eight-line header, then
+# <id>.log byte for byte. Written once, never rewritten; at most KEEP_PER_GATE
+# per id, lowest <seq> evicted. It changes what is KEPT, never what is judged:
+# nothing here touches $results, an outcome, or the exit status.
+#
+# The decision rests on the captured line, never on the status of
+# `clean_log | grep -m1`: under pipefail, grep leaving early kills sed with
+# SIGPIPE, and a large log's match would read as no match (MT-053 Contract).
+#
+# kept_files <id>   Sets the array KFILES to that gate's kept files, ascending
+# by <seq>. The name is matched whole, never as `<id>*`: a prefix glob would
+# take coverage-core's files for coverage's.
+kept_files() {
+  local d="$LOGDIR/kept" f
+  KFILES=()
+  for f in "$d/$1".[0-9][0-9][0-9][0-9][0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.log; do
+    [ -f "$f" ] && KFILES+=("$f")
+  done
+}
+# keep_for_signature   Uses the gate loop's $id, $log, $outcome, $started and
+# the $fl_commit/$fl_tree just written to <id>.failed.log.
+keep_for_signature() {
+  local kid kre kline="" kmatched="" kseq n kname i
+  while IFS="$TAB" read -r kid kre; do
+    [ "$kid" = "$id" ] && [ -n "$kre" ] || continue
+    kline="$(clean_log "$log" | grep -Em1 -- "$kre" 2>/dev/null)"
+    if [ -n "$kline" ]; then kmatched="$kre"; break; fi
+  done <<< "$KEEPWHEN"
+  [ -n "$kmatched" ] || return 0
+  mkdir -p "$LOGDIR/kept"
+  kept_files "$id"
+  kseq=0
+  n=${#KFILES[@]}
+  if [ "$n" -gt 0 ]; then
+    kseq="${KFILES[$((n-1))]##*/}"; kseq="${kseq#"$id".}"; kseq="${kseq%%.*}"
+    kseq=$((10#$kseq))
+  fi
+  printf -v kname '%s.%06d.%s.log' "$id" "$((kseq+1))" "${started//[-:]/}"
+  { printf '%s\n' \
+      "# gates.sh: failing run of gate '$id' kept for a signature" \
+      "# outcome: $outcome" \
+      "# run:     $started" \
+      "# commit:  $fl_commit" \
+      "# tree:    $fl_tree" \
+      "# matched: $kmatched" \
+      "# line:    $kline" \
+      "# ----"
+    cat "$log"
+  } > "$LOGDIR/kept/$kname"
+  printf 'signature log kept: .claude/state/gate-logs/kept/%s (matched: %s)\n' "$kname" "$kmatched"
+  kept_files "$id"
+  n=${#KFILES[@]}; i=0
+  while [ $((n-i)) -gt "$KEEP_PER_GATE" ]; do
+    rm -f -- "${KFILES[$i]}"
+    printf 'gates.sh: evicted %s (more than %d kept for %s)\n' "${KFILES[$i]##*/}" "$KEEP_PER_GATE" "$id" >&2
+    i=$((i+1))
+  done
 }
 
 # --- recording ----------------------------------------------------------------
@@ -667,16 +743,21 @@ while IFS= read -r line; do
   # run that did not pass, stamped, in <id>.failed.log: one per gate, replaced
   # whole, never removed. Not added to $results: the gate record is unchanged.
   if [ "$outcome" != pass ]; then
-    { printf '%s\n' \
+    # Computed inside the group, after the redirection has opened the file, as
+    # they always were; kept in variables so the signature log below carries
+    # the very same stamp.
+    { fl_commit="$(commit_with_note)"; fl_tree="$(gate_tree_hash)"
+      printf '%s\n' \
         "# gates.sh: last failing run of gate '$id'" \
         "# outcome: $outcome" \
         "# run:     $started" \
-        "# commit:  $(commit_with_note)" \
-        "# tree:    $(gate_tree_hash)" \
+        "# commit:  $fl_commit" \
+        "# tree:    $fl_tree" \
         "# ----"
       cat "$log"
     } > "$LOGDIR/$id.failed.log"
     printf 'failing log kept: .claude/state/gate-logs/%s.failed.log\n' "$id"
+    keep_for_signature
   fi
 done < "$CONF"
 
@@ -721,6 +802,17 @@ if [ "$AUDIT" = 1 ]; then
     esac
     [ -n "$bpat" ] || { printf 'FAIL %-12s a `blocked-when` line has no pattern\n' "$bid"; fails=$((fails+1)); }
   done <<< "$BLOCKEDWHEN"
+  # A keep-when line naming no gate keeps nothing, silently - the loss of the
+  # one log that mattered, which is what the line exists to prevent. One with
+  # no pattern is never tried at all.
+  while IFS="$TAB" read -r wid wpat; do
+    [ -n "$wid" ] || continue
+    case " $GATE_IDS " in
+      *" $wid "*) ;;
+      *) printf 'FAIL %-12s a `keep-when` line names no configured gate\n' "$wid"; fails=$((fails+1)); continue ;;
+    esac
+    [ -n "$wpat" ] || { printf 'FAIL %-12s a `keep-when` line has no pattern\n' "$wid"; fails=$((fails+1)); }
+  done <<< "$KEEPWHEN"
   # A skipped-when line classifies a shortfall a floor measured. One naming no
   # gate fires on nothing; one with no pattern matches every log and would turn
   # every shortfall into a block; one on a gate with no floor has no
