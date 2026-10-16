@@ -95,6 +95,7 @@ from mangatl.ui.intake import display_name
 from mangatl.ui.labels import plain_label
 from mangatl.ui.line_editor import LineEditor, SaveFn
 from mangatl.ui.link import LinkController, LiveRegion, OrderedRegion
+from mangatl.ui.theme import ThemeController
 
 __all__ = [
     "BREAKPOINT_WIDTH",
@@ -490,6 +491,8 @@ class Workspace(QMainWindow):
         self._page_ordinal: int | None = None
         self._render_controller: BakeController | None = None
         self._render_output = ""
+        #: The theme controller the canvas follows; `None` until `follow_theme`.
+        self._theme: ThemeController | None = None
         #: The Render dialog last opened, kept after it closes; `None` before.
         self.bake_dialog: BakeConfirmDialog | None = None
         #: The side of the breakpoint last laid out; `None` before the first resize.
@@ -569,6 +572,19 @@ class Workspace(QMainWindow):
         self.translation_column.rowEntered.connect(self.link.hover)
         self.translation_column.rowLeft.connect(self._on_row_left)
         self.render_button.clicked.connect(self._render_pages)
+
+    def follow_theme(self, controller: ThemeController) -> None:
+        """Put the canvas in `controller`'s mode now, and again on every apply (MT-073).
+
+        The canvas reads the palette from the controller, so `themeApplied(bool)`
+        keeps its signature."""
+        self._theme = controller
+        self._on_theme_applied(controller.high_contrast)
+        controller.themeApplied.connect(self._on_theme_applied)
+
+    def _on_theme_applied(self, high_contrast: bool) -> None:
+        if self._theme is not None:
+            self.page_canvas.set_high_contrast(high_contrast, self._theme.palette)
 
     def load_chapter(self, project: Project) -> None:
         """List the project's pages in the strip; nothing is selected yet.

@@ -135,6 +135,9 @@ def open_folder(folder: Path) -> QMainWindow | Chapter | str:
     except SchemaTooNew as error:
         return str(error)
     window = Workspace()
+    if _theme is not None:
+        # The canvas follows the running contrast theme (MT-073 AC-6).
+        window.follow_theme(_theme)
     window.load_chapter(project)
     window.page_strip.setCurrentRow(0)
     # The window owns the project from here: closed after the pending saves.

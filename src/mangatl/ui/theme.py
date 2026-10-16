@@ -47,8 +47,13 @@ __all__ = [
     "UnknownToken",
     "apply_theme",
     "compose_stylesheet",
+    "contrast_ratio",
+    "mat_safe",
     "resolve",
 ]
+
+#: A-04: the non-text contrast floor a High Contrast colour on the mat must clear.
+_NON_TEXT_CONTRAST = 3.0
 
 #: The override template's palette-role placeholders are `@{hc.<Role>}`.
 _HC_PREFIX = "hc."
@@ -102,6 +107,32 @@ def resolve(name: str, *, high_contrast: bool, palette: Mapping[str, str]) -> st
         return palette[role]
     # In neither dict: a non-colour token, exempt (section 4.2, third group).
     return TOKENS[name]
+
+
+def _relative_luminance(colour: str) -> float:
+    """WCAG 2.x relative luminance of a `#RRGGBB` string, either case."""
+
+    def channel(offset: int) -> float:
+        value = int(colour[offset : offset + 2], 16) / 255
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5)
+
+
+def contrast_ratio(a: str, b: str) -> float:
+    """The WCAG 2.x contrast ratio of two `#RRGGBB` colours, 1.0 to 21.0, symmetric."""
+    first, second = _relative_luminance(a), _relative_luminance(b)
+    lighter, darker = max(first, second), min(first, second)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def mat_safe(value: str, authored: str, *, mat: str = TOKENS["color.canvas.surround"]) -> str:
+    """`value` as given if it clears 3:1 against `mat`, else `authored` (A-15.9).
+
+    A fallback, not an exception: a High Contrast colour that would vanish on
+    the canvas mat is replaced by the authored one, and nothing is reported.
+    """
+    return value if contrast_ratio(value, mat) >= _NON_TEXT_CONTRAST else authored
 
 
 def compose_stylesheet(
@@ -169,6 +200,7 @@ class ThemeController(QObject):
         self._source = source
         self._palette_provider = palette_provider or _system_palette
         self._high_contrast = False
+        self._palette: Mapping[str, str] = {}
         #: The one widget this controller creates: parentless and off-screen (A-12).
         self.live_region = LiveRegion()
 
@@ -176,6 +208,11 @@ class ThemeController(QObject):
     def high_contrast(self) -> bool:
         """The mode most recently applied."""
         return self._high_contrast
+
+    @property
+    def palette(self) -> Mapping[str, str]:
+        """The palette the last `apply()` read; `{}` before any apply and while off."""
+        return self._palette
 
     def apply(self) -> None:
         """Compose for the source's current mode and set it on the application."""
@@ -187,6 +224,7 @@ class ThemeController(QObject):
         )
         self._app.setStyleSheet(sheet)
         self._high_contrast = high_contrast
+        self._palette = palette
         self.themeApplied.emit(high_contrast)
 
     def _on_changed(self, value: bool) -> None:

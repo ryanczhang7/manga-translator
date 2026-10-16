@@ -33,20 +33,35 @@ and re-pinned after everything that moves the view - including every scroll,
 because a scroll carries the viewport's child widgets with it. Clicking it or
 `Ctrl+9` runs `bring_into_view`: centre the region, zooming out only as far as
 it must to fit the 24 px inset, never in (Q1).
+
+MT-073 adds the boundary MT-015 deferred and its High Contrast deltas
+(`components.md` §3 and §10.3): `paint_boundary` paints, last and in viewport
+pixels, a `color.canvas.frame` line - or, while the canvas has keyboard focus,
+a `focus.width` ring with its `focus.halo` - over the outermost pixels of the
+viewport, never moving its contents. The viewport is repainted whole after a
+scroll, a focus change and a mode change, because a band painted in viewport
+space would otherwise be carried inside by the scroll's pixel shift, or left
+stale. `set_high_contrast` changes exactly three things (§10.3): dimming stops,
+the frame becomes `WindowText` at 2 px, and the ring `WindowText` on a `Window`
+halo - frame and ring falling back to their authored values when they fail 3:1
+against the mat (`theme.mat_safe`, A-15.9). The markers are untouched (§7).
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QFocusEvent,
     QKeyEvent,
     QMouseEvent,
+    QPainter,
+    QPaintEvent,
     QPen,
     QPixmap,
     QResizeEvent,
@@ -74,6 +89,7 @@ from mangatl.ui.link import (
 )
 from mangatl.ui.markers import BubbleMarker, MarkerState
 from mangatl.ui.offscreen import INDICATOR_TARGET_PX, OffscreenIndicator, indicator_edge
+from mangatl.ui.theme import MissingPaletteRole, mat_safe
 
 __all__ = [
     "EMPTY",
@@ -83,7 +99,14 @@ __all__ = [
     "FAILED_MESSAGE",
     "LOADED",
     "PageCanvas",
+    "paint_boundary",
 ]
+
+#: The two palette roles the canvas reads under High Contrast (§10.3), each
+#: with the first token that takes it there - named when a role is missing.
+_TEXT_ROLE = "WindowText"
+_GROUND_ROLE = "Window"
+_CANVAS_ROLES = {_TEXT_ROLE: "color.canvas.frame", _GROUND_ROLE: "color.focus.halo"}
 
 EMPTY = "empty"
 LOADED = "loaded"
@@ -101,6 +124,45 @@ _SELECTION_STEPS: dict[int, str] = {
     Qt.Key.Key_Home: "first",
     Qt.Key.Key_End: "last",
 }
+
+
+def paint_boundary(
+    painter: QPainter,
+    rect: QRect,
+    *,
+    focused: bool,
+    frame_width: int,
+    frame_colour: str,
+    ring_colour: str,
+    halo_colour: str,
+) -> None:
+    """Paint the viewport's boundary band over the outermost pixels of `rect`.
+
+    Not focused: the outermost `frame_width` px are `frame_colour`. Focused:
+    the outermost `focus.halo` px are `halo_colour` and the `focus.width` px
+    just inside them `ring_colour` - the frame covered, not drawn beside it
+    (`components.md` §3, `tokens.md` §7). Nothing outside `rect` and nothing
+    inside the band is touched.
+    """
+    if focused:
+        halo = tokens_gen.FOCUS_HALO
+        _paint_band(painter, rect, halo, halo_colour)
+        inside_halo = rect.adjusted(halo, halo, -halo, -halo)
+        _paint_band(painter, inside_halo, tokens_gen.FOCUS_WIDTH, ring_colour)
+    else:
+        _paint_band(painter, rect, frame_width, frame_colour)
+
+
+def _paint_band(painter: QPainter, rect: QRect, width: int, colour: str) -> None:
+    """Fill the outermost `width` px of `rect` on every side with `colour`."""
+    if width <= 0:
+        return
+    fill = QColor(colour)
+    x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+    painter.fillRect(QRect(x, y, w, width), fill)
+    painter.fillRect(QRect(x, y + h - width, w, width), fill)
+    painter.fillRect(QRect(x, y + width, width, h - 2 * width), fill)
+    painter.fillRect(QRect(x + w - width, y + width, width, h - 2 * width), fill)
 
 
 class PageCanvas(QGraphicsView):
@@ -145,6 +207,9 @@ class PageCanvas(QGraphicsView):
         self.markers: list[BubbleMarker] = []
         self._regions: list[OrderedRegion] = []
         self._link_state = LinkState()
+        self._high_contrast = False
+        #: Under High Contrast, the palette's `WindowText` and `Window`; else empty.
+        self._palette: dict[str, str] = {}
         self._press_pos: QPoint | None = None
         self._last_click: QPoint | None = None
         # Hover needs moves with no button held; offscreen and on a real
@@ -197,7 +262,89 @@ class PageCanvas(QGraphicsView):
         self._place_badges()
         self._update_indicator()
 
-    # --- The link (MT-016) ------------------------------------------------------
+    # --- The boundary and High Contrast (MT-073) --------------------------------
+
+    def set_high_contrast(self, enabled: bool, palette: Mapping[str, str]) -> None:
+        """Follow the contrast theme: the frame, the ring and dimming, nothing else.
+
+        Off ignores `palette`. On reads its `WindowText` and `Window`, and a
+        palette without either raises `MissingPaletteRole` (A-15.3) before
+        anything changes. The transform, scroll bars and link state are untouched.
+        """
+        if enabled:
+            for role, token in _CANVAS_ROLES.items():
+                if role not in palette:
+                    raise MissingPaletteRole(token, role)
+            self._palette = {role: palette[role] for role in _CANVAS_ROLES}
+        else:
+            self._palette = {}
+        self._high_contrast = enabled
+        self.viewport().update()
+        self._restyle()
+
+    @property
+    def high_contrast(self) -> bool:
+        """Whether the canvas is showing the High Contrast deltas."""
+        return self._high_contrast
+
+    @property
+    def frame_width(self) -> int:
+        """The frame's width: a hairline, or `border.width.emphasis` under High Contrast."""
+        if self._high_contrast:
+            return tokens_gen.BORDER_WIDTH_EMPHASIS
+        return tokens_gen.BORDER_WIDTH_HAIRLINE
+
+    @property
+    def frame_colour(self) -> str:
+        """`color.canvas.frame`, or a mat-safe `WindowText` under High Contrast."""
+        authored = tokens_gen.COLOR_CANVAS_FRAME
+        if self._high_contrast:
+            return mat_safe(self._palette[_TEXT_ROLE], authored)
+        return authored
+
+    @property
+    def ring_colour(self) -> str:
+        """`color.focus.ring`, or a mat-safe `WindowText` under High Contrast."""
+        authored = tokens_gen.COLOR_FOCUS_RING
+        if self._high_contrast:
+            return mat_safe(self._palette[_TEXT_ROLE], authored)
+        return authored
+
+    @property
+    def halo_colour(self) -> str:
+        """`color.focus.halo`, or the palette's `Window` (no mat check, §10.3)."""
+        if self._high_contrast:
+            return self._palette[_GROUND_ROLE]
+        return tokens_gen.COLOR_FOCUS_HALO
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        super().paintEvent(event)
+        viewport = self.viewport()
+        painter = QPainter(viewport)
+        try:
+            paint_boundary(
+                painter,
+                viewport.rect(),
+                focused=self.hasFocus(),
+                frame_width=self.frame_width,
+                frame_colour=self.frame_colour,
+                ring_colour=self.ring_colour,
+                halo_colour=self.halo_colour,
+            )
+        finally:
+            painter.end()
+
+    # The viewport is opaque, so the canvas's own focus repaint does not reach
+    # it; without these the band would keep the previous focus state.
+    def focusInEvent(self, event: QFocusEvent) -> None:
+        super().focusInEvent(event)
+        self.viewport().update()  # the ring replaces the frame
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:
+        super().focusOutEvent(event)
+        self.viewport().update()  # the frame replaces the ring
+
+    # --- The link (MT-016)------------------------------------------------------
 
     def set_regions(self, regions: Sequence[OrderedRegion]) -> None:
         """One marker per region, in region_id order, styled from the current state."""
@@ -315,6 +462,9 @@ class PageCanvas(QGraphicsView):
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
         super().scrollContentsBy(dx, dy)  # moves the viewport's child widgets too
+        # The scroll shifts the viewport's pixels, band included: repaint it all,
+        # or a stale copy of the band is left inside the viewport (MT-073).
+        self.viewport().update()
         self._update_indicator()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
@@ -332,7 +482,9 @@ class PageCanvas(QGraphicsView):
                 state = MarkerState.HOVER
             else:
                 state = MarkerState.IDLE
-            marker.set_appearance(state, dimmed=selected is not None and region_id != selected)
+            # Under High Contrast dimming stops (A-15.6, §7.1); nothing else does.
+            dimmed = not self._high_contrast and selected is not None and region_id != selected
+            marker.set_appearance(state, dimmed=dimmed)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
