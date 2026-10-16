@@ -9,6 +9,7 @@ in here is ever committed; only this file and `.gitkeep` are tracked.
 | `last-gate-run` | `scripts/gates.sh` | the stop hook | no |
 | `gate-logs/*.log` | `scripts/gates.sh` | you, when a gate fails | yes |
 | `gate-logs/*.failed.log` | `scripts/gates.sh` | you, when a failure did not reproduce | yes |
+| `gate-logs/kept/*.log` | `scripts/gates.sh` | you, when an unexplained failure recurs | yes |
 | `mutations/*.bak` | `scripts/mutate.sh` | `scripts/mutate.sh`, to restore the file | yes |
 | `mutations/*.new` | `scripts/mutate.sh` | nothing; scratch for the mutated text | yes |
 | `mutations/log` | `scripts/mutate.sh` | you, and the story that quotes it | yes |
@@ -68,6 +69,16 @@ overwritten by every run, so this is the copy the flake-checking re-run cannot
 destroy. The next run that does not pass replaces it whole; a pass never
 removes it, and neither does a run that skips the gate. Delete it by hand once
 the cause is understood.
+
+`gate-logs/kept/<id>.<seq>.<stamp>.log` is a failing run of that gate whose
+log matched one of its `keep-when` lines in `.claude/harness/project.conf` - a
+signature of a failure nobody has explained yet (MT-053). It is written beside
+`<id>.failed.log`, with the same stamp plus two more header lines (the regex that
+matched and the first log line it matched), and unlike that file it is never
+replaced by a later failure. `<seq>` counts up per gate; once a gate has more
+than 5, the lowest `<seq>` is removed; `gates.sh` removes nothing else. A pass
+never writes here. Delete them by hand once the failure is explained, and
+remove its `keep-when` line at the same time.
 
 `mutations/` is `scripts/mutate.sh`'s working area, and the backup path is
 explicit rather than `$TMPDIR` because that variable is unset in some of the
