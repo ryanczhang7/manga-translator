@@ -315,9 +315,14 @@ of **A-06** already solves it against both extremes of the artwork, which no
 single HC colour can (`tokens.md` §5). Applying HC to the markers would replace a
 guarantee with a single flat colour and break A-06.
 
-*Testable as:* for every token whose name starts with `overlay.`, and for
+*Testable as:* for every **colour** token whose name starts with `overlay.`
+(the `overlay.*` keys of `HC_PALETTE_ROLE`, every one `@static`), and for
 `color.canvas.surround` and `color.canvas.page-edge`, assert
 `resolve(name, high_contrast=True, palette=P) == TOKENS[name]` for any `P`.
+Not every `overlay.*` token: the strokes and badge sizes are not colours and
+have no mapping, and `overlay.dim.opacity` is A-15.6's and resolves to 1.0.
+*(Corrected 2026-10-15, MT-073 PO-5: the clause previously said "every token
+whose name starts with `overlay.`", which A-15.6 contradicts.)*
 
 ### A-15.6 — Under HC nothing is dimmed on purpose
 
