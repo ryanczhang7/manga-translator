@@ -47,7 +47,8 @@ from mangatl.ui.link import LiveRegion
 # --- Settled strings (components.md §8, story ## Contract), spelled out ------------
 DASH = "$\N{EM DASH}"  # "$" and an em dash: nothing is known
 ZERO = "$0.00"  # a claim that the run is free - never shown for "unknown"
-GLYPH = "\N{WARNING SIGN}"  # warning sign
+GLYPH_OUTLINE = "\N{WHITE UP-POINTING TRIANGLE}"  # approaching (components.md §10.6, MT-074)
+GLYPH_FILLED = "\N{BLACK UP-POINTING TRIANGLE}"  # exceeded and aborted (§10.6, MT-074)
 TWO = Usd(Decimal("2.00"))
 
 
@@ -266,7 +267,7 @@ def test_crossing_75_percent_of_the_budget_enters_approaching_with_the_warning_g
     readout.set_state(usd("1.55"), TWO, None)
 
     assert readout.state() == "approaching"
-    assert readout.glyph.text() == GLYPH
+    assert readout.glyph.text() == GLYPH_OUTLINE
     assert readout.figure.text() == "$1.55"
 
 
@@ -335,7 +336,7 @@ def test_exactly_75_percent_is_approaching_and_just_under_is_normal(
 
     readout.set_state(usd("1.50"), TWO, None)
     assert readout.state() == "approaching", "spend of exactly 75% of the budget is not approaching"
-    assert readout.glyph.text() == GLYPH
+    assert readout.glyph.text() == GLYPH_OUTLINE
 
 
 def test_the_75_percent_threshold_scales_with_the_ceiling(qtbot) -> None:  # type: ignore[no-untyped-def]
@@ -364,7 +365,7 @@ def test_a_projection_reaching_the_budget_is_approaching_before_spend_reaches_75
 
     readout.set_state(usd("0.50"), TWO, observed("1.50", 3))
     assert readout.state() == "approaching", "a projected total of exactly $2.00 is approaching"
-    assert readout.glyph.text() == GLYPH
+    assert readout.glyph.text() == GLYPH_OUTLINE
     assert _announced(readout, alerts) == ["Cost $0.50 of $2.00: approaching the budget."]
 
 
@@ -376,7 +377,7 @@ def test_spend_at_the_budget_is_exceeded_with_the_glyph(qtbot) -> None:  # type:
 
     readout.set_state(usd("2.00"), TWO, None)
     assert readout.state() == "exceeded", "spend of exactly the budget is not exceeded"
-    assert readout.glyph.text() == GLYPH
+    assert readout.glyph.text() == GLYPH_FILLED
     assert readout.figure.text() == "$2.00"
 
 
