@@ -2,7 +2,7 @@
 id: EPIC-07
 title: Knowing whether it worked, and getting it onto the machine
 status: todo
-stories: [MT-029, MT-022, MT-023, MT-075, MT-024, MT-076, MT-077]
+stories: [MT-029, MT-022, MT-023, MT-075, MT-089, MT-024, MT-076, MT-077]
 ---
 
 ## Goal
@@ -73,3 +73,6 @@ nothing in this epic supplies either.
 S3 (time saved) and S4 (it reads naturally) are human judgements the brief marks
 as such — timed once, honestly, and read once, by the user. No story automates
 them, and no gate pretends to.
+- **MT-089** — one `bench` command printing all six numbers: the done-when
+  above names one command, and after MT-075 the numbers exist across three.
+  Filed from MT-075's PO-1, 2026-10-17.
