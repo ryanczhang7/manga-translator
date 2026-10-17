@@ -1,5 +1,10 @@
 """MT-024 AC-2, AC-3, AC-3b and AC-4: what the built tree holds, and what it must not.
 
+MT-076 AC-1, AC-1b and AC-6 append the notices: `_internal/notices/` holds the two
+licence texts at their pinned SHA-256 (read out of the story, never derived), and
+`THIRD_PARTY_NOTICES.txt` and `notices.json` byte-identical to the committed
+`packaging/notices/` files, and nothing else.
+
 Every assertion walks or reads the REAL `dist/mangatl` the `build` gate wrote
 (`conftest.py` fails when there is none), and compares it with the repository's
 own files as bytes: `packaging/models.json` and the hashes it pins (AC-2), the
@@ -36,6 +41,13 @@ FACES = (
     "Shantell_Sans-Normal-Bold_Italic.otf",
 )
 THEME = ("theme.qss", "theme.qss.tmpl", "theme_hc.qss.tmpl")
+
+#: MT-076 AC-1 / AC-1b (PO-3): the canonical licence texts' SHA-256.
+LICENCE_TEXTS = {
+    "GPL-3.0.txt": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "Apache-2.0.txt": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+}
+NOTICES = REPO_ROOT / "packaging" / "notices"
 
 
 # -- C-8: no tree is a failure, not a skip ----------------------------------------
@@ -175,3 +187,34 @@ def test_the_walk_sees_a_forbidden_directory_when_one_is_there(tmp_path: Path) -
 
     assert top == ["docs"]
     assert nested == ["ui/tests"]
+
+
+# -- MT-076 AC-1, AC-1b, AC-6: the notices ship with the installer -----------------------
+
+
+@pytest.mark.parametrize("name", sorted(LICENCE_TEXTS))
+def test_the_licence_text_ships_with_its_pinned_hash(internal: Path, name: str) -> None:
+    shipped = internal / "notices" / name
+
+    assert shipped.is_file(), f"{shipped} is missing"
+    assert sha256_of(shipped) == LICENCE_TEXTS[name]
+
+
+@pytest.mark.parametrize("name", ["THIRD_PARTY_NOTICES.txt", "notices.json"])
+def test_the_notice_file_ships_byte_identical_to_the_committed_one(
+    internal: Path, name: str
+) -> None:
+    shipped = internal / "notices" / name
+
+    assert shipped.is_file(), f"{shipped} is missing"
+    assert shipped.read_bytes() == (NOTICES / name).read_bytes()
+
+
+def test_the_notices_directory_holds_the_four_files_and_nothing_else(internal: Path) -> None:
+    notices = internal / "notices"
+    assert notices.is_dir(), f"{notices} is missing"
+    shipped = sorted(p.relative_to(notices).as_posix() for p in notices.rglob("*"))
+
+    assert shipped == sorted(
+        ["THIRD_PARTY_NOTICES.txt", "GPL-3.0.txt", "Apache-2.0.txt", "notices.json"]
+    )

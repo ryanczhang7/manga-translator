@@ -10,10 +10,12 @@ the spec still executes.
 The built tree itself is judged by `tests/frozen` after `build`; this file
 judges the instruction, that one the outcome.
 
-**`datas`, in C-4's order, exactly ten entries:** the fonts entry first and
+**`datas`, in C-4's order, exactly eleven entries:** the fonts entry first and
 unchanged (MT-020), then one `(packaging/models/<path>, models/<dirname>)` per
 manifest entry in manifest order, then `(packaging/models.json, models)`, then
-the three theme artefacts to `mangatl/ui`. Sources are compared resolved;
+the three theme artefacts to `mangatl/ui`, then - MT-076 AC-8 - the directory
+`(packaging/notices, notices)` as a whole, last, so its four files land at
+`_internal/notices/`. Sources are compared resolved;
 destinations with `\\` and `/` unified and a trailing separator dropped, so
 `models` and `models/` (what `os.path.join("models", "")` makes of a file at
 the top of the directory) are the same destination.
@@ -93,6 +95,7 @@ def _expected_datas() -> list[tuple[Path, str]]:
         ((ui / "theme.qss").resolve(), "mangatl/ui"),
         ((ui / "theme.qss.tmpl").resolve(), "mangatl/ui"),
         ((ui / "theme_hc.qss.tmpl").resolve(), "mangatl/ui"),
+        ((root / "packaging" / "notices").resolve(), "notices"),
     ]
 
 
@@ -109,7 +112,15 @@ def test_the_expected_model_destinations_are_the_two_directories_of_the_layout()
     ]
 
 
-def test_the_spec_ships_fonts_weights_manifest_and_theme_in_that_order() -> None:
+def test_the_expected_datas_are_eleven_with_the_notices_directory_last() -> None:
+    """Fixture check on `_expected_datas` (MT-076 AC-8): C-4's ten, then one."""
+    expected = _expected_datas()
+
+    assert len(expected) == 11
+    assert expected[-1] == ((settled.REPO_ROOT / "packaging" / "notices").resolve(), "notices")
+
+
+def test_the_spec_ships_fonts_weights_manifest_theme_and_notices_in_that_order() -> None:
     datas = _pairs("datas")
     expected = _expected_datas()
 
