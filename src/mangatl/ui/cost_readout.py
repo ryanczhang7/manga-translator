@@ -21,6 +21,18 @@ is neither shown nor allowed to move the state before then, so the warning
 glyph never appears with no figure to explain it - and its basis is read from
 `Projection.basis`, never inferred from the count (`budget.py`).
 
+**The glyph is §10.6's, in both themes** (MT-074, PO-1): none for `unknown`,
+`normal` and `final`, an outline triangle for `approaching`, a filled one for
+`exceeded` and `aborted` - read from `GLYPHS`, one entry per state. Under a
+contrast theme every hue collapses to one colour, so the glyph and the text are
+what tell the states apart (A-15.7): `triple()` reads exactly those, and no
+colour.
+
+**An abort freezes the figure and budget and says so** (MT-074, PO-2):
+`mark_aborted` fills the meter, shows the filled triangle and puts
+`ABORTED_CAPTION` in the projection slot, replacing any projection. Without the
+caption, `exceeded` with no projection and `aborted` would read the same.
+
 **The warning is announced on the edge, not the level** (AC-6): once on each
 transition from `unknown`/`normal` into `approaching`/`exceeded`, through the
 readout's own `LiveRegion`. `mark_aborted` and `show_final` never announce -
@@ -56,9 +68,23 @@ CostState = Literal["unknown", "normal", "approaching", "exceeded", "aborted", "
 
 OBJECT_NAME = "cost-readout"
 DASH = "$\N{EM DASH}"
-GLYPH = "\N{WARNING SIGN}"
+#: §10.6: `approaching` - an outline triangle (U+25B3).
+GLYPH_OUTLINE: str = "\N{WHITE UP-POINTING TRIANGLE}"
+#: §10.6: `exceeded` and `aborted` - a filled triangle (U+25B2).
+GLYPH_FILLED: str = "\N{BLACK UP-POINTING TRIANGLE}"
+#: §10.6's glyph for every state, the same in both themes (PO-1).
+GLYPHS: dict[CostState, str] = {
+    "unknown": "",
+    "normal": "",
+    "approaching": GLYPH_OUTLINE,
+    "exceeded": GLYPH_FILLED,
+    "aborted": GLYPH_FILLED,
+    "final": "",
+}
 #: §8 `unknown` copy, in place of a budget the readout cannot yet hold spend to.
 UNKNOWN_CAPTION = "Cost appears after the first page."
+#: §10.6 `aborted` copy, shown in the projection slot once the run stops (PO-2).
+ABORTED_CAPTION = "Run stopped \N{EM DASH} budget reached"
 #: The meter's resolution: per mille of the ceiling.
 METER_MAX = 1000
 
@@ -112,6 +138,22 @@ class CostReadout(QWidget):
         """The current state, as the stylesheet sees it in `costState`."""
         return self._state
 
+    def triple(self) -> tuple[str, str, int]:
+        """`(text, glyph, meter)` as shown: the non-empty figure, budget and
+        projection labels joined by spaces, the glyph's text and the meter's
+        value. Read live from the widgets and nothing else - no colour - so two
+        states with different triples are told apart without hue (A-15.7)."""
+        text = " ".join(
+            t
+            for t in (
+                self.figure.text(),
+                self.budget_label.text(),
+                self.projection_label.text(),
+            )
+            if t
+        )
+        return (text, self.glyph.text(), self.meter.value())
+
     def set_state(self, spent: Usd | None, ceiling: Usd, projection: Projection | None) -> None:
         """Show `spent` against `ceiling`; announce on entering a warned state."""
         if spent is None:
@@ -136,7 +178,7 @@ class CostReadout(QWidget):
         previous = self._state
         self.figure.setText(format_usd(spent))
         self.budget_label.setText(f"of {format_usd(ceiling)}")
-        self.glyph.setText(GLYPH if state in _WARNED else "")
+        self.glyph.setText(GLYPHS[state])
         self.meter.setValue(_meter_value(spent, ceiling))
         self.projection_label.setText(
             "" if counted is None or total is None else _projection_text(counted, total, ceiling)
@@ -148,9 +190,12 @@ class CostReadout(QWidget):
             )
 
     def mark_aborted(self) -> None:
-        """The run stopped at the budget: figure frozen, meter full, no announcement."""
-        self.glyph.setText("")
+        """The run stopped at the budget: figure and budget frozen, meter full,
+        the filled triangle and `ABORTED_CAPTION` in place of any projection, no
+        announcement."""
+        self.glyph.setText(GLYPHS["aborted"])
         self.meter.setValue(METER_MAX)
+        self.projection_label.setText(ABORTED_CAPTION)
         self._set("aborted")
 
     def show_final(self, spent: Usd | None, ceiling: Usd) -> None:
@@ -162,7 +207,7 @@ class CostReadout(QWidget):
             return
         self.figure.setText(format_usd(spent))
         self.budget_label.setText(f"of {format_usd(ceiling)} \N{MIDDLE DOT} final")
-        self.glyph.setText("")
+        self.glyph.setText(GLYPHS["final"])
         self.meter.setValue(_meter_value(spent, ceiling))
         self.projection_label.setText("")
         self._set("final")
@@ -170,7 +215,7 @@ class CostReadout(QWidget):
     def _show_unknown(self) -> None:
         self.figure.setText(DASH)
         self.budget_label.setText(UNKNOWN_CAPTION)
-        self.glyph.setText("")
+        self.glyph.setText(GLYPHS["unknown"])
         self.meter.setValue(0)
         self.projection_label.setText("")
         self._set("unknown")
