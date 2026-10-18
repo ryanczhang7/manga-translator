@@ -1,0 +1,56 @@
+THIRD-PARTY NOTICES for mangatl
+
+This application bundles the model weights and the font listed below. Each is
+conveyed under its own licence; the full licence texts named here ship beside
+this file. This file was generated from packaging/models.json and
+packaging/notices/notices.json by packaging/build_notices.py, and it is an
+engineer's reading of the licences, not legal advice (architecture.md D13).
+
+== comic-text-detector (detect) ==
+File:                 models/comic-text-detector.onnx
+Source:               https://huggingface.co/mayocream/comic-text-detector-onnx at revision a5d67ec772adef819ef5b0e7aa701fcf4c8bf74a
+SHA-256:              1a86ace74961413cbd650002e7bb4dcec4980ffa21b2f19b86933372071d718f
+Licence:              GPL-3.0 (upstream dmMaze/comic-text-detector; the HF repo's metadata says apache-2.0 - architecture.md D13)
+Licence text:         GPL-3.0.txt
+Upstream:             https://github.com/dmMaze/comic-text-detector
+Corresponding source: https://github.com/dmMaze/comic-text-detector (the model definition and training code); the conveyed weights are the ONNX export at https://huggingface.co/mayocream/comic-text-detector-onnx/tree/a5d67ec772adef819ef5b0e7aa701fcf4c8bf74a
+Training data:        This detector was trained in part on the Manga109-s dataset (https://manga109.github.io/manga109-project-website/en/index.html). Upstream states: "All models were trained on around 13 thousand anime & comic style images, 1/3 from Manga109-s, 1/3 from DCM, and 1/3 are synthetic data in a weak supervision manner due to the lack of available high-quality annotations."
+
+== manga-ocr-encoder (ocr) ==
+File:                 models/manga-ocr/encoder_model.onnx
+Source:               https://huggingface.co/onnx-community/manga-ocr-base-ONNX at revision f9023406bb2f6b17df67bc4a327c56ecd20611f0
+SHA-256:              df35f64c2400ea860c70a2d06f2a1f99892374a78c89fcf35308076557a3863f
+Licence:              Apache-2.0
+Licence text:         Apache-2.0.txt
+Upstream:             https://github.com/kha-white/manga-ocr
+
+== manga-ocr-decoder (ocr) ==
+File:                 models/manga-ocr/decoder_model.onnx
+Source:               https://huggingface.co/onnx-community/manga-ocr-base-ONNX at revision f9023406bb2f6b17df67bc4a327c56ecd20611f0
+SHA-256:              31ca14d6dee6b3966144e128d0481d5a91f5083cbced81fe7a9571713fa50cd4
+Licence:              Apache-2.0
+Licence text:         Apache-2.0.txt
+Upstream:             https://github.com/kha-white/manga-ocr
+
+== manga-ocr-vocab (ocr) ==
+File:                 models/manga-ocr/vocab.txt
+Source:               https://huggingface.co/kha-white/manga-ocr-base at revision aa6573bd10b0d446cbf622e29c3e084914df9741
+SHA-256:              344fbb6b8bf18c57839e924e2c9365434697e0227fac00b88bb4899b78aa594d
+Licence:              Apache-2.0
+Licence text:         Apache-2.0.txt
+Upstream:             https://github.com/kha-white/manga-ocr
+
+== lama (clean) ==
+File:                 models/lama_fp32.onnx
+Source:               https://huggingface.co/Carve/LaMa-ONNX at revision c3c0c9e468934d62e79c329e35d82dd09ff8c444
+SHA-256:              1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6
+Licence:              Apache-2.0 (repository metadata; the big-lama checkpoint's provenance is unverified - MT-002 E7, D13)
+Licence text:         Apache-2.0.txt
+Upstream:             https://github.com/advimman/lama
+
+== Lettering font ==
+Lettering font
+Shantell Sans 1.011, by Stephen Nixon / Arrow Type, with concept and creative direction by Shantell Martin.
+Copyright 2022 The Shantell Sans Project Authors (https://github.com/arrowtype/shantell-sans).
+Licensed under the SIL Open Font License 1.1; the full licence ships beside the font files as OFL.txt.
+Third-party notices and licence texts ship with the application under notices/ (THIRD_PARTY_NOTICES.txt, GPL-3.0.txt, Apache-2.0.txt).

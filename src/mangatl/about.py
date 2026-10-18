@@ -17,4 +17,6 @@ ABOUT_TEXT: str = (
     "(https://github.com/arrowtype/shantell-sans).\n"
     "Licensed under the SIL Open Font License 1.1; the full licence ships beside "
     f"the font files as {OFL_FILENAME}.\n"
+    "Third-party notices and licence texts ship with the application under notices/ "
+    "(THIRD_PARTY_NOTICES.txt, GPL-3.0.txt, Apache-2.0.txt).\n"
 )

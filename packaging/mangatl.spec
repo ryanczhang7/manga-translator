@@ -71,6 +71,9 @@ a = Analysis(
         (os.path.join(UI, "theme.qss"), "mangatl/ui"),
         (os.path.join(UI, "theme.qss.tmpl"), "mangatl/ui"),
         (os.path.join(UI, "theme_hc.qss.tmpl"), "mangatl/ui"),
+        # MT-076: the notices directory whole - THIRD_PARTY_NOTICES.txt, the
+        # GPL-3.0 and Apache-2.0 texts and notices.json - to `_internal/notices/`.
+        (os.path.join(PACKAGING, "notices"), "notices"),
     ],
     hiddenimports=["mangatl.ui.main_window"],
     hookspath=[],
