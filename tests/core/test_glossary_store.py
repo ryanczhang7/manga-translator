@@ -15,9 +15,14 @@ took the edited line's first changed span:
 
 - step 1, `term_ja` not in `source_ja`: `term-not-in-this-lines-source`;
 - step 2, `term_en` occurs 0 or 2+ times: `name-twice-in-proposed`,
-  `name-only-inside-a-longer-token`;
+  `name-only-inside-a-longer-token`, and `name-twice-in-proposed-both-renamed`
+  (MT-083 AC-3), the one case where step 2 is the deciding clause;
 - step 3, `term_en` still in the final: `name-kept-other-words-edited`,
-  `no-edit-at-all`;
+  `no-edit-at-all`, and `two-names-swapped` (MT-083 AC-1), the one case where
+  a `replace` lands exactly on a name the user kept, so step 3 decides it.
+
+`name-is-the-last-token` (MT-083 AC-2), on the update side, is the one line
+that ends in the name rather than punctuation: `_occurrences`' last window.
 - step 4, not exactly one `replace` equal to the name's range:
   `rewrite-wider-than-the-name`, `rewrite-inside-a-two-word-name`,
   `insertion-inside-a-two-word-name` (an `insert` opcode has an empty
@@ -272,6 +277,15 @@ def test_editing_a_name_updates_the_entry_to_the_users_wording(chapter: _Chapter
             "Sakura-chan",
             id="a-second-replacement-elsewhere-does-not-block-it",
         ),
+        pytest.param(
+            "走れ、健二",
+            "Run, Kenji",
+            "Run, Mr. Tanaka",
+            "健二",
+            "Kenji",
+            "Mr. Tanaka",
+            id="name-is-the-last-token",
+        ),
     ],
 )
 def test_one_replaced_span_exactly_over_the_name_becomes_the_new_rendering(
@@ -444,6 +458,22 @@ def test_the_reading_index_is_honoured_as_well_as_the_page(chapter: _Chapter) ->
             "さくら",
             "Sakura",
             id="untranslated-line",
+        ),
+        pytest.param(
+            "健二が来て、佐藤が帰った。",
+            "Kenji came, Sato left.",
+            "Sato came, Kenji left.",
+            "健二",
+            "Kenji",
+            id="two-names-swapped",
+        ),
+        pytest.param(
+            "さくら?さくら!",
+            "Sakura? Sakura!",
+            "Sakura-chan? Sakura-chan!",
+            "さくら",
+            "Sakura",
+            id="name-twice-in-proposed-both-renamed",
         ),
     ],
 )
