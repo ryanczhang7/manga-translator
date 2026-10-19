@@ -1,0 +1,7 @@
+{"notices": [
+  {"name": "comic-text-detector", "upstream": "https://github.com/dmMaze/comic-text-detector", "corresponding_source": "https://github.com/dmMaze/comic-text-detector (the model definition and training code); the conveyed weights are the ONNX export at https://huggingface.co/mayocream/comic-text-detector-onnx/tree/a5d67ec772adef819ef5b0e7aa701fcf4c8bf74a", "training_data": "This detector was trained in part on the Manga109-s dataset (https://manga109.github.io/manga109-project-website/en/index.html). Upstream states: \"All models were trained on around 13 thousand anime & comic style images, 1/3 from Manga109-s, 1/3 from DCM, and 1/3 are synthetic data in a weak supervision manner due to the lack of available high-quality annotations.\"", "licence_text": "GPL-3.0.txt"},
+  {"name": "manga-ocr-encoder", "upstream": "https://github.com/kha-white/manga-ocr", "corresponding_source": "", "training_data": "", "licence_text": "Apache-2.0.txt"},
+  {"name": "manga-ocr-decoder", "upstream": "https://github.com/kha-white/manga-ocr", "corresponding_source": "", "training_data": "", "licence_text": "Apache-2.0.txt"},
+  {"name": "manga-ocr-vocab", "upstream": "https://github.com/kha-white/manga-ocr", "corresponding_source": "", "training_data": "", "licence_text": "Apache-2.0.txt"},
+  {"name": "lama", "upstream": "https://github.com/advimman/lama", "corresponding_source": "", "training_data": "", "licence_text": "Apache-2.0.txt"}
+]}
