@@ -352,6 +352,41 @@ def test_an_index_one_past_the_end_of_the_page_is_refused_too(fixture: _Fixture)
         fixture.project.write_proposed(_TARGET_ORDINAL, {3: "A fourth bubble."})
 
 
+def test_a_negative_index_is_refused_and_the_last_bubble_keeps_its_english(
+    fixture: _Fixture,
+) -> None:
+    """MT-085 **AC-1** (audit survivor PJ2): the *other* end of the bounds check.
+
+    `write_proposed` documents that an index outside the page's reading indices
+    raises `ValueError` naming it, with nothing written. The two tests above pin
+    only the upper end (`9`, and `3` one past it), so dropping the `0 <=` half
+    of `if not 0 <= reading_index < len(region_ids)` kept them green - and then
+    `-1` is a valid Python subscript: `region_ids[-1]` is the page's **last**
+    bubble, silently overwritten with English meant for a bubble that does not
+    exist. That is the failure `parse.py`'s docstring warns about; the parser
+    rejects negatives first, so only the store's own guard is pinned here.
+
+    Seeded **with** a previous run's proposals, so the last region has paid-for
+    English for a mis-aimed write to destroy. The needle names `-1` anchored to
+    the message's own wording, because a bare `1` is satisfied by the very same
+    message for *any* index - the target page is ordinal 1 and "is not on page
+    1" carries it.
+    """
+    fixture.seed(proposals=True)
+    before = fixture.project.read_proposed(_TARGET_ORDINAL)
+    assert before == (_EXISTING[0], _EXISTING[1], _EXISTING[2])
+
+    with pytest.raises(ValueError, match=rf"^reading index -1 is not on page {_TARGET_ORDINAL}:"):
+        fixture.project.write_proposed(_TARGET_ORDINAL, {-1: "A bubble before the first."})
+
+    after = fixture.project.read_proposed(_TARGET_ORDINAL)
+    assert after[-1] == _EXISTING[2], (
+        f"the last region's proposal became {after[-1]!r}: index -1 was written to"
+        " region_ids[-1], the page's last bubble"
+    )
+    assert after == before
+
+
 # -- C-6: it opens its own transaction -----------------------------------------
 
 
