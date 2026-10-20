@@ -434,3 +434,79 @@ def test_a_response_with_no_glossary_proposes_no_terms(
 
     assert result.proposed_terms == ()
     assert result.lines == _EXPECTED
+
+
+# -- MT-084: the response is read the way the API can send it ------------------
+
+#: A dated snapshot id, the shape an alias resolves to. Deliberately **not** in
+#: `domain.rates.RATES`: `translate_page` does not price (pricing, and so
+#: `UnknownModel`, runs downstream), so an unlisted id is safe at this level.
+_SERVED_SNAPSHOT = "claude-opus-5-20261001"
+
+
+def test_the_call_records_the_model_that_served_the_response_not_the_one_requested(
+    response_body: Callable[[str], str],
+    fake_message: Callable[..., object],
+) -> None:
+    """MT-084 AC-1 (audit survivor CL2), MT-044 C-5: the ledger records "the
+    model that actually served the request", because it is reconciled against
+    the provider's bill and the bill names the snapshot, not the alias.
+
+    The fake's default model equals `prompt.MODEL_ID`, so every other test here
+    is blind to which of the two `CallInfo` reads. This one makes them differ,
+    and checks that they do before asserting which one landed.
+    """
+    client = _FakeClient(fake_message(response_body("well-formed"), model=_SERVED_SNAPSHOT))
+
+    result = translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+    assert client.messages.seen[0]["model"] != _SERVED_SNAPSHOT, (
+        "precondition: the request must ask for a different model than the one that served it"
+    )
+    assert result.call is not None
+    assert result.call.model_id == "claude-opus-5-20261001", (
+        f"the call recorded {result.call.model_id!r}, which is the model the request asked"
+        " for, not the one the response says served it"
+    )
+
+
+def test_cache_counts_the_response_left_absent_are_recorded_as_zero(
+    response_body: Callable[[str], str],
+    fake_message: Callable[..., object],
+    fake_usage: Callable[..., object],
+) -> None:
+    """MT-084 AC-3 (audit survivor CL5). The SDK types both cache counts
+    `Optional[int]`, and a response that neither read nor wrote a cache entry
+    may carry `None`. The ledger's columns are not nullable, so an absent count
+    is the zero it means - not a one, and not a `None` passed through.
+
+    The two other counts are distinct non-zero values so the assertion is on the
+    whole `TokenUsage`: a fallback that leaked into a neighbouring field would
+    show up here too.
+    """
+    client = _FakeClient(
+        fake_message(
+            response_body("well-formed"),
+            usage=fake_usage(
+                input_tokens=3011,
+                output_tokens=712,
+                cache_read_input_tokens=None,
+                cache_creation_input_tokens=None,
+            ),
+        )
+    )
+
+    usage = translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT).usage
+
+    assert usage.cache_write_tokens == 0, (
+        f"absent cache writes recorded as {usage.cache_write_tokens!r}"
+    )
+    assert usage.cache_read_tokens == 0, (
+        f"absent cache reads recorded as {usage.cache_read_tokens!r}"
+    )
+    assert usage == TokenUsage(
+        input_tokens=3011,
+        output_tokens=712,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+    )

@@ -222,12 +222,18 @@ _TRANSLATE_FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "transl
 
 @dataclass(frozen=True)
 class FakeUsage:
-    """`response.usage`, with the four fields MT-011 C-5 reads off it."""
+    """`response.usage`, with the four fields MT-011 C-5 reads off it.
+
+    The two cache fields are `int | None` because the SDK's `Usage` types them
+    `Optional[int]` (MEASURED 2026-10-20, `anthropic` 0.125.0): a response that
+    neither read nor wrote a cache entry may carry `None`, and MT-084 AC-3 builds
+    exactly that. The default stays `0` so every existing caller is unchanged.
+    """
 
     input_tokens: int = 0
     output_tokens: int = 0
-    cache_read_input_tokens: int = 0
-    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int | None = 0
+    cache_creation_input_tokens: int | None = 0
 
 
 @dataclass(frozen=True)
@@ -242,6 +248,22 @@ class FakeThinkingBlock:
 
     thinking: str = ""
     type: str = "thinking"
+
+
+@dataclass(frozen=True)
+class FakeRedactedThinkingBlock:
+    """A `redacted_thinking` block: `data` and `type`, and **no** `text`.
+
+    Mirrors `anthropic.types.RedactedThinkingBlock`, whose `model_fields` are
+    `['data', 'type']` (MEASURED 2026-10-20 against `anthropic` 0.125.0;
+    `hasattr(..., "text")` is `False`). Deliberately its own class and not a
+    subclass of anything carrying `text`: the missing attribute is the point
+    (MT-084 AC-2). A reader that takes "the first block that is not `thinking`"
+    for the text block reaches for `.text` here and raises `AttributeError`.
+    """
+
+    data: str = "redacted_fake"
+    type: str = "redacted_thinking"
 
 
 # MT-044 C-5: `translate/client.py` now reads `response.id` and `response.model`
@@ -268,7 +290,7 @@ _FAKE_MODEL_ID = "claude-opus-5"
 
 @dataclass(frozen=True)
 class FakeMessage:
-    content: tuple[FakeTextBlock | FakeThinkingBlock, ...]
+    content: tuple[FakeTextBlock | FakeThinkingBlock | FakeRedactedThinkingBlock, ...]
     usage: FakeUsage = FakeUsage()
     stop_reason: str = "end_turn"
     id: str = _FAKE_MESSAGE_ID
@@ -279,6 +301,7 @@ def _fake_message(
     body: str,
     *,
     leading_thinking: bool = False,
+    leading_redacted_thinking: bool = False,
     usage: FakeUsage | None = None,
     stop_reason: str = "end_turn",
     message_id: str = _FAKE_MESSAGE_ID,
@@ -289,8 +312,13 @@ def _fake_message(
     `message_id` sets the field the real `Message` spells `id`; the *field* has
     to be `id` because production reads `response.id`, while the *parameter* is
     spelled out so the builder's body does not shadow the builtin.
+
+    `leading_redacted_thinking` puts a `FakeRedactedThinkingBlock` **first**,
+    ahead of any `leading_thinking` block and the text block (MT-084 AC-2).
     """
-    blocks: list[FakeTextBlock | FakeThinkingBlock] = []
+    blocks: list[FakeTextBlock | FakeThinkingBlock | FakeRedactedThinkingBlock] = []
+    if leading_redacted_thinking:
+        blocks.append(FakeRedactedThinkingBlock())
     if leading_thinking:
         blocks.append(FakeThinkingBlock())
     blocks.append(FakeTextBlock(text=body))
@@ -305,8 +333,8 @@ def _fake_message(
 
 @pytest.fixture
 def fake_message() -> Callable[..., FakeMessage]:
-    """A builder: `fake_message(body, leading_thinking=..., usage=...,
-    message_id=..., model=...)`."""
+    """A builder: `fake_message(body, leading_thinking=...,
+    leading_redacted_thinking=..., usage=..., message_id=..., model=...)`."""
     return _fake_message
 
 
