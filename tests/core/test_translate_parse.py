@@ -118,6 +118,40 @@ def test_a_thinking_block_in_front_of_the_json_does_not_hide_it(
     assert parse_lines(message, _REGION_INDICES) == _EXPECTED
 
 
+@pytest.mark.parametrize(
+    "leading_thinking",
+    [False, True],
+    ids=["redacted-then-text", "redacted-then-thinking-then-text"],
+)
+def test_a_redacted_thinking_block_in_front_of_the_json_does_not_hide_it(
+    response_body: Callable[[str], str],
+    fake_message: Callable[..., object],
+    leading_thinking: bool,
+) -> None:
+    """MT-084 AC-2 (audit survivor P7). `anthropic` 0.125.0's content union
+    includes `RedactedThinkingBlock`, which has `data` and `type` and **no**
+    `text`. A reader that takes "the first block that is not `thinking`" for the
+    text block passes every test above - the only other non-text block they
+    build is `thinking` - and raises `AttributeError` on a real response that
+    leads with a redacted block, losing a paid page. The lines must come from
+    the text block, whatever sits in front of it."""
+    message = fake_message(
+        response_body("well-formed"),
+        leading_redacted_thinking=True,
+        leading_thinking=leading_thinking,
+    )
+    first = message.content[0]
+    assert first.type == "redacted_thinking", "precondition: the redacted block must come first"
+    assert not hasattr(first, "text"), "precondition: a redacted block carries no `text`"
+
+    assert parse_lines(message, _REGION_INDICES) == {
+        0: "As if a demon would move at a human's say-so.",
+        1: "...I see.",
+        2: "Why are you here?",
+        3: "Let's go.",
+    }
+
+
 # -- AC-5, at the parse level --------------------------------------------------
 
 
