@@ -1092,6 +1092,12 @@ def _strip_row_one_ink(window: Workspace) -> str:
     # The item is wider than the 96 px strip; outside the viewport `copy` is black.
     rect = strip.visualItemRect(strip.item(1)).intersected(strip.viewport().rect())
     assert not rect.isEmpty(), "precondition: row 1 is not in view"
+    # MT-086 R-1: the row also holds the status glyph, so read the item's text label alone.
+    label = strip.itemWidget(strip.item(1)).findChild(QLabel, "pageLabel")
+    assert label is not None, "precondition: row 1 has no QLabel#pageLabel"
+    origin = label.mapTo(strip.viewport(), QPoint(0, 0))
+    rect = QRect(origin, label.size()).intersected(strip.viewport().rect())
+    assert not rect.isEmpty(), "precondition: row 1's label is not in view"
     image = _grab(strip.viewport()).copy(rect)
     return _ink(image)
 
