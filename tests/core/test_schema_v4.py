@@ -628,6 +628,54 @@ def test_the_ceiling_a_version_three_file_held_survives_as_micro_dollars(
     assert _raw(db_path, "SELECT budget_ceiling_micro_usd FROM chapter") == [(_V4_CEILING_MICRO,)]
 
 
+#: Whole-cent ceilings whose double, times 1,000,000, lands just *below* the
+#: integer, so `CAST(... AS INTEGER)` without `ROUND` truncates one micro-dollar
+#: low. MT-085 measured all 500 of $0.01..$5.00 on SQLite 3.53.1 and exactly ten
+#: differ: 2.01, 2.03, 2.05, 2.07, 2.09, 4.02, 4.06, 4.10, 4.14, 4.18. These
+#: three are the first, the last of the 2.0x run, and the last overall; 2.01 is
+#: the case AC-2 names.
+_HARD_CEILINGS: tuple[tuple[float, int], ...] = (
+    (2.01, 2_010_000),
+    (2.09, 2_090_000),
+    (4.18, 4_180_000),
+)
+
+
+@pytest.mark.parametrize(("ceiling_usd", "expected_micro"), _HARD_CEILINGS)
+def test_a_ceiling_truncation_would_get_wrong_migrates_to_the_exact_micro_dollars(
+    source_dir: Path, ceiling_usd: float, expected_micro: int
+) -> None:
+    """MT-085 **AC-2** (audit survivor SC3): the `ROUND` in the conversion.
+
+    The 1.5 test above is about the migration converting *at all*, and chose
+    an exactly representable value for that reason, so it is green with or
+    without `ROUND`. This is the hard case it deliberately avoided: 2.01 as a
+    double is 2.00999999999999978..., and `CAST(2.01 * 1000000 AS INTEGER)` is
+    2,009,999. A user who set $2.01 before MT-044 would find a ceiling one
+    micro-dollar lower after opening the file.
+
+    The first assertion is the fixture's own precondition: if SQLite ever stops
+    truncating this value, the case no longer distinguishes `ROUND` from its
+    absence and must be replaced, not kept as a vacuous green.
+    """
+    scratch = sqlite3.connect(":memory:")
+    try:
+        truncated = list(scratch.execute("SELECT CAST(? * 1000000 AS INTEGER)", (ceiling_usd,)))
+    finally:
+        scratch.close()
+    assert truncated == [(expected_micro - 1,)], (
+        f"{ceiling_usd} no longer truncates to {expected_micro - 1} on this SQLite"
+        f" ({truncated}); it is not a hard case and proves nothing about ROUND"
+    )
+
+    db_path, _ = _migrated(source_dir, ceiling_usd=ceiling_usd)
+
+    with open_project(project_dir_for(source_dir)) as project:
+        assert project.budget_ceiling() == Usd.from_micro(expected_micro)
+
+    assert _raw(db_path, "SELECT budget_ceiling_micro_usd FROM chapter") == [(expected_micro,)]
+
+
 def test_a_version_three_file_with_no_ceiling_still_has_none_afterwards(
     source_dir: Path,
 ) -> None:
