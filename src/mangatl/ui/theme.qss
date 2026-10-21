@@ -417,6 +417,21 @@ QLabel#rowGutter[status="failed"] {
 }
 
 /* ====================================================================== */
+/* components.md PageStrip - each page's status glyph (MT-086)            */
+/* ====================================================================== */
+/* Coloured exactly as the gutter above: keyed on the glyph label's      */
+/* status property, which workspace.PageStrip re-polishes after setting. */
+/* Tokens are workspace.PAGE_STATUS_COLOR_TOKENS.                        */
+
+QLabel#pageGlyph[status="pending"] { color: #949494; }
+QLabel#pageGlyph[status="running"] { color: #4CC2FF; }
+QLabel#pageGlyph[status="translated"] { color: #B4B4B4; }
+QLabel#pageGlyph[status="partly_reviewed"] { color: #6FD08C; }
+QLabel#pageGlyph[status="fully_reviewed"] { color: #6FD08C; }
+QLabel#pageGlyph[status="failed"] { color: #FF7A7A; }
+QLabel#pageGlyph[status="skipped"] { color: #737373; }
+
+/* ====================================================================== */
 /* components.md section 8 - run progress and CostReadout (MT-018)        */
 /* ====================================================================== */
 /* Colour only. The type that section 8 names - type.numeric and     */
