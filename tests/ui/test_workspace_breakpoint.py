@@ -150,7 +150,10 @@ def _item_accessible_texts(window: Workspace) -> list[str]:
 
 def _expected_accessible_texts() -> list[str]:
     total = len(PAGES)
-    return [f"Page {i + 1} of {total}, {name}" for i, (name, _) in enumerate(PAGES)]
+    # MT-086: a fresh project's pages are pending, so each name ends with PO-4's phrase.
+    return [
+        f"Page {i + 1} of {total}, {name}, not translated yet" for i, (name, _) in enumerate(PAGES)
+    ]
 
 
 def _filenames() -> list[str]:

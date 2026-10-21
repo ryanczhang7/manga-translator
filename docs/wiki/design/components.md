@@ -534,19 +534,47 @@ carries its index and a status glyph:
 
 | Page status | Glyph | Colour |
 |---|---|---|
-| pending | hollow circle | `color.text.muted` |
-| running | half-filled circle, and the row is `color.accent.base` bordered | `color.accent.base` |
-| translated, none reviewed | hollow circle | `color.text.secondary` |
-| partly reviewed | half-filled check | `color.status.success` |
-| fully reviewed | filled check | `color.status.success` |
-| has a failed line | filled warning triangle | `color.status.danger` |
-| skipped (undecodable) | filled dash | `color.text.disabled` |
+| pending | hollow circle `○` U+25CB | `color.text.muted` |
+| running | half-filled circle `◐` U+25D0, and the row is `color.accent.base` bordered | `color.accent.base` |
+| translated, none reviewed | hollow diamond `◇` U+25C7 | `color.text.secondary` |
+| partly reviewed | half-filled diamond `◈` U+25C8 | `color.status.success` |
+| fully reviewed | filled diamond `◆` U+25C6 | `color.status.success` |
+| has a failed line | warning sign `⚠` U+26A0 (the gutter's `failed` glyph, §5) | `color.status.danger` |
+| skipped (source changed or gone) | filled dash `▬` U+25AC | `color.text.disabled` |
+
+> **Amended by MT-086 (PO-1, the user's decision 2026-10-21).** As first
+> written, `pending` and `translated, none reviewed` shared the hollow circle
+> and differed by colour alone, which A-10 forbids, and "half-filled check" has
+> no text glyph. Two shape families now carry two different progressions: the
+> **circle** fills as the run proceeds (hollow → half), the **diamond** fills as
+> the review proceeds (hollow → half → full). The seven are pairwise distinct
+> code points in distinct shapes, so one colour cannot collapse any pair
+> (A-15.7). The glyphs are text, coloured by `theme.qss` through the row's
+> `status` property exactly as §5's gutter is, so High Contrast maps them
+> through `[hc.map]` with no painting code.
+>
+> **How a page earns a row** (MT-086's derivation, `domain.page_status`): the
+> store knows three page states — pending, stale (the source image changed or
+> is gone; its results were discarded) and done — and each line's status.
+> `running` is a flag the strip can show but nothing sets today (the workspace
+> is not open during a run). `stale` shows as **skipped**. A `done` page with
+> any `failed` line is **has a failed line**; otherwise it is translated /
+> partly / fully reviewed by how many of its lines carry a committed user act
+> (`accepted`, `edited` or `reverted` — a reverted line was looked at and
+> decided). A `done` page with no lines at all is **translated, none
+> reviewed**: nothing was reviewed, and the user should look at why nothing
+> was found.
 
 States per row: default / hover (`color.surface.hover`) / focus-visible (ring) /
 current (3px `color.accent.base` leading bar + `color.surface.selected`) /
 disabled (during a run, non-current rows are not activatable but stay focusable).
 
-Accessible name: "Page 7 of 20, *filename*, 12 of 18 lines reviewed".
+Accessible name: "Page 7 of 20, *filename*, 12 of 18 lines reviewed" — the
+reviewed-family form. Every status carries an audible phrase (A-10; MT-086
+PO-4): pending *"not translated yet"*; running *"translating"*; translated,
+partly and fully reviewed *"R of T lines reviewed"*; has a failed line *"R of T
+lines reviewed, F failed"*; skipped *"skipped, source changed"*. The rail (28 px)
+carries the same glyph and the same name as the full strip (layout.md, A-10).
 
 **List ground** (MT-061): the strip's viewport is `color.surface.raised`, from
 the base `QAbstractItemView` rule in `theme.qss.in` - the same rule grounds

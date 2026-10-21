@@ -386,7 +386,9 @@ def test_the_chapters_pages_are_listed_by_filename_in_ordinal_order(qtbot, sourc
     # MT-048: at 1100 px the rail shows "1", "2"; the accessible text names the file at any width.
     assert [
         strip.item(i).data(Qt.ItemDataRole.AccessibleTextRole) for i in range(strip.count())
-    ] == [f"Page {i + 1} of {len(PAGES)}, {name}" for i, name in enumerate(PAGES)]
+    ] == [  # MT-086: a fresh project's pages are pending, so each name ends with PO-4's phrase.
+        f"Page {i + 1} of {len(PAGES)}, {name}, not translated yet" for i, name in enumerate(PAGES)
+    ]
 
 
 def test_the_first_page_is_current_and_shown_with_its_own_rows(qtbot, source: Path) -> None:  # type: ignore[no-untyped-def]

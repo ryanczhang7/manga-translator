@@ -45,6 +45,11 @@ shows filenames and the name is shown. Only a resize that CROSSES the line
 reallocates the splitter, and then only if the user has not dragged the column
 since the chapter was opened; a resize on one side gives the whole delta to the
 canvas, as before.
+
+**Page status** (MT-086, `components.md` §`PageStrip`). Each strip row carries
+a glyph for its page's `domain.page_status` derivation, coloured by `theme.qss`
+through the glyph's `status` property. A line committed in the column re-derives
+the shown page's row in place (`linesChanged`); the chapter is never reloaded.
 `mangatl.app` opens this window on a chapter folder (MT-054) and closes the
 project on `closed`, which is emitted after a render in flight has finished and
 the pending saves are written.
@@ -55,16 +60,19 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from PySide6.QtCore import QEvent, QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QPersistentModelIndex, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
     QEnterEvent,
+    QPainter,
     QPalette,
     QPixmap,
     QResizeEvent,
 )
 from PySide6.QtWidgets import (
+    QApplication,
+    QBoxLayout,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -74,6 +82,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
@@ -81,10 +92,11 @@ from PySide6.QtWidgets import (
 from mangatl.domain.budget import DEFAULT_CEILING
 from mangatl.domain.line import Line, LineStatus, effective_text, failure_reason
 from mangatl.domain.page import Chapter
+from mangatl.domain.page_status import PageProgress, PageStatus, page_progress
 from mangatl.pipeline.bake import BakePreview, BakeReport
 from mangatl.store import ledger
 from mangatl.store.lines import commit_line, read_review_lines
-from mangatl.store.project import Project, project_dir_for
+from mangatl.store.project import PAGE_DONE, PAGE_STALE, Project, project_dir_for
 from mangatl.ui import tokens_gen
 from mangatl.ui.bake import BakeController
 from mangatl.ui.bake_dialog import BakeConfirmDialog
@@ -106,6 +118,8 @@ __all__ = [
     "COLUMN_MIN_WIDTH",
     "FOOTER_HEIGHT",
     "HEADER_HEIGHT",
+    "PAGE_STATUS_COLOR_TOKENS",
+    "PAGE_STATUS_GLYPHS",
     "STATUS_COLOR_TOKENS",
     "STATUS_GLYPHS",
     "STRIP_RAIL_WIDTH",
@@ -114,6 +128,7 @@ __all__ = [
     "TranslationColumn",
     "TranslationRow",
     "Workspace",
+    "page_accessible_text",
 ]
 
 #: Judged on `Workspace.width()`: `>=` is the wide layout (layout.md).
@@ -150,6 +165,31 @@ STATUS_COLOR_TOKENS: dict[LineStatus, str] = {
     "failed": "color.status.danger",
 }
 
+#: `components.md` §`PageStrip`'s glyphs (PO-1): circles for the run, diamonds
+#: for the review. Pairwise distinct code points (A-15.7), keyed in
+#: `PAGE_STATUSES` order.
+PAGE_STATUS_GLYPHS: dict[PageStatus, str] = {
+    "pending": "\N{WHITE CIRCLE}",
+    "running": "\N{CIRCLE WITH LEFT HALF BLACK}",
+    "translated": "\N{WHITE DIAMOND}",
+    "partly_reviewed": "\N{WHITE DIAMOND CONTAINING BLACK SMALL DIAMOND}",
+    "fully_reviewed": "\N{BLACK DIAMOND}",
+    "failed": "\N{WARNING SIGN}",
+    "skipped": "\N{BLACK RECTANGLE}",
+}
+
+#: `components.md` §`PageStrip`'s glyph colours, as tokens. The colour itself
+#: lives only in `theme.qss` (`QLabel#pageGlyph[status=...]`, MT-086 AC-3).
+PAGE_STATUS_COLOR_TOKENS: dict[PageStatus, str] = {
+    "pending": "color.text.muted",
+    "running": "color.accent.base",
+    "translated": "color.text.secondary",
+    "partly_reviewed": "color.status.success",
+    "fully_reviewed": "color.status.success",
+    "failed": "color.status.danger",
+    "skipped": "color.text.disabled",
+}
+
 #: `components.md` §5's per-status phrase in the row's accessible name.
 _STATUS_PHRASES: dict[LineStatus, str] = {
     "proposed": "machine proposal",
@@ -164,17 +204,109 @@ _RENDER_LOADING_TEXT = "\N{MIDDLE DOT}" * 3
 _RENDER_LOADING_NAME = "Render pages, working"
 
 
+def page_accessible_text(
+    index: int, total_pages: int, filename: str, progress: PageProgress
+) -> str:
+    """`components.md` §`PageStrip`: a strip item's accessible name (PO-4).
+
+    `index` is 0-based; the name numbers pages from one."""
+    status = progress.status
+    if status == "pending":
+        phrase = "not translated yet"
+    elif status == "running":
+        phrase = "translating"
+    elif status == "skipped":
+        phrase = "skipped, source changed"
+    else:
+        phrase = f"{progress.reviewed} of {progress.total} lines reviewed"
+        if status == "failed":
+            phrase += f", {progress.failed} failed"
+    return f"Page {index + 1} of {total_pages}, {filename}, {phrase}"
+
+
+class _NoTextDelegate(QStyledItemDelegate):
+    """Paints an item's ground (hover, current, selection) but not its text.
+
+    The strip's items keep their text (MT-048: the index or the filename) for
+    whoever reads it, and the item widget shows it; painting it too would
+    draw it twice, under the widget."""
+
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex | QPersistentModelIndex,
+    ) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""  # type: ignore[attr-defined]
+        widget = opt.widget  # type: ignore[attr-defined]
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+
+
+class _PageRow(QWidget):
+    """One strip row: the status glyph and the item's text.
+
+    Beside each other in the full strip; the glyph above the index in the rail,
+    which is what fits two characters' width into 28 px."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("pageRow")
+        self.glyph = QLabel()
+        self.glyph.setObjectName("pageGlyph")
+        self.glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label = QLabel()
+        self.label.setObjectName("pageLabel")
+        self.box = QBoxLayout(QBoxLayout.Direction.LeftToRight, self)
+        self.box.setContentsMargins(0, 0, 0, 0)
+        self.box.setSpacing(0)
+        self.box.addWidget(self.glyph)
+        self.box.addWidget(self.label, 1)
+
+    def set_rail(self, rail: bool) -> None:
+        self.box.setDirection(
+            QBoxLayout.Direction.TopToBottom if rail else QBoxLayout.Direction.LeftToRight
+        )
+        # In the rail the index's width counts, so the row's hint is honest
+        # against 28 px; in the full strip a long filename is clipped by the
+        # 96 px strip rather than widening it.
+        self.label.setSizePolicy(
+            QSizePolicy.Policy.Preferred if rail else QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+            if rail
+            else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+
+    def set_status(self, status: PageStatus) -> None:
+        self.glyph.setText(PAGE_STATUS_GLYPHS[status])
+        self.glyph.setProperty("status", status)
+        # theme.qss colours the glyph by `status`, as the gutter: without a
+        # re-polish a status change keeps the old rule's colour.
+        self.glyph.style().unpolish(self.glyph)
+        self.glyph.style().polish(self.glyph)
+
+
 class PageStrip(QListWidget):
     """The chapter's pages, one item per page in ordinal order.
 
     Full (96 px) it shows each page's filename; as a rail (28 px) its 1-based
-    index. Every item reads "Page N of M, <filename>" in both modes."""
+    index. Each row carries its page's status glyph (MT-086), coloured by
+    `theme.qss` through the glyph's `status` property, and every item reads
+    "Page N of M, <filename>, <progress>" in both modes."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("pageStrip")
         self.setAccessibleName("Pages")
+        self.setItemDelegate(_NoTextDelegate(self))
         self._filenames: list[str] = []
+        self._progress: list[PageProgress] = []
+        self._rows: list[_PageRow] = []
         self._rail = False
         self.setFixedWidth(STRIP_WIDTH)
 
@@ -182,18 +314,41 @@ class PageStrip(QListWidget):
     def is_rail(self) -> bool:
         return self._rail
 
-    def set_pages(self, filenames: Sequence[str]) -> None:
-        """Replace every item: one per filename, labelled for the current mode."""
+    def set_pages(self, filenames: Sequence[str], progress: Sequence[PageProgress]) -> None:
+        """Replace every item: one per filename, labelled for the current mode
+        and showing its page's progress."""
         self._filenames = list(filenames)
+        self._progress = list(progress)
         self.clear()
-        total = len(self._filenames)
-        for index, filename in enumerate(self._filenames):
+        self._rows = []
+        for _ in self._filenames:
             item = QListWidgetItem()
-            item.setData(
-                Qt.ItemDataRole.AccessibleTextRole, f"Page {index + 1} of {total}, {filename}"
-            )
             self.addItem(item)
+            row = _PageRow()
+            row.set_rail(self._rail)
+            self.setItemWidget(item, row)
+            self._rows.append(row)
+        for index in range(len(self._filenames)):
+            self._show_progress(index)
         self._relabel()
+
+    def set_progress(self, index: int, progress: PageProgress) -> None:
+        """Show `progress` on row `index`, in place: the item is not rebuilt, so
+        the current row and the selection survive."""
+        self._progress[index] = progress
+        self._show_progress(index)
+
+    def progress(self, index: int) -> PageProgress:
+        """What row `index` shows."""
+        return self._progress[index]
+
+    def _show_progress(self, index: int) -> None:
+        progress = self._progress[index]
+        self._rows[index].set_status(progress.status)
+        self.item(index).setData(
+            Qt.ItemDataRole.AccessibleTextRole,
+            page_accessible_text(index, len(self._filenames), self._filenames[index], progress),
+        )
 
     def set_rail(self, rail: bool) -> None:
         """Switch between the rail and the full strip, relabelling in place so
@@ -202,11 +357,18 @@ class PageStrip(QListWidget):
             return
         self._rail = rail
         self.setFixedWidth(STRIP_RAIL_WIDTH if rail else STRIP_WIDTH)
+        for row in self._rows:
+            row.set_rail(rail)
         self._relabel()
 
     def _relabel(self) -> None:
         for index, filename in enumerate(self._filenames):
-            self.item(index).setText(str(index + 1) if self._rail else filename)
+            text = str(index + 1) if self._rail else filename
+            item = self.item(index)
+            item.setText(text)
+            row = self._rows[index]
+            row.label.setText(text)
+            item.setSizeHint(row.sizeHint())
 
 
 def _row_accessible_text(ordinal: int, total: int, japanese: str | None, line: Line) -> str:
@@ -372,6 +534,9 @@ class TranslationColumn(QWidget):
     #: The pointer entered a row (its region_id) or left one (the region_id it left).
     rowEntered = Signal(int)
     rowLeft = Signal(int)
+    #: A row re-rendered after a commit or a save outcome: a line's status may
+    #: have changed (MT-086 block 6). Not emitted by `set_rows`.
+    linesChanged = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -421,10 +586,20 @@ class TranslationColumn(QWidget):
                 self._rows.append(row)
                 self._describe(item, row, region.ordinal, total, ja)
                 row.rendered.connect(
-                    lambda item=item, row=row, ordinal=region.ordinal, ja=ja: self._describe(
+                    lambda item=item, row=row, ordinal=region.ordinal, ja=ja: self._on_rendered(
                         item, row, ordinal, total, ja
                     )
                 )
+
+    def _on_rendered(
+        self, item: QListWidgetItem, row: TranslationRow, ordinal: int, total: int, ja: str | None
+    ) -> None:
+        self._describe(item, row, ordinal, total, ja)
+        self.linesChanged.emit()
+
+    def statuses(self) -> tuple[LineStatus, ...]:
+        """Each row's line status, in row order."""
+        return tuple(row.editor.line.status for row in self._rows)
 
     def _describe(
         self, item: QListWidgetItem, row: TranslationRow, ordinal: int, total: int, ja: str | None
@@ -471,6 +646,14 @@ def _saver(project: Project, page_ordinal: int, reading_index: int) -> SaveFn:
         commit_line(project, page_ordinal, reading_index, text, status)
 
     return save
+
+
+def _stored_progress(project: Project, ordinal: int) -> PageProgress:
+    """One page's progress as the store has it (MT-086 block 6). `running` is
+    never set: the workspace is not open during a run."""
+    status = project.page_status(ordinal)
+    lines = [None if line is None else line.status for line in read_review_lines(project, ordinal)]
+    return page_progress(lines, page_done=status == PAGE_DONE, stale=status == PAGE_STALE)
 
 
 class Workspace(QMainWindow):
@@ -571,6 +754,7 @@ class Workspace(QMainWindow):
         self.translation_column.list.currentRowChanged.connect(self._on_current_row_changed)
         self.translation_column.rowEntered.connect(self.link.hover)
         self.translation_column.rowLeft.connect(self._on_row_left)
+        self.translation_column.linesChanged.connect(self._refresh_page_progress)
         self.render_button.clicked.connect(self._render_pages)
 
     def follow_theme(self, controller: ThemeController) -> None:
@@ -601,10 +785,24 @@ class Workspace(QMainWindow):
         name = display_name(self._chapter.source_dir)
         self.chapter_name.setText(name)
         self.chapter_name.setAccessibleName(f"Chapter {name}")
+        progress = [_stored_progress(project, page.ordinal) for page in self._chapter.pages]
         with QSignalBlocker(self.page_strip):
-            self.page_strip.set_pages([page.filename for page in self._chapter.pages])
+            self.page_strip.set_pages([page.filename for page in self._chapter.pages], progress)
         self.page_canvas.set_page(None)
         self.set_regions([], [], [])
+
+    def _refresh_page_progress(self) -> None:
+        """The shown page's strip row, re-derived from the column's lines and
+        the page's stored state - in place, never by reloading (MT-086 AC-4)."""
+        if self._project is None or self._page_ordinal is None:
+            return
+        status = self._project.page_status(self._page_ordinal)
+        progress = page_progress(
+            self.translation_column.statuses(),
+            page_done=status == PAGE_DONE,
+            stale=status == PAGE_STALE,
+        )
+        self.page_strip.set_progress(self._page_ordinal, progress)
 
     def show_page(self, ordinal: int) -> None:
         """Decode page `ordinal` synchronously and show it with its stored

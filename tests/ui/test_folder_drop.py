@@ -809,7 +809,9 @@ def test_a_dropped_folder_with_a_project_opens_the_review_workspace(
     # MT-048: at 1100 px the rail shows "1", "2"; the accessible text names the file at any width.
     assert [
         strip.item(i).data(Qt.ItemDataRole.AccessibleTextRole) for i in range(strip.count())
-    ] == [f"Page {i + 1} of {len(PAGES)}, {name}" for i, name in enumerate(PAGES)]
+    ] == [  # MT-086: a fresh project's pages are pending, so each name ends with PO-4's phrase.
+        f"Page {i + 1} of {len(PAGES)}, {name}, not translated yet" for i, name in enumerate(PAGES)
+    ]
     assert strip.currentRow() == 0
     assert not window.isVisible(), "the intake window is still open"
 
