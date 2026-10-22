@@ -55,8 +55,9 @@ waivers are refused on required gates for the same reason.
 `slow` keeps a gate out of `--fast` and nothing else: it still runs on every
 full run. A gate that should not run per story at all takes an `ondemand` line
 instead, reason required, and runs only with `--gate <id>` or when a story
-escalates it; `--audit` refuses one on a required gate. The `mutation` gate
-below carries both.
+escalates it; `--audit` refuses one on a required gate, and refuses a
+`mutation` gate that has no `ondemand` line. The `mutation` gate below carries
+both.
 
 A `--fast` run is never recorded in a story. It is not a full run, and only a
 full run is evidence.
@@ -226,12 +227,37 @@ The number is read out of the evidence match, so a floor needs an evidence line
 whose regex covers the whole number; `--audit` refuses one that does not, or a
 floor that is not a number. Every full run prints `observed <n>` for any gate
 with an evidence line, so the count is visible before anyone commits to a
-floor.
+floor — except where there is no count to print, which is the next section.
 
 Raise a floor in the story that adds the tests. **Never lower one to make a
 gate pass** — that is the gate equivalent of deleting a failing test. A
 legitimate drop (a suite genuinely split in two) is a change to explain in the
 story, like any other.
+
+### The regex with no number under it
+
+Proving a gate ran and measuring how much it did are two different jobs, and
+one regex is asked to do both. Some regexes can only do the first, and the
+number printed under them is not a count of anything:
+
+    evidence | lint | Finished .* profile
+    no-count | lint | `Finished .* profile` is liveness-only; the digits are seconds
+
+Cargo's line is ``Finished `dev` profile [unoptimized + debuginfo] target(s) in
+0.29s``, so the digits `work_count` finds are the **elapsed time**. A floor of
+5 there passes or fails on how warm the build cache is, and in `project.conf`
+it looks exactly like the floor on `unit`. A `no-count` line says the regex
+measures nothing: the gate then reports `observed -` rather than a number, and
+any floor on it is refused, under `--audit` and on a real run alike. Liveness
+is untouched — the regex must still match, or the gate still fails with `ran
+but produced no evidence of work`.
+
+It is declared rather than detected because it cannot be detected. "The regex
+has no digit class" is the obvious test and it is wrong both ways:
+`Finished .* profile` has none and matches a stopwatch, while `TOTAL` has none
+and is followed by a genuine region count a floor may use. The reason is
+required, and `--audit` refuses a `no-count` naming a gate that does not exist
+— a typo there leaves the gate open to exactly the floor it meant to prevent.
 
 ### The directory nobody was testing
 
@@ -322,7 +348,7 @@ been noise for sixty stories.
 So a known failure is declared, with its reason, in `project.conf`:
 
     gate   | mutation | optional | . | pnpm exec stryker run
-    waiver | mutation | stryker needs a TS compiler API TS 7 lacks; stack.md s4
+    waiver | mutation | stryker's vitest runner tests nothing under vitest 5; command runner not wired yet - node-typescript.md
 
 `gates.sh` then reports it as `KNOWN`, with the reason inline, and `WARN` is
 reserved for a failure nobody declared. A waived gate still runs; when it
@@ -496,11 +522,14 @@ broader: `[1-9][0-9]* skipped`, not `skipped`.
 ## The gate record is written by the tool
 
 A full run of `gates.sh` writes its own summary into the active story's
-`## Gate results` (or `--story <id>`): a marker line, the UTC time, the commit,
+`## Gate results` (or `--story <id>`): a marker line, the UTC time the run
+started, the commit,
 a hash of every source, test and config file plus the harness's scripts and
 manifests (not its prompts - no gate reads a command file) as they were on disk
 when the gates ran, and the summary. `--gate` and `--required` runs are not recorded,
-because a partial run is not evidence that the story passes its gates.
+because a partial run is not evidence that the story passes its gates. A full
+run that finds a record from a run that started later declines to record, says
+so on a `(not recorded: …)` line, and leaves the newer record standing.
 
 Nobody pastes it and nobody edits it. `check-boundaries.sh` refuses a PR whose
 section has no marker, whose recorded result is not `pass`, or whose recorded
@@ -563,6 +592,12 @@ probe before moving on, and say in the story that you did.
    say so in the story. Removing the line is the gate equivalent of deleting a
    failing test. The same holds for lowering a `floor`, dropping a `discovery`
    line, or removing a gate from a story's `required_gates`.
+
+6. Adding a `no-count` line to silence a floor that is failing honestly is the
+   same move. The line is a statement about what the regex can measure, not an
+   escape hatch: if the gate really did less work, that is the floor doing its
+   job. Adding one is only correct where the number never meant anything, and
+   the story that adds it shows the output it read.
 
 `reference/triage.md` has the per-gate playbook, including what a coverage
 failure actually tells you and when a suppression is legitimate.

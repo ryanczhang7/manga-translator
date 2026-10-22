@@ -97,12 +97,68 @@ json_is_true() {
 #
 #   |  -> \001   &  -> \002   ;  -> \003   >  -> \004
 #   <  -> \005   SP -> \006   TAB-> \007   LF -> \010
+#   (  -> \016   )  -> \017
+#
+# Why \016/\017 for the parens and not \013/\014: VT and FF are POSIX
+# [[:space:]], so the redirect and tee extractors' character classes would eat
+# them and the target would truncate in exactly the old place - which is also
+# why SP and TAB are \006/\007. A mask character has to be inert to every
+# character class the extractors use, not merely unusual.
 #
 # Control characters are used because no real command line contains them, so
 # the round trip cannot corrupt a path that had one of them already.
 
+# HARNESS_SUBST_AWK   The paren matcher for the inside of a `$( ... )`, as awk
+# source that a caller PREPENDS to its own program. ONE copy, two callers:
+# mask_shell_quotes below (where a quoted substitution ends) and
+# check-grep-count.sh unwrap_quoted_subst (which quotes to blank). rules.md is
+# explicit about what happens to a rule that gets a private copy per caller,
+# and HARNESS-060 measured the cost here: with a separate copy in the guard, the
+# guard suite stayed green with this matcher broken.
+#
+# THE DEFECT IT REPLACES (HARNESS-060): the matcher counted every paren, quoted
+# or not, so a quoted substitution whose argument held a quoted, unpaired
+# paren - x="$(f Q(aQ)" with Q a single quote - never came back to depth zero, and every operator from there to the end of the file was
+# masked. Both tree guards went blind past such a line.
+#
+# subst_step(s, j)   One unit of text inside a substitution, at column j of s.
+#   SUBST_IN   the inner quoting, held by the CALLER across calls and lines:
+#              "" (code), "s" (a single-quoted span), "d" (a double-quoted
+#              span). Reset it to "" on entering a substitution.
+#   returns    how many characters the unit spans (1, or 2 for an escape pair)
+#   SUBST_D    +1 for a paren that opens, -1 for one that closes, else 0. Only
+#              a paren in code counts; a nested `$(` is a paren and counts.
+# A single-quoted span ends at the next single quote; a double-quoted span at
+# the next double quote not escaped, with the four pairs bash honours there
+# (backslash before dollar, backtick, double quote, backslash) stepped over
+# whole; a backslash in code takes the next character with it. No apostrophe
+# appears in this program: it is a single-quoted shell string.
+HARNESS_SUBST_AWK='
+function subst_step(s, j,   c, nx) {
+  if (_SS_Q == "") { _SS_Q = sprintf("%c", 39); _SS_BS = sprintf("%c", 92) }
+  SUBST_D = 0
+  c = substr(s, j, 1)
+  if (SUBST_IN == "s") { if (c == _SS_Q) SUBST_IN = ""; return 1 }
+  if (SUBST_IN == "d") {
+    if (c == _SS_BS) {
+      nx = substr(s, j + 1, 1)
+      if (nx == "$" || nx == "`" || nx == "\"" || nx == _SS_BS) return 2
+      return 1
+    }
+    if (c == "\"") SUBST_IN = ""
+    return 1
+  }
+  if (c == _SS_BS) return (j < length(s)) ? 2 : 1
+  if (c == _SS_Q)  { SUBST_IN = "s"; return 1 }
+  if (c == "\"")   { SUBST_IN = "d"; return 1 }
+  if (c == "(")    SUBST_D = 1
+  else if (c == ")") SUBST_D = -1
+  return 1
+}
+'
+
 mask_shell_quotes() {
-  awk '
+  awk "$HARNESS_SUBST_AWK"'
     function maskchar(c) {
       if (c == "|")  return "\001"
       if (c == "&")  return "\002"
@@ -111,6 +167,8 @@ mask_shell_quotes() {
       if (c == "<")  return "\005"
       if (c == " ")  return "\006"
       if (c == "\t") return "\007"
+      if (c == "(")  return "\016"
+      if (c == ")")  return "\017"
       return c
     }
     function maskstr(t,   k, o) {
@@ -133,6 +191,16 @@ mask_shell_quotes() {
         # Inside a heredoc body: everything is data until the delimiter line.
         if (delim != "") {
           t = s; gsub(/^[ \t]+|[ \t]+$/, "", t)
+          if (state == "subst") {
+            # A body opened inside a quoted substitution: masked whole, its
+            # delimiter line too, and joined as the substitution was before
+            # HARNESS-060, so the bytes are unchanged and only the state
+            # after it is.
+            out = out maskstr(s)
+            if (t == delim) delim = ""
+            if (i < NR) out = out "\010"
+            continue
+          }
           if (t == delim) { out = out s; delim = "" } else out = out maskstr(s)
           if (i < NR) out = out "\n"
           continue
@@ -170,18 +238,38 @@ mask_shell_quotes() {
             # redirect in there is masked too, which fails open, as the guard
             # already does for any target with a `$` in it.
             if (c == "$" && substr(s, j + 1, 1) == "(") {
-              out = out c "("; state = "subst"; depth = 1; j += 2; continue
+              out = out c "("; state = "subst"; depth = 1; SUBST_IN = ""; j += 2; continue
             }
             if (c == "\"") { out = out c; state = "none" } else out = out maskchar(c)
             j++; continue
           }
           if (state == "subst") {
-            if (c == "(") depth++
-            else if (c == ")") {
+            # Where the substitution ENDS is decided by subst_step, which
+            # steps over quoted spans and escapes (HARNESS-060). What is
+            # emitted is unchanged: every character in here is masked, and
+            # only the closing paren is raw.
+            if (SUBST_IN == "") {
+              # A heredoc opened in here is a BODY, not code: the awk rules of
+              # both tree guards live in "$(cat <<AWKEOF ... )", full of
+              # unpaired quotes. `<<<` is a here-string and opens nothing.
+              if (c == "<" && substr(s, j, 3) == "<<<") { out = out maskstr("<<<"); j += 3; continue }
+              if (c == "<" && substr(s, j + 1, 1) == "<" && match(substr(s, j), HD)) {
+                w = substr(s, j, RLENGTH)
+                out = out maskstr(w)
+                j += RLENGTH
+                sub(/^<<-?[ \t]*/, "", w)
+                gsub("[\"" Q "]", "", w)
+                pending = w
+                continue
+              }
+            }
+            k = subst_step(s, j)
+            if (SUBST_D == 1) depth++
+            else if (SUBST_D == -1) {
               depth--
               if (depth == 0) { out = out c; state = "double"; j++; continue }
             }
-            out = out maskchar(c); j++; continue
+            out = out maskstr(substr(s, j, k)); j += k; continue
           }
 
           # Unquoted. A comment runs to the end of the line and is data: an
@@ -238,7 +326,7 @@ mask_shell_quotes() {
 }
 
 unmask_shell_quotes() {
-  tr '\001\002\003\004\005\006\007\010' '|&;>< \t\n'
+  tr '\001\002\003\004\005\006\007\010\016\017' '|&;>< \t\n()'
 }
 
 # masked_lines <file>   The file's text with every operator inside a quoted,
@@ -409,7 +497,7 @@ mutate_targets() {
 # hand each command its own operand list.
 _WC_AWK='
     function isname(w) {
-      return (w == "sed" || w == "tee" || w == "cp" || w == "mv" || w == "rm" || w == "touch")
+      return (w == "sed" || w == "tee" || w == "cp" || w == "mv" || w == "rm" || w == "touch" || w == "git")
     }
     function out(s)      { BUF = BUF s "\n" }
     function emit(t)     { if (t != "") out(t) }
@@ -550,6 +638,23 @@ _WC_AWK='
       }
     }
 
+    # git is not a write by itself (HARNESS-045). First, hand a subcommand the
+    # rules above already judge - git mv, git rm - to its own rule, walking past
+    # any global option before it. Otherwise the one git option whose purpose is
+    # to write a file: --output, matched EXACTLY, because --output-indicator-new,
+    # -old and -context write nothing, and git refuses any shorter abbreviation
+    # as ambiguous with them.
+    function do_git(a, b,   k, t) {
+      for (k = a; k <= b; k++) if (isname(tok[k]) && tok[k] != "git") { dispatch(tok[k], k + 1, b); return }
+      for (k = a; k <= b; k++) {
+        if (!islong(tok[k]) || longname(tok[k]) != "output") continue
+        WRITE = 1
+        if (LONGHAS) t = LONGVAL
+        else { k++; t = (k <= b) ? tok[k] : "" }
+        emitr(t, "destination of git --output")
+      }
+    }
+
     # rm and tee take every remaining operand, with no role: there is nothing
     # ambiguous about them, and inventing a role for one is the churn AC-5s own
     # control forbids.
@@ -559,6 +664,7 @@ _WC_AWK='
 
     function dispatch(name, a, b) {
       if (name == "sed") { do_sed(a, b); return }
+      if (name == "git") { do_git(a, b); return }
       WRITE = 1
       if (name == "tee" || name == "rm") { do_plain(a, b); return }
       if (name == "touch") { do_touch(a, b); return }
@@ -1309,6 +1415,13 @@ _hash_blob_listing() {
 # before .gitattributes pinned LF the hash would disagree with CI's. With no
 # real index at all (a fresh clone that never populated one), HEAD's tree is
 # the seed instead.
+#
+# The copy is `cp -p`, and the -p is load-bearing (HARNESS-042). `add -u`
+# re-reads a file whose stat data matches its entry only when the entry is
+# "racily clean" - not older than the INDEX FILE's own mtime. A plain `cp`
+# stamps the copy now, so an entry written in the same second as the real index
+# stops being racy, and a same-size rewrite in that second is skipped: the hash
+# misses a real edit. It surfaced as a timing-dependent `lib` failure on CI.
 gate_tree_hash() {
   local idx real
   idx="$HARNESS_ROOT/.claude/state/.tree-index.$$"
@@ -1316,7 +1429,7 @@ gate_tree_hash() {
   real="$(cd "$HARNESS_ROOT" && git rev-parse --git-path index 2>/dev/null)"
   case "$real" in ''|/*|[A-Za-z]:*) ;; *) real="$HARNESS_ROOT/$real" ;; esac
   ( cd "$HARNESS_ROOT" \
-      && { { [ -n "$real" ] && [ -f "$real" ] && cp "$real" "$idx"; } \
+      && { { [ -n "$real" ] && [ -f "$real" ] && cp -p "$real" "$idx"; } \
            || { GIT_INDEX_FILE="$idx" git read-tree HEAD >/dev/null 2>&1 || :; }; } \
       && GIT_INDEX_FILE="$idx" git add -u . >/dev/null 2>&1 \
       && GIT_INDEX_FILE="$idx" git ls-files -s ) \
@@ -1351,6 +1464,23 @@ untracked_gated() {
 # One reader, used by phase.sh, gates.sh and check-boundaries.sh. Three
 # implementations of "read a key out of the frontmatter" is how the three come
 # to disagree about what a story says.
+
+# valid_story_id <id>   0 when <id> is one path component: the first character
+# a letter or digit, every character a letter, digit, '.', '_' or '-'. 1
+# otherwise. Prints nothing and spawns nothing (this file is the hook's hot
+# path). Every script that joins an id into docs/backlog/stories/$id.md asks
+# this first - new-story.sh, phase.sh and gates.sh - so `../X` names no file.
+# The letters are listed rather than written as `A-Z`: a range in a bracket
+# expression follows the locale's collation on bash 3.2, which has no
+# globasciiranges, and may then admit non-ASCII letters.
+valid_story_id() {
+  [ -n "$1" ] || return 1
+  [ -z "${1//[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-]/}" ] || return 1
+  case "$1" in
+    [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]*) return 0 ;;
+  esac
+  return 1
+}
 
 # frontmatter_value <file> <key>   The scalar value, trailing comment stripped.
 frontmatter_value() {

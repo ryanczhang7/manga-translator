@@ -527,29 +527,32 @@ while read -r n v; do
   got="$(floor_of "$n" "$REAL")"
   [ "$got" = "$v" ] || wrong="$wrong $n=${got:-<none>}(want $v)"
 done <<'COUNTS'
-boundaries 113
+boundaries 136
 ci-local 28
 classify 55
-doctor 50
+doctor 61
 gate-reminder 32
-gates 470
-grep-count 20
-lib 217
-mutate 189
-new-story 43
-phase 33
-phase-guard 310
-plan 42
+gates 682
+grep-count 38
+lib 324
+mutate 308
+new-story 53
+phase 73
+phase-guard 388
+plan 284
 policy 17
 procedure 37
-profiles 50
-refresh 122
+profiles 132
+refresh 215
 reporting 27
 run-lock 140
+security-audit 51
 selftest 268
-settings 27
-sigpipe 82
+settings 70
+shipped-docs 14
+sigpipe 91
 spawns 69
+tidy 128
 worktree 73
 COUNTS
 assert_eq "and each records the executed count measured on this tree" "" "$wrong"
@@ -559,10 +562,10 @@ assert_eq "and each records the executed count measured on this tree" "" "$wrong
 # moved lib from 139 to 197 and phase-guard from 188 to 288 - both floors are
 # recorded in RED, so both suites sit BELOW them until the reconciled parser
 # lands. See the note at the foot of floors.conf.
-assert_eq "profiles is floored at its 50 executed assertions, not its call-site count" \
-  50 "$(floor_of profiles "$REAL")"
-assert_eq "lib is floored at its 217 executed assertions, not its call-site count" \
-  217 "$(floor_of lib "$REAL")"
+assert_eq "profiles is floored at its 132 executed assertions, not its call-site count" \
+  132 "$(floor_of profiles "$REAL")"
+assert_eq "lib is floored at its 324 executed assertions, not its call-site count" \
+  324 "$(floor_of lib "$REAL")"
 
 # ===========================================================================
 # HARNESS-020: a project declares its own suites' floors in

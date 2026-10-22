@@ -14,6 +14,9 @@ to a browser through a bundler.
     gate | build     | required | . | pnpm build
     gate | mutation  | optional | . | pnpm exec stryker run
     ondemand | mutation | stryker re-runs the suite once per mutant; run it with /audit-mutations, not per story
+    # Combining this with another profile's `mutation` gate: see the stack-profiles skill, *Choosing*.
+    # On TypeScript 7 or Vitest 5, `stryker run` as shipped does not work; see
+    # *The mutation gate on TypeScript 7 / Vitest 5* below.
 
     task | install | - | . | pnpm install --frozen-lockfile
     task | dev     | - | . | pnpm dev
@@ -32,6 +35,12 @@ work, not that it succeeded.
     evidence | typecheck   | -
     evidence | integration | [1-9][0-9]* passed
 
+    # UNVERIFIED against a Stryker run - derived from the clear-text reporter's
+    # source. The third number in its `All files` row is `# killed`, and a run
+    # that killed nothing is not evidence that the tests ran. No `floor` on this
+    # line: gates.sh reads the first number after the match, which is the score.
+    evidence | mutation    | All files *[|][^|]*[|][^|]*[|] *[1-9][0-9]* [|]
+
     # UNVERIFIED - correct these against your own linter's output.
     evidence | lint        | Checked [1-9][0-9]* files      # biome
     # eslint prints nothing on success; use `--format unix` and count, or `-`.
@@ -41,8 +50,12 @@ work, not that it succeeded.
     # `built in 1.23s`; `tsc -b` prints nothing at all on success, in which case
     # use `-` and say why in the bootstrap story rather than inventing a match.
     evidence | build       | built in [0-9]
+    no-count | build       | `built in 1.23s` is liveness-only; the digits are elapsed seconds
 
-Verified against vitest 5 and typescript 5 on Windows. Vitest prints
+The `unit` and `coverage` lines were verified against vitest 5 and typescript 5
+on Windows; the `mutation` line was not run here - its shape is derived from
+Stryker's clear-text reporter source and checked by `profiles.test.sh` against
+canned rows, not against a Stryker run. Vitest prints
 `Tests  2 passed (2)` with ANSI colour and, on Windows, CRLF; `gates.sh` strips
 both before matching, so write the regex against the plain text.
 
@@ -63,6 +76,62 @@ Note what is *not* here: `coverage` stays in the fast subset even though it is
 the slowest of the four that remain. That is the point of it. `vitest run
 --coverage` runs the same tests as `unit` under v8 instrumentation, and the
 instrumented run is the one that judges the story.
+
+## The mutation gate on TypeScript 7 / Vitest 5
+
+`pnpm exec stryker run` with Stryker's defaults does not work on this
+toolchain. Everything in this section was measured by the reporter of issue
+#104 on a consumer project, with `@stryker-mutator/core` 10.0.0,
+`@stryker-mutator/vitest-runner` 10.0.0, typescript 7.0.2, vitest 5.0.0, Node
+24.19.0 and pnpm 12.3.4 on Windows 11. These are the reporter's measurements
+(issue #104, section 2), not re-measured here: that toolchain is not installed
+in the harness repository.
+
+Two failures, independent of each other:
+
+- **TypeScript 7.** Core's `TSConfigPreprocessor` calls
+  `ts.parseConfigFileTextToJson`, which TypeScript 7 (the native port) no
+  longer has, whenever `tsconfigFile` names a file that exists. `checkers: []`
+  does not avoid it; only a `tsconfigFile` that points nowhere does.
+- **Vitest 5.** The vitest runner plugin 10.0.0 was built against vitest
+  4.1.10 with a peer range of `>=2.0.0`. Under vitest 5.0.0 it **runs no tests
+  and still reports a score**: on one file 85.79% (156 static mutants killed,
+  0 of 22 runtime mutants killed), on another 0 of 19 killed where the same
+  mutant run by hand fails 9 tests. `--maxTestRunnerReuse 1` and
+  `--coverageAnalysis off` do not fix it, and `--logLevel debug` crashes it.
+
+What worked for the reporter was core's built-in command runner:
+
+    // stryker.config.mjs - the shape the reporter measured working
+    export default {
+      testRunner: "command",
+      commandRunner: { command: "pnpm exec vitest related --run <the files named in mutate>" },
+      coverageAnalysis: "off",      // no static-mutant bookkeeping; every kill is a real run
+      timeoutMS: 60000,             // 5,000 default: 5 of 19 were false timeouts on Windows
+      tsconfigFile: "tsconfig.none.json",  // a path that does NOT exist, on TS 7
+      plugins: [],                  // the command runner is built in; under pnpm a runner
+                                    // plugin, if you use one, must be listed here explicitly
+    };
+
+With it, the reporter's runs killed 19 of 19 mutants on the small file, and 155
+killed, 22 timeouts and 6 survivors on a 501-line one. Pointing `tsconfigFile`
+at a file that does not exist loses nothing when `tsconfig.json` has no
+`extends` or `references`; if yours has either, check what Stryker would have
+read from it before copying this.
+
+**What the `evidence | mutation` line can and cannot catch.** It requires the
+`# killed` column of the `All files` row to be non-zero, so it fails the 0 of
+19 run and a run in which nothing was tested at all. It would *pass* the
+85.79% run: those 156 kills were static mutants, decided without the runner.
+Under the configuration above that case does not arise - with
+`coverageAnalysis: "off"` Stryker classifies no mutant as static, because
+detecting one needs per-test coverage analysis - so every kill is one the
+command runner actually ran, and the line then means what it says. Leave
+coverage analysis on and the line is weaker than it looks. Stryker's reporter
+also prints `Ran N tests per mutant on average.`, which would read `0.00` in
+the broken-runner case; whether it appears depends on
+`clearTextReporter.reportMutants`, so confirm it against your own output before
+building anything on it.
 
 ## The 5,000 ms default is measured against the wrong run
 

@@ -265,7 +265,7 @@ while IFS= read -r line; do
   # matcher's own status is the answer. That is not true of a GATE command,
   # whose status means "did the tool succeed", so gates.sh keeps pipefail: there,
   # a failing test runner whose output still matched would be a vacuous pass.
-  if ( set +o pipefail; cd "$ROOT/$cwd" 2>/dev/null && eval "$cmd" ) >/dev/null 2>&1; then
+  if ( set +o pipefail; cd "$ROOT/$cwd" 2>/dev/null && eval "$cmd" ) </dev/null >/dev/null 2>&1; then
     printf '  ok       %-12s discovered\n' "$id"
   else
     printf '  MISSING  %-12s nothing discovered by: %s\n' "$id" "$cmd"

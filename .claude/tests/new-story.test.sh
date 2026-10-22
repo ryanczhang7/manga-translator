@@ -23,8 +23,13 @@ SCRIPT="$REPO_ROOT/scripts/new-story.sh"
 
 # Run the real script against a throwaway root, never this checkout: it writes
 # into docs/backlog/stories, which is a real directory here.
-mkdir -p "$WORK/scripts" "$WORK/docs/backlog/stories"
+# The real lib.sh beside it (HARNESS-046, Contract C-3): the script sources
+# .claude/hooks/lib.sh for valid_story_id, as phase.sh and gates.sh do, so a
+# fixture holding the script alone would fail every case below with "No such
+# file" and assert nothing about the template.
+mkdir -p "$WORK/scripts" "$WORK/docs/backlog/stories" "$WORK/.claude/hooks"
 cp "$SCRIPT" "$WORK/scripts/new-story.sh"
+cp "$REPO_ROOT/.claude/hooks/lib.sh" "$WORK/.claude/hooks/lib.sh"
 ( cd "$WORK" && bash scripts/new-story.sh WORLD-014 "Hex grid renders at 60fps" EPIC-03 feature \
     >"$WORK/out" 2>"$WORK/err" )
 STORY="$WORK/docs/backlog/stories/WORLD-014.md"
@@ -209,5 +214,56 @@ assert_contains "and says plan.sh conflicts compares it with touches:" \
 assert_eq "a fresh story's Contract mentions **Writes:** only inside the comment, and declares no write" \
   "commented 0" \
   "$([ "$in_comment" -ge 1 ] && printf commented || printf absent) $(grep -c '^\*\*Writes:\*\*' <<<"$uncommented")"
+
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-046 AC-1: an id that is not one path component is refused, and nothing is written"
+
+# Contract C-1's message, byte for byte, with the offending id substituted as
+# is (C-1: "Newlines inside <id> are printed as-is"). Matched as a whole
+# sentence inside stderr, so a message that names a DIFFERENT id, or carries
+# only the prefix, does not satisfy it.
+h46_msg() { printf "error: story id '%s' is not one path component: an id is letters, digits, '.', '_' or '-', and starts with a letter or digit" "$1"; }
+
+# Every '..'-shaped id resolves INSIDE $WORK: from docs/backlog/stories,
+# ../OUTSIDE is docs/backlog/OUTSIDE.md (C-6). Measured on today's script,
+# 2026-10-09: it creates that file and exits 0; '..', '.x', '-x', 'a b' and
+# A<newline>B each create a file under stories/; 'a/b' and 'a\b' fail to write
+# and still exit 0.
+#
+# One assertion per id, on the whole answer: exit status, the message, and
+# the two directory listings unchanged (OUTSIDE.md is in the second).
+h46_ls() { ( cd "$1" && ls -A ); }
+for id in '../OUTSIDE' 'a/b' 'a\b' '..' '.x' '-x' 'a b' $'A\nB'; do
+  h46_before_s="$(h46_ls "$WORK/docs/backlog/stories")"
+  h46_before_b="$(h46_ls "$WORK/docs/backlog")"
+  ( cd "$WORK" && bash scripts/new-story.sh "$id" "x" >"$WORK/h46.out" 2>"$WORK/h46.err" ); h46_rc=$?
+  h46_err="$(cat "$WORK/h46.err")"
+  case "$h46_err" in *"$(h46_msg "$id")"*) h46_m=message ;; *) h46_m="no grammar message" ;; esac
+  [ "$(h46_ls "$WORK/docs/backlog/stories")" = "$h46_before_s" ] && h46_s="stories/ unchanged" || h46_s="stories/ CHANGED"
+  [ "$(h46_ls "$WORK/docs/backlog")" = "$h46_before_b" ] && h46_b="backlog/ unchanged" || h46_b="backlog/ CHANGED"
+  [ -e "$WORK/docs/backlog/OUTSIDE.md" ] && h46_o="OUTSIDE.md exists" || h46_o="no OUTSIDE.md"
+  assert_eq "HARNESS-046 AC-1: new-story.sh $(printf '%q' "$id") exits 2, prints the grammar message naming it, and writes nothing" \
+    "2|message|stories/ unchanged|backlog/ unchanged|no OUTSIDE.md" \
+    "$h46_rc|$h46_m|$h46_s|$h46_b|$h46_o"
+  # Row-local: a red ../OUTSIDE row must not make every later row report it.
+  rm -f "$WORK/docs/backlog/OUTSIDE.md"
+done
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-046 AC-6: a title with a line break is refused"
+
+# Measured on today's script, 2026-10-09: both exit 0 and write the file, the
+# first with `# injected` as a line of its frontmatter. The id is valid, so
+# this is the title check alone - DV-1's "AC-6 stays green under an id check
+# that accepts everything" depends on that.
+for h46_t in "T-50|probe"$'\n\n'"# injected" "T-51|a"$'\r'"b"; do
+  h46_id="${h46_t%%|*}"; h46_title="${h46_t#*|}"
+  ( cd "$WORK" && bash scripts/new-story.sh "$h46_id" "$h46_title" >"$WORK/h46.out" 2>"$WORK/h46.err" ); h46_rc=$?
+  case "$(cat "$WORK/h46.err")" in *"the title must be one line"*) h46_m=one-line ;; *) h46_m="no one-line message" ;; esac
+  [ -e "$WORK/docs/backlog/stories/$h46_id.md" ] && h46_f="$h46_id.md written" || h46_f="no file"
+  assert_eq "HARNESS-046 AC-6: new-story.sh $h46_id $(printf '%q' "$h46_title") exits 2, says the title must be one line, and writes no $h46_id.md" \
+    "2|one-line|no file" "$h46_rc|$h46_m|$h46_f"
+done
 
 summary "new-story"

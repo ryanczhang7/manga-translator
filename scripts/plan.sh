@@ -188,7 +188,7 @@ contract_unenforced() { # <file>
 }
 
 cmd_models() {
-  local file id; id="$1"; file="$(story_file "$id")"
+  local file id; id="$1"; file="$(story_file "$id")" || exit $?
   local type contract_has=0 unenforced=0
   type="$(frontmatter_value "$file" type)"; [ -n "$type" ] || type=feature
   section "$file" "Contract" | has_content && contract_has=1
@@ -251,7 +251,7 @@ unmet_deps() { # <file>
 }
 
 cmd_next() {
-  local file id; id="$1"; file="$(story_file "$id")"
+  local file id; id="$1"; file="$(story_file "$id")" || exit $?
   local type phase acs deferred
   type="$(frontmatter_value "$file" type)"; [ -n "$type" ] || type=feature
   phase="$(frontmatter_value "$file" phase)"; [ -n "$phase" ] || phase=PLANNED
@@ -310,7 +310,7 @@ cmd_next() {
 
 cmd_both() {
   local id="$1" nxt cmd why
-  nxt="$(cmd_next "$id")"
+  nxt="$(cmd_next "$id")" || exit $?
   cmd="$(printf '%s' "$nxt" | cut -f1)"; why="$(printf '%s' "$nxt" | cut -f2-)"
   printf 'Story %s\n\n' "$id"
   case "$cmd" in
@@ -398,7 +398,7 @@ cmd_write() {
   # Replace the section where the heading exists; append it where it does not.
   local new="$file.new"
   awk -v planfile="$tmp" '
-    /^## Model guidance/ { while ((getline line < planfile) > 0) print line; skip = 1; matched = 1; next }
+    /^## Model guidance$/ { while ((getline line < planfile) > 0) print line; skip = 1; matched = 1; next }
     skip && /^## / { skip = 0 }
     !skip { print }
     END { if (!matched) { print ""; while ((getline line < planfile) > 0) print line } }

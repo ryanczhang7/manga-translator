@@ -62,6 +62,7 @@ complete-story|bash scripts/plan.sh after $1
 plan-story|bash scripts/plan.sh <id>
 status|bash scripts/phase.sh board
 audit-mutations|bash scripts/plan.sh after
+security-audit|bash scripts/plan.sh after
 create-product|/plan-product
 plan-product|/setup-environment
 setup-environment|bash scripts/plan.sh after

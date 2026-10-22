@@ -63,8 +63,10 @@ no story is active it is off entirely. Quoted arguments and heredoc bodies are
 data, not syntax; relative paths resolve against the directory the command will
 actually run in; a path held in a variable the command itself assigns is
 resolved and judged, and one it cannot resolve is declined and logged rather
-than waved through; and anything `.gitignore` covers is always writable. If it
-still blocks a command that writes nothing, that is a bug in the guard: add the
+than waved through; and a `.gitignore`d path is writable in every phase unless
+a `paths.conf` rule classifies it first — `.vitest/x/a.test.ts` is still `test`
+(an ignored test or config can still steer the local runs a phase relies on).
+If it still blocks a command that writes nothing, that is a bug in the guard: add the
 case to `.claude/tests/phase-guard.test.sh` and fix it there, which is the one
 form of "working around the lock" that is allowed.
 
@@ -168,6 +170,7 @@ bash scripts/plan.sh conflicts   which startable stories share a declared file
 bash scripts/plan.sh after ID    what to run next, and what can run alongside it
 bash scripts/classify.sh --list source src   # what the lock thinks a path is
 bash scripts/refresh-harness.sh ../agentic-dev-harness  # pull a newer harness in
+bash scripts/tidy.sh [--apply]   # finished worktrees and merged branches
 bash scripts/task.sh dev         # run the app
 bash scripts/mutate.sh F 'EXPR' -- CMD   # the only sanctioned diagnostic mutation
 bash scripts/mutate.sh --check   # is a killed mutation still in the tree? gates.sh asks first

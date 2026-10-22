@@ -18,10 +18,13 @@
 # `evidence` lines assert that work was OBSERVED, not that it succeeded.
 # `floor` lines go further and assert HOW MUCH: the number the evidence regex
 # matched must not fall below a recorded minimum, so a suite that quietly
-# shrinks from 47 tests to 3 fails instead of passing faster. `waiver` lines
-# name an optional gate that is known to fail, and why, so that WARN in the
-# summary always means something changed. All three are described in the
-# quality-gates skill.
+# shrinks from 47 tests to 3 fails instead of passing faster. `no-count` lines
+# say the opposite about a gate - that its evidence regex proves liveness but
+# measures nothing, so the digits sitting under it are not a count of work and
+# a floor on them would be nonsense. Such a gate reports `observed -`, and a
+# floor declared on it is refused. `waiver` lines name an optional gate that is
+# known to fail, and why, so that WARN in the summary always means something
+# changed. All four are described in the quality-gates skill.
 #
 # A gate can also be neither: BLOCKED, where the environment would not let the
 # process start at all. That exits 3, stamps RESULT=blocked, and is a decision
@@ -36,10 +39,10 @@
 # so out loud. A --fast run is never recorded: it is not a full run.
 #
 # `ondemand` lines name the gates NO run executes unless asked: `--gate <id>`,
-# or a story that names the gate in `required_gates`. `slow` alone still let a
-# mutation tool run on every full run - every story's GATES, every PR's CI job.
-# A run that leaves one out prints `ON REQUEST   <id> (not run: <why>; ...)`
-# and counts it in nothing. --audit refuses one on a required gate.
+# or a story that names the gate in `required_gates`; `slow` alone still let a
+# mutation tool run on every full run. A run that leaves one out prints
+# `ON REQUEST   <id> (not run: <why>; ...)` and counts it in nothing. --audit
+# refuses one on a required gate, and a `mutation` gate with no `ondemand` line.
 #
 # A full run writes its own summary into the story's ## Gate results, stamped
 # with the commit and a hash of the code it ran against. Nobody pastes it.
@@ -51,7 +54,7 @@ LOGDIR="$ROOT/.claude/state/gate-logs"
 # At most this many signature-kept logs per gate id under $LOGDIR/kept/, the
 # lowest <seq> evicted first. A bound on disk use, not a property of the
 # project, so it lives here rather than in project.conf. Why 5:
-# docs/backlog/stories/MT-053.md, "## Contract" and PO-2.
+# docs/backlog/stories/HARNESS-069.md, "## Contract" and PO-2.
 KEEP_PER_GATE=5
 STAMP="$ROOT/.claude/state/last-gate-run"
 
@@ -89,8 +92,8 @@ while [ $# -gt 0 ]; do
     --required) REQUIRED_ONLY=1 ;;
     --fast) FAST=1 ;;
     --audit) AUDIT=1 ;;
-    --story) shift; STORY="${1:-}" ;;
-    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+    --story) shift; STORY="${1:-}"; valid_story_id "$STORY" || { printf "error: story id '%s' is not one path component: an id is letters, digits, '.', '_' or '-', and starts with a letter or digit\n" "$STORY" >&2; exit 2; } ;;
+    -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
     *) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
   shift
@@ -142,7 +145,7 @@ ESC=$(printf '\033')
 # --- evidence, floor, waiver, slow and ondemand tables ----------------------
 # Read up front, so that --gate <id> still finds its own lines. Stored as
 # "<id><TAB><value>" lines; no associative arrays, for bash 3.2.
-EVIDENCE=""; WAIVERS=""; FLOORS=""; SLOWS=""; ONDEMANDS=""; CIFACTORS=""; COVERS=""; BLOCKEDWHEN=""; SKIPPEDWHEN=""; KEEPWHEN=""; GATE_IDS=""
+EVIDENCE=""; WAIVERS=""; FLOORS=""; SLOWS=""; ONDEMANDS=""; CIFACTORS=""; COVERS=""; BLOCKEDWHEN=""; SKIPPEDWHEN=""; KEEPWHEN=""; NOCOUNTS=""; GATE_IDS=""
 GATE_REQ=""   # "<id><TAB>required|optional" per gate, after any story escalation
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -157,7 +160,7 @@ while IFS= read -r line; do
   # line", and a misspelt `floor` id fails the audit outright, but a misspelt
   # `slow` id is silent - the gate it meant to exclude simply stays in --fast.
   [ "$kind" = "gate" ] && { GATE_IDS="$GATE_IDS $tid"; continue; }
-  case "$kind" in evidence|waiver|floor|slow|ondemand|ci-factor|covers|blocked-when|skipped-when|keep-when) ;; *) continue ;; esac
+  case "$kind" in evidence|waiver|floor|slow|ondemand|ci-factor|covers|blocked-when|skipped-when|keep-when|no-count) ;; *) continue ;; esac
   # rest, not field, so that a regex containing `|` (alternation) survives.
   rest 3 "$line" tval
   [ -n "$tid" ] || continue
@@ -181,6 +184,8 @@ while IFS= read -r line; do
     skipped-when) SKIPPEDWHEN="$SKIPPEDWHEN$tid$TAB$tval
 " ;;
     keep-when) KEEPWHEN="$KEEPWHEN$tid$TAB$tval
+" ;;
+    no-count) NOCOUNTS="$NOCOUNTS$tid$TAB$tval
 " ;;
   esac
 done < "$CONF"
@@ -254,6 +259,7 @@ if [ "$LIST" = 0 ] && [ "$AUDIT" = 0 ]; then
   trap 'exit 130' INT
   trap 'exit 143' TERM
   run_lock_acquire "$ROOT" "$RUN_LOCK_SELF" || exit 2
+  RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # here, not top level: --list has a process budget
 fi
 
 # table_lookup <table> <id>   Echoes the value. Exact string comparison, never
@@ -264,6 +270,17 @@ table_lookup() {
   while IFS="$TAB" read -r eid ere; do
     if [ "$eid" = "$2" ]; then printf '%s' "$ere"; return 0; fi
   done <<< "$1"
+  return 1
+}
+
+# table_get <var> <table> <id>   table_lookup, assigning <var> instead of echoing,
+# so a per-gate lookup costs no fork. <var> is empty and status 1 when no line.
+table_get() {
+  local _tg_id _tg_val
+  while IFS="$TAB" read -r _tg_id _tg_val; do
+    if [ "$_tg_id" = "$3" ]; then printf -v "$1" %s "$_tg_val"; return 0; fi
+  done <<< "$2"
+  printf -v "$1" %s ""
   return 1
 }
 
@@ -282,30 +299,43 @@ clean_log() {
 # to cover the whole number if you want a floor on that gate.
 # Parenthesised, so that an evidence regex using top-level alternation
 # (`a|b`) does not bind the trailing `.*` to its last branch alone.
+#
+# The sharper consequence is that this function ALWAYS returns whatever digits
+# it finds, and cannot tell a count from a stopwatch. `Finished .* profile`
+# proves cargo ran and measures nothing: the digits after it are the elapsed
+# time, so a warm cache "observes 0" and a cold one "observes 2". That is not
+# detectable from the regex either - `TOTAL` has no digit class and is followed
+# by a real region count - so it is DECLARED, with a `no-count` line, and the
+# callers below consult that instead of guessing. Nothing here changes: this
+# function stays a dumb reader of digits, and its callers decide whether to
+# believe them.
 work_count() {
   clean_log "$1" | awk 'BEGIN { re = ARGV[1]; ARGV[1] = "" }
     !seen && match($0, re) { seen = 1; m = substr($0, RSTART, RLENGTH); if (match(m, /[0-9]+/)) out = substr(m, RSTART, RLENGTH) }
     END { if (out != "") print out; exit (out == "") ? 1 : 0 }' "($2).*"
 }
 
-# --- keep-when: a failing log with an unexplained signature (MT-053) ----------
+# --- keep-when: a failing log with an unexplained signature (HARNESS-069) -----
 #
 #     keep-when | integration | SEGFAULT in worker [0-9]+
 #
 # <id>.failed.log below is the LAST non-passing run of a gate, and the next one
 # replaces it - every story's RED fails `unit` by design, so an ordinary RED
-# failure twice destroyed the only log of an intermittent nobody had explained
-# (docs/wiki/audits/opencv-unknown-exception-2026-09-28.md). A gate that ran and
-# did not pass, and one of whose cleaned log lines matches one of its keep-when
-# regexes (grep -E, case-sensitive, manifest order, first wins), is also copied
-# to $LOGDIR/kept/<id>.<seq6>.<YYYYMMDDTHHMMSSZ>.log: an eight-line header, then
+# failure can destroy the only log of an intermittent nobody has explained
+# (ported from manga-translator's MT-053, where that happened twice). A gate
+# that ran and did not pass - any outcome but pass - and one of whose cleaned
+# log lines matches one of its keep-when regexes (grep -E, case-sensitive,
+# manifest order, first wins) is also copied to
+# $LOGDIR/kept/<id>.<seq6>.<YYYYMMDDTHHMMSSZ>.log: an eight-line header, then
 # <id>.log byte for byte. Written once, never rewritten; at most KEEP_PER_GATE
 # per id, lowest <seq> evicted. It changes what is KEPT, never what is judged:
-# nothing here touches $results, an outcome, or the exit status.
+# nothing here touches $results, an outcome, or the exit status. The only
+# patterns tried are the manifest's; this script carries none of its own.
 #
 # The decision rests on the captured line, never on the status of
 # `clean_log | grep -m1`: under pipefail, grep leaving early kills sed with
-# SIGPIPE, and a large log's match would read as no match (MT-053 Contract).
+# SIGPIPE, and a large log's match would read as no match. Not awk either:
+# mawk has no interval expressions, and the regex is a user's ERE.
 #
 # kept_files <id>   Sets the array KFILES to that gate's kept files, ascending
 # by <seq>. The name is matched whole, never as `<id>*`: a prefix glob would
@@ -318,7 +348,8 @@ kept_files() {
   done
 }
 # keep_for_signature   Uses the gate loop's $id, $log, $outcome, $started and
-# the $fl_commit/$fl_tree just written to <id>.failed.log.
+# the $fl_commit/$fl_tree just written to <id>.failed.log, so both files carry
+# the very same stamp.
 keep_for_signature() {
   local kid kre kline="" kmatched="" kseq n kname i
   while IFS="$TAB" read -r kid kre; do
@@ -369,17 +400,26 @@ commit_with_note() {
 }
 
 # Replace the body of the story's "## Gate results" section with a block this
-# script wrote: the marker check-boundaries.sh looks for, the UTC time, the
-# commit, the tree hash of the code the gates saw, and the summary. If the
-# section is missing (an older story file) it is appended.
+# script wrote: the marker check-boundaries.sh looks for, the UTC time the run
+# started, the commit, the tree hash of the code the gates saw, and the
+# summary. If the section is missing (an older story file) it is appended.
+# Returns 1, writing nothing, when the section already holds a record from a
+# run that started later than this one; RECORD_SKIPPED then holds its run:.
+RECORD_SKIPPED=""
 record_in_story() { # <story-file> <result-text> <summary-lines>
-  local f="$1" res="$2" body="$3" commit tree block
+  local f="$1" res="$2" body="$3" commit tree block prev pn cn
+  # Never overwrite a record whose run: is LATER than this run's start. Digits
+  # compared as integers, so only between same-width stamps; a malformed run:
+  # is replaced, and a record from the same second is overwritten.
+  prev="$(awk '/^## Gate results/ { b = 1; next } b && /^## / { exit } b && $1 == "run:" { print $2; exit }' "$f")"
+  pn="${prev//[!0-9]/}"; cn="${RUN_STARTED_AT//[!0-9]/}"
+  if [ -n "$pn" ] && [ "${#pn}" = "${#cn}" ] && [ "$pn" -gt "$cn" ]; then RECORD_SKIPPED="$prev"; return 1; fi
   commit="$(commit_with_note)"
   tree="$(gate_tree_hash)"
   block="$(printf '%s\n' \
     "$GATE_MARKER" \
     "" \
-    "    run:    $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "    run:    $RUN_STARTED_AT" \
     "    commit: $commit" \
     "    tree:   $tree" \
     "    result: $res" \
@@ -404,7 +444,7 @@ record_in_story() { # <story-file> <result-text> <summary-lines>
 #     required_gates: [integration]
 #
 # Optional for the repo, binding for the story that depends on it.
-if [ -z "$STORY" ]; then load_state; STORY="$STORY_ID"; fi
+if [ -z "$STORY" ]; then load_state; STORY="$STORY_ID"; fi; [ -z "$STORY" ] || valid_story_id "$STORY" || { printf "error: story id '%s' is not one path component: an id is letters, digits, '.', '_' or '-', and starts with a letter or digit\n" "$STORY" >&2; exit 2; }
 STORY_FILE="$ROOT/docs/backlog/stories/$STORY.md"
 STORY_REQUIRES=""
 if [ -n "$STORY" ] && [ -f "$STORY_FILE" ]; then
@@ -413,6 +453,17 @@ fi
 
 fails=0; warns=0; known=0; unconfigured=0; ran=0; noevidence=0; blocked=0; skipped=""
 results=""
+# Every gate line the loop REACHES is recorded here, before any filter or
+# refusal can `continue` past it; after the loop the list is compared with
+# GATE_IDS, read at parse time before any gate ran. A declared gate the loop
+# never reached (a gate drained or truncated the manifest under it) refuses the
+# run by name. GATES_FAULT_LOSE is the test seam: the gate lines it names are
+# treated as never read. It can only make a run fail, and says so up front.
+reached=""; fault_lose=""
+if [ -n "${GATES_FAULT_LOSE:-}" ] && [ "$LIST" = 0 ] && [ "$AUDIT" = 0 ]; then
+  fault_lose=" $GATES_FAULT_LOSE "
+  printf 'note: GATES_FAULT_LOSE is set; this run will lose: %s\n' "$GATES_FAULT_LOSE"
+fi
 
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -423,6 +474,8 @@ while IFS= read -r line; do
   field 1 "$line" kind
   [ "$kind" = "gate" ] || continue
   field 2 "$line" id
+  case "$fault_lose" in *" $id "*) continue ;; esac
+  reached="$reached $id"
   field 3 "$line" req
   field 4 "$line" cwd
   rest  5 "$line" cmd
@@ -455,7 +508,7 @@ while IFS= read -r line; do
   # It is counted in none of ran, unconfigured or known. A line with no reason,
   # or on a gate project.conf itself requires, is a manifest fault - a required
   # gate no full run executes is a hole shaped like a gate.
-  ondwhy=$(table_lookup "$ONDEMANDS" "$id"); is_ondemand=$?
+  table_get ondwhy "$ONDEMANDS" "$id"; is_ondemand=$?
   if [ "$LIST" = 0 ] && [ "$is_ondemand" = 0 ]; then
     ond_broken=""
     if [ -z "$ondwhy" ]; then
@@ -486,12 +539,13 @@ while IFS= read -r line; do
     skipped="$skipped $id"; continue
   fi
 
-  exp=$(table_lookup "$EVIDENCE" "$id") || exp="<none>"
-  waiver=$(table_lookup "$WAIVERS" "$id") || waiver=""
-  slowwhy=$(table_lookup "$SLOWS" "$id"); is_slow=$?
-  floor=$(table_lookup "$FLOORS" "$id") || floor=""
-  skippat=$(table_lookup "$SKIPPEDWHEN" "$id") || skippat=""
-  cifactor=$(table_lookup "$CIFACTORS" "$id") || cifactor=""
+  table_get exp "$EVIDENCE" "$id" || exp="<none>"
+  table_get waiver "$WAIVERS" "$id" || waiver=""
+  table_get slowwhy "$SLOWS" "$id"; is_slow=$?
+  table_get floor "$FLOORS" "$id" || floor=""
+  table_get skippat "$SKIPPEDWHEN" "$id" || skippat=""
+  table_get cifactor "$CIFACTORS" "$id" || cifactor=""
+  table_get nocountwhy "$NOCOUNTS" "$id"; is_nocount=$?
   logrel=".claude/state/gate-logs/$id.log"
 
   if [ "$LIST" = 1 ]; then
@@ -499,6 +553,7 @@ while IFS= read -r line; do
     printf '%-12s %-9s %-6s evidence: %s\n' "" "" "" "$exp"
     [ -n "$floor" ]  && printf '%-12s %-9s %-6s floor:    %s\n' "" "" "" "$floor"
     [ -n "$cifactor" ] && printf '%-12s %-9s %-6s ci-factor: %s\n' "" "" "" "$cifactor"
+    [ "$is_nocount" = 0 ] && printf '%-12s %-9s %-6s no-count: %s (no floor possible)\n' "" "" "" "${nocountwhy:-no reason given}"
     while IFS="$TAB" read -r cid cglob; do
       [ "$cid" = "$id" ] && printf '%-12s %-9s %-6s covers:   %s\n' "" "" "" "$cglob"
     done <<< "$COVERS"
@@ -509,6 +564,9 @@ while IFS= read -r line; do
     while IFS="$TAB" read -r kid kpat; do
       [ "$kid" = "$id" ] && printf '%-12s %-9s %-6s skipped-when: %s\n' "" "" "" "$kpat"
     done <<< "$SKIPPEDWHEN"
+    while IFS="$TAB" read -r wid wpat; do
+      [ "$wid" = "$id" ] && printf '%-12s %-9s %-6s keep-when: %s\n' "" "" "" "$wpat"
+    done <<< "$KEEPWHEN"
     [ "$is_slow" = 0 ] && printf '%-12s %-9s %-6s slow:     %s (left out of --fast)\n' "" "" "" "${slowwhy:-no reason given}"
     [ "$is_ondemand" = 0 ] && printf '%-12s %-9s %-6s on-request: %s (run with --gate %s)\n' "" "" "" "${ondwhy:-no reason given}" "$id"
     [ -n "$escalated" ] && printf '%-12s %-9s %-6s optional for the repo,%s\n' "" "" "" "$escalated"
@@ -526,9 +584,21 @@ while IFS= read -r line; do
     fails=$((fails+1)); continue
   fi
 
-  # A floor is measured out of the evidence match, so it needs one, and it has
-  # to be a number. Both are checked before anything runs: a floor that cannot
-  # be evaluated would otherwise sit in project.conf looking like protection.
+  # A `no-count` line with no reason is the same failure as a `slow` one: the
+  # next person needs to know WHY the regex measures nothing, or they will read
+  # the line as a shrug and delete it.
+  if [ "$is_nocount" = 0 ] && [ -z "$nocountwhy" ]; then
+    if [ "$AUDIT" = 1 ]; then
+      printf 'FAIL %-12s marked no-count with no reason; say what its evidence regex measures instead\n' "$id"
+    else
+      results="$results\nFAIL         $id (marked no-count with no reason in project.conf)"
+    fi
+    fails=$((fails+1)); continue
+  fi
+  # A floor is measured out of the evidence match, so it needs one, it has to
+  # be a number, and the match has to contain a count rather than a stopwatch.
+  # All three are checked before anything runs: a floor that cannot be
+  # evaluated would otherwise sit in project.conf looking like protection.
   floor_broken=""
   if [ -n "$floor" ]; then
     case "$floor" in
@@ -536,6 +606,13 @@ while IFS= read -r line; do
     esac
     if [ -z "$floor_broken" ] && { [ "$exp" = "<none>" ] || [ "$exp" = "-" ]; }; then
       floor_broken="floor needs an evidence regex to measure, and $id has none"
+    fi
+    # The dangerous case, and the quiet one: /$exp/ matches, a number is found,
+    # the floor compares cleanly against it, and the number means nothing. A
+    # floor on `Finished .* profile` passes or fails on how warm the build
+    # cache is. Refusing it is the whole point of the no-count declaration.
+    if [ -z "$floor_broken" ] && [ "$is_nocount" = 0 ]; then
+      floor_broken="floor cannot be measured: $id is declared no-count ($nocountwhy)"
     fi
   fi
   if [ -n "$floor_broken" ]; then
@@ -612,6 +689,7 @@ while IFS= read -r line; do
     [ -n "$floor" ]  && printf '     %-12s floor:  %s\n' "" "$floor"
     [ -n "$skippat" ] && printf '     %-12s skipped-when: %s\n' "" "$skippat"
     [ -n "$cifactor" ] && printf '     %-12s ci-factor: %s\n' "" "$cifactor"
+    [ "$is_nocount" = 0 ] && printf '     %-12s no-count: %s (reports `observed -`; no floor possible)\n' "" "$nocountwhy"
     [ "$is_slow" = 0 ] && printf '     %-12s slow:   %s\n' "" "$slowwhy"
     [ "$is_ondemand" = 0 ] && printf '     %-12s on-request: %s\n' "" "$ondwhy"
     [ -n "$waiver" ] && printf '     %-12s waiver: %s\n' "" "$waiver"
@@ -633,7 +711,7 @@ while IFS= read -r line; do
   log="$LOGDIR/$id.log"
   started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   start=$(date +%s)
-  ( cd "$ROOT/$cwd" && eval "$cmd" ) 2>&1 | tee "$log"
+  ( cd "$ROOT/$cwd" && eval "$cmd" ) </dev/null 2>&1 | tee "$log"
   rc=${PIPESTATUS[0]}
   dur=$(( $(date +%s) - start ))
   ran=$((ran+1))
@@ -649,7 +727,7 @@ while IFS= read -r line; do
     # exited non-zero, and only against patterns describing a process that
     # could not be launched.
     blockpat="$BLOCKED_DEFAULT"
-    extra=$(table_lookup "$BLOCKEDWHEN" "$id") || extra=""
+    table_get extra "$BLOCKEDWHEN" "$id" || extra=""
     [ -n "$extra" ] && blockpat="$blockpat|$extra"
     if clean_log "$log" | awk 'BEGIN{r=ARGV[1];ARGV[1]=""} $0~r{h=1} END{exit !h}' "$blockpat"; then
       outcome=blocked
@@ -658,6 +736,11 @@ while IFS= read -r line; do
   elif [ "$exp" != "<none>" ] && [ "$exp" != "-" ] && ! clean_log "$log" | awk 'BEGIN{r=ARGV[1];ARGV[1]=""} $0~r{h=1} END{exit !h}' "$exp"; then
     outcome=noevidence
     why="ran but produced no evidence of work: expected /$exp/"
+  elif [ "$exp" != "<none>" ] && [ "$exp" != "-" ] && [ "$is_nocount" = 0 ]; then
+    # Live, but unmeasurable by declaration. Print the dash rather than the
+    # digits work_count would have found: a number nobody may act on is worse
+    # than no number, because it reads exactly like one somebody may.
+    observed="-"
   elif [ "$exp" != "<none>" ] && [ "$exp" != "-" ]; then
     # The gate did work. How much, and is that less than it used to be? A suite
     # that shrinks from 47 tests to 3 exits 0 and matches its evidence regex
@@ -746,6 +829,7 @@ while IFS= read -r line; do
     # Computed inside the group, after the redirection has opened the file, as
     # they always were; kept in variables so the signature log below carries
     # the very same stamp.
+    fl_commit=""; fl_tree=""
     { fl_commit="$(commit_with_note)"; fl_tree="$(gate_tree_hash)"
       printf '%s\n' \
         "# gates.sh: last failing run of gate '$id'" \
@@ -781,6 +865,17 @@ if [ "$AUDIT" = 1 ]; then
       *) printf 'FAIL %-12s an `ondemand` line names no configured gate\n' "$oid"; fails=$((fails+1)) ;;
     esac
   done <<< "$ONDEMANDS"
+  # HARNESS-039 / issue #104 Symptom B: a `mutation` gate with no `ondemand`
+  # line runs on every full run - `slow` alone only keeps it out of --fast. The
+  # id is compared exactly: the one every profile, the template and
+  # /audit-mutations use. A mutation tool under another id is not caught.
+  # Regardless of command (the cost arrives when it is filled in) and of
+  # `required` (that is a second fault with its own message).
+  for gid in $GATE_IDS; do
+    [ "$gid" = mutation ] || continue
+    table_lookup "$ONDEMANDS" "$gid" >/dev/null && continue
+    printf 'FAIL %-12s no `ondemand | mutation | <why>` line, so every full run executes it; `slow` alone only leaves it out of --fast\n' "$gid"; fails=$((fails+1))
+  done
   # Same for a ci-factor: a measurement filed against a gate that does not
   # exist is a number nobody will ever find when they need it.
   while IFS="$TAB" read -r cid _; do
@@ -790,6 +885,16 @@ if [ "$AUDIT" = 1 ]; then
       *) printf 'FAIL %-12s a `ci-factor` line names no configured gate\n' "$cid"; fails=$((fails+1)) ;;
     esac
   done <<< "$CIFACTORS"
+  # Same for a no-count: it is the thing standing between a real gate and a
+  # floor on a stopwatch, and a misspelt id leaves that gate undefended while
+  # looking, in project.conf, exactly as though it were covered.
+  while IFS="$TAB" read -r nid _; do
+    [ -n "$nid" ] || continue
+    case " $GATE_IDS " in
+      *" $nid "*) ;;
+      *) printf 'FAIL %-12s a `no-count` line names no configured gate\n' "$nid"; fails=$((fails+1)) ;;
+    esac
+  done <<< "$NOCOUNTS"
   # A blocked-when line is what makes BLOCKED reachable for a runner whose
   # launch failures the built-in patterns do not describe. One naming no gate
   # never fires; one with no pattern would match every line of every log and
@@ -895,7 +1000,7 @@ if [ -n "$COVERS" ] && [ -n "$STORY" ] && [ -f "$STORY_FILE" ]; then
       while IFS="$TAB" read -r cid cglob; do
         [ -n "$cid" ] && [ -n "$cglob" ] || continue
         glob_matches "$cglob" "$path" || continue
-        creq="$(table_lookup "$GATE_REQ" "$cid")" || creq=""
+        table_get creq "$GATE_REQ" "$cid" || creq=""
         case " $reqs $opts " in *" $cid "*) continue ;; esac
         if [ "$creq" = "required" ]; then reqs="$reqs $cid"; else opts="$opts $cid"; fi
       done <<< "$COVERS"
@@ -918,6 +1023,20 @@ if [ -n "$COVERS" ] && [ -n "$STORY" ] && [ -f "$STORY_FILE" ]; then
     fi
   fi
 fi
+
+# Declared against reached, per line and in manifest order: each reached entry
+# pays off one declared one. What is left was never read, so this run can say
+# nothing about it, and a run that cannot account for its manifest certifies
+# nothing - required or optional, filtered or not.
+lost=0; unpaid=" $reached "
+set -f
+for d in $GATE_IDS; do
+  case "$unpaid" in
+    *" $d "*) unpaid="${unpaid/" $d "/ }" ;;
+    *) results="$results\nFAIL         $d (declared in project.conf but never accounted for)"; lost=$((lost+1)); fails=$((fails+1)) ;;
+  esac
+done
+set +f
 
 # Folded into `results` rather than reported as a separate early exit, which is
 # deliberate: that lands it INSIDE the summary block, so the exit status, the
@@ -1069,8 +1188,11 @@ else
   elif [ "$REFUSED" = 1 ]; then
     printf '\n(not recorded: %s)\n' "$REFUSED_WHY"
   else
-    record_in_story "$STORY_FILE" "$result" "$(printf '%b' "$results")"
-    printf '\nrecorded in docs/backlog/stories/%s.md (## Gate results)\n' "$STORY"
+    if record_in_story "$STORY_FILE" "$result" "$(printf '%b' "$results")"; then
+      printf '\nrecorded in docs/backlog/stories/%s.md (## Gate results)\n' "$STORY"
+    else
+      printf '\n(not recorded: docs/backlog/stories/%s.md already holds a record from a gate run that started at %s; this one started at %s, so the newer record stands)\n' "$STORY" "$RECORD_SKIPPED" "$RUN_STARTED_AT"
+    fi
   fi
 fi
 
@@ -1087,6 +1209,9 @@ if [ "$blocked" -gt 0 ]; then
   printf 'and docs/wiki/environment.md are where that gets fixed and written down.\n'
 fi
 
+if [ "$lost" -gt 0 ]; then
+  printf '\n%d declared gate(s) never accounted for; this run certifies nothing.\n' "$lost"
+fi
 if [ "$fails" -gt 0 ]; then
   printf '\n%d required gate(s) failed.\n' "$fails"
   exit 1

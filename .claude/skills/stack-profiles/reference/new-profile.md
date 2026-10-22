@@ -49,9 +49,10 @@ written - there is no list to add yourself to.
 It asserts what `gates.sh --audit` asserts about a real `project.conf`, because
 a profile is copied verbatim into one: every required gate is configured; every
 required gate with a command has an `evidence` line; no `evidence`, `floor`,
-`slow` or `ondemand` line names a gate the profile does not configure; every
-`floor` has an evidence line to measure out of; every `slow` and `ondemand`
-line carries a reason; a `mutation` gate has an `ondemand` line; the
+`no-count`, `slow` or `ondemand` line names a gate the profile does not
+configure; every `floor` has an evidence line to measure out of and is not on a
+`no-count` gate; every `no-count`, `slow` and `ondemand` line carries a reason; a `mutation` gate has an `ondemand` line and an
+`evidence` line whose regex requires a non-zero killed count; the
 `## What --fast should leave out` section exists; and there is at least one
 `discovery` line.
 
@@ -85,11 +86,20 @@ what happened.
   units of work, and require it to be non-zero: `[1-9]` and `[1-9][0-9]*` do
   nearly all of it. Assert volume, never success.
 
-Two failure modes to check before writing the line down:
+Three failure modes to check before writing the line down:
 
 - **Caching.** Compilers print a per-unit line on a cold build and nothing on a
   warm one, so a "N units processed" regex fails spuriously on the second run.
   Test runners re-execute every time and are safe. Run the gate twice.
+- **A number that is not a count.** `gates.sh` reads the first run of digits at
+  or after the evidence match as the gate's work count, and cannot tell a count
+  from a clock. ``Finished `dev` profile ... in 0.29s`` and `built in 1.23s`
+  both yield elapsed seconds; `Successfully built foo-0.1.0.tar.gz` yields a
+  version. That is usually the *same* gate the caching note just forced you to
+  weaken, so expect them together. Add a `no-count` line with the reason: the
+  gate then reports `observed -` and `--audit` refuses any floor on it. Say it
+  explicitly even when it seems obvious — the whole hazard is that a stopwatch
+  in the summary is indistinguishable from a count.
 - **Flags that make a safe tool unsafe.** `--passWithNoTests` and its cousins
   exist in most runners and turn a loud vacuous case into a silent one. Never
   add one, and check the ecosystem's config file for one already set.

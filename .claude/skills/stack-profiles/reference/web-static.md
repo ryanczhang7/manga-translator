@@ -33,6 +33,7 @@ work, not that it succeeded.
     # UNVERIFIED - correct against your biome version's output.
     evidence | lint        | Checked [1-9][0-9]* files
     evidence | build       | built in
+    no-count | build       | `built in 1.23s` is liveness-only; the digits are elapsed seconds
 
 `biome lint` aimed at a directory containing no source **exits 0 and reports
 "Checked 1 file"** - it counts the directory. That is the vacuous pass in this
