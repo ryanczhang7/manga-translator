@@ -88,7 +88,18 @@ turns the next occurrence into evidence is a **native crash dump**:
 1. Enable Windows Error Reporting LocalDumps for `python.exe`
    (`HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\python.exe`,
    `DumpType=2`, `DumpFolder` somewhere outside the repo). This is a machine
-   setting, so the user makes it, not an agent.
+   setting, so the user makes it, not an agent. **On its own it writes nothing
+   for a gate run:** Git Bash starts its children with error mode 3
+   (`SEM_NOGPFAULTERRORBOX` set; PowerShell and cmd give 1), the mode is
+   inherited, and with that bit set Windows Error Reporting never runs. Measured
+   2026-10-21: the same native crash wrote a dump from PowerShell and none from
+   Git Bash. The fix is machine-local and uncommitted: a `.pth` file in the
+   tree's `.venv/Lib/site-packages/` (gitignored) holding
+   `import ctypes; ctypes.windll.kernel32.SetErrorMode(1)`. With it, a crash
+   from Git Bash wrote a dump, with `-X faulthandler` on as well. A `uv`
+   rebuild of `.venv` removes it, and each worktree has its own `.venv`.
+   (`faulthandler._read_null()` is no test of the setup: it wrote no dump from
+   any shell.)
 2. On the next `Windows fatal exception: access violation` in a kept coverage
    log, open the dump with PySide6/Qt symbols and read the faulting C++ frame
    (`QWidgetRepaintManager`, `QCoreApplication::sendPostedEvents`/
