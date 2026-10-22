@@ -28,6 +28,32 @@ uv run python -m mangatl.bench.truth <chapter-folder>      # validate the docume
 Seeding refuses to overwrite an existing document. Validation prints every
 error with the page and region it is about, and exits non-zero on any error.
 
+## Measuring
+
+One command prints all six numbers (MT-089), running the three measurements
+below in order against one opened project and one loaded document:
+
+```bash
+uv run python -m mangatl.bench <chapter-folder> [--truth PATH]   # S1b, S1a, recall, spurious, S2, S5
+uv run mangatl-bench            <chapter-folder> [--truth PATH]   # the same, as a console script
+```
+
+It exits `0` when it measured and `2` when it cannot — no folder, no
+project, no document, an invalid document, or a document flagged
+`development_use`. A refusal prints one line to stderr and **nothing** to
+stdout: S5 is not reported for a chapter the harness refuses. Each
+measurement is also its own command, printing exactly the lines the combined
+report carries for it:
+
+```bash
+uv run python -m mangatl.bench.acceptance <chapter-folder> [--truth PATH]   # S1b, S1a, recall, spurious (MT-022)
+uv run python -m mangatl.bench.s2         <chapter-folder> [--truth PATH]   # recall, residual ink, S2 PASS/FAIL (MT-023)
+uv run python -m mangatl.bench.cost       <chapter-folder>                  # S5, the chapter's cost (MT-075)
+```
+
+The console script is a development convenience, like `mangatl-run`; the
+installer ships `mangatl.exe` alone.
+
 ## Read this before annotating — the seeding bias
 
 Seeding from a detector pass biases the ground truth toward **what the detector
