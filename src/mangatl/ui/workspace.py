@@ -59,6 +59,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
@@ -76,10 +77,13 @@ from PySide6.QtGui import (
     QCloseEvent,
     QColor,
     QEnterEvent,
+    QGuiApplication,
+    QMoveEvent,
     QPainter,
     QPalette,
     QPixmap,
     QResizeEvent,
+    QShowEvent,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -120,6 +124,17 @@ from mangatl.ui.line_editor import LineEditor, SaveFn
 from mangatl.ui.link import LinkController, LiveRegion, OrderedRegion
 from mangatl.ui.theme import ThemeController
 from mangatl.ui.thumbnail import decode_thumbnail, thumbnail_size
+from mangatl.ui.workspace_state import (
+    Rect,
+    WorkspaceState,
+    clamp_state,
+    first_run_size,
+    read_state,
+    write_state,
+)
+
+#: Where a remembered layout must fit: `(x, y, width, height)`, asked when applied.
+WorkArea = Callable[[], Rect]
 
 __all__ = [
     "BREAKPOINT_WIDTH",
@@ -809,6 +824,13 @@ class Workspace(QMainWindow):
         self._column_dragged = False
         #: Set while the breakpoint itself moves the splitter.
         self._reallocating = False
+        #: Where the layout is remembered; `None` until `remember_layout` arms it.
+        self._state_path: Path | None = None
+        #: The remembered column width, applied once the window is laid out.
+        self._pending_column: int | None = None
+        #: The last normal (not maximised) `(width, height, x, y)`, in `pos()`
+        #: terms - `normalGeometry()` is the client top-left once shown (A-2).
+        self._normal = (self.width(), self.height(), self.x(), self.y())
 
         self.header = QWidget()
         self.header.setObjectName("workspaceHeader")
@@ -890,6 +912,54 @@ class Workspace(QMainWindow):
         self._theme = controller
         self._on_theme_applied(controller.high_contrast)
         controller.themeApplied.connect(self._on_theme_applied)
+
+    def remember_layout(self, path: Path, *, work_area: WorkArea | None = None) -> None:
+        """Apply the layout remembered in `path` now, and write it back on close (MT-088).
+
+        Called before `show()`. With no usable file the window takes
+        `first_run_size`; otherwise the file, fitted to `work_area()` by
+        `clamp_state`, sets the size, the position, the maximised state and a
+        dragged column's width. `work_area` defaults to this window's screen's
+        available geometry. A window never armed reads and writes nothing."""
+        self._state_path = path
+        area = (work_area or self._screen_work_area)()
+        state = read_state(path)
+        if state is None:
+            self.resize(*first_run_size(area, self.MIN_SIZE))
+            return
+        state = clamp_state(state, area, self.MIN_SIZE, (COLUMN_MIN_WIDTH, COLUMN_MAX_WIDTH))
+        self.resize(state.width, state.height)
+        self.move(state.x, state.y)
+        self._normal = (state.width, state.height, state.x, state.y)
+        if state.maximized:
+            self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
+        if state.column_width is not None:
+            # A remembered drag is a drag: the breakpoint leaves it alone (MT-048).
+            self._column_dragged = True
+            self._pending_column = state.column_width
+
+    def _screen_work_area(self) -> Rect:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry()
+        return (area.x(), area.y(), area.width(), area.height())
+
+    def layout_state(self) -> WorkspaceState:
+        """What closing would remember now: the normal size and position (in
+        `pos()` terms even while maximised, A-2), the maximised flag, and the
+        column's width if the user dragged it."""
+        maximized = self.isMaximized()
+        if maximized:
+            width, height, x, y = self._normal
+        else:
+            width, height, x, y = self.width(), self.height(), self.pos().x(), self.pos().y()
+        return WorkspaceState(
+            width=width,
+            height=height,
+            x=x,
+            y=y,
+            maximized=maximized,
+            column_width=self.splitter.sizes()[2] if self._column_dragged else None,
+        )
 
     def _on_theme_applied(self, high_contrast: bool) -> None:
         if self._theme is not None:
@@ -1074,7 +1144,37 @@ class Workspace(QMainWindow):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
+        self._track_normal()
         self._apply_breakpoint()
+
+    def moveEvent(self, event: QMoveEvent) -> None:
+        super().moveEvent(event)
+        self._track_normal()
+
+    def _track_normal(self) -> None:
+        """Record the normal geometry in `pos()` terms while the window is in it."""
+        abnormal = (
+            Qt.WindowState.WindowMaximized
+            | Qt.WindowState.WindowMinimized
+            | Qt.WindowState.WindowFullScreen
+        )
+        if not self.windowState() & abnormal:
+            self._normal = (self.width(), self.height(), self.pos().x(), self.pos().y())
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if self._pending_column is not None:
+            # Splitter sizes are unreliable until the window is laid out.
+            column, self._pending_column = self._pending_column, None
+            QTimer.singleShot(0, self, partial(self._apply_remembered_column, column))
+
+    def _apply_remembered_column(self, column: int) -> None:
+        strip, canvas, current = self.splitter.sizes()
+        self._reallocating = True
+        try:
+            self.splitter.setSizes([strip, canvas + current - column, column])
+        finally:
+            self._reallocating = False
 
     def _apply_breakpoint(self) -> None:
         """Lay out the side of the breakpoint the window is on.
@@ -1107,10 +1207,14 @@ class Workspace(QMainWindow):
 
         A render cannot be cancelled, and the project is closed on `closed`,
         so the wait comes first. `closed` is the last thing done: a slot that
-        closes the project must find nothing left to write (MT-054 C-4)."""
+        closes the project must find nothing left to write (MT-054 C-4). An
+        armed window (`remember_layout`) writes its layout just before it."""
         if self._render_controller is not None:
             self._render_controller.wait()
         self.translation_column.flush()
+        if self._state_path is not None:
+            # A failed write is not a reason to keep the window open (AC-4).
+            write_state(self._state_path, self.layout_state())
         super().closeEvent(event)
         self.closed.emit()
 

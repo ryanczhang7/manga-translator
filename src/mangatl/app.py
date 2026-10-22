@@ -48,7 +48,12 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
-from mangatl.app_paths import bundled_manifest, bundled_models_dir, settings_path
+from mangatl.app_paths import (
+    bundled_manifest,
+    bundled_models_dir,
+    settings_path,
+    workspace_state_path,
+)
 from mangatl.domain.page import Chapter
 from mangatl.models.manifest import ModelHashMismatch, load_manifest, verify_bundled_models
 from mangatl.models.providers import select_providers
@@ -140,6 +145,9 @@ def open_folder(folder: Path) -> QMainWindow | Chapter | str:
         window.follow_theme(_theme)
     window.load_chapter(project)
     window.page_strip.setCurrentRow(0)
+    # After `load_chapter`, which forgets a dragged column (MT-048): the
+    # remembered one must survive it (MT-088 block 4).
+    window.remember_layout(workspace_state_path())
     # The window owns the project from here: closed after the pending saves.
     window.closed.connect(lambda: project.__exit__(None, None, None))
     return window
