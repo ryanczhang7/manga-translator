@@ -57,10 +57,21 @@ the pending saves are written.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Sequence
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
-from PySide6.QtCore import QEvent, QModelIndex, QPersistentModelIndex, QSignalBlocker, Qt, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QModelIndex,
+    QPersistentModelIndex,
+    QSignalBlocker,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
@@ -108,6 +119,7 @@ from mangatl.ui.labels import plain_label
 from mangatl.ui.line_editor import LineEditor, SaveFn
 from mangatl.ui.link import LinkController, LiveRegion, OrderedRegion
 from mangatl.ui.theme import ThemeController
+from mangatl.ui.thumbnail import decode_thumbnail, thumbnail_size
 
 __all__ = [
     "BREAKPOINT_WIDTH",
@@ -124,6 +136,7 @@ __all__ = [
     "STATUS_GLYPHS",
     "STRIP_RAIL_WIDTH",
     "STRIP_WIDTH",
+    "THUMBNAIL_BATCH",
     "PageStrip",
     "TranslationColumn",
     "TranslationRow",
@@ -137,6 +150,13 @@ BREAKPOINT_WIDTH = 1440
 STRIP_WIDTH = 96
 #: The rail of page indices, below the breakpoint.
 STRIP_RAIL_WIDTH = 28
+#: Strip thumbnails decoded per event-loop tick (MT-087 PO-2): opening a chapter
+#: never waits on them, and no tick holds the loop for long.
+THUMBNAIL_BATCH = 4
+#: A row's thumbnail area before `PageStrip.set_thumbnails` sizes it (72 x 96).
+_DEFAULT_THUMBNAIL_AREA = QSize(72, 96)
+
+ThumbnailState = Literal["pending", "shown", "failed"]
 COLUMN_DEFAULT_NARROW = 300
 COLUMN_DEFAULT_WIDE = 380
 COLUMN_MIN_WIDTH = 280
@@ -227,7 +247,7 @@ def page_accessible_text(
 class _NoTextDelegate(QStyledItemDelegate):
     """Paints an item's ground (hover, current, selection) but not its text.
 
-    The strip's items keep their text (MT-048: the index or the filename) for
+    The strip's items keep their text (the 1-based index, MT-087 PO-1) for
     whoever reads it, and the item widget shows it; painting it too would
     draw it twice, under the widget."""
 
@@ -246,32 +266,47 @@ class _NoTextDelegate(QStyledItemDelegate):
 
 
 class _PageRow(QWidget):
-    """One strip row: the status glyph and the item's text.
+    """One strip row: the page's thumbnail above a footer of the status glyph
+    and the page's 1-based index (MT-087, `components.md` §`PageStrip`).
 
-    Beside each other in the full strip; the glyph above the index in the rail,
-    which is what fits two characters' width into 28 px."""
+    In the full strip the thumbnail sits centred between `space.3` margins
+    (12 + 72 + 12 = 96) and the footer lays glyph beside index; in the rail the
+    thumbnail is hidden and the footer stacks glyph over index, which is what
+    fits two characters' width into 28 px (MT-086)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("pageRow")
+        self.thumb = QLabel()
+        self.thumb.setObjectName("pageThumbnail")
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.glyph = QLabel()
         self.glyph.setObjectName("pageGlyph")
         self.glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label = QLabel()
         self.label.setObjectName("pageLabel")
-        self.box = QBoxLayout(QBoxLayout.Direction.LeftToRight, self)
+        self.outer = QVBoxLayout(self)
+        self.outer.setSpacing(tokens_gen.SPACE_S1)
+        self.outer.addWidget(self.thumb, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.box = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         self.box.setContentsMargins(0, 0, 0, 0)
         self.box.setSpacing(0)
         self.box.addWidget(self.glyph)
         self.box.addWidget(self.label, 1)
+        self.outer.addLayout(self.box)
+        self.set_thumbnail_area(_DEFAULT_THUMBNAIL_AREA)
+        self.set_thumbnail("pending", None)
 
     def set_rail(self, rail: bool) -> None:
+        margin = 0 if rail else tokens_gen.SPACE_S3
+        vertical = 0 if rail else tokens_gen.SPACE_S1
+        self.outer.setContentsMargins(margin, vertical, margin, vertical)
+        self.thumb.setVisible(not rail)
         self.box.setDirection(
             QBoxLayout.Direction.TopToBottom if rail else QBoxLayout.Direction.LeftToRight
         )
         # In the rail the index's width counts, so the row's hint is honest
-        # against 28 px; in the full strip a long filename is clipped by the
-        # 96 px strip rather than widening it.
+        # against 28 px; in the full strip the 96 px strip sets the width.
         self.label.setSizePolicy(
             QSizePolicy.Policy.Preferred if rail else QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Preferred,
@@ -281,6 +316,20 @@ class _PageRow(QWidget):
             if rail
             else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
+
+    def set_thumbnail_area(self, size: QSize) -> None:
+        """Fix the thumbnail area now, so the row does not reflow when the
+        image lands."""
+        self.thumb.setFixedSize(size)
+
+    def set_thumbnail(self, state: ThumbnailState, pixmap: QPixmap | None) -> None:
+        if pixmap is None:
+            self.thumb.clear()
+        else:
+            self.thumb.setPixmap(pixmap)
+        self.thumb.setProperty("state", state)
+        self.thumb.style().unpolish(self.thumb)
+        self.thumb.style().polish(self.thumb)
 
     def set_status(self, status: PageStatus) -> None:
         self.glyph.setText(PAGE_STATUS_GLYPHS[status])
@@ -294,10 +343,15 @@ class _PageRow(QWidget):
 class PageStrip(QListWidget):
     """The chapter's pages, one item per page in ordinal order.
 
-    Full (96 px) it shows each page's filename; as a rail (28 px) its 1-based
-    index. Each row carries its page's status glyph (MT-086), coloured by
-    `theme.qss` through the glyph's `status` property, and every item reads
-    "Page N of M, <filename>, <progress>" in both modes."""
+    Full (96 px) each row shows the page's thumbnail above its status glyph and
+    1-based index; as a rail (28 px) the glyph above the index (MT-048, MT-086,
+    MT-087). The item's text is the index in both modes, its tooltip the
+    filename, and every item reads "Page N of M, <filename>, <progress>".
+
+    Thumbnails decode lazily (MT-087 PO-2): `set_thumbnails` only queues them,
+    and a zero-interval timer decodes `THUMBNAIL_BATCH` per event-loop tick,
+    only while the full strip is shown. Each page is decoded at most once until
+    the next `set_pages`."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -308,6 +362,15 @@ class PageStrip(QListWidget):
         self._progress: list[PageProgress] = []
         self._rows: list[_PageRow] = []
         self._rail = False
+        self._source_dir: Path | None = None
+        self._thumbnails: list[QPixmap | None] = []
+        self._thumbnail_states: list[ThumbnailState] = []
+        self._thumbnail_sizes: list[QSize] = []
+        self._queue: deque[int] = deque()
+        self._timer = QTimer(self)
+        self._timer.setInterval(0)
+        self._timer.setSingleShot(False)
+        self._timer.timeout.connect(self._decode_batch)
         self.setFixedWidth(STRIP_WIDTH)
 
     @property
@@ -315,14 +378,21 @@ class PageStrip(QListWidget):
         return self._rail
 
     def set_pages(self, filenames: Sequence[str], progress: Sequence[PageProgress]) -> None:
-        """Replace every item: one per filename, labelled for the current mode
-        and showing its page's progress."""
+        """Replace every item: one per filename, labelled with its index and
+        showing its page's progress. Forgets every thumbnail and the queue."""
+        self._timer.stop()
+        self._queue.clear()
+        self._source_dir = None
         self._filenames = list(filenames)
         self._progress = list(progress)
+        self._thumbnails = [None] * len(self._filenames)
+        self._thumbnail_states = ["pending"] * len(self._filenames)
+        self._thumbnail_sizes = [_DEFAULT_THUMBNAIL_AREA] * len(self._filenames)
         self.clear()
         self._rows = []
-        for _ in self._filenames:
+        for filename in self._filenames:
             item = QListWidgetItem()
+            item.setToolTip(filename)
             self.addItem(item)
             row = _PageRow()
             row.set_rail(self._rail)
@@ -331,6 +401,54 @@ class PageStrip(QListWidget):
         for index in range(len(self._filenames)):
             self._show_progress(index)
         self._relabel()
+
+    def set_thumbnails(self, source_dir: Path, sizes: Sequence[tuple[int, int]]) -> None:
+        """Queue every page's thumbnail, `sizes` being each page's stored
+        `(width, height)` in the order of `set_pages`' filenames. Each area is
+        sized now; nothing is decoded inside this call."""
+        self._timer.stop()
+        self._source_dir = source_dir
+        self._thumbnail_sizes = [thumbnail_size(width, height) for width, height in sizes]
+        self._thumbnails = [None] * len(self._thumbnail_sizes)
+        self._thumbnail_states = ["pending"] * len(self._thumbnail_sizes)
+        self._queue = deque(range(len(self._thumbnail_sizes)))
+        for index, row in enumerate(self._rows):
+            row.set_thumbnail_area(self._thumbnail_sizes[index])
+            row.set_thumbnail("pending", None)
+        self._resize_items()
+        if not self._rail:
+            self._timer.start()
+
+    def thumbnail(self, index: int) -> QPixmap | None:
+        """Row `index`'s decoded thumbnail, or None while pending or failed."""
+        return self._thumbnails[index]
+
+    def thumbnail_state(self, index: int) -> ThumbnailState:
+        return self._thumbnail_states[index]
+
+    def pending_thumbnails(self) -> int:
+        """How many thumbnails are still queued."""
+        return len(self._queue)
+
+    def _decode_batch(self) -> None:
+        """One tick of the queue: up to `THUMBNAIL_BATCH` pages, in order."""
+        source_dir = self._source_dir
+        for _ in range(THUMBNAIL_BATCH):
+            if not self._queue or source_dir is None:
+                break
+            index = self._queue.popleft()
+            # Looked up on this module per call, so the decode can be counted.
+            image = decode_thumbnail(
+                source_dir / self._filenames[index], self._thumbnail_sizes[index]
+            )
+            if image is None:
+                self._thumbnail_states[index] = "failed"
+            else:
+                self._thumbnails[index] = QPixmap.fromImage(image)
+                self._thumbnail_states[index] = "shown"
+            self._rows[index].set_thumbnail(self._thumbnail_states[index], self._thumbnails[index])
+        if not self._queue:
+            self._timer.stop()
 
     def set_progress(self, index: int, progress: PageProgress) -> None:
         """Show `progress` on row `index`, in place: the item is not rebuilt, so
@@ -351,24 +469,31 @@ class PageStrip(QListWidget):
         )
 
     def set_rail(self, rail: bool) -> None:
-        """Switch between the rail and the full strip, relabelling in place so
-        the current row and the selection survive."""
+        """Switch between the rail and the full strip in place, so the current
+        row, the selection and the decoded thumbnails survive. The rail pauses
+        the thumbnail queue; the full strip resumes it."""
         if rail == self._rail:
             return
         self._rail = rail
+        if rail:
+            self._timer.stop()
+        elif self._queue:
+            self._timer.start()
         self.setFixedWidth(STRIP_RAIL_WIDTH if rail else STRIP_WIDTH)
         for row in self._rows:
             row.set_rail(rail)
-        self._relabel()
+        self._resize_items()
 
     def _relabel(self) -> None:
-        for index, filename in enumerate(self._filenames):
-            text = str(index + 1) if self._rail else filename
-            item = self.item(index)
-            item.setText(text)
-            row = self._rows[index]
-            row.label.setText(text)
-            item.setSizeHint(row.sizeHint())
+        for index in range(len(self._filenames)):
+            text = str(index + 1)
+            self.item(index).setText(text)
+            self._rows[index].label.setText(text)
+        self._resize_items()
+
+    def _resize_items(self) -> None:
+        for index, row in enumerate(self._rows):
+            self.item(index).setSizeHint(row.sizeHint())
 
 
 def _row_accessible_text(ordinal: int, total: int, japanese: str | None, line: Line) -> str:
@@ -788,6 +913,9 @@ class Workspace(QMainWindow):
         progress = [_stored_progress(project, page.ordinal) for page in self._chapter.pages]
         with QSignalBlocker(self.page_strip):
             self.page_strip.set_pages([page.filename for page in self._chapter.pages], progress)
+            self.page_strip.set_thumbnails(
+                self._chapter.source_dir, [(p.width, p.height) for p in self._chapter.pages]
+            )
         self.page_canvas.set_page(None)
         self.set_regions([], [], [])
 

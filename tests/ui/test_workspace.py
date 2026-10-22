@@ -458,8 +458,11 @@ def test_the_page_strip_lists_every_page_by_filename_in_ordinal_order(
     _settle()
 
     assert window.page_strip.count() == 2
-    assert window.page_strip.item(0).text() == GOOD_PAGE
-    assert window.page_strip.item(1).text() == JUNK_PAGE
+    # MT-087 (PO-1): the 96 px text is the index; the filename is the tooltip.
+    assert window.page_strip.item(0).text() == "1"
+    assert window.page_strip.item(1).text() == "2"
+    assert window.page_strip.item(0).toolTip() == GOOD_PAGE
+    assert window.page_strip.item(1).toolTip() == JUNK_PAGE
 
 
 def test_the_page_failed_copy_is_the_one_components_md_specifies() -> None:

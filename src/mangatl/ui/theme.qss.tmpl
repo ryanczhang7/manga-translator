@@ -462,6 +462,13 @@ QLabel#pageGlyph[status="skipped"] { color: @{color.text.disabled}; }
     border: @{border-width.hairline}px solid @{color.border.subtle};
 }
 
+/* The page strip's thumbnail area (MT-087 PO-4): the same placeholder frame */
+/* as RunThumbnail's, under a decoded page and alone while pending or failed. */
+QLabel#pageThumbnail {
+    background-color: @{color.surface.sunken};
+    border: @{border-width.hairline}px solid @{color.border.subtle};
+}
+
 /* ---- PageStageStepper: one rule per value of the dynamic property ----- */
 /* stepState, which progress.py sets on each step label and re-polishes.  */
 /* The text carries the state too (a check when done, a marker when       */

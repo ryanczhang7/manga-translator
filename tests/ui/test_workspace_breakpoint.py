@@ -141,6 +141,22 @@ def _item_texts(window: Workspace) -> list[str]:
     return [strip.item(row).text() for row in range(strip.count())]
 
 
+def _item_tooltips(window: Workspace) -> list[str]:
+    # MT-087 (PO-1): the filename moved from the 96 px text to the tooltip.
+    strip = window.page_strip
+    return [strip.item(row).toolTip() for row in range(strip.count())]
+
+
+def _thumbnails_visible(window: Workspace) -> list[bool | None]:
+    """MT-087: per row, whether its `pageThumbnail` shows (None: there is none)."""
+    strip = window.page_strip
+    found = [
+        strip.itemWidget(strip.item(row)).findChild(QLabel, "pageThumbnail")
+        for row in range(strip.count())
+    ]
+    return [None if thumb is None else thumb.isVisibleTo(strip) for thumb in found]
+
+
 def _item_accessible_texts(window: Workspace) -> list[str]:
     strip = window.page_strip
     return [
@@ -256,22 +272,27 @@ def test_at_1100_px_each_rail_item_shows_its_one_based_page_index(
     assert _item_texts(window) == _indices()
 
 
-def test_at_1900_px_each_strip_item_shows_its_filename(
+def test_at_1900_px_each_strip_item_shows_its_index_and_a_thumbnail(
     qtbot,  # type: ignore[no-untyped-def]
     chapter_project: Project,
 ) -> None:
     window = _open_loaded(qtbot, chapter_project, WIDE)
 
-    assert _item_texts(window) == _filenames()
+    # MT-087 (PO-1): the index under a thumbnail at 96 px too; the filename is the tooltip.
+    assert _item_texts(window) == _indices()
+    assert _thumbnails_visible(window) == [True] * len(PAGES)
+    assert _item_tooltips(window) == _filenames()
 
 
-def test_at_exactly_1440_px_each_strip_item_shows_its_filename(
+def test_at_exactly_1440_px_each_strip_item_shows_its_index_and_a_thumbnail(
     qtbot,  # type: ignore[no-untyped-def]
     chapter_project: Project,
 ) -> None:
     window = _open_loaded(qtbot, chapter_project, EXACT)
 
-    assert _item_texts(window) == _filenames()
+    # MT-087 (PO-1): the index under a thumbnail at 96 px too.
+    assert _item_texts(window) == _indices()
+    assert _thumbnails_visible(window) == [True] * len(PAGES)
 
 
 @pytest.mark.parametrize("width", [NARROW, EXACT, WIDE])
@@ -289,15 +310,20 @@ def test_crossing_the_breakpoint_relabels_the_items_both_ways(
     qtbot,  # type: ignore[no-untyped-def]
     chapter_project: Project,
 ) -> None:
+    # MT-087 (PO-1): the text is the index at both widths; what changes across
+    # the crossing is the thumbnail, hidden in the rail and shown at 96 px.
     window = _open_loaded(qtbot, chapter_project, NARROW)
     assert _item_texts(window) == _indices()
+    assert _thumbnails_visible(window) == [False] * len(PAGES)
 
     _resize(window, WIDE)
-    assert _item_texts(window) == _filenames()
+    assert _item_texts(window) == _indices()
+    assert _thumbnails_visible(window) == [True] * len(PAGES)
     assert _item_accessible_texts(window) == _expected_accessible_texts()
 
     _resize(window, NARROW)
     assert _item_texts(window) == _indices()
+    assert _thumbnails_visible(window) == [False] * len(PAGES)
     assert _item_accessible_texts(window) == _expected_accessible_texts()
 
 

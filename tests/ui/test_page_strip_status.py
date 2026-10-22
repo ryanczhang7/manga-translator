@@ -394,7 +394,7 @@ def test_set_progress_leaves_the_items_own_text_alone(qtbot) -> None:  # type: i
     strip = _strip(qtbot)
     strip.set_pages(SEVEN_FILENAMES, _seven())
     strip.set_progress(0, PageProgress("fully_reviewed", 4, 4, 0))
-    assert strip.item(0).text() == SEVEN_FILENAMES[0]
+    assert strip.item(0).text() == "1"  # MT-087 (PO-1): the index in the full strip too
     strip.set_rail(True)
     strip.set_progress(0, PageProgress("failed", 0, 4, 1))
     assert strip.item(0).text() == "1"
@@ -419,7 +419,8 @@ def test_crossing_into_the_rail_and_back_keeps_glyphs_current_row_and_selection(
     assert rail[2] == _accessible(strip)
     assert rail_current == (4, True)
     assert _shown(strip) == _expected_shown(list(DESIGN_ORDER))
-    assert [strip.item(i).text() for i in range(7)] == list(SEVEN_FILENAMES)
+    # MT-087 (PO-1): the full strip's text is the index too, so rail and full agree.
+    assert [strip.item(i).text() for i in range(7)] == [str(i + 1) for i in range(7)]
     assert (strip.currentRow(), strip.item(4).isSelected()) == (4, True)
 
 
@@ -445,7 +446,7 @@ def test_the_rail_width_is_the_design_number() -> None:
     assert STRIP_RAIL_WIDTH == DESIGN_RAIL_WIDTH
 
 
-def test_at_1900_px_every_row_shows_its_glyph_in_its_colour_and_its_filename(qtbot) -> None:  # type: ignore[no-untyped-def]
+def test_at_1900_px_every_row_shows_its_glyph_in_its_colour_and_its_index(qtbot) -> None:  # type: ignore[no-untyped-def]
     window = _open(qtbot, WIDE)
     strip = window.page_strip
     strip.set_pages(SEVEN_FILENAMES, _seven())
@@ -454,8 +455,9 @@ def test_at_1900_px_every_row_shows_its_glyph_in_its_colour_and_its_filename(qtb
     assert not strip.is_rail
     assert _shown(strip) == _expected_shown(list(DESIGN_ORDER))
     assert [_glyph(strip, i).isVisibleTo(strip) for i in range(7)] == [True] * 7
-    assert [strip.item(i).text() for i in range(7)] == list(SEVEN_FILENAMES)
-    assert [_label(strip, i).text() for i in range(7)] == list(SEVEN_FILENAMES)
+    # MT-087 (PO-1): the index, under the thumbnail; the filename is the tooltip.
+    assert [strip.item(i).text() for i in range(7)] == [str(i + 1) for i in range(7)]
+    assert [_label(strip, i).text() for i in range(7)] == [str(i + 1) for i in range(7)]
     assert [_label(strip, i).isVisibleTo(strip) for i in range(7)] == [True] * 7
 
 

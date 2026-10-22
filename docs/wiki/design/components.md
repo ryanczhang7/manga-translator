@@ -569,6 +569,20 @@ States per row: default / hover (`color.surface.hover`) / focus-visible (ring) /
 current (3px `color.accent.base` leading bar + `color.surface.selected`) /
 disabled (during a run, non-current rows are not activatable but stay focusable).
 
+**Row anatomy (MT-087, PO-1, the user's decision 2026-10-21).** At 96 px each
+row is a **72 px-wide thumbnail** of the page (height from the page's stored
+`width × height`, aspect kept, `space.3` either side: 12 + 72 + 12 = 96) above a
+one-line footer of the status glyph and the page's 1-based index — the row
+"carries its index and a status glyph", as above. The filename is the row's
+tooltip and part of its accessible name; it is not drawn. In the 28 px rail the
+thumbnail is hidden and the footer stacks glyph over index (MT-086). Until a
+page's thumbnail is decoded, and permanently for a page whose bytes do not
+decode, the thumbnail area is the **placeholder**: `color.surface.sunken` with
+a hairline `color.border.subtle` frame, the same frame `RunThumbnail` (§8) shows
+for an undecodable page — nothing is painted on it. Thumbnails decode lazily, a
+few pages per event-loop tick and only while the full strip is shown, so
+opening a chapter never waits on them.
+
 Accessible name: "Page 7 of 20, *filename*, 12 of 18 lines reviewed" — the
 reviewed-family form. Every status carries an audible phrase (A-10; MT-086
 PO-4): pending *"not translated yet"*; running *"translating"*; translated,
