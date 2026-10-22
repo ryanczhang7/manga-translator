@@ -160,3 +160,49 @@ def test_asking_where_the_models_live_creates_nothing(frozen_at: Path) -> None:
     app_paths.bundled_manifest()
 
     assert not frozen_at.parent.exists()
+
+
+# =============================================================================
+# MT-088 block 2: where the workspace remembers its layout
+# =============================================================================
+#
+# `workspace_state_path()` is `%APPDATA%\mangatl\workspace.json` - beside
+# `settings.json` - read at call time, with the same home fallback, creating
+# nothing. Reached through the module object, so the tests above keep running
+# while the function does not exist (RED).
+
+
+def test_the_workspace_state_file_is_mangatl_workspace_json_under_appdata(appdata: Path) -> None:
+    assert app_paths.workspace_state_path() == appdata / "mangatl" / "workspace.json"
+
+
+def test_the_workspace_state_file_sits_beside_the_settings_file(appdata: Path) -> None:
+    assert app_paths.workspace_state_path().parent == settings_path().parent
+
+
+def test_the_workspace_state_file_follows_appdata_when_it_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "elsewhere"))
+    assert app_paths.workspace_state_path() == tmp_path / "elsewhere" / "mangatl" / "workspace.json"
+
+
+def test_without_appdata_the_workspace_state_file_is_under_the_home_roaming_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+    assert (
+        app_paths.workspace_state_path()
+        == tmp_path / "home" / "AppData" / "Roaming" / "mangatl" / "workspace.json"
+    )
+
+
+def test_asking_where_the_workspace_state_file_lives_creates_nothing(appdata: Path) -> None:
+    app_paths.workspace_state_path()
+    assert list(appdata.iterdir()) == []
+
+
+def test_workspace_state_path_is_exported() -> None:
+    assert "workspace_state_path" in app_paths.__all__

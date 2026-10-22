@@ -15,7 +15,21 @@ factor, a `QSizePolicy`, or a fixed `minimumWidth`.
 |---|---|
 | Minimum size | **1100 × 720** — enforced with `setMinimumSize`, not suggested |
 | Default on first run | 1600 × 1000, or the work-area size if smaller |
-| Remembered | size, position, maximised state, and the splitter positions — *not built yet; a follow-up story to MT-048 persists them (PO decision 2026-10-14)* |
+| Remembered | size, position, maximised state, and the dragged column width — built by MT-088 (PO decisions 2026-10-22, below). The strip's user collapse is not built, so nothing remembers it yet |
+
+**How remembering works (MT-088).** The review workspace alone remembers;
+the intake window does not. The state is one JSON file,
+`%APPDATA%\mangatl\workspace.json` (beside `settings.json`, so the frozen
+build and a dev run agree, MT-024), written when the workspace closes and read
+when `mangatl.app.open_folder` builds one. A `Workspace` built any other way
+remembers nothing. What is remembered: the normal (un-maximised) size and
+position, whether it was maximised, and the column width **only if the user
+dragged it** (MT-048's flag) — an undragged column always takes the breakpoint
+default. On reading: size is clamped to at least the minimum and at most the
+work area, the top-left is moved inside the work area, the column to 280–560; a
+missing, unreadable or wrong-version file is the first run, which opens at
+1600 × 1000 or the work-area size if smaller, and never below the minimum. A
+file that cannot be written never stops the window closing.
 
 1100px is the narrowest width at which the page canvas still shows a full manga
 page at a readable zoom beside a usable translation column. Below it the product

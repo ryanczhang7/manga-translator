@@ -20,7 +20,24 @@ from pathlib import Path
 
 from mangatl.models.manifest import MANIFEST_FILENAME
 
-__all__ = ["bundled_dir", "bundled_manifest", "bundled_models_dir", "settings_path"]
+__all__ = [
+    "bundled_dir",
+    "bundled_manifest",
+    "bundled_models_dir",
+    "settings_path",
+    "workspace_state_path",
+]
+
+
+def _app_dir() -> Path:
+    """``%APPDATA%\\mangatl``, read from the environment at call time.
+
+    With ``APPDATA`` unset, the same place under the home folder's
+    ``AppData\\Roaming``.
+    """
+    appdata = os.environ.get("APPDATA")
+    root = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    return root / "mangatl"
 
 
 def settings_path() -> Path:
@@ -29,9 +46,13 @@ def settings_path() -> Path:
     With ``APPDATA`` unset, the same place under the home folder's
     ``AppData\\Roaming``.
     """
-    appdata = os.environ.get("APPDATA")
-    root = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
-    return root / "mangatl" / "settings.json"
+    return _app_dir() / "settings.json"
+
+
+def workspace_state_path() -> Path:
+    """``%APPDATA%\\mangatl\\workspace.json``, beside ``settings.json`` (MT-088):
+    the workspace's remembered size, position and dragged column width."""
+    return _app_dir() / "workspace.json"
 
 
 def _frozen() -> bool:
