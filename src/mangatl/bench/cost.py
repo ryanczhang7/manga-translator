@@ -47,7 +47,7 @@ from mangatl.domain.money import Usd
 from mangatl.store.ledger import chapter_call_costs
 from mangatl.store.project import Project, SchemaTooNew, open_project, project_dir_for
 
-__all__ = ["DASH", "CostReport", "main", "measure_cost"]
+__all__ = ["DASH", "CostReport", "main", "measure_cost", "render"]
 
 #: What the figure reads when no call was priced. MT-018 AC-5's glyph, spelled
 #: here because `bench` may not import `mangatl.ui`.
@@ -80,7 +80,7 @@ def measure_cost(project: Project) -> CostReport:
     return CostReport(total=total, calls=len(costs), pages=pages, per_page=per_page)
 
 
-def _render(report: CostReport) -> tuple[str, str]:
+def render(report: CostReport) -> tuple[str, str]:
     if report.total is None or report.per_page is None:
         return (
             f"S5 chapter cost  {DASH}  no priced calls",
@@ -110,7 +110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     with project:
         report = measure_cost(project)
 
-    for line in _render(report):
+    for line in render(report):
         print(line)
     return _OK
 

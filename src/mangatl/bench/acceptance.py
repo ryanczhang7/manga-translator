@@ -47,7 +47,7 @@ from mangatl.domain.line import is_accepted_as_is
 from mangatl.store.lines import read_review_lines
 from mangatl.store.project import Project, SchemaTooNew, open_project, project_dir_for
 
-__all__ = ["AcceptanceReport", "main", "measure"]
+__all__ = ["AcceptanceReport", "main", "measure", "render"]
 
 _PROG = "python -m mangatl.bench.acceptance"
 _OK = 0
@@ -116,7 +116,7 @@ def measure(project: Project, truth: GroundTruth) -> AcceptanceReport:
     )
 
 
-def _render(report: AcceptanceReport) -> list[str]:
+def render(report: AcceptanceReport) -> list[str]:
     identity = "holds" if report.spurious == 0 else "does not hold (spurious present)"
     return [
         f"S1b chapter acceptance      {report.s1b:.1%}  accepted {report.accepted}"
@@ -159,7 +159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _fail(str(error))
         warnings = validate(truth, project.chapter).warnings
 
-    for line in (*warnings, *_render(report)):
+    for line in (*warnings, *render(report)):
         print(line)
     return _OK
 
