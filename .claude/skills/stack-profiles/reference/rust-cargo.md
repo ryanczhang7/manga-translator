@@ -8,11 +8,12 @@ that a JavaScript or Godot front end drives.
     gate | format    | optional | . | cargo fmt --all --check
     gate | lint      | required | . | cargo clippy --workspace --all-targets -- -D warnings
     gate | typecheck | required | . | cargo check --workspace --all-targets
-    gate | unit      | required | . | cargo test --workspace
-    gate | coverage  | required | . | cargo llvm-cov --workspace --fail-under-lines 100
+    gate | unit      | required | . | cargo test --workspace --no-fail-fast
+    gate | coverage  | required | . | cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 100
     gate | build     | required | . | cargo build --release --workspace
     gate | mutation  | optional | . | cargo mutants
     ondemand | mutation | cargo mutants re-runs the suite once per mutant; run it with /audit-mutations, not per story
+    # Combining this with another profile's `mutation` gate: see the stack-profiles skill, *Choosing*.
 
     task | install | - | . | cargo fetch
     task | dev     | - | . | cargo run
@@ -28,6 +29,17 @@ package* and silently skips every member. It exits 0 having run nothing. This
 profile recommends exactly that layout below, so the flag and the layout have to
 be adopted together.
 
+**`--no-fail-fast` on the test gates.** By default cargo stops at the first
+test *binary* with a failing test and never runs the rest, so a change that
+breaks five suites reports one, and the other four surface one re-run at a
+time. `--no-fail-fast` runs them all and still exits non-zero, so the gate
+still fails. On a passing run it changes nothing in the output, so evidence
+lines and floors read the same numbers. Found on a consuming project's
+unit gate, then its coverage gate. `cargo llvm-cov` also offers
+`--ignore-run-fail`, which runs every test too but **exits 0** when tests
+fail and the report succeeds. On a required gate that is a failing test
+graded as a pass: never use it there.
+
 ## Evidence of work
 
 See the `evidence` format in `project.conf`; these assert that the tool did
@@ -38,11 +50,26 @@ work, not that it succeeded.
     evidence | typecheck| Finished .* profile
     evidence | build    | Finished .* profile
 
+    no-count | lint     | `Finished .* profile` is liveness-only; the digits after it are elapsed seconds
+    no-count | typecheck| `Finished .* profile` is liveness-only; the digits after it are elapsed seconds
+    no-count | build    | `Finished .* profile` is liveness-only; the digits after it are elapsed seconds
+
     # UNVERIFIED - cargo-llvm-cov was not installed when this was written.
     # The bootstrap story must run the coverage gate and correct this line.
     evidence | coverage | TOTAL
 
-All but the coverage line were run against cargo 1.98 on Windows.
+    # cargo-mutants prints one summary line, `N mutants tested in T: ...`,
+    # listing only the non-zero outcomes. A run that killed nothing has no
+    # `caught` in it at all, so there is nothing for this to match.
+    evidence | mutation | [1-9][0-9]* caught
+
+All but the coverage line were run against cargo 1.98 on Windows. The mutation
+line was checked against cargo-mutants 27.1.0's real summary lines
+(`4 mutants tested in 4s: 4 caught`, `4 mutants tested in 3s: 3 missed, 1
+caught`). A `floor | mutation` would be meaningful here - `gates.sh` reads the
+number directly before `caught`, which is the kill count - but no profile can
+know how many mutants your crate has, so none is set; add one in the story that
+gives the gate a number worth defending.
 
 `cargo test` re-executes the test binaries on every run, warm cache or cold, so
 the `unit` regex is strong: it fails on precisely the vacuous-workspace bug
@@ -67,6 +94,19 @@ whenever the cache was warm. `Finished` proves cargo ran to completion rather
 than the command being a no-op or a broken alias; it cannot prove the crate set
 was right. For those gates the protection comes from `--workspace` being correct
 in the first place, and from the `unit` gate failing loudly if it is not.
+
+Which is why all three carry a `no-count` line. The count `gates.sh` reads is
+the first run of digits at or after the evidence match, and cargo's line is
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.29s
+
+so that number is the **elapsed time**. Read off a real cargo workspace:
+`typecheck` reported `observed 0`, `lint` `2` then `6` across runs of an
+unchanged tree, `build` `1` (from `in 1m 22s`). Harmless while it is only printed,
+and a coin-toss gate the moment somebody adds `floor | lint | 5` in good faith.
+The `no-count` lines make `gates.sh` print `observed -` instead and refuse that
+floor outright. There is no regex that fixes this — cargo prints no count on a
+warm cache, which is the same fact that makes the regexes weak to begin with.
 
 ## What `--fast` should leave out
 

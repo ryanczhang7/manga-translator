@@ -243,6 +243,9 @@ is short of DONE — it recommends `/audit-mutations <epic>`, scoped to the path
 the epic's stories touched — the exhaustive mutation work that `rules.md`,
 "Mutation work per story", keeps out of every story. Recommend it; never run it.
 A story with an empty `epic:` gets no `Epic:` line and no recommendation.
+Above that report the DONE output carries `bash scripts/tidy.sh`'s census of
+finished worktrees and merged branches; when it counts any, recommend
+`bash scripts/tidy.sh --apply` to the user, and never run it unasked.
 
 Before you call the PR green, **read the timings out of its first CI log** — not
 just the pass/fail. A pass within 10 % of a limit is a pending failure, and a

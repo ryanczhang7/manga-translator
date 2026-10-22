@@ -957,4 +957,217 @@ assert_contains "AC-7 precondition: the rules.md bullet holding the .bak sentenc
 assert_contains "AC-7: rules.md's .bak bullet says what a surviving .active means" '.active' "$bak_bullet"
 assert_contains "AC-7: and names mutate.sh --check" 'mutate.sh --check' "$bak_bullet"
 
+# ===========================================================================
+# HARNESS-059: mutate.sh leaves the tree as it found it. --check sees a
+# sentinel whose name starts with `.` (every target under .claude/), sed
+# expressions that write, read or execute are refused before FILE is touched,
+# and a missing `--` is refused. Every assertion below executes
+# unconditionally - loops have a fixed body - so the executed count is fixed
+# (floors.conf).
+#
+# The helpers above (`actives`, `clear_strays`, `the_bak`) glob `*.active` and
+# therefore cannot see a dot-named sentinel: the defect F1 describes, in the
+# test. The blocks below use their own dot-aware helpers instead, so that a
+# dot-named sentinel left behind is seen, and is removed.
+
+# h59_actives   Sentinel FILES in mutations/, dot-named ones included.
+h59_actives() { local n=0 a; for a in "$ABSMUT"/*.active "$ABSMUT"/.*.active; do [ -f "$a" ] && n=$((n + 1)); done; printf '%s' "$n"; }
+# h59_of <ext>   Files *.<ext> in mutations/, dot-named ones included.
+h59_of() { local n=0 a; for a in "$ABSMUT"/*."$1" "$ABSMUT"/.*."$1"; do [ -f "$a" ] && n=$((n + 1)); done; printf '%s' "$n"; }
+h59_clear() { clear_strays; rm -f "$ABSMUT"/.*.active "$ABSMUT"/.*.bak "$ABSMUT"/.*.new "$ABSMUT"/.*.diff 2>/dev/null; }
+# h59_tree   The fixture's tracked-and-untracked state, ignored files excluded
+# (.claude/state/ is ignored): what "no new file exists in the tree" is read off.
+h59_tree() { git -C "$FIX" status --porcelain --untracked-files=all 2>/dev/null; }
+H59_LIB="$FIXABS/.claude/hooks/lib.sh"
+H59_STARTED=20261016T053548Z
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-059 AC-1: --check reports a stranded mutation of a file under a dot-directory"
+
+# F1, reproduced in a fixture: the sentinel name is the target path with `/`
+# turned to `_`, so a .claude/ target names a dotfile. The target is left as it
+# is and the BACKUP is made to differ - "the target differs from its backup" is
+# the state, and the fixture's lib.sh is not edited.
+h59_clear
+H59_DPID="$(dead_pid)"
+assert_eq "HARNESS-059 AC-1 precondition: the planted pid belongs to a process that has exited" "gone" "$(is_alive "$H59_DPID")"
+assert_eq "HARNESS-059 AC-1 precondition: the fixture has .claude/hooks/lib.sh to be the target" "present" \
+  "$([ -f "$H59_LIB" ] && printf present || printf absent)"
+D_BAK="$ABSMUT/.claude_hooks_lib.sh.$H59_STARTED.$H59_DPID.bak"
+D_ACT="$ABSMUT/.claude_hooks_lib.sh.$H59_STARTED.$H59_DPID.active"
+mkdir -p "$ABSMUT"
+printf 'not what lib.sh holds\n' > "$D_BAK"
+plant "$D_ACT" "$H59_DPID" .claude/hooks/lib.sh "$H59_LIB" "$D_BAK" '1s/a/b/' 'bash .claude/tests/gates.test.sh' "$H59_STARTED"
+chk
+assert_eq "HARNESS-059 AC-1: a stranded dot-named sentinel makes --check exit 1" "1" "$CHK_RC"
+assert_eq "HARNESS-059 AC-1: and --check does not print the clean line on stdout" 0 "$(whole_lines "$CLEAN_LINE" "$CHK_OUT")"
+assert_eq "HARNESS-059 AC-1: it opens with the unaccounted-for line" 1 "$(whole_lines "$UNACCOUNTED" "$CHK_ERR")"
+assert_eq "HARNESS-059 AC-1: it names the .claude/ target, as recorded" 1 "$(whole_lines '  .claude/hooks/lib.sh' "$CHK_ERR")"
+assert_eq "HARNESS-059 AC-1: and reports its process as GONE" 1 "$(whole_lines "    process:     $H59_DPID $GONE_SUFFIX" "$CHK_ERR")"
+assert_eq "HARNESS-059 AC-1: the file differs from its backup, and it says so" 1 \
+  "$(whole_lines '    the file DIFFERS from the original. Put it back:' "$CHK_ERR")"
+assert_eq "HARNESS-059 AC-1: with the exact cp && cmp && rm -f remedy naming the dot-named sentinel" 1 \
+  "$(whole_lines "      cp $D_BAK $H59_LIB && cmp $D_BAK $H59_LIB && rm -f $D_BAK $D_ACT" "$CHK_ERR")"
+assert_eq "HARNESS-059 AC-1: and counts it" 1 "$(whole_lines "$ONE_COUNT" "$CHK_ERR")"
+
+# NEGATIVE CONTROL, green today and required to stay so: the same stranded
+# state for a scripts/ target, whose sentinel name does not start with `.`.
+rm -f "$D_ACT" "$D_BAK"
+S_BAK="$ABSMUT/scripts_gates.sh.$H59_STARTED.$H59_DPID.bak"
+S_ACT="$ABSMUT/scripts_gates.sh.$H59_STARTED.$H59_DPID.active"
+printf 'not what gates.sh holds\n' > "$S_BAK"
+plant "$S_ACT" "$H59_DPID" scripts/gates.sh "$FIXABS/scripts/gates.sh" "$S_BAK" '1s/a/b/' 'true' "$H59_STARTED"
+chk
+assert_eq "HARNESS-059 AC-1 control: the same fixture for a scripts/ target exits 1" "1" "$CHK_RC"
+assert_eq "HARNESS-059 AC-1 control: and names scripts/gates.sh" 1 "$(whole_lines '  scripts/gates.sh' "$CHK_ERR")"
+assert_eq "HARNESS-059 AC-1 control: and counts one" 1 "$(whole_lines "$ONE_COUNT" "$CHK_ERR")"
+
+# Both at once: C-1's loop visits both globs, and the count is over both.
+printf 'not what lib.sh holds\n' > "$D_BAK"
+plant "$D_ACT" "$H59_DPID" .claude/hooks/lib.sh "$H59_LIB" "$D_BAK" '1s/a/b/' 'true' "$H59_STARTED"
+chk
+assert_eq "HARNESS-059 AC-1 (C-1): with a dot-named and a plain sentinel, --check exits 1" "1" "$CHK_RC"
+assert_eq "HARNESS-059 AC-1 (C-1): it names the .claude/ target" 1 "$(whole_lines '  .claude/hooks/lib.sh' "$CHK_ERR")"
+assert_eq "HARNESS-059 AC-1 (C-1): it names the scripts/ target" 1 "$(whole_lines '  scripts/gates.sh' "$CHK_ERR")"
+assert_eq "HARNESS-059 AC-1 (C-1): and counts two" 1 \
+  "$(whole_lines '2 unaccounted-for mutation(s). Nothing that judges this tree should run' "$CHK_ERR")"
+
+# A dot-named sentinel whose target already matches its backup: the clearing
+# remedy, exactly as for a plain one.
+rm -f "$S_ACT" "$S_BAK"
+cp "$H59_LIB" "$D_BAK"
+chk
+assert_eq "HARNESS-059 AC-1 (C-1): a dot-named sentinel whose file matches still exits 1" "1" "$CHK_RC"
+assert_eq "HARNESS-059 AC-1 (C-1): and prints the exact rm -f remedy for it" 1 "$(whole_lines "      rm -f $D_BAK $D_ACT" "$CHK_ERR")"
+h59_clear
+chk
+assert_eq "HARNESS-059 AC-1: once cleared, --check is clean again" "$CLEAN_LINE" "$CHK_OUT"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-059 AC-3: a sed expression that writes, reads or executes is refused before FILE is touched"
+
+# F5: a `w` flag in an `s` command wrote an untracked file at the repository
+# root, and mutate.sh reported a verified restore. Each case runs from the
+# fixture root, which is the directory sed's own relative paths resolve
+# against, with `touch ran-marker` as the command so that "refused before the
+# command" is a file's absence. Measured outside this suite on GNU sed 4.9
+# (Git Bash), 2026-10-16: every expression below is refused by
+# `sed --sandbox` with "e/r/w commands disabled in sandbox mode" and exit 1,
+# and without --sandbox each `w`/`W`/`e` case creates its file.
+#
+# h59_refused <label> <expr> <path the expression would create, relative to FIX>
+h59_refused() {
+  local label="$1" expr="$2" made="$3" before tree_before out rc
+  reset_src
+  h59_clear
+  rm -f "$FIX/ran-marker" "$FIX/$made"
+  before="$(sha "$SRC")"
+  tree_before="$(h59_tree)"
+  out="$(mutate src/main.ts "$expr" -- touch ran-marker)"; rc=$?
+  assert_eq "HARNESS-059 AC-3 $label: exits 2" "2" "$rc"
+  assert_eq "HARNESS-059 AC-3 $label: says sed rejected the expression, as a whole line" 1 \
+    "$(whole_lines 'mutate: sed rejected the expression:' "$out")"
+  assert_eq "HARNESS-059 AC-3 $label: no file exists at $made afterwards" "absent" \
+    "$([ -e "$FIX/$made" ] && printf present || printf absent)"
+  assert_eq "HARNESS-059 AC-3 $label: the command never ran (no ran-marker)" "absent" \
+    "$([ -e "$FIX/ran-marker" ] && printf present || printf absent)"
+  assert_eq "HARNESS-059 AC-3 $label: no new file exists in the tree afterwards (git status unchanged)" \
+    "$tree_before" "$(h59_tree)"
+  assert_eq "HARNESS-059 AC-3 $label: FILE is byte-identical" "$before" "$(sha "$SRC")"
+  assert_eq "HARNESS-059 AC-3 $label: no .active is left" "0" "$(h59_actives)"
+  assert_eq "HARNESS-059 AC-3 $label: no .bak is left" "0" "$(h59_of bak)"
+  rm -f "$FIX/ran-marker" "$FIX/$made"
+}
+# The minimal case, from the story, and the audit's own delimiter.
+h59_refused "1s#a#b#w out (w flag, # delimiter)"    '1s#a#b#w out'           out
+h59_refused "1s/a/b/w h59-w-slash (w flag, /)"      '1s/a/b/w h59-w-slash'   h59-w-slash
+h59_refused "1s|a|b|gw h59-w-pipe (gw flags, |)"    '1s|a|b|gw h59-w-pipe'   h59-w-pipe
+h59_refused "1w h59-w-cmd (w command)"              '1w h59-w-cmd'           h59-w-cmd
+h59_refused "1W h59-W-cmd (W command)"              '1W h59-W-cmd'           h59-W-cmd
+h59_refused "1e touch h59-e-cmd (e command)"        '1e touch h59-e-cmd'     h59-e-cmd
+h59_refused "1s/.*/touch h59-e-flag/e (e flag)"     '1s/.*/touch h59-e-flag/e' h59-e-flag
+h59_refused "w on the second line of a two-line expression" $'s/90/-90/\nw h59-w-line2' h59-w-line2
+# r and R read rather than write; they create nothing, so <made> names a path
+# no case creates and that half holds vacuously - the exit, the message and
+# the command never running are what these two pin.
+h59_refused "1r src/main.ts (r command)"            '1r src/main.ts'         h59-r-none
+h59_refused "1R src/main.ts (R command)"            '1R src/main.ts'         h59-R-none
+
+# NEGATIVE CONTROLS, green today and required to stay so: an `s` with the `g`
+# flag and with a numeric flag are ordinary probes.
+for h59_expr in '1s#a#b#g' '1s/a/b/2'; do
+  reset_src
+  h59_clear
+  before="$(sha "$SRC")"
+  out="$(mutate src/main.ts "$h59_expr" -- true)"; rc=$?
+  assert_eq "HARNESS-059 AC-3 control: $h59_expr is accepted and runs the command, exit 0" "0" "$rc"
+  assert_eq "HARNESS-059 AC-3 control: $h59_expr is not reported as rejected" 0 \
+    "$(whole_lines 'mutate: sed rejected the expression:' "$out")"
+  assert_eq "HARNESS-059 AC-3 control: $h59_expr is restored afterwards" "$before" "$(sha "$SRC")"
+done
+reset_src
+h59_clear
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-059 AC-3 (PO decision 1): a sed with no --sandbox mode makes mutate.sh refuse"
+
+# A fake `sed` first on PATH that refuses --sandbox, as BSD sed does, and
+# passes every other call through to the real one - so everything mutate.sh
+# does with sed apart from the sandbox still works.
+H59_REALSED="$(command -v sed)"
+H59_FAKE="$W/h59-fakesed"
+mkdir -p "$H59_FAKE"
+cat > "$H59_FAKE/sed" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  [ "\$a" = "--sandbox" ] && { printf 'sed: illegal option -- -\n' >&2; exit 1; }
+done
+exec "$H59_REALSED" "\$@"
+EOF
+chmod +x "$H59_FAKE/sed"
+H59_NOSANDBOX='mutate: this sed has no --sandbox mode, so an expression could write files the restore never sees; install GNU sed (gsed) and put it first on PATH'
+pre_rej="$( PATH="$H59_FAKE:$PATH" sed --sandbox -e '' </dev/null >/dev/null 2>&1 && printf accepted || printf refused )"
+pre_pass="$( printf 'a\n' | PATH="$H59_FAKE:$PATH" sed -e 's/a/b/' 2>/dev/null )"
+assert_eq "HARNESS-059 PO-1 precondition: the fake sed refuses --sandbox" "refused" "$pre_rej"
+assert_eq "HARNESS-059 PO-1 precondition: and passes an ordinary expression through to the real sed" "b" "$pre_pass"
+
+reset_src
+h59_clear
+before="$(sha "$SRC")"
+rm -f "$FIX/ran-marker"
+out="$( cd "$FIX" && PATH="$H59_FAKE:$PATH" bash scripts/mutate.sh src/main.ts 's/90/-90/' -- touch ran-marker 2>&1 )"; rc=$?
+assert_eq "HARNESS-059 PO-1: with no --sandbox, an ordinary expression exits 2" "2" "$rc"
+assert_eq "HARNESS-059 PO-1: and says why, as the exact whole line" 1 "$(whole_lines "$H59_NOSANDBOX" "$out")"
+assert_eq "HARNESS-059 PO-1: FILE is byte-identical" "$before" "$(sha "$SRC")"
+assert_eq "HARNESS-059 PO-1: the command never ran (no ran-marker)" "absent" \
+  "$([ -e "$FIX/ran-marker" ] && printf present || printf absent)"
+assert_eq "HARNESS-059 PO-1: no .active is left" "0" "$(h59_actives)"
+assert_eq "HARNESS-059 PO-1: no .bak is left" "0" "$(h59_of bak)"
+assert_eq "HARNESS-059 PO-1: no .new is left" "0" "$(h59_of new)"
+rm -f "$FIX/ran-marker"
+reset_src
+h59_clear
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-059 AC-4: a command with no -- before it is refused, and FILE is unchanged"
+
+# PASSES ON ARRIVAL (C-3: mutate.sh:191 already refuses it). Earned at GATES by
+# DV-3, which replaces that check with `true || die` and must turn this red.
+# Distinct from "no -- and no command" above: here a command IS given, so a
+# missing check would silently eat its first word as the separator.
+reset_src
+h59_clear
+before="$(sha "$SRC")"
+rm -f "$FIX/ran-marker"
+out="$(mutate src/main.ts 's/90/-90/' touch ran-marker)"; rc=$?
+assert_eq "HARNESS-059 AC-4: no -- before the command exits 2" "2" "$rc"
+assert_eq "HARNESS-059 AC-4: and names the missing --, as a whole line" 1 \
+  "$(whole_lines 'mutate: the command must be separated from the expression by -- <command>' "$out")"
+assert_eq "HARNESS-059 AC-4: FILE is byte-identical" "$before" "$(sha "$SRC")"
+assert_eq "HARNESS-059 AC-4: the command never ran (no ran-marker)" "absent" \
+  "$([ -e "$FIX/ran-marker" ] && printf present || printf absent)"
+rm -f "$FIX/ran-marker"
+reset_src
+h59_clear
+
 summary "mutate"

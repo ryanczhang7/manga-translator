@@ -126,27 +126,56 @@ function code_part(s,   i, c, p) {
 # leave before its input is drained? `head` always can. `grep` can when it is
 # asked for a yes/no (-q), a bounded count (-m), or a file list (-l/-L).
 # Everything else - -c, -v, -o alone, sed, awk, tr, wc, sort, cat - drains.
-function early_reader(s,   n, a, w, i, t) {
+#
+# THE COMMAND WORD IS NOT ALWAYS THE FIRST WORD (HARNESS-061). `LC_ALL=C grep -q`
+# and `env LC_ALL=C grep -q` run grep; cmd_index() skips the prefix. And an
+# option that takes an operand - `-e PAT`, `-f FILE`, `--regexp PAT`, `--file
+# FILE`, a bundle ending in `e` or `f` - CONSUMES the next word, so the options
+# go on after it: `grep -e x -q` is a reader, and `grep -e -q x` is not (its
+# `-q` is the pattern).
+function is_assign(t) { return t ~ /^[A-Za-z_][A-Za-z0-9_]*=/ && t !~ /[;&|)}<>]/ }
+
+# cmd_index(a, n)  Index in a[1..n] of the command word: past leading shell
+# assignments, and past a leading `env` with the assignments after it. n + 1
+# when there is none. `env`'s own options are out of scope: one ends the skip
+# and nothing after it is judged a reader.
+function cmd_index(a, n,   j) {
+  j = 1
+  while (j <= n && is_assign(a[j])) j++
+  if (j <= n && bname(a[j]) == "env") {
+    j++
+    while (j <= n && is_assign(a[j])) j++
+    if (j <= n && substr(a[j], 1, 1) == "-") return n + 1
+  }
+  return j
+}
+
+function early_reader(s,   n, a, w, i, t, j) {
   sub(/^[ \t]+/, "", s)
   n = split(s, a, /[ \t]+/)
   if (n < 1) return 0
-  w = bname(a[1])
+  j = cmd_index(a, n)
+  if (j > n) return 0
+  w = bname(a[j])
   # `| head; then ...` - the command word carries the separator when nothing
   # follows it. Without this, bare `head` at the end of a command is invisible.
   sub(/[;&)}<>].*$/, "", w)
   if (w == "head") return 1
   if (w != "grep" && w != "egrep" && w != "fgrep") return 0
-  for (i = 2; i <= n; i++) {
+  for (i = j + 1; i <= n; i++) {
     t = a[i]
     if (t == "--") return 0
     if (substr(t, 1, 2) == "--") {
       if (t ~ /^--(quiet|silent|max-count|files-with-matches|files-without-match)/) return 1
+      if (t == "--regexp" || t == "--file") i++   # its operand is the next word
       continue
     }
     if (substr(t, 1, 1) == "-") {
       # A bundled short option carrying q, l, L or m: -q -qF -qE -qx -Eq -m1
       # -oE -m1 -Eom1 -l -L. No draining option letter is one of those four.
+      # Tested before the operand rule, so `-qe x` is still a reader.
       if (t ~ /^-[A-Za-z]*[qlLm]/) return 1
+      if (t ~ /^-[A-Za-z]*[ef]$/) i++             # -e PAT, -f FILE, -Fe PAT
       continue
     }
     return 0   # the pattern: options are over
@@ -168,6 +197,12 @@ function scan_line(s,   i, c, L, res) {
     if (c == ")") { if (D > 0) D--; continue }
     if (c == "|") {
       if (substr(s, i + 1, 1) == "|") { i++; continue }
+      # `|&` is a pipe too (stderr with stdout): the reader starts after the
+      # `&`, and the column reported is the `|`.
+      if (substr(s, i + 1, 1) == "&") {
+        if (D == 0 && res == 0 && early_reader(substr(s, i + 2))) res = i
+        i++; continue
+      }
       if (D == 0 && res == 0 && early_reader(substr(s, i + 1))) res = i
     }
   }

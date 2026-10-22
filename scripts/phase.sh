@@ -154,6 +154,7 @@ cmd_set() {
   [ -n "$id" ] && [ -n "$phase" ] || die "usage: phase.sh set <story-id> <PHASE> [--force]"
   phase="$(printf '%s' "$phase" | tr 'a-z' 'A-Z')"
   valid_phase "$phase" || die "unknown phase '$phase'. Known: $(awk -F'|' '!/^#|^$/{gsub(/ /,"",$1); printf "%s ", $1}' "$PHASES")"
+  valid_story_id "$id" || die "story id '$id' is not one path component: an id is letters, digits, '.', '_' or '-', and starts with a letter or digit"
 
   local file="$STORIES/$id.md"
   [ -f "$file" ] || die "no story file at docs/backlog/stories/$id.md — create it first (scripts/new-story.sh)"
@@ -188,7 +189,21 @@ EOF
   # Closing a story is when the next one is chosen, so the report that answers
   # "what next, and what alongside" is printed here (HARNESS-018). The phase is
   # already written, so a failure in plan.sh must not fail the phase change.
+  #
+  # Closing a story is also when its worktree and branch become finished, so
+  # tidy.sh's census comes first (HARNESS-066). Report mode only: nothing is
+  # applied from here. Only a census line from a tidy that exited 0 is
+  # printed - tidy's own error line also begins `tidy:` - and a tidy that
+  # fails adds nothing and does not fail the phase change.
   if [ "$phase" = DONE ]; then
+    local tidy_out census=""
+    if tidy_out="$( cd "$ROOT" && bash "$ROOT/scripts/tidy.sh" 2>/dev/null )"; then
+      census="$(awk '/^tidy: [0-9]+ worktree\(s\), [0-9]+ removable, [0-9]+ kept; [0-9]+ merged branch\(es\) deletable$/ { l = $0 } END { print l }' <<<"$tidy_out")"
+    fi
+    if [ -n "$census" ]; then
+      printf '%s\n' "$census"
+      awk '{ r = $4; m = $8; sub(/,/, "", r); if (r + m > 0) print "tidy: run bash scripts/tidy.sh --apply to remove them" }' <<<"$census"
+    fi
     printf '\n'
     bash "$ROOT/scripts/plan.sh" after "$id" || true
   fi

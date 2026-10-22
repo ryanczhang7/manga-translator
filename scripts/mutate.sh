@@ -119,7 +119,12 @@ die() { printf 'mutate: %s\n' "$1" >&2; usage; exit 2; }
 if [ "${1:-}" = "--check" ]; then
   TAB="$(printf '\t')"
   found=0; own=""
-  for a in "$MUTDIR"/*.active; do
+  # Both globs, because a target under a dot-directory (.claude/ - every hook,
+  # every test) names a sentinel that starts with `.`, and a bash glob does not
+  # match a leading dot (HARNESS-059: one such mutation was stranded and this
+  # said "no stranded mutation"). Not `shopt -s dotglob`, which would change
+  # every other glob here; `.` and `..` are not `.active` files.
+  for a in "$MUTDIR"/*.active "$MUTDIR"/.*.active; do
     [ -f "$a" ] || continue
     a_pid=""; a_file=""; a_path=""; a_backup=""; a_expr=""; a_command=""; a_started=""
     while IFS="$TAB" read -r k v; do
@@ -210,6 +215,14 @@ esac
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 if [ "$(cd "$(dirname "$FILE")" 2>/dev/null && pwd)/$(basename "$FILE")" = "$SELF" ]; then
   die "cannot mutate itself: bash reads this script as it runs, so the restore would never happen. Copy it elsewhere and mutate the copy."
+fi
+
+# The expression runs under `sed --sandbox` (below), and a sed without that
+# mode is refused rather than run unguarded. Asked here, before the backup,
+# so that the refusal leaves nothing behind (HARNESS-059, PO decision 1).
+if ! sed --sandbox -e '' </dev/null >/dev/null 2>&1; then
+  printf 'mutate: this sed has no --sandbox mode, so an expression could write files the restore never sees; install GNU sed (gsed) and put it first on PATH\n' >&2
+  exit 2
 fi
 
 mkdir -p "$MUTDIR" || die "cannot create $MUTDIR"
@@ -328,7 +341,12 @@ trap ':' PIPE
 # Read from the backup rather than the live file: a `sed` that reads and writes
 # the same path truncates it, and this script's whole claim is that it does not
 # lose the original.
-if ! sed -e "$EXPR" "$BAK" > "$NEW" 2>"$NEW.err"; then
+#
+# --sandbox (HARNESS-059): GNU sed then rejects e, r, R, w and W - as commands
+# and as `s` flags - at PARSE time, before anything is written. Without it an
+# `s` whose pattern ran into a `#` delimiter took the rest as flags, and its `w`
+# wrote a stray file at the repository root that the restore never saw.
+if ! sed --sandbox -e "$EXPR" "$BAK" > "$NEW" 2>"$NEW.err"; then
   printf 'mutate: sed rejected the expression:\n' >&2
   sed -e 's/^/  /' "$NEW.err" >&2
   rm -f "$BAK"

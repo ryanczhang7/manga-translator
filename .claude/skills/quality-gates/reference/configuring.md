@@ -17,19 +17,23 @@ fail gets a waiver naming why:
 A waiver turns that gate's failure from `WARN` into `KNOWN` so that `WARN`
 always means something changed. It is refused on required gates.
 
-Seven more kinds, each explained in the skill and in `project.conf`'s own
+Nine more kinds, each explained in the skill and in `project.conf`'s own
 comments:
 
     floor        | <gate id> | <minimum count read out of the evidence match>
+    no-count     | <gate id> | <why its evidence regex measures nothing>
     slow         | <gate id> | <why it is too slow for gates.sh --fast>
     ondemand     | <gate id> | <why it is not run per story>
     covers       | <gate id> | <glob of the paths this gate actually reads>
     discovery    | <id> | <cwd> | <command proving a runner can see a directory>
     blocked-when | <gate id> | <regex meaning this runner could not START>
     skipped-when | <gate id> | <regex meaning the work was skipped, not lost>
+    keep-when    | <gate id> | <regex of a failure nobody has explained yet>
 
-`floor` catches a gate that quietly started doing much less; `slow` names what
-`--fast` leaves out, reason required; `ondemand` names what no run executes
+`floor` catches a gate that quietly started doing much less; `no-count` says
+this gate has no count to floor, so it reports `observed -` and any floor on it
+is refused, reason required; `slow` names what `--fast` leaves out, reason
+required; `ondemand` names what no run executes
 unless asked - `--gate <id>`, or a story's `required_gates` - and is refused on a
 required gate (every profile's `mutation` gate is one: see `rules.md`'s
 `# Mutation work per story`); `covers` is what lets `gates.sh` fail a
@@ -55,6 +59,18 @@ always was, and a non-zero exit or missing evidence is never reclassified.
 `--audit` refuses a line naming no gate, one with no pattern, and one on a gate
 with no `floor` line. Patterns are matched by awk, like `evidence` and
 `blocked-when`, so avoid interval expressions (`{n}`).
+
+`keep-when` changes what is kept, never what is judged. `<id>.failed.log` holds
+only the last run of a gate that did not pass, and the next failure replaces it,
+so the one log of a failure nobody has explained can be gone by the next story's
+RED. When a gate runs, does not pass, and a cleaned line of its log matches one
+of its `keep-when` regexes (`grep -E`, case-sensitive, first match in manifest
+order), `gates.sh` also copies the log to
+`.claude/state/gate-logs/kept/<id>.<seq>.<stamp>.log` with a header naming the
+regex and the line it matched, and prints `signature log kept:`. A kept file is
+never rewritten; at most 5 are held per gate, the oldest evicted. Add a line
+only for a failure nobody has explained, and remove it once the failure is.
+`--audit` refuses a line naming no gate, and one with no pattern.
 
 Once CI has run a gate for real, record how much slower one test is there:
 
@@ -100,15 +116,22 @@ than trusting it: tool output changes between versions.
 5. Make the gate vacuous on purpose - move the test directory aside - and
    confirm it now fails. Then put it back.
 
+6. Look at what sits immediately after the match. `gates.sh` reads the first
+   run of digits there as the gate's work count, and it cannot tell a count
+   from a stopwatch: ``Finished `dev` profile ... in 0.29s`` yields `0`. If
+   those digits are not a count of anything, add a `no-count` line - otherwise
+   the number looks exactly like one somebody may put a floor under.
+
 `|` inside the regex is fine; everything after field 2 is the pattern. ANSI
 colour and CRLF are stripped before matching, so write plain text. Where a tool
 prints nothing countable, `evidence | <id> | -` records that deliberately - use
-it rarely, and say why in the story.
+it rarely, and say why in the story. Where it proves it ran but counts nothing,
+that is `no-count`, not `-`: liveness still holds and must still be asserted.
 
     bash scripts/gates.sh --audit
 
 reports gates whose `cwd` does not exist, gates with no evidence line, a floor,
-slow or ondemand line it cannot honour, and - once `BOOTSTRAPPED=yes` - required gates
+no-count, slow or ondemand line it cannot honour, and - once `BOOTSTRAPPED=yes` - required gates
 with no command, without running anything. Before the flag is flipped an
 unconfigured gate is reported as `ok (unconfigured)`.
 

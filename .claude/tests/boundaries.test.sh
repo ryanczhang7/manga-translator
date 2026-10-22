@@ -64,15 +64,23 @@ accepts_manifest() {
 commit_all() { git -C "$FIX" add -A >/dev/null 2>&1
                git -C "$FIX" -c user.email=t@t -c user.name=t commit -qm "${1:-wip}" >/dev/null 2>&1; }
 
-# story_on_branch   Writes docs/backlog/stories/T-1.md on a fresh story branch
-# cut from main, with the body on stdin appended after the frontmatter.
+# story_on_branch [type] [extra-frontmatter-line] [phase]   Writes
+# docs/backlog/stories/T-1.md on a fresh story branch cut from main, with the
+# body on stdin appended after the frontmatter. Defaults: type feature, no extra
+# line, phase REVIEW - which writes the same bytes the argument-free form always
+# wrote, so every call site that passes nothing is unchanged (HARNESS-054). The
+# phase argument is HARNESS-062's: a rule that runs at REVIEW|DONE needs a DONE
+# fixture, or dropping DONE from its case label survives (audit mutant B07).
 story_on_branch() {
+  local type="${1:-feature}" extra="${2:-}" phase="${3:-REVIEW}"
   git -C "$FIX" checkout -q main 2>/dev/null
   git -C "$FIX" branch -D story/T-1-fixture >/dev/null 2>&1
   git -C "$FIX" checkout -q -b story/T-1-fixture 2>/dev/null
   mkdir -p "$FIX/docs/backlog/stories"
   {
-    printf -- '---\nid: T-1\ntitle: Fixture story\nslug: fixture\ntype: feature\nstatus: todo\nphase: REVIEW\nbranch: story/T-1-fixture\n---\n\n'
+    printf -- '---\nid: T-1\ntitle: Fixture story\nslug: fixture\ntype: %s\nstatus: todo\nphase: %s\nbranch: story/T-1-fixture\n' "$type" "$phase"
+    [ -n "$extra" ] && printf -- '%s\n' "$extra"
+    printf -- '---\n\n'
     printf -- '## Acceptance criteria\n\n- **AC-1** - it works.\n\n## Handoff: RED -> GREEN\n\nthe command, the failure, the export shape.\n\n'
     cat
   } > "$FIX/docs/backlog/stories/T-1.md"
@@ -739,6 +747,84 @@ run_boundaries
 refused "AC-3 (d): output quoted in inline backticks within prose is refused" "## Deferred verifications has no result and no waiver"
 whole_line "AC-3 (d): and the refusal is AC-2's whole line" "$WANT_3H"
 
+# HARNESS-062 AC-2, audit mutant B04. The owner has to be a PHASE, not merely
+# a word after "owner:". Every acceptance above names GATES and the one refusal
+# names nobody at all, so widening has_owner's phase list to any run of letters
+# (`[a-z]*`) survived the whole suite: `owner: banana` would have counted as a
+# declared owner. The fixture is exactly the shape that mutant admits - lower
+# case, a colon, one word - and carries a fenced result, so the owner check is
+# the only rule with anything to say about it.
+story_on_branch <<'EOF'
+## Deferred verifications
+
+1. Drop a field from the encoder; AC-1's property must fail. owner: banana
+
+```
+ x round-trips an arbitrary world document
+ Tests  1 failed | 44 passed (45)
+```
+EOF
+run_boundaries
+refused "HARNESS-062 AC-2: an owner line naming no phase (owner: banana) is refused" "does not declare an owner"
+
+# Its control names GREEN, not GATES: B04's widened class still matches GATES,
+# and a control the mutant cannot tell apart from the original says nothing
+# about which phases the list really carries.
+story_on_branch <<'EOF'
+## Deferred verifications
+
+1. Drop a field from the encoder; AC-1's property must fail. Owner: GREEN
+
+```
+ x round-trips an arbitrary world document
+ Tests  1 failed | 44 passed (45)
+```
+EOF
+run_boundaries
+assert_contains "HARNESS-062 AC-2: the same section with Owner: GREEN is accepted as owned" \
+  "ok    ## Deferred verifications names the phase that owns each entry" "$out"
+
+# HARNESS-062 AC-3, audit mutant B05. A waiver is the WORD "waived". The only
+# waiver fixture above writes WAIVED in capitals with a space after it, so
+# matching the bare substring survived: "unwaived" - which says the opposite -
+# would have counted as a waiver and discharged the entry. The prose below
+# carries no block and no "waived" as a word of its own; re-read it before
+# changing it, because one stray "waived" makes the case pass for the wrong
+# reason.
+story_on_branch <<'EOF'
+## Deferred verifications
+
+1. Drop a field from the encoder; AC-1's property must fail. Owner: GATES.
+   This entry is still unwaived, and nobody has run it yet.
+EOF
+run_boundaries
+refused "HARNESS-062 AC-3: 'unwaived' is not a waiver, so the entry has no result and no waiver" \
+  "## Deferred verifications has no result and no waiver"
+whole_line "HARNESS-062 AC-3: and the refusal is the whole 3h line" "$WANT_3H"
+
+# Its two controls: the word in lower case mid-sentence, and at the start of a
+# line with a colon - the two spellings an author actually writes, neither of
+# them the capitalised WAIVED the case above already holds.
+story_on_branch <<'EOF'
+## Deferred verifications
+
+1. Drop a field from the encoder; AC-1's property must fail. Owner: GATES.
+   The PO waived it on 2026-10-17: the encoder moved to WORLD-010.
+EOF
+run_boundaries
+assert_contains "HARNESS-062 AC-3: 'waived' in lower case mid-sentence is a waiver" \
+  "ok    ## Deferred verifications carries an explicit waiver" "$out"
+
+story_on_branch <<'EOF'
+## Deferred verifications
+
+1. Drop a field from the encoder; AC-1's property must fail. Owner: GATES.
+Waived: the encoder moved to WORLD-010 with the criterion it belonged to.
+EOF
+run_boundaries
+assert_contains "HARNESS-062 AC-3: 'Waived:' starting a line is a waiver" \
+  "ok    ## Deferred verifications carries an explicit waiver" "$out"
+
 # ---------------------------------------------------------------------------
 describe "a harness change bumps the stamp"
 
@@ -1361,6 +1447,149 @@ run_boundaries
 assert_contains "one that did pass is reported as passing" \
   "ok    story-required gate 'unit' passed in the recorded run" "$out"
 assert_eq "and the run is clean" 0 "$rc"
+
+# HARNESS-062 AC-1, audit mutant B08. The gate id has to END where the record's
+# gate name ends - a space, a "(" or the end of the line. Every record above
+# names gates that share no prefix, so dropping that terminator survived: a
+# PASS for `unit-slow` would have stood in for a required `unit` that never ran.
+# The record here is pasted, not run: rule 3e-i reads the section's text, and
+# the tree-hash rule that refuses a pasted record says so in different words.
+# So the refusal is asserted by its needle, and the two controls by their ok
+# line rather than by $rc, which the tree-hash rule keeps non-zero throughout.
+story_on_branch feature 'required_gates: [unit]' <<'EOF'
+## Gate results
+
+PASS         unit-slow (1s)
+EOF
+run_boundaries
+refused "HARNESS-062 AC-1: a PASS for unit-slow does not satisfy a required unit" \
+  "frontmatter requires gate 'unit', but the recorded run has no PASS for it"
+
+story_on_branch feature 'required_gates: [unit]' <<'EOF'
+## Gate results
+
+PASS         unit (12s)
+EOF
+run_boundaries
+assert_contains "HARNESS-062 AC-1: PASS unit followed by its timing satisfies a required unit" \
+  "ok    story-required gate 'unit' passed in the recorded run" "$out"
+
+story_on_branch feature 'required_gates: [unit]' <<'EOF'
+## Gate results
+
+PASS         unit
+EOF
+run_boundaries
+assert_contains "HARNESS-062 AC-1: PASS unit ending the line satisfies a required unit" \
+  "ok    story-required gate 'unit' passed in the recorded run" "$out"
+
+# HARNESS-062 AC-4, audit mutant B07. The rule runs at DONE as well as REVIEW,
+# and every fixture that reached it was at REVIEW, so dropping DONE from its
+# case label survived: a story could be closed with a gate it escalated never
+# having passed. Under that mutant other rules still refuse this story, which
+# is why refused checks the message as well as the status. The second case is
+# the same rule from the other side - at DONE, a gate that did pass is SAID to
+# have passed - and it goes red under B07 too, because the rule never runs.
+story_on_branch feature 'required_gates: [unit]' DONE <<'EOF'
+## Gate results
+
+PASS         unit-slow (1s)
+EOF
+run_boundaries
+refused "HARNESS-062 AC-4: at DONE, a PASS for unit-slow does not satisfy a required unit" \
+  "frontmatter requires gate 'unit', but the recorded run has no PASS for it"
+
+story_on_branch feature 'required_gates: [unit]' DONE <<'EOF'
+## Gate results
+
+PASS         unit (12s)
+EOF
+run_boundaries
+assert_contains "HARNESS-062 AC-4: at DONE, a recorded PASS unit is reported as passing" \
+  "ok    story-required gate 'unit' passed in the recorded run" "$out"
+
+# ---------------------------------------------------------------------------
+describe "a spike that escalates a gate has to have run it"
+
+# HARNESS-054, ported from manhwa-cropper 3ac70e3. The required_gates re-check
+# lived inside the non-spike arm of 3e, and inside the else of its marker test,
+# so a spike that named a gate in required_gates and never ran it merged with
+# nothing said but "spike story; gate record not required". Every fixture in
+# the describe above is type: feature, so no spike had ever been put through.
+#
+# The exemption is right and stays (AC-2); only its width was wrong. AC-1a and
+# AC-1b are pinned separately because they fail through different code today:
+# no record at all, and a real record with no PASS for the escalated gate.
+# AC-3 is AC-1b's twin with integration in the record, so a fix that refused
+# every escalating spike passes AC-1 and fails AC-3.
+
+# gates_recorded <what>   Runs the real gates.sh for T-1 in the fixture. Its
+# record is the only one check-boundaries.sh's tree hash agrees with, so it is
+# never pasted - and a run that quietly stopped recording would make AC-1b
+# pass for the wrong reason and AC-3 fail for one, hence the assertion.
+gates_recorded() {
+  local g
+  g="$( cd "$FIX" && bash scripts/gates.sh --story T-1 2>&1 )"
+  assert_contains "fixture: $1 was recorded by gates.sh" \
+    "recorded in docs/backlog/stories/T-1.md" "$g"
+}
+
+story_on_branch spike 'required_gates: [integration]' <<'EOF'
+## Notes
+
+A spike that named a gate in its frontmatter and never ran it.
+EOF
+run_boundaries
+assert_contains "AC-1a an escalating spike with no gate record is refused" \
+  "story T-1: frontmatter requires gate 'integration'" "$out"
+assert_eq "AC-1a and the run fails rather than noting and moving on" 1 "$rc"
+
+story_on_branch spike 'required_gates: [integration]' </dev/null
+write_conf "$FIX" <<'CONF'
+gate     | unit | required | . | printf 'Tests  47 passed (47)\n'
+evidence | unit | Tests +[1-9][0-9]* passed
+CONF
+# project.conf is code the gate hash covers, and gates.sh will not record while
+# a gated file is untracked, so it is committed BEFORE the run.
+commit_all "T-1 conf"
+gates_recorded "a run that never touched integration"
+commit_all "T-1 recorded, integration unrun"
+run_boundaries
+assert_contains "AC-1b a recorded run with no PASS for the escalated gate is refused" \
+  "story T-1: frontmatter requires gate 'integration'" "$out"
+assert_eq "AC-1b and that run fails too" 1 "$rc"
+
+story_on_branch spike 'required_gates: []' <<'EOF'
+## Notes
+
+A spike that escalated nothing, which is what a spike usually is.
+EOF
+run_boundaries
+assert_contains "AC-2 a spike escalating nothing still needs no gate record" \
+  "spike story; gate record not required" "$out"
+assert_eq "AC-2 and merges" 0 "$rc"
+
+story_on_branch spike 'required_gates: [integration]' </dev/null
+write_conf "$FIX" <<'CONF'
+gate     | unit        | required | . | printf 'Tests  47 passed (47)\n'
+evidence | unit        | Tests +[1-9][0-9]* passed
+gate     | integration | optional | . | printf 'Tests  3 passed (3)\n'
+evidence | integration | Tests +[1-9][0-9]* passed
+CONF
+commit_all "T-1 conf"
+gates_recorded "a run that did cover integration"
+assert_contains "fixture: the record carries a PASS for integration" \
+  "PASS         integration" "$(cat "$FIX/docs/backlog/stories/T-1.md")"
+commit_all "T-1 recorded, integration run"
+assert_eq "fixture: the record's tree is the tree being merged" \
+  "$( cd "$FIX" && CLAUDE_PROJECT_DIR="$FIX" bash -c '. .claude/hooks/lib.sh; gate_tree_hash' )" \
+  "$(sed -nE '/^[[:space:]]*tree:[[:space:]]*[0-9a-f]+/{s/^[[:space:]]*tree:[[:space:]]*([0-9a-f]+).*/\1/p;q;}' "$FIX/docs/backlog/stories/T-1.md")"
+run_boundaries
+assert_eq "AC-3 a spike that ran the gate it escalated merges" 0 "$rc"
+# No line BEGINS with FAIL - read on a here-string, never a pipe. A message
+# that merely mentions the word is not an objection. The lines themselves are
+# the actual value, so a failure names the objection rather than a count.
+assert_eq "AC-3 and nothing in the run objects" "" "$(grep '^FAIL' <<< "$out")"
 
 # ---------------------------------------------------------------------------
 describe "machine-local state is never committed"

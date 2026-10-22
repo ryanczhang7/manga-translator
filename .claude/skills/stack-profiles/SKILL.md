@@ -57,6 +57,18 @@ value depends on a test runner that is fast, deterministic and scriptable.
 Mixed-stack projects are normal - a Godot client with a Python service is two
 profiles, two sets of gates with distinct ids, and one `paths.conf`.
 
+Two profiles that both configure a `mutation` gate - a Tauri project is
+`node-typescript` plus `rust-cargo` - would give `project.conf` two gates with
+one id. Keep `mutation` for one stack, the one `/audit-mutations` runs by
+default, and name the other `<stack>-mutation`: `rust-mutation`,
+`python-mutation`. The id **ends in `mutation`** so that a later rule can key
+on the suffix. Copy that profile's `evidence`, `slow` and `ondemand` lines
+under the new id, or the second gate runs on every full run and passes a
+runner that tested nothing, and tell `/audit-mutations` to run
+`bash scripts/gates.sh --gate rust-mutation` as well. Know the limit: today
+`gates.sh --audit` and `profiles.test.sh` judge the id `mutation` only
+(HARNESS-039 AC-4b), so nothing checks the second gate's lines but you.
+
 ## Guards that scan the source tree
 
 Most stacks eventually grow a *guard*: a test asserting a property of all

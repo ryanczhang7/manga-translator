@@ -441,19 +441,30 @@ case "$ph:$story_type" in
       else
         problem "story $sid: gates were recorded against tree '${rec:-none}' but $where is '$now'. Source, test or config changed after the last full gate run; run 'bash scripts/gates.sh' again and commit the result."
       fi
-
-      # A gate the story escalated must appear in the record as having passed.
-      # gates.sh enforces this while it runs; this catches the record written
-      # before the escalation was added, where the gate is optional again by
-      # the time anyone looks.
-      for g in $(frontmatter_list "$sfile" required_gates); do
-        if awk 'BEGIN{r=ARGV[1];ARGV[1]=""} $0~r{h=1} END{exit !h}' "^[[:space:]]*PASS[[:space:]]+$g( |\(|$)" <<< "$gr"; then
-          ok "story-required gate '$g' passed in the recorded run"
-        else
-          problem "story $sid: frontmatter requires gate '$g', but the recorded run has no PASS for it. Run 'bash scripts/gates.sh' again."
-        fi
-      done
     fi ;;
+esac
+
+# 3e-i. A gate the story escalated must appear in the record as having passed.
+#
+# gates.sh enforces this while it runs; this catches the record written before
+# the escalation was added, where the gate is optional again by the time
+# anyone looks - and the record that was never written at all.
+#
+# Outside the case above on both axes: every story type, spike included (the
+# spike exemption is about the RECORD; a spike that names a gate in
+# required_gates has claimed something needs checking), and outside the marker
+# test's else, so a story with no ## Gate results is told WHICH gate it did not
+# run.
+case "$ph" in
+  REVIEW|DONE)
+    gr="$(section "$sfile" "Gate results")"
+    for g in $(frontmatter_list "$sfile" required_gates); do
+      if awk 'BEGIN{r=ARGV[1];ARGV[1]=""} $0~r{h=1} END{exit !h}' "^[[:space:]]*PASS[[:space:]]+$g( |\(|$)" <<< "$gr"; then
+        ok "story-required gate '$g' passed in the recorded run"
+      else
+        problem "story $sid: frontmatter requires gate '$g', but the recorded run has no PASS for it. Run 'bash scripts/gates.sh' again."
+      fi
+    done ;;
 esac
 
 # 3f. The handoff was actually written

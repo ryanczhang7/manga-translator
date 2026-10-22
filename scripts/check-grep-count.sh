@@ -216,11 +216,18 @@ END {
     last = i
     i++
 
-    D = 0; hitline = 0
+    # JUDGED AS ONE LINE, reported at its first. Scanning each physical line on
+    # its own left a `||` on a continuation line with no `grep -c` to its left,
+    # so `y=$(grep -c x f \` then `  || printf 0)` was silent (HARNESS-060).
+    # Each trailing backslash and its newline become one space.
+    joined = ""
     for (k = start; k <= last; k++) {
-      pos = scan_line(raw[k])
-      if (pos > 0 && hitline == 0) hitline = k
+      seg = raw[k]
+      if (k < last) { sub(/\\[ \t]*$/, "", seg); seg = seg " " }
+      joined = joined seg
     }
+    D = 0; hitline = 0
+    if (scan_line(joined) > 0) hitline = start
 
     # The marker, by line number, computed from the RAW file - see analyze().
     marked = 0
@@ -270,21 +277,27 @@ AWKEOF
 # pair is only taken when a `"` immediately follows it. An unbalanced rewrite
 # would corrupt the masking of everything after it on the line.
 #
+# THE DEPTH IS COUNTED BY lib.sh's subst_step (HARNESS_SUBST_AWK), the same
+# function mask_shell_quotes uses, so a quoted paren - `"$(grep -c '(a' f)"` -
+# is stepped over rather than counted. It counted every paren until HARNESS-060,
+# and such a substitution was never unwrapped. One function, not a copy: with a
+# private copy here the guard suite stayed green while the masker was broken.
+#
 # KNOWN LIMIT: only a `"` IMMEDIATELY before `$(`. In `x="a $(cmd) b"` the
 # substitution is embedded in a larger string and its interior stays masked, so
 # a defect written that way is not reported. No instance exists in this tree and
 # the shape is a poor place to put one; recorded rather than left silent.
 unwrap_quoted_subst() { # <file>
-  awk '{
+  awk "$HARNESS_SUBST_AWK"'{
     s = $0; L = length(s)
     delete blank
     for (i = 1; i <= L; i++) {
       if (substr(s, i, 3) != "\"$(") continue
-      d = 0
-      for (j = i + 1; j <= L; j++) {
-        c = substr(s, j, 1)
-        if (c == "(") d++
-        else if (c == ")") { d--; if (d == 0) break }
+      d = 1; SUBST_IN = ""
+      for (j = i + 3; j <= L; j += k) {
+        k = subst_step(s, j)
+        if (SUBST_D == 1) d++
+        else if (SUBST_D == -1) { d--; if (d == 0) break }
       }
       if (j <= L && substr(s, j + 1, 1) == "\"") { blank[i] = 1; blank[j + 1] = 1 }
     }

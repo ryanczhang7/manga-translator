@@ -27,6 +27,7 @@ command, observes it fail on purpose, and corrects this file.
     gate | integration   | optional | . | uv run pytest -q tests/integration -m "gpu or network"
     gate | build         | required | . | uv run pyinstaller --noconfirm packaging/<app>.spec
     gate | mutation      | optional | . | uv run mutmut run
+    evidence | mutation | 🎉 [1-9][0-9]*
     ondemand | mutation | mutmut re-runs the suite once per mutant; run it with /audit-mutations, not per story
 
     task | install | - | . | uv sync --all-extras

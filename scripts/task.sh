@@ -47,7 +47,7 @@ while IFS= read -r line; do
   rest  5 "$line" cmd
   [ -z "$cmd" ] && { printf "task '%s' is not configured in project.conf\n" "$want" >&2; exit 1; }
   shift
-  cd "$ROOT/$cwd" && eval "$cmd" "$@"
+  cd "$ROOT/$cwd" && eval "$cmd \"\$@\""
   exit $?
 done < "$CONF"
 printf "no such task: %s\n" "$want" >&2; exit 1

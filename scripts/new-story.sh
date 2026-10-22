@@ -5,6 +5,12 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 id="${1:-}"; title="${2:-}"; epic="${3:-}"; type="${4:-feature}"
 [ -n "$id" ] && [ -n "$title" ] || { echo 'usage: new-story.sh <ID> "<title>" [epic-id] [feature|fix|chore|bootstrap|spike]' >&2; exit 2; }
+. "$ROOT/.claude/hooks/lib.sh"
+# The id is joined into a path below, and the title is written into the
+# frontmatter unquoted: refuse an id that is not one path component and a
+# title that is not one line, before either names or writes anything.
+valid_story_id "$id" || { printf "error: story id '%s' is not one path component: an id is letters, digits, '.', '_' or '-', and starts with a letter or digit\n" "$id" >&2; exit 2; }
+case "$title" in *$'\n'*|*$'\r'*) echo 'error: the title must be one line' >&2; exit 2 ;; esac
 
 slug=$(printf '%s' "$title" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '-' | sed -e 's/^-//' -e 's/-$//' | cut -c1-40)
 slug="${slug%-}"
