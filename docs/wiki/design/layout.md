@@ -73,8 +73,25 @@ at all times", expressed as a stretch factor.
 | | < 1440 | ≥ 1440 |
 |---|---|---|
 | `TranslationColumn` default width | 300 | 380 |
-| `PageStrip` | a 28px rail: the page's index number (`type.numeric`, `color.text.secondary`; `color.text.primary` on the current row), plus status glyphs once they exist — no thumbnails | full 96px: thumbnails once they exist, filenames until then |
+| `PageStrip` | a 28px rail: the status glyph over the page's index number (`type.numeric`, `color.text.secondary`; `color.text.primary` on the current row) — the index drawn only when it fits the rail, per row (MT-090, below) — no thumbnails | full 96px: thumbnails once they exist, filenames until then |
 | Header | page counter, reviewed counter, cost readout, zoom | the same plus the chapter name |
+
+> **Amended by MT-090 (Lead Designer, 2026-10-23).** The rail is 28 px on
+> every chapter; it never widens for a long one, because every pixel it took
+> would come out of the canvas. Each rail row draws its 1-based index **iff**
+> the index label's `sizeHint().width()` is at most `STRIP_RAIL_WIDTH` — a
+> per-row test, re-judged on entering the rail, on relabel and on font change
+> (A-14). A row whose index does not fit (three digits under a wide-digit font;
+> none under Consolas or Segoe UI at 9 pt, where "120" is ~21 px) shows the
+> glyph alone, keeps its height (the label is hidden with its size retained,
+> so the rail's rows stay uniform), and its tooltip becomes
+> "Page N of M — *filename*" instead of the filename alone. The accessible name
+> is unchanged and already carries "Page N of M", so A-10's promise below
+> holds: the number is never unreachable, only undrawn. Smaller numerals were
+> rejected because the type scale has no step below `type.caption` that is
+> legible, and a chapter-wide "glyph only" rail was rejected because it would
+> hide 99 numbers that fit to accommodate 21 that do not. Chapters under 100
+> pages are unaffected on every supported font.
 
 Nothing is *removed* at the narrow width and nothing becomes unreachable — the
 strip's rail still selects pages, by click and by keyboard, and still carries

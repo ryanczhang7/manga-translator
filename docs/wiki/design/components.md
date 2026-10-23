@@ -575,7 +575,13 @@ row is a **72 px-wide thumbnail** of the page (height from the page's stored
 one-line footer of the status glyph and the page's 1-based index — the row
 "carries its index and a status glyph", as above. The filename is the row's
 tooltip and part of its accessible name; it is not drawn. In the 28 px rail the
-thumbnail is hidden and the footer stacks glyph over index (MT-086). Until a
+thumbnail is hidden and the footer stacks glyph over index (MT-086). **Amended
+by MT-090 (2026-10-23):** in the rail the index is drawn only when its label
+fits `STRIP_RAIL_WIDTH` (per row; three digits under a wide-digit font do not),
+and a row whose index is hidden keeps its height and takes the tooltip
+"Page N of M — *filename*" in place of the filename alone — the tooltip carries
+whatever the row does not draw; the accessible name never changes. The rule is
+in layout.md §"The one breakpoint". Until a
 page's thumbnail is decoded, and permanently for a page whose bytes do not
 decode, the thumbnail area is the **placeholder**: `color.surface.sunken` with
 a hairline `color.border.subtle` frame, the same frame `RunThumbnail` (§8) shows
