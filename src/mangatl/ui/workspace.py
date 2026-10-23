@@ -157,6 +157,7 @@ __all__ = [
     "TranslationRow",
     "Workspace",
     "page_accessible_text",
+    "page_tooltip_text",
 ]
 
 #: Judged on `Workspace.width()`: `>=` is the wide layout (layout.md).
@@ -259,6 +260,14 @@ def page_accessible_text(
     return f"Page {index + 1} of {total_pages}, {filename}, {phrase}"
 
 
+def page_tooltip_text(index: int, total_pages: int, filename: str) -> str:
+    """MT-090: the tooltip of a rail row whose index does not fit the rail.
+
+    `index` is 0-based; the text numbers pages from one, then the filename
+    after a spaced em dash (voice.md's dash form)."""
+    return f"Page {index + 1} of {total_pages} \N{EM DASH} {filename}"
+
+
 class _NoTextDelegate(QStyledItemDelegate):
     """Paints an item's ground (hover, current, selection) but not its text.
 
@@ -287,11 +296,19 @@ class _PageRow(QWidget):
     In the full strip the thumbnail sits centred between `space.3` margins
     (12 + 72 + 12 = 96) and the footer lays glyph beside index; in the rail the
     thumbnail is hidden and the footer stacks glyph over index, which is what
-    fits two characters' width into 28 px (MT-086)."""
+    fits two characters' width into 28 px (MT-086).
+
+    In the rail the index is drawn only when it fits (MT-090): a row whose
+    index is wider than the rail hides it, keeping its height, and the strip
+    moves the number into the item's tooltip. `fitChanged` asks the strip to
+    re-read this row after a font change, which can change the answer."""
+
+    fitChanged = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("pageRow")
+        self._rail = False
         self.thumb = QLabel()
         self.thumb.setObjectName("pageThumbnail")
         self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -313,6 +330,7 @@ class _PageRow(QWidget):
         self.set_thumbnail("pending", None)
 
     def set_rail(self, rail: bool) -> None:
+        self._rail = rail
         margin = 0 if rail else tokens_gen.SPACE_S3
         vertical = 0 if rail else tokens_gen.SPACE_S1
         self.outer.setContentsMargins(margin, vertical, margin, vertical)
@@ -320,17 +338,44 @@ class _PageRow(QWidget):
         self.box.setDirection(
             QBoxLayout.Direction.TopToBottom if rail else QBoxLayout.Direction.LeftToRight
         )
-        # In the rail the index's width counts, so the row's hint is honest
-        # against 28 px; in the full strip the 96 px strip sets the width.
-        self.label.setSizePolicy(
-            QSizePolicy.Policy.Preferred if rail else QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Preferred,
-        )
         self.label.setAlignment(
             Qt.AlignmentFlag.AlignCenter
             if rail
             else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
+        self.fit_index()
+
+    def index_fits(self) -> bool:
+        """Whether the index fits the rail: the rail row has zero contents
+        margins, so the label's own hint is the whole horizontal cost."""
+        return self.label.sizeHint().width() <= STRIP_RAIL_WIDTH
+
+    def index_drawn(self) -> bool:
+        """Whether the index is drawn: always in the full strip, and in the
+        rail only when it fits. Judged afresh on every call."""
+        return not self._rail or self.index_fits()
+
+    def fit_index(self) -> bool:
+        """Show or hide the index by `index_drawn`, and return the answer.
+
+        A drawn index in the rail counts its width, so the row's hint is
+        honest against 28 px; in the full strip the 96 px strip sets the
+        width. A hidden index keeps its height, so every rail row is as tall
+        as every other, and gives up its width, so the row fits the rail."""
+        drawn = self.index_drawn()
+        policy = QSizePolicy(
+            QSizePolicy.Policy.Preferred if self._rail and drawn else QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        policy.setRetainSizeWhenHidden(not drawn)
+        self.label.setSizePolicy(policy)
+        self.label.setVisible(drawn)
+        return drawn
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange:
+            self.fitChanged.emit()
 
     def set_thumbnail_area(self, size: QSize) -> None:
         """Fix the thumbnail area now, so the row does not reflow when the
@@ -405,12 +450,13 @@ class PageStrip(QListWidget):
         self._thumbnail_sizes = [_DEFAULT_THUMBNAIL_AREA] * len(self._filenames)
         self.clear()
         self._rows = []
-        for filename in self._filenames:
+        for index, filename in enumerate(self._filenames):
             item = QListWidgetItem()
             item.setToolTip(filename)
             self.addItem(item)
             row = _PageRow()
             row.set_rail(self._rail)
+            row.fitChanged.connect(partial(self._refit_row, index))
             self.setItemWidget(item, row)
             self._rows.append(row)
         for index in range(len(self._filenames)):
@@ -497,14 +543,38 @@ class PageStrip(QListWidget):
         self.setFixedWidth(STRIP_RAIL_WIDTH if rail else STRIP_WIDTH)
         for row in self._rows:
             row.set_rail(rail)
-        self._resize_items()
+        self._refit()
 
     def _relabel(self) -> None:
         for index in range(len(self._filenames)):
             text = str(index + 1)
             self.item(index).setText(text)
             self._rows[index].label.setText(text)
+        self._refit()
+
+    def _refit(self) -> None:
+        """Re-judge every row's index against the rail (MT-090), then size
+        every item to its row."""
+        for index in range(len(self._rows)):
+            self._apply_fit(index)
         self._resize_items()
+
+    def _refit_row(self, index: int) -> None:
+        """Row `index`'s font changed: re-judge it and re-size its item."""
+        if index >= len(self._rows):
+            return
+        self._apply_fit(index)
+        self.item(index).setSizeHint(self._rows[index].sizeHint())
+
+    def _apply_fit(self, index: int) -> None:
+        """Show or hide row `index`'s index, and give its item the tooltip
+        that goes with the answer: the filename when the index is drawn, the
+        page number and filename when it is not."""
+        filename = self._filenames[index]
+        drawn = self._rows[index].fit_index()
+        self.item(index).setToolTip(
+            filename if drawn else page_tooltip_text(index, len(self._filenames), filename)
+        )
 
     def _resize_items(self) -> None:
         for index, row in enumerate(self._rows):
