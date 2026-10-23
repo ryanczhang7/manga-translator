@@ -43,7 +43,7 @@ from mangatl.bench.truth import (
 )
 from mangatl.store.project import Project, SchemaTooNew, open_project, project_dir_for
 
-__all__ = ["S2Report", "main", "measure_s2"]
+__all__ = ["S2Report", "main", "measure_s2", "render"]
 
 _PROG = "python -m mangatl.bench.s2"
 _OK = 0
@@ -79,7 +79,7 @@ def measure_s2(project: Project, truth: GroundTruth) -> S2Report:
     )
 
 
-def _render(report: S2Report) -> list[str]:
+def render(report: S2Report) -> list[str]:
     recall, residual = report.recall, report.residual
     missed = ", ".join(f"page {o} region {i}" for o, i in recall.missed) or "none"
     lines = [
@@ -131,7 +131,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _fail(str(error))
         warnings = validate(truth, project.chapter).warnings
 
-    for line in (*warnings, *_render(report)):
+    for line in (*warnings, *render(report)):
         print(line)
     return _OK
 

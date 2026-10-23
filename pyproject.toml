@@ -85,6 +85,11 @@ mangatl = "mangatl.app:main"
 # `mangatl.cli.main([...])` in process; a test that shelled out to this name
 # would be testing the installer.
 mangatl-run = "mangatl.cli:main"
+# Added by MT-089 (PO-1): the combined benchmark report, `python -m
+# mangatl.bench` under a script name. A development convenience - the installer
+# ships `mangatl.exe` alone. Tests call `mangatl.bench.__main__.main([...])` in
+# process; a test that shelled out to this name would be testing the install.
+mangatl-bench = "mangatl.bench.__main__:main"
 
 [dependency-groups]
 # Synced by default by `uv sync`; every gate command depends on this group.
