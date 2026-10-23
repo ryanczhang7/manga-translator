@@ -355,6 +355,28 @@ def test_ac4_with_no_matched_region_nothing_is_measured_and_the_worst_is_zero(
     assert type(report.worst) is float
 
 
+def test_mt091_ac2_with_no_matched_region_anywhere_no_page_is_listed_as_uncleaned(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """MT-091 AC-2: nothing detected and nothing cleaned. No page is read, so no
+    page is listed as measured on its source scan."""
+    report = _measure(tmp_path, chapter, truth, None, {})
+
+    assert report.uncleaned_pages == ()
+
+
+def test_mt091_ac2_a_page_with_no_matched_region_is_not_listed_as_uncleaned(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """MT-091 AC-2: only page 0 is detected, nothing is cleaned. Page 0 is read
+    on its source scan and listed; page 1 has no matched region, is not read, and
+    is not listed."""
+    report = _measure(tmp_path, chapter, truth, None, {0: w.baseline()})
+
+    assert _keys(report) == [(0, 0), (0, 1), (0, 2)]
+    assert report.uncleaned_pages == (0,)
+
+
 def test_ac4_po2_a_page_with_no_cleaned_image_is_measured_on_its_source_scan_and_listed(
     tmp_path: Path, chapter: Chapter, truth: GroundTruth
 ) -> None:
