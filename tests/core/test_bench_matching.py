@@ -178,13 +178,23 @@ def test_masks_of_different_shapes_are_refused_with_a_value_error() -> None:
         iou(np.zeros((4, 6), dtype=bool), np.zeros((6, 4), dtype=bool))
 
 
-def test_masks_of_different_but_broadcastable_shapes_are_refused_naming_both_shapes() -> None:
-    # numpy broadcasts (1, 6) against (4, 6) silently and would yield a wrong IoU.
+@pytest.mark.parametrize(
+    ("shape_a", "shape_b"),
+    [
+        pytest.param((1, 6), (4, 6), id="rows-differ"),
+        # Same row count: a guard comparing only axis 0 lets this pair through.
+        pytest.param((4, 1), (4, 6), id="columns-differ"),
+    ],
+)
+def test_masks_of_different_but_broadcastable_shapes_are_refused_naming_both_shapes(
+    shape_a: tuple[int, int], shape_b: tuple[int, int]
+) -> None:
+    # numpy broadcasts each pair silently and would yield a wrong IoU.
     with pytest.raises(ValueError, match="different shapes") as raised:
-        iou(np.zeros((1, 6), dtype=bool), np.zeros((4, 6), dtype=bool))
+        iou(np.zeros(shape_a, dtype=bool), np.zeros(shape_b, dtype=bool))
 
-    assert "(1, 6)" in str(raised.value)
-    assert "(4, 6)" in str(raised.value)
+    assert str(shape_a) in str(raised.value)
+    assert str(shape_b) in str(raised.value)
 
 
 # -- Match --------------------------------------------------------------------
