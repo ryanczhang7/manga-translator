@@ -238,6 +238,53 @@ def test_ac8_a_missed_region_and_cleaning_skipped_fail_s2_on_both(
     assert _verdict(report) == (False, False, False)
 
 
+def _dots(count: int) -> list[w.Rect]:
+    """`count` isolated 1 x 1 black dots inside page 0's region 0, on a 4 px
+    pitch (three white pixels between) in a 5-column grid inset 8 px from the
+    region's edge (MT-091 Contract
+    block 3). Each dot is ink (luma 0, 5x5 contrast 255) and each white pixel
+    around it is not (luma 255), so `count` dots in the 1,600 px region score
+    exactly `count / 1600`."""
+    x0, y0, _, _ = w.TRUTH_RECTS[0]
+    assert count <= 25
+    return [
+        (x0 + 8 + 4 * (k % 5), y0 + 8 + 4 * (k // 5), x0 + 8 + 4 * (k % 5), y0 + 8 + 4 * (k // 5))
+        for k in range(count)
+    ]
+
+
+def _dotted(dots: int) -> dict[int, bytes]:
+    """Every region cleaned white, then `dots` black dots left in page 0's region 0."""
+    cleaned = w.all_cleaned(w.WHITE)
+    cleaned[0] = w.cleaned_page(0, w.WHITE, extra_ink=_dots(dots))
+    return cleaned
+
+
+def test_mt091_ac1_a_region_left_with_exactly_one_percent_ink_passes_s2s_residual_half(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """MT-091 AC-1, at the bar: 16 dots in 1,600 px is 0.01, the measured bar
+    (MT-023). A region at the bar passes; the bar is inclusive."""
+    report = _measure(tmp_path, chapter, truth, w.all_pages(), _dotted(16))
+
+    assert [r.fraction for r in report.residual.regions] == [0.01, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert report.residual_ok is True
+    assert _verdict(report) == (True, True, True)
+
+
+def test_mt091_ac1_a_region_left_with_one_and_a_quarter_percent_ink_fails_s2s_residual_half(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """MT-091 AC-1, over the bar: 20 dots in 1,600 px is 0.0125, above the 0.01
+    bar and well below the 0.0205 that the cleaning-skipped control allows a
+    loosened bar to reach. S2 must fail on residual ink alone."""
+    report = _measure(tmp_path, chapter, truth, w.all_pages(), _dotted(20))
+
+    assert [r.fraction for r in report.residual.regions] == [0.0125, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert report.residual_ok is False
+    assert _verdict(report) == (True, False, False)
+
+
 def test_ac8_with_nothing_detected_residual_is_vacuously_clean_and_s2_still_fails(
     tmp_path: Path, chapter: Chapter, truth: GroundTruth
 ) -> None:
