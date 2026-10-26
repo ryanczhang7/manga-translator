@@ -172,8 +172,29 @@ def test_iou_is_the_intersection_over_the_union() -> None:
 
 
 def test_masks_of_different_shapes_are_refused_with_a_value_error() -> None:
-    with pytest.raises(ValueError):
+    # `match=`: numpy refuses (4, 6) against (6, 4) on its own, with a message
+    # that does not say "different shapes"; only the guard's message does.
+    with pytest.raises(ValueError, match="different shapes"):
         iou(np.zeros((4, 6), dtype=bool), np.zeros((6, 4), dtype=bool))
+
+
+@pytest.mark.parametrize(
+    ("shape_a", "shape_b"),
+    [
+        pytest.param((1, 6), (4, 6), id="rows-differ"),
+        # Same row count: a guard comparing only axis 0 lets this pair through.
+        pytest.param((4, 1), (4, 6), id="columns-differ"),
+    ],
+)
+def test_masks_of_different_but_broadcastable_shapes_are_refused_naming_both_shapes(
+    shape_a: tuple[int, int], shape_b: tuple[int, int]
+) -> None:
+    # numpy broadcasts each pair silently and would yield a wrong IoU.
+    with pytest.raises(ValueError, match="different shapes") as raised:
+        iou(np.zeros(shape_a, dtype=bool), np.zeros(shape_b, dtype=bool))
+
+    assert str(shape_a) in str(raised.value)
+    assert str(shape_b) in str(raised.value)
 
 
 # -- Match --------------------------------------------------------------------

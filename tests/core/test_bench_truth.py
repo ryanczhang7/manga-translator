@@ -702,6 +702,9 @@ _MALFORMED: list[tuple[str, Edit]] = [
     ("unparseable-json", lambda d: '{"schema_version": 1, "pages": ['),
     ("top-level-is-an-array", lambda d: json.dumps([d])),
     ("schema-version-2", _set(("schema_version",), 2)),
+    # Below the supported version as well as above it: `!=`, not `>`.
+    ("schema-version-0", _set(("schema_version",), 0)),
+    ("schema-version-minus-1", _set(("schema_version",), -1)),
     ("schema-version-as-string", _set(("schema_version",), "1")),
     ("missing-schema-version", _drop(("schema_version",))),
     ("missing-chapter-name", _drop(("chapter_name",))),
@@ -717,14 +720,20 @@ _MALFORMED: list[tuple[str, Edit]] = [
     ("missing-page-regions", _drop(("pages", 1, "regions"))),
     ("page-width-as-string", _set(("pages", 1, "width"), "130")),
     ("page-height-as-float", _set(("pages", 1, "height"), 110.5)),
+    # `True` is an `int` to `isinstance`; the loader must check the exact type.
+    ("page-width-as-true", _set(("pages", 1, "width"), True)),
     ("page-regions-not-a-list", _set(("pages", 1, "regions"), {})),
     ("missing-region-index", _drop((*_REGION, "index"))),
     ("missing-region-polygon", _drop((*_REGION, "polygon"))),
     ("missing-region-kind", _drop((*_REGION, "kind"))),
     ("missing-region-source", _drop((*_REGION, "source"))),
     ("region-index-as-string", _set((*_REGION, "index"), "2")),
+    # The region whose index is 1, so that `True == 1` keeps the sorted indices
+    # 0..n-1 and only the exact-type check stands between it and loading.
+    ("region-index-as-true", _set(("pages", 1, "regions", 1, "index"), True)),
     ("polygon-not-a-list", _set((*_REGION, "polygon"), "34,10 42,10 42,18")),
     ("vertex-with-a-float", _set((*_REGION, "polygon"), [[34.5, 10], [42, 10], [42, 18]])),
+    ("vertex-with-true", _set((*_REGION, "polygon"), [[True, 10], [42, 10], [42, 18]])),
     ("vertex-with-three-numbers", _set((*_REGION, "polygon"), [[34, 10, 0], [42, 10], [42, 18]])),
     ("kind-outside-its-literal", _set((*_REGION, "kind"), "speech")),
     ("source-outside-its-literal", _set((*_REGION, "source"), "machine")),
