@@ -343,6 +343,85 @@ def test_a_mismatch_over_a_stale_file_does_not_leave_the_wrong_bytes_in_its_plac
     assert not stale.exists() or stale.read_bytes() != b"still wrong"
 
 
+class _ResetAfterFirstChunk:
+    """A response that serves its first chunk, then raises `error` from the
+    next `read` - a connection reset mid-stream (MT-093 AC-1).
+
+    Every `read` goes through the wrapped `_Response` first, so the opener's
+    `observe()` runs - and records the target directory - before the raise."""
+
+    def __init__(self, inner: _Response, error: BaseException) -> None:
+        self._inner = inner
+        self._error = error
+        self._served = False
+
+    def read(self, size: int | None = -1) -> bytes:
+        chunk = self._inner.read(size)
+        if self._served:
+            raise self._error
+        self._served = True
+        assert chunk, "the first read must hand out bytes, or nothing was mid-stream"
+        return chunk
+
+    def __enter__(self) -> _ResetAfterFirstChunk:
+        return self
+
+    def __exit__(
+        self,
+        kind: type[BaseException] | None,
+        value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self._inner.close()
+
+
+class _ResettingOpener(_Opener):
+    """`_Opener`, except the response for each path in `reset` raises that
+    path's exception from its second `read`."""
+
+    def __init__(self, opener: _Opener, reset: dict[str, BaseException]) -> None:
+        super().__init__(opener.served, opener.paths, opener.target)
+        self.reset = reset
+
+    def __call__(self, request: str | urllib.request.Request, *args: Any, **kwargs: Any) -> Any:
+        response = super().__call__(request, *args, **kwargs)
+        path = self.paths[self.urls[-1]]
+        if path in self.reset:
+            return _ResetAfterFirstChunk(response, self.reset[path])
+        return response
+
+
+def test_a_download_that_raises_mid_stream_propagates_and_leaves_no_part_behind(
+    tmp_path: Path,
+) -> None:
+    """MT-093 AC-1 (FM4): the opener serves detector.onnx's first chunk, then
+    its next `read` raises - inside `fetch_all`'s `with`, so the `.part` is
+    already open. The identical exception propagates, and line 68's clean-up is
+    the only thing that removes the `.part`."""
+    manifest, target, plain = _world(tmp_path)
+    sentinel = OSError("connection reset mid-stream")
+    opener = _ResettingOpener(plain, {"detector.onnx": sentinel})
+
+    with pytest.raises(OSError) as raised:
+        _script().fetch_all(manifest, target, opener=opener)
+
+    assert raised.value is sentinel, (
+        f"fetch_all raised {raised.value!r}, not the opener's own exception; AC-1:"
+        " the same exception propagates"
+    )
+    seen = [part for path, part, _final in opener.during if path == "detector.onnx"]
+    assert True in seen, (
+        f"detector.onnx's .part was never seen while it streamed ({seen});"
+        " the check below that it is gone would prove nothing"
+    )
+    assert not (target / "detector.onnx.part").exists(), (
+        "a download that raised mid-stream left detector.onnx.part behind"
+    )
+    assert not (target / "detector.onnx").exists(), (
+        "a download that raised mid-stream gave its bytes the file's name"
+    )
+
+
 # -- main ------------------------------------------------------------------------
 
 
