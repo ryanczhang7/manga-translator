@@ -60,7 +60,7 @@ from mangatl.domain.line import Line, OcrResult
 from mangatl.domain.page import Chapter, Page
 from mangatl.domain.page_status import PAGE_STATUSES, PageProgress
 from mangatl.domain.region import RawRegion
-from mangatl.store.lines import commit_line
+from mangatl.store.lines import commit_line, read_review_lines
 from mangatl.store.project import PAGE_DONE, PAGE_STALE, Project, create_project
 from mangatl.ui import tokens_gen
 from mangatl.ui.link import OrderedRegion
@@ -865,6 +865,75 @@ def test_a_change_on_the_current_page_updates_that_pages_row_and_no_other(
 
     assert window.page_strip.progress(1) == PageProgress("fully_reviewed", 1, 1, 0)
     assert [window.page_strip.progress(i) for i in (0, 2, 3)] == others_before
+
+
+# =============================================================================
+# MT-097: a save still pending when the page changes belongs to the page left
+# =============================================================================
+
+
+def _stored_row(project: Project, ordinal: int, index: int) -> tuple[Any, ...]:
+    """One stored line as `(status, final_en, proposed_en, source_ja, edited)`."""
+    line = read_review_lines(project, ordinal)[index]
+    assert line is not None, f"page {ordinal} region {index} has no line"
+    return (
+        line.status,
+        line.final_en,
+        line.proposed_en,
+        line.source_ja,
+        line.edited_at is not None,
+    )
+
+
+def test_changing_page_with_a_save_pending_leaves_the_new_pages_row_its_own(
+    qtbot,  # type: ignore[no-untyped-def]
+    reviewing: Project,
+) -> None:
+    """MT-097 AC-1: the flushed save of page 1's accept re-derives page 1's
+    row, never page 2's - which is the page being entered."""
+    window = _reviewing(qtbot, reviewing, 0)
+    strip = window.page_strip
+    before = [strip.progress(i) for i in range(4)]
+
+    _click(window, 0, "accept_button")
+    strip.setCurrentRow(1)
+    _settle()
+
+    assert before[1] == PageProgress("translated", 0, 1, 0)
+    entered = strip.progress(1)
+    assert entered == before[1], (
+        f"page 2's strip row now reads {entered!r}, not its own {before[1]!r}:"
+        " the save flushed on leaving page 1 was written onto the page entered"
+    )
+    assert strip.progress(0) == PageProgress("partly_reviewed", 1, 3, 0)
+    assert [strip.progress(i) for i in (2, 3)] == before[2:]
+    assert strip.currentRow() == 1
+
+
+def test_a_save_pending_when_the_page_changes_still_reaches_the_project_file(
+    qtbot,  # type: ignore[no-untyped-def]
+    reviewing: Project,
+) -> None:
+    """MT-097 AC-2: reordering the flush neither drops nor delays the save.
+
+    Read straight after the page change and a `flush()` of the column - no
+    wait - so a save deferred past the page change fails too."""
+    window = _reviewing(qtbot, reviewing, 0)
+
+    _click(window, 0, "accept_button")
+    pending = _stored_row(reviewing, 0, 0)
+    window.page_strip.setCurrentRow(1)
+    _settle()
+    window.translation_column.flush()
+
+    # Precondition: the accept was still unsaved when the page changed.
+    assert pending == ("proposed", None, "en 0", "ja 0", False)
+    assert _stored_row(reviewing, 0, 0) == ("accepted", None, "en 0", "ja 0", True)
+    assert [_stored_row(reviewing, 0, i) for i in (1, 2)] == [
+        ("proposed", None, "en 1", "ja 1", False),
+        ("proposed", None, "en 2", "ja 2", False),
+    ]
+    assert _stored_row(reviewing, 1, 0) == ("proposed", None, "en 0", "ja 0", False)
 
 
 @pytest.mark.parametrize(
