@@ -808,3 +808,44 @@ def test_the_workspaces_rows_carry_the_stored_statuses(
         ("proposed", P),
         ("failed", ""),
     ]
+
+
+def test_closing_the_workspace_commits_text_typed_without_enter(
+    qtbot,  # type: ignore[no-untyped-def]
+    project: Project,
+    chapter_dir: Path,
+) -> None:
+    """MT-096 AC-1. Text typed into a focused editor, Enter never pressed, then
+    the window closed: `closeEvent` calls `TranslationColumn.flush()`, which
+    clears focus from the focused editor before flushing - committing the dirty
+    field as leaving it would (C-7 row 11). Flushing the editors directly
+    (WS29) leaves the field focused and uncommitted, and the text is lost."""
+    window = _showing(qtbot, project)
+    editor = _editor(window, 2)
+    _focus(qtbot, editor)
+    _type(editor, "Typed, no Enter")
+
+    window.close()
+
+    assert _on_disk(chapter_dir, 0)[2] == ("Typed, no Enter", "edited")
+
+
+def test_changing_page_commits_text_typed_without_enter_to_the_page_it_was_typed_on(
+    qtbot,  # type: ignore[no-untyped-def]
+    project: Project,
+    chapter_dir: Path,
+) -> None:
+    """MT-096 AC-2. Text typed into a focused editor, Enter never pressed, then
+    page 2 selected: `_load_regions` and `set_rows` call
+    `TranslationColumn.flush()`, which clears focus before flushing, so the
+    text commits to page 1's line before the rows are replaced. Flushing the
+    editors directly (WS30) drops it; page 2's lines stay untouched."""
+    window = _showing(qtbot, project)
+    editor = _editor(window, 2)
+    _focus(qtbot, editor)
+    _type(editor, "Typed, no Enter")
+
+    window.page_strip.setCurrentRow(1)
+
+    assert _on_disk(chapter_dir, 0)[2] == ("Typed, no Enter", "edited")
+    assert _on_disk(chapter_dir, 1) == [(None, None)]
