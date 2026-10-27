@@ -1076,6 +1076,9 @@ class Workspace(QMainWindow):
         """Decode page `ordinal` synchronously and show it with its stored
         regions and lines (MT-016 PO-2), or show why it failed."""
         assert self._chapter is not None, "show_page before load_chapter"
+        # The page left's pending saves, while its rows still update its own
+        # strip row and not the page entered's (MT-097).
+        self.translation_column.flush()
         self._page_ordinal = ordinal
         page = self._chapter.pages[ordinal]
         pixmap = QPixmap(str(self._chapter.source_dir / page.filename))
