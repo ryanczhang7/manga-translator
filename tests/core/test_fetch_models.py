@@ -33,6 +33,7 @@ does with the entries after a mismatch, and what `main` prints on success.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import importlib.util
 import io
 import json
@@ -391,18 +392,34 @@ class _ResettingOpener(_Opener):
         return response
 
 
+@pytest.mark.parametrize(
+    "sentinel",
+    [
+        pytest.param(OSError("connection reset mid-stream"), id="oserror-connection-reset"),
+        pytest.param(
+            http.client.IncompleteRead(partial=b"truncated"),
+            id="incompleteread-not-an-oserror",
+        ),
+        pytest.param(KeyboardInterrupt(), id="keyboardinterrupt-not-an-exception"),
+    ],
+)
 def test_a_download_that_raises_mid_stream_propagates_and_leaves_no_part_behind(
-    tmp_path: Path,
+    tmp_path: Path, sentinel: BaseException
 ) -> None:
     """MT-093 AC-1 (FM4): the opener serves detector.onnx's first chunk, then
     its next `read` raises - inside `fetch_all`'s `with`, so the `.part` is
     already open. The identical exception propagates, and line 68's clean-up is
-    the only thing that removes the `.part`."""
+    the only thing that removes the `.part`.
+
+    MT-095 pins the breadth of that clean-up's `except`: AC-1 raises
+    `http.client.IncompleteRead`, an `Exception` that is not an `OSError` (red
+    under `except OSError:`); AC-2 raises `KeyboardInterrupt`, which is not an
+    `Exception` (red under `except Exception:`). `pytest.raises` catches the
+    `KeyboardInterrupt` inside the test, so it never reaches the session."""
     manifest, target, plain = _world(tmp_path)
-    sentinel = OSError("connection reset mid-stream")
     opener = _ResettingOpener(plain, {"detector.onnx": sentinel})
 
-    with pytest.raises(OSError) as raised:
+    with pytest.raises(type(sentinel)) as raised:
         _script().fetch_all(manifest, target, opener=opener)
 
     assert raised.value is sentinel, (
