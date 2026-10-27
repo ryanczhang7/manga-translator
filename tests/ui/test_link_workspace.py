@@ -674,6 +674,42 @@ def test_a_click_more_than_3_px_away_starts_over_at_the_smallest_and_within_3_px
     assert window.link.state.selected_region_id == 0
 
 
+def test_a_second_click_exactly_3_px_away_is_the_same_point_and_cycles(
+    qtbot,  # type: ignore[no-untyped-def]
+    project: Project,
+) -> None:
+    """MT-098 AC-2: components.md §4.8 "within 3px" includes 3 px itself."""
+    window = _on_page(qtbot, project)
+    canvas, point = _overlapping(window)
+    _click(canvas, point)
+    assert window.link.state.selected_region_id == 1, "precondition: smallest first"
+
+    _click(canvas, point + QPoint(3, 0))  # exactly 3 px: the same point
+
+    assert window.link.state.selected_region_id == 0
+
+
+def test_a_press_and_release_exactly_3_px_apart_is_a_click_not_a_drag(
+    qtbot,  # type: ignore[no-untyped-def]
+    project: Project,
+) -> None:
+    """MT-098 AC-3: §4.8, a press and release within 3 px (3 included) selects."""
+    window = _on_page(qtbot, project)
+    canvas, point = _overlapping(window)
+    window.link.select(None)
+    _settle()
+    assert window.link.state.selected_region_id is None, "precondition: nothing selected"
+
+    viewport = canvas.viewport()
+    QTest.mousePress(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
+    QTest.mouseRelease(
+        viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point + QPoint(3, 0)
+    )
+    _settle()
+
+    assert window.link.state.selected_region_id == 1
+
+
 # =============================================================================
 # AC-7 - dimming (the badge half is in test_markers.py)
 # =============================================================================
