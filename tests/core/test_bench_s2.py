@@ -285,6 +285,20 @@ def test_mt091_ac1_a_region_left_with_one_and_a_quarter_percent_ink_fails_s2s_re
     assert _verdict(report) == (True, False, False)
 
 
+def test_mt094_ac1_a_region_left_one_pixel_over_the_bar_fails_s2s_residual_half(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """MT-094 AC-1, one pixel over the bar: 17 dots in 1,600 px is 0.010625, one
+    pixel (the fixture's resolution, 1/1600) above 16/1600 = 0.01, the measured
+    bar (MT-023). A bar loosened anywhere into [0.010625, 0.0125) - which
+    MT-091's 20-dot test cannot see - passes this region; S2 must fail it."""
+    report = _measure(tmp_path, chapter, truth, w.all_pages(), _dotted(17))
+
+    assert [r.fraction for r in report.residual.regions] == [0.010625, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert report.residual_ok is False
+    assert _verdict(report) == (True, False, False)
+
+
 def test_ac8_with_nothing_detected_residual_is_vacuously_clean_and_s2_still_fails(
     tmp_path: Path, chapter: Chapter, truth: GroundTruth
 ) -> None:
