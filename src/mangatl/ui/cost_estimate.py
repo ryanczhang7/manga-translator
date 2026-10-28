@@ -6,9 +6,12 @@ for the budget, and - above 200 pages - a warning that this is more pages than a
 chapter. Nothing here blocks anything; the Start button is MT-059's.
 
 **The figure is the guard's own.** The estimate is
-`Budget().project((), pages).remaining_chapter`, asked at construction: the
-number the budget guard itself uses before any call is priced, so the screen
-and the guard cannot disagree about whether a chapter fits. No money arithmetic
+`Budget(page_estimate=page_estimate(model)).project((), pages).remaining_chapter`,
+asked at construction: the number the budget guard itself uses before any call
+is priced on that model (MT-100), so the screen and the guard cannot disagree
+about whether a chapter fits. `model` is the id the run would call; when none
+can be chosen it is `NoProvider(reason)` and the widget shows no figure, only
+why, and is never over budget. No money arithmetic
 happens here beyond the one comparison, `estimate > ceiling`, which is inclusive
 as `Budget.check` is: an estimate exactly on the ceiling is within budget.
 
@@ -31,16 +34,17 @@ before the frame is first polished and never changed, which the sheet's
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import ROUND_CEILING, Context, Decimal
 
 from PySide6.QtWidgets import QFrame, QVBoxLayout, QWidget
 
-from mangatl.domain.budget import Budget
+from mangatl.domain.budget import Budget, page_estimate
 from mangatl.domain.money import Usd
 from mangatl.ui import tokens_gen
 from mangatl.ui.labels import plain_label
 
-__all__ = ["CostEstimate", "format_usd"]
+__all__ = ["CostEstimate", "NoProvider", "format_usd"]
 
 OBJECT_NAME = "summary-cost-estimate"
 OVER_BUDGET = "The estimate is over budget."
@@ -62,36 +66,53 @@ def format_usd(amount: Usd) -> str:
     return f"${cents:,.2f}"
 
 
-class CostEstimate(QFrame):
-    """The estimate for `pages` pages and the budget it is held to."""
+@dataclass(frozen=True)
+class NoProvider:
+    """No model to price against (MT-100 C-6); `reason` is the
+    `ProviderError`'s message - or `NO_MODELS` - saying why."""
 
-    def __init__(self, pages: int, parent: QWidget | None = None) -> None:
+    reason: str
+
+
+class CostEstimate(QFrame):
+    """The estimate for `pages` pages on `model`, and the budget it is held to.
+
+    `model` is a `domain.rates.RATES` id, or `NoProvider` when none can be
+    chosen: then there is no figure, nothing is over budget, and the estimate
+    line says why.
+    """
+
+    def __init__(self, pages: int, model: str | NoProvider, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        budget = Budget()
-        estimate = budget.project((), pages).remaining_chapter
-        self._over_budget = estimate > budget.ceiling
+        noun = "page" if pages == 1 else "pages"
+        if isinstance(model, NoProvider):
+            budget = Budget()
+            self._over_budget = False
+            stop = "" if model.reason.endswith(".") else "."
+            estimate_line = f"No estimate: {model.reason}{stop}"
+            warning = "That is more pages than a chapter."
+        else:
+            budget = Budget(page_estimate=page_estimate(model))
+            estimate = budget.project((), pages).remaining_chapter
+            self._over_budget = estimate > budget.ceiling
+            shown = format_usd(estimate)
+            estimate_line = f"Estimated for {pages} {noun} with {model}: {shown}."
+            warning = f"That is more pages than a chapter. Estimated cost is {shown}."
 
         self.setObjectName(OBJECT_NAME)
         # Read by theme.qss's [overBudget="true"] rule; set before first polish
         # and never changed, so no re-polish is needed.
         self.setProperty("overBudget", self._over_budget)
-        shown = format_usd(estimate)
 
-        noun = "page" if pages == 1 else "pages"
         budget_line = f"Budget {format_usd(budget.ceiling)}."
         if self._over_budget:
             budget_line = f"{budget_line} {OVER_BUDGET}"
         parts = [
-            ("cost-estimate", f"Estimated for {pages} {noun}: {shown}."),
+            ("cost-estimate", estimate_line),
             ("cost-budget", budget_line),
         ]
         if pages > CHAPTER_PAGE_LIMIT:
-            parts.append(
-                (
-                    "cost-page-warning",
-                    f"That is more pages than a chapter. Estimated cost is {shown}.",
-                )
-            )
+            parts.append(("cost-page-warning", warning))
 
         column = QVBoxLayout(self)
         pad = tokens_gen.SPACE_S3

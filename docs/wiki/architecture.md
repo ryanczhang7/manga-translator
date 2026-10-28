@@ -379,6 +379,17 @@ not a tuning knob, it is the budget.
 loses twenty pages of spend and the context window fights twenty images);
 one call per *bubble* (far better alignment, catastrophically more expensive,
 and it discards the page context the brief chose a cloud LLM for).
+*Amended 2026-10-28 by the user (EPIC-09 PO-1):* **one request per page,
+submitted together as one batch per volume**, on Gemini. The lost
+alternative "one call per chapter" is not what a batch is: each request is
+billed and succeeds or fails on its own, so a single failure costs one page.
+Two things D5 forbade are now wanted and are the user's decision, dated
+today: a second, text-only pass over the volume that returns **only
+corrections** (EPIC-09 PO-6 - a full-rewrite pass would cost more than the
+batch saves), and a glossary proposed by one text-only call before page 1
+(PO-2). The 1,568 px cap, the thinking level and the model are unchanged;
+`translate/prompt.py`'s "one call per page" note is updated by the story that
+first builds a batch (MT-110).
 
 **D6 — Budget enforcement is a domain rule, not a warning.**
 `Budget` lives in `domain`, is fed by the ledger, and `translate` refuses to

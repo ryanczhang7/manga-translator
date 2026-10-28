@@ -29,6 +29,7 @@ from typing import Literal
 
 __all__ = [
     "KEY_VARS",
+    "MODEL_IDS",
     "PROVIDERS",
     "PROVIDER_VAR",
     "AmbiguousProvider",
@@ -39,6 +40,7 @@ __all__ = [
     "ProviderUnavailable",
     "Selection",
     "UnknownProvider",
+    "model_for",
     "select_provider",
 ]
 
@@ -131,3 +133,22 @@ def _known(value: str) -> Provider:
         if value == provider:
             return provider
     raise UnknownProvider(f"unknown provider {value!r}: choose one of {', '.join(PROVIDERS)}")
+
+
+#: The model each provider's translator calls - the id `domain.rates.RATES`
+#: prices (MT-100 C-2). `translate.gemini.MODEL_ID` and
+#: `translate.prompt.MODEL_ID` are held equal to these by a test (AC-8).
+#: `openai` has no translator (MT-078 PO-5) and no row.
+MODEL_IDS: Mapping[Provider, str] = {
+    "anthropic": "claude-opus-5",
+    "gemini": "gemini-3.1-pro-preview",
+}
+
+
+def model_for(provider: Provider) -> str:
+    """The model `provider`'s translator calls, or `ProviderUnavailable` for a
+    provider with no translator - the sentence `compose._translator` raises."""
+    model_id = MODEL_IDS.get(provider)
+    if model_id is None:
+        raise ProviderUnavailable(f"translation with {provider} is not available yet")
+    return model_id

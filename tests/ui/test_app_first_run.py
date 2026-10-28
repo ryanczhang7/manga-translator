@@ -56,7 +56,7 @@ from mangatl import app as app_module
 from mangatl.app_paths import settings_path
 from mangatl.domain.page import Chapter
 from mangatl.store.project import project_dir_for
-from mangatl.translate.provider import NoApiKey, ProviderUnavailable, Selection
+from mangatl.translate.provider import AmbiguousProvider, NoApiKey, ProviderUnavailable, Selection
 from mangatl.ui import tokens_gen
 from mangatl.ui.intake import FolderDropTarget
 from mangatl.ui.main_window import MainWindow
@@ -548,8 +548,11 @@ def _press_start(qtbot, window: QMainWindow, folder: Path) -> None:  # type: ign
 def _window(tmp_path: Path, folder: Path) -> QMainWindow:
     models = tmp_path / "models"
     models.mkdir()
+    # MT-100 C-5: the window's model selector is the real `app.selected_model`,
+    # which makes the same resolution `build_stages` makes at Start.
     return app_module.build_window(
-        [str(folder)], run_setup=RunSetup(lambda: models, app_module.build_stages)
+        [str(folder)],
+        run_setup=RunSetup(lambda: models, app_module.build_stages, app_module.selected_model),
     )
 
 
@@ -603,6 +606,146 @@ def test_a_start_with_the_stored_key_hands_its_selection_to_the_pipeline(
 
     assert _selection_of(recorder) == Selection("gemini", STORED_KEY)
     assert recorder.calls[0][0] == tmp_path / "models"
+    window.close()
+
+
+def test_a_keyless_window_shows_no_estimate_and_its_start_still_fails_naming_the_key(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """MT-100 AC-4 through the real `app.selected_model` and `app.build_stages`:
+    the summary says why there is no estimate - the `NoApiKey` sentence - and
+    pressing Start fails exactly as it did before (MT-077 AC-1)."""
+    _clear_provider_env(monkeypatch)
+    recorder = _record_pipeline(
+        monkeypatch, PipelineRecorder(raise_after=ProviderUnavailable("build_pipeline was reached"))
+    )
+    folder = _chapter_folder(tmp_path)
+    window = _window(tmp_path, folder)
+    summary = window.centralWidget()
+    assert isinstance(summary, ChapterSummary), f"central is {type(summary).__name__}"
+
+    assert summary.cost_estimate.lines == (f"No estimate: {NO_API_KEY_TEXT}.", "Budget $2.00.")
+    assert summary.cost_estimate.over_budget is False
+
+    _press_start(qtbot, window, folder)
+
+    target = window.centralWidget()
+    assert isinstance(target, FolderDropTarget)
+    assert target.headline.text() == NO_API_KEY_TEXT
+    assert recorder.calls == []
+    window.close()
+
+
+# =============================================================================
+# selected_model - MT-100 C-5: the model Start would call, for the estimate
+# =============================================================================
+#
+# The same resolution `build_stages` makes at Start - `select_provider` over
+# `translation_env(os.environ, settings_path())`, the choice from
+# `MANGATL_PROVIDER` - then `model_for(provider)`. `os.environ` is set to
+# exactly the variables each test names (`_clear_provider_env` first);
+# `settings_path()` is this test's own empty `APPDATA` unless a test stores a
+# key there.
+
+#: MT-078 AC-2's sentence for anthropic + gemini, spelled out.
+AMBIGUOUS_TEXT = (
+    "API keys are set for more than one provider (anthropic, gemini);"
+    " choose one with --provider or MANGATL_PROVIDER"
+)
+
+
+def test_a_gemini_key_alone_selects_the_gemini_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MT-100 AC-1's environment: `GEMINI_API_KEY` is the only key set."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv(GEMINI, ENV_KEY)
+
+    assert app_module.selected_model() == "gemini-3.1-pro-preview"
+
+
+def test_an_anthropic_key_alone_selects_the_claude_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MT-100 AC-3's environment."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-dummy-0000")
+
+    assert app_module.selected_model() == "claude-opus-5"
+
+
+def test_the_stored_gemini_key_selects_the_gemini_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MT-077's stored key counts, as it does at Start: `translation_env`."""
+    _clear_provider_env(monkeypatch)
+    _store(settings_path(), {"gemini_api_key": STORED_KEY})
+
+    assert app_module.selected_model() == "gemini-3.1-pro-preview"
+
+
+def test_no_key_anywhere_is_refused_with_the_no_api_key_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MT-100 AC-4: the `ProviderError` the summary quotes."""
+    _clear_provider_env(monkeypatch)
+
+    with pytest.raises(NoApiKey) as caught:
+        app_module.selected_model()
+
+    assert str(caught.value) == NO_API_KEY_TEXT
+
+
+def test_two_keys_and_no_choice_are_refused_as_ambiguous(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-dummy-0000")
+    monkeypatch.setenv(GEMINI, ENV_KEY)
+
+    with pytest.raises(AmbiguousProvider) as caught:
+        app_module.selected_model()
+
+    assert str(caught.value) == AMBIGUOUS_TEXT
+
+
+def test_two_keys_and_an_explicit_choice_select_the_chosen_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`MANGATL_PROVIDER` decides, as at Start."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-dummy-0000")
+    monkeypatch.setenv(GEMINI, ENV_KEY)
+    monkeypatch.setenv("MANGATL_PROVIDER", "anthropic")
+
+    assert app_module.selected_model() == "claude-opus-5"
+
+
+def test_an_openai_key_alone_is_refused_as_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MT-100 AC-8 / Out of scope: openai has no translator and no model."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-oai-dummy-0000")
+
+    with pytest.raises(ProviderUnavailable) as caught:
+        app_module.selected_model()
+
+    assert str(caught.value) == "translation with openai is not available yet"
+
+
+def test_the_default_window_setup_prices_with_selected_model(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """MT-100 C-5: `build_window`'s default `RunSetup` carries `selected_model`,
+    so a window built with no setup of its own prices on the environment's
+    model. A Gemini key alone: two pages at $0.03."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv(GEMINI, ENV_KEY)
+    folder = _chapter_folder(tmp_path)
+
+    window = app_module.build_window([str(folder)])
+    qtbot.addWidget(window)
+
+    summary = window.centralWidget()
+    assert isinstance(summary, ChapterSummary)
+    assert summary.cost_estimate.lines[0] == (
+        "Estimated for 2 pages with gemini-3.1-pro-preview: $0.06."
+    )
     window.close()
 
 

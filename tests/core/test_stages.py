@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mangatl.domain.line import OcrResult
+from mangatl.domain.money import Usd
 from mangatl.domain.region import RawRegion
 from mangatl.domain.translation import TokenUsage, TranslationResult
 from mangatl.pipeline.clean_stage import CleanStage
@@ -88,6 +89,12 @@ _DETECT = "detect"
 _CLEAN = "clean"
 _OCR = "ocr"
 _TRANSLATE = "translate"
+
+#: MT-100 C-3: the per-page estimate `build_stages` hands the translate stage.
+#: $0.03 and deliberately NOT `BOOTSTRAP_PAGE_ESTIMATE` ($0.06): a builder that
+#: dropped the argument and let the stage fall back to Claude's figure must
+#: show up as a different number, not as the same one by coincidence.
+_ESTIMATE = Usd.from_micro(30_000)
 
 
 # -- doubles -------------------------------------------------------------------
@@ -240,7 +247,7 @@ def test_the_stage_list_is_detect_then_clean_then_ocr_then_translate_and_nothing
     transcriber = _Transcriber()
     translator = _Translator()
 
-    stages = build_stages(detector, cleaner, transcriber, translator)
+    stages = build_stages(detector, cleaner, transcriber, translator, _ESTIMATE)
 
     assert [type(stage) for stage in stages] == [
         DetectStage,
@@ -259,7 +266,9 @@ def test_the_stage_list_is_a_tuple_rather_than_a_mutable_sequence(
 ) -> None:
     """C-1 says `tuple`, and a list here would let a caller append a stage to
     the pipeline's own definition after it was built."""
-    stages = build_stages(_Detector(_mask(one_bit_png)), _Cleaner(), _Transcriber(), _Translator())
+    stages = build_stages(
+        _Detector(_mask(one_bit_png)), _Cleaner(), _Transcriber(), _Translator(), _ESTIMATE
+    )
 
     assert type(stages) is tuple, f"build_stages returned a {type(stages).__name__}"
 
@@ -270,7 +279,9 @@ def test_each_stage_is_named_the_way_the_events_will_report_it(
     """AC-2's second clause. The names are what `StageFinished.stage` carries
     and what MT-018's progress readout will show a user - which ignores
     `"clean"` by design (MT-065 PO-6)."""
-    stages = build_stages(_Detector(_mask(one_bit_png)), _Cleaner(), _Transcriber(), _Translator())
+    stages = build_stages(
+        _Detector(_mask(one_bit_png)), _Cleaner(), _Transcriber(), _Translator(), _ESTIMATE
+    )
 
     assert [stage.name for stage in stages] == [_DETECT, _CLEAN, _OCR, _TRANSLATE]
 
@@ -294,13 +305,18 @@ def test_each_stage_holds_the_callable_it_was_given_and_not_the_other_one(
     translator = _Translator()
 
     detect_stage, clean_stage, ocr_stage, translate_stage = build_stages(
-        detector, cleaner, transcriber, translator
+        detector, cleaner, transcriber, translator, _ESTIMATE
     )
 
     assert detect_stage.detect is detector
     assert clean_stage.clean is cleaner
     assert ocr_stage.transcribe is transcriber
     assert translate_stage.translate is translator
+    # MT-100 C-3: and the per-page estimate it was handed, not Claude's $0.06.
+    assert translate_stage.page_estimate == _ESTIMATE, (
+        f"the translate stage carries {translate_stage.page_estimate!r}, not the"
+        f" {_ESTIMATE!r} build_stages was given (MT-100 C-3)"
+    )
 
 
 def test_every_stage_in_the_list_satisfies_the_stage_protocol(
@@ -308,7 +324,9 @@ def test_every_stage_in_the_list_satisfies_the_stage_protocol(
 ) -> None:
     """`Stage` is a `Protocol`, so there is no base class to assert against; the
     three members the runner calls are the whole of it."""
-    stages = build_stages(_Detector(_mask(one_bit_png)), _Cleaner(), _Transcriber(), _Translator())
+    stages = build_stages(
+        _Detector(_mask(one_bit_png)), _Cleaner(), _Transcriber(), _Translator(), _ESTIMATE
+    )
 
     assert len(stages) == 4, (
         f"the stage list holds {len(stages)} stages;"
@@ -330,7 +348,7 @@ def test_without_a_translator_the_list_is_detect_then_clean_then_ocr(
     satisfies every assertion about the two it kept (DV-7)."""
     cleaner = _Cleaner()
 
-    stages = build_stages(_Detector(_mask(one_bit_png)), cleaner, _Transcriber(), None)
+    stages = build_stages(_Detector(_mask(one_bit_png)), cleaner, _Transcriber(), None, None)
 
     assert [type(stage) for stage in stages] == [DetectStage, CleanStage, OcrStage], (
         f"the --no-translate list is {[type(stage).__name__ for stage in stages]};"
@@ -348,9 +366,13 @@ def test_the_cleaner_is_a_required_second_parameter_with_no_default() -> None:
     give the project a stage list that silently does not clean."""
     parameters = inspect.signature(build_stages).parameters
 
-    assert list(parameters) == ["detect", "clean", "transcribe", "translate"]
+    # MT-100 C-3 appends `page_estimate`, given with the translator or `None`
+    # with it, and with no default for the translator's reason: a default would
+    # let a stage list quietly price every model at Claude's figure.
+    assert list(parameters) == ["detect", "clean", "transcribe", "translate", "page_estimate"]
     assert parameters["clean"].default is inspect.Parameter.empty
     assert parameters["translate"].default is inspect.Parameter.empty
+    assert parameters["page_estimate"].default is inspect.Parameter.empty
 
 
 def test_the_module_exports_the_builder_and_nothing_else() -> None:
@@ -446,7 +468,7 @@ def test_the_built_order_lets_each_stage_read_what_the_one_before_it_wrote(
     with _new_project(source_dir) as project:
         outcome = run_chapter(
             project,
-            build_stages(detector, cleaner, transcriber, translator),
+            build_stages(detector, cleaner, transcriber, translator, _ESTIMATE),
             lambda event: None,
             _never,
         )
@@ -515,7 +537,7 @@ def test_a_page_with_no_regions_at_all_gets_no_proposal_and_does_not_fail_the_ru
     with _new_project(source_dir) as project:
         outcome = run_chapter(
             project,
-            build_stages(_EmptyDetector(), cleaner, _Transcriber(), translator),
+            build_stages(_EmptyDetector(), cleaner, _Transcriber(), translator, _ESTIMATE),
             lambda event: None,
             _never,
         )

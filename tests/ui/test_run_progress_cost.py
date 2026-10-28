@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 from PIL import Image
 
-from mangatl.domain.budget import DEFAULT_CEILING, Projection
+from mangatl.domain.budget import BOOTSTRAP_PAGE_ESTIMATE, DEFAULT_CEILING, Projection
 from mangatl.domain.events import CallPriced, PageStarted, RunEvent, RunStarted, StageFinished
 from mangatl.domain.line import OcrResult
 from mangatl.domain.money import Usd
@@ -270,7 +270,10 @@ def test_a_real_run_drives_the_panels_cost_readout_page_by_page(qtbot, tmp_path:
 
     with create_project(read_chapter(source_dir), project_dir_for(source_dir)) as project:
         run_chapter(
-            project, build_stages(detect, clean, transcribe, _Translator()), emit, lambda: False
+            project,
+            build_stages(detect, clean, transcribe, _Translator(), BOOTSTRAP_PAGE_ESTIMATE),
+            emit,
+            lambda: False,
         )
 
     assert figures == ["$0.04", "$0.10", "$0.14"], (

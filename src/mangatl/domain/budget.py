@@ -5,10 +5,14 @@ MT-013's decisive design point: **the guard runs before the call, on a
 projection, not after it on a total.** A guard that notices the overrun after
 paying for it has not guarded anything.
 
-Pure arithmetic over `Usd`. This module imports nothing of ours but
-`domain.money`, which the `domain is independent` import contract requires and
-which is also why the ceiling is a default *argument* rather than a lookup:
-where a real ceiling comes from is MT-044's question.
+Pure arithmetic over `Usd`. This module imports nothing of ours outside
+`domain` - `domain.money`, and since MT-100 `domain.rates` and
+`domain.translation` to price the per-page estimate - which the `domain is
+independent` import contract requires and which is also why the ceiling is a
+default *argument* rather than a lookup: where a real ceiling comes from is
+MT-044's question. The domain knows *models* (the rate table keys on them) but
+not *providers*: which model a provider calls is `translate.provider`'s fact,
+and the caller passes `page_estimate(model_id)` in (MT-100 C-1).
 
 **It raises nothing.** A refusal is a `Decision` with `permitted=False`, not an
 exception - an exception can be swallowed by a caller, and a returned decision
@@ -19,9 +23,13 @@ rather than re-decided:
 
 - The comparison is ``spent + projection.next_call <= ceiling``, **inclusive**:
   landing exactly on the ceiling is permitted.
-- `BOOTSTRAP_PAGE_ESTIMATE` is $0.06 - $1.14 for a 20-page chapter
-  (`docs/wiki/cost-model.awk`, design A) is $0.057 a page, rounded **up**. An
-  estimate that errs low lets a run start that it cannot finish.
+- The per-page estimate is `page_estimate(model_id)`: the design-A page
+  (`docs/wiki/cost-model.awk`) priced at that model's rates and rounded **up**
+  to the cent - $0.06 on claude-opus-5 ($0.05673), $0.03 on
+  gemini-3.1-pro-preview ($0.025692). An estimate that errs low lets a run
+  start that it cannot finish. `BOOTSTRAP_PAGE_ESTIMATE`, what `Budget()`
+  projects when no model is named, is the dearest listed model's figure, so an
+  unnamed model errs high (MT-100 AC-7).
 - The observed mean rounds **up** to the micro-dollar, for that same reason.
   It is the first division this product performs on money.
 
@@ -50,25 +58,53 @@ from decimal import Decimal
 from typing import Literal
 
 from mangatl.domain.money import Usd
+from mangatl.domain.rates import RATES, price
+from mangatl.domain.translation import TokenUsage
 
 __all__ = [
     "BOOTSTRAP_PAGE_ESTIMATE",
     "DEFAULT_CEILING",
+    "DESIGN_A_PAGE_TOKENS",
     "MIN_SAMPLES_FOR_PROJECTION",
     "Budget",
     "Decision",
     "Projection",
+    "page_estimate",
 ]
 
 #: The brief's hard budget: under $2 per ~20-page chapter (AC-8).
 DEFAULT_CEILING: Usd = Usd(Decimal("2.00"))
 
-#: What one page is assumed to cost before any call has been priced (AC-5).
-#: `docs/wiki/cost-model.awk` design A is $1.14 for twenty pages, so $0.057 a
-#: page, rounded **up** to the cent. Strictly positive, which is what makes a
-#: $0.00 ceiling refuse its very first consultation (AC-7) without a special
-#: case for zero.
-BOOTSTRAP_PAGE_ESTIMATE: Usd = Usd(Decimal("0.06"))
+#: cost-model.awk design A, per page: 2,296 image + 500 OCR + 900 rolling
+#: context as uncached input; the 1,500-token prefix as a cache READ (the awk
+#: writes it once a chapter and reads it 19 times - per page that is a read);
+#: 700 visible + 800 thinking as output; no cache write.
+DESIGN_A_PAGE_TOKENS: TokenUsage = TokenUsage(
+    input_tokens=3696, output_tokens=1500, cache_read_tokens=1500, cache_write_tokens=0
+)
+
+#: One cent, in micro-dollars: the unit `page_estimate` rounds up to.
+_CENT_MICRO: int = 10_000
+
+
+def page_estimate(model_id: str) -> Usd:
+    """What one page is assumed to cost on `model_id` before any call is priced.
+
+    `price(model_id, DESIGN_A_PAGE_TOKENS).cost` rounded **up** to the cent,
+    with exact integer ceiling division. Priced at call time against
+    `domain.rates.RATES`, so it always reads the table `price` reads. Raises
+    `domain.rates.UnknownModel` (from `price`, unchanged) for an id the table
+    does not list. Strictly positive for every listed model, which is what
+    makes a $0.00 ceiling refuse its very first consultation (MT-013 AC-7)
+    without a special case for zero.
+    """
+    cost = price(model_id, DESIGN_A_PAGE_TOKENS).cost
+    return Usd.from_micro(-(-cost.micro() // _CENT_MICRO) * _CENT_MICRO)
+
+
+#: What `Budget()` projects when no model is named: the dearest listed model's
+#: `page_estimate`, so an unnamed model errs high. $0.06 today (claude-opus-5).
+BOOTSTRAP_PAGE_ESTIMATE: Usd = max(page_estimate(model_id) for model_id in RATES)
 
 #: How many priced calls it takes before the projection extrapolates from them
 #: instead of from the estimate. A **floor**, which two meets: one page is not a
@@ -116,14 +152,19 @@ class Decision:
 class Budget:
     """A chapter ceiling, and the two questions asked against it."""
 
-    def __init__(self, ceiling: Usd = DEFAULT_CEILING) -> None:
+    def __init__(
+        self, ceiling: Usd = DEFAULT_CEILING, *, page_estimate: Usd = BOOTSTRAP_PAGE_ESTIMATE
+    ) -> None:
         self.ceiling = ceiling
+        #: What one page is projected at while fewer than
+        #: `MIN_SAMPLES_FOR_PROJECTION` calls are priced (MT-100 C-1).
+        self.page_estimate = page_estimate
 
     def project(self, priced_calls: Sequence[Usd], pages_remaining: int) -> Projection:
         """Project the next call and the rest of the chapter (AC-5, AC-6).
 
         Fewer than `MIN_SAMPLES_FOR_PROJECTION` priced calls project from
-        `BOOTSTRAP_PAGE_ESTIMATE` and say so; from there on the projection is
+        this budget's `page_estimate` and say so; from there on the projection is
         the mean of the observed costs, rounded **up** to the micro-dollar.
         `priced_calls` is read and never mutated, so a tuple and a list are
         equally welcome.
@@ -135,7 +176,7 @@ class Budget:
         sample_count = len(priced_calls)
         basis: Literal["estimate", "observed"]
         if sample_count < MIN_SAMPLES_FOR_PROJECTION:
-            next_call = BOOTSTRAP_PAGE_ESTIMATE
+            next_call = self.page_estimate
             basis = "estimate"
         else:
             total = functools.reduce(operator.add, priced_calls)

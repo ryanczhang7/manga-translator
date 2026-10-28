@@ -66,6 +66,8 @@ from mangatl.clean.page import clean_page_image
 from mangatl.clean.session import load_inpainter
 from mangatl.detect.page import detect_page_regions
 from mangatl.detect.session import load_detector, selected_provider
+from mangatl.domain.budget import page_estimate
+from mangatl.domain.money import Usd
 from mangatl.models.providers import PROVIDER_PREFERENCE, select_providers
 from mangatl.ocr.page import transcribe_page_regions
 from mangatl.ocr.session import VOCAB_FILENAME, load_ocr, load_vocab
@@ -78,6 +80,7 @@ from mangatl.translate.provider import (
     PROVIDER_VAR,
     ProviderUnavailable,
     Selection,
+    model_for,
     select_provider,
 )
 
@@ -235,7 +238,15 @@ def build_pipeline(
     provider (`openai`) is `ProviderUnavailable` until its adapter story adds
     an arm to the `match` (PO-5).
     """
-    translator = _translator(selection) if translate else None
+    translator: PageTranslator | None = None
+    estimate: Usd | None = None
+    if translate:
+        if selection is None:
+            selection = select_provider(os.environ.get(PROVIDER_VAR) or None, os.environ)
+        translator = _translator(selection)
+        # MT-100 C-4: the guard's per-page estimate is the selected model's,
+        # computed once here - the figure the window's summary shows.
+        estimate = page_estimate(model_for(selection.provider))
     providers = select_providers(available_providers())
     ocr_dir = models_dir / OCR_SUBDIR
     detector = load_detector(models_dir / DETECTOR_FILENAME, providers)
@@ -248,14 +259,13 @@ def build_pipeline(
         partial(clean_page_image, inpainter),
         partial(transcribe_page_regions, ocr, vocab),
         translator,
+        estimate,
     )
 
 
-def _translator(selection: Selection | None) -> PageTranslator:
-    """The page translator for `selection`, or the environment's choice when
-    there is none; a `ProviderError` when there is no translator to bind."""
-    if selection is None:
-        selection = select_provider(os.environ.get(PROVIDER_VAR) or None, os.environ)
+def _translator(selection: Selection) -> PageTranslator:
+    """The page translator for `selection`; a `ProviderError` when there is no
+    translator to bind (its `openai` sentence is `model_for`'s, word for word)."""
     match selection.provider:
         case "anthropic":
             return partial(translate_page, Anthropic())

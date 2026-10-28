@@ -348,11 +348,22 @@ observable before it happens as well as during (`CostReadout`, §8, is the
 > `type.numeric`'s tabular digits are for. "Start run anyway" stays [[MT-059]]'s,
 > read from the over-budget state below.
 
+> **Amended 2026-10-28 (MT-100).** The estimate is priced on the model the run
+> would call - the one `select_provider` picks for Start - and line 1 names it.
+> Before, every provider was priced at Claude's $0.06 a page, so a Gemini-only
+> user read `Estimated for 200 pages: $12.00.` for a chapter that projects $6.00.
+> When no model can be chosen (no key, several keys, a provider with no
+> translator, no models folder) the widget shows why in place of a figure: the
+> **no-provider** state below.
+
 **Source of every figure.** The estimate `{x}` is
-`Budget().project((), n).remaining_chapter` (`mangatl.domain.budget`), where `n`
-is the page count; the budget `{b}` is `DEFAULT_CEILING`. Computed in `domain`,
-formatted in `ui`. No money arithmetic in the widget, and no constant re-typed:
-$0.06 and $2.00 are read from `budget.py`.
+`Budget(page_estimate=page_estimate(m)).project((), n).remaining_chapter`
+(`mangatl.domain.budget`), where `n` is the page count and `m` the model id
+(`{model}`, the `RATES` key - `claude-opus-5`, `gemini-3.1-pro-preview`); the
+budget `{b}` is `DEFAULT_CEILING`. `page_estimate(m)` is the design-A page
+(`cost-model.awk`) priced at `m`'s rates, rounded up to the cent: $0.06 on
+`claude-opus-5`, $0.03 on `gemini-3.1-pro-preview`. Computed in `domain`,
+formatted in `ui`. No money arithmetic in the widget, and no constant re-typed.
 
 **Lines, top to bottom.** A `QFrame` holding two or three plain-text labels
 (the `ChapterSummary` rules: `Qt.PlainText`, word-wrapped, selectable by mouse,
@@ -360,10 +371,12 @@ never a focus stop).
 
 | # | Line | Shown | Copy (character-exact) | Token |
 |---|---|---|---|---|
-| 1 | estimate | always | `Estimated for {n} pages: {x}.` — for one page, `Estimated for 1 page: {x}.` | `type.body-strong`, `color.text.primary` |
+| 1 | estimate | a model | `Estimated for {n} pages with {model}: {x}.` — for one page, `Estimated for 1 page with {model}: {x}.` | `type.body-strong`, `color.text.primary` |
+| 1 | estimate | **no-provider** state | `No estimate: {reason}.` — `{reason}` is the `ProviderError`'s sentence, or `NO_MODELS`; the final `.` is not doubled when `{reason}` already ends in one | `type.body-strong`, `color.text.primary` |
 | 2 | budget | **normal** state | `Budget {b}.` | `type.body`, `color.text.secondary` |
 | 2 | budget | **over-budget** state | `Budget {b}. The estimate is over budget.` | `type.body`, `color.text.secondary` |
 | 3 | page-count warning | `n > 200` only | `That is more pages than a chapter. Estimated cost is {x}.` | `type.body`, `color.text.primary` |
+| 3 | page-count warning | `n > 200`, **no-provider** state | `That is more pages than a chapter.` | `type.body`, `color.text.primary` |
 
 - `{n}` is the page count in digits, the same number as part 2's `{n} pages`.
   One page is `1 page`, as part 2 says it.
@@ -383,7 +396,7 @@ never a focus stop).
   so the figure and the over-budget state can never disagree (round-half-even
   would show `$2.00` for $2.004 and call it over budget); and it makes AC-5 hold
   by construction - any positive estimate shows at least `$0.01`.
-- Today every `{x}` is a whole number of cents ($0.06 × `n`), so the rounding
+- Today every `{x}` is a whole number of cents ($0.06 or $0.03 × `n`), so the rounding
   rule is observable only on the formatter itself; it is pinned there.
 - **Never `$0.00` for a chapter of one or more pages** (§8's rule for
   `CostReadout`: an unmeasured cost shown as zero is a lie). A chapter of zero
@@ -395,11 +408,14 @@ never a focus stop).
 |---|---|---|---|
 | **normal** | `{x} <= {b}` | 1px `color.border.subtle` border | `Budget {b}.` |
 | **over-budget** | `{x} > {b}` | 1px `color.status.warning` border | `Budget {b}. The estimate is over budget.` |
+| **no-provider** | no model can be chosen | 1px `color.border.subtle` border, as normal | `Budget {b}.` |
 
 - The comparison is on the **unrounded** `Usd` values and is **inclusive**, as
-  `Budget.check`'s is: an estimate of exactly $2.00 is normal. With $0.06 and
-  $2.00: 33 pages → `$1.98`, normal; 34 pages → `$2.04`, over-budget. (The
-  boundary is 33.33 pages; tests read it from the two constants.)
+  `Budget.check`'s is: an estimate of exactly $2.00 is normal. The boundary
+  moves with the model: at $0.06 (`claude-opus-5`) 33 pages → `$1.98`, normal;
+  34 → `$2.04`, over-budget; at $0.03 (`gemini-3.1-pro-preview`) 66 → `$1.98`,
+  normal; 67 → `$2.01`, over-budget. (Tests read it from the figures.) The
+  no-provider state is never over budget: there is no figure to compare.
 - **Colour is not the only carrier** (`accessibility.md` A-10): the over-budget
   state is the sentence `The estimate is over budget.` The border is emphasis
   only. **No glyph** - the same choice as the order notice (part 6): the sentence
@@ -421,12 +437,16 @@ never a focus stop).
 
 | Pages | State | Lines |
 |---|---|---|
-| 1 | normal | `Estimated for 1 page: $0.06.` / `Budget $2.00.` |
-| 20 | normal | `Estimated for 20 pages: $1.20.` / `Budget $2.00.` |
-| 33 | normal | `Estimated for 33 pages: $1.98.` / `Budget $2.00.` |
-| 34 | over-budget | `Estimated for 34 pages: $2.04.` / `Budget $2.00. The estimate is over budget.` |
-| 200 | over-budget | `Estimated for 200 pages: $12.00.` / `Budget $2.00. The estimate is over budget.` |
-| 201 | over-budget | `Estimated for 201 pages: $12.06.` / `Budget $2.00. The estimate is over budget.` / `That is more pages than a chapter. Estimated cost is $12.06.` |
+| 1 | normal | `Estimated for 1 page with claude-opus-5: $0.06.` / `Budget $2.00.` |
+| 20 | normal | `Estimated for 20 pages with claude-opus-5: $1.20.` / `Budget $2.00.` |
+| 33 | normal | `Estimated for 33 pages with claude-opus-5: $1.98.` / `Budget $2.00.` |
+| 34 | over-budget | `Estimated for 34 pages with claude-opus-5: $2.04.` / `Budget $2.00. The estimate is over budget.` |
+| 200 | over-budget | `Estimated for 200 pages with claude-opus-5: $12.00.` / `Budget $2.00. The estimate is over budget.` |
+| 201 | over-budget | `Estimated for 201 pages with claude-opus-5: $12.06.` / `Budget $2.00. The estimate is over budget.` / `That is more pages than a chapter. Estimated cost is $12.06.` |
+| 66 | normal | `Estimated for 66 pages with gemini-3.1-pro-preview: $1.98.` / `Budget $2.00.` |
+| 67 | over-budget | `Estimated for 67 pages with gemini-3.1-pro-preview: $2.01.` / `Budget $2.00. The estimate is over budget.` |
+| 200 | over-budget | `Estimated for 200 pages with gemini-3.1-pro-preview: $6.00.` / `Budget $2.00. The estimate is over budget.` |
+| 201 | no-provider | `No estimate: no API key is set: set ANTHROPIC_API_KEY, GEMINI_API_KEY or OPENAI_API_KEY, or run with --no-translate.` / `Budget $2.00.` / `That is more pages than a chapter.` |
 
 **Box.** Ground as the order notice (`color.surface.raised`),
 `radius.sm`, padding `space.3`, lines `space.1` apart, `space.4` above it (below

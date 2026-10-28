@@ -14,7 +14,9 @@ here creates a project or writes anything.
 **The composition root for the window (MT-059, PO-3).** Every intake window is
 given a `RunSetup`: `resolve_models` (`$MANGATL_MODELS`, read when Start is
 pressed) and `build_stages` (`mangatl.compose.build_pipeline`, translation
-on). Both import `mangatl.compose` inside their bodies, so a launch that only
+on), and since MT-100 `selected_model` (the model a Start would call, which
+the summary's estimate is priced on). The first two import `mangatl.compose`
+inside their bodies, so a launch that only
 reviews never loads `onnxruntime` or `anthropic`; import-linter counts those
 imports all the same, which is why this module is exempt from the two
 contracts that confine them, as `mangatl.cli` is. The window - `mangatl.ui` -
@@ -67,7 +69,7 @@ from mangatl.store.settings import (
     mask_key,
     write_setting,
 )
-from mangatl.translate.provider import KEY_VARS, PROVIDER_VAR, select_provider
+from mangatl.translate.provider import KEY_VARS, PROVIDER_VAR, model_for, select_provider
 from mangatl.ui.api_key_dialog import ask_api_key
 from mangatl.ui.contrast import SystemContrastSource
 from mangatl.ui.main_window import MainWindow
@@ -86,6 +88,7 @@ __all__ = [
     "main",
     "open_folder",
     "resolve_models",
+    "selected_model",
     "self_check",
     "show_warning",
     "translation_env",
@@ -207,6 +210,15 @@ def build_stages(models_dir: Path) -> tuple[Stage, ...]:
     return build_pipeline(models_dir, translate=True, selection=selection)
 
 
+def selected_model() -> str:
+    """The model a Start would translate with, by the resolution `build_stages`
+    makes - the environment plus the stored key, `MANGATL_PROVIDER` choosing
+    between two - so the summary's estimate names the model Start would call
+    (MT-100 C-5). Raises `ProviderError` when no model can be chosen."""
+    env = translation_env(os.environ, settings_path())
+    return model_for(select_provider(os.environ.get(PROVIDER_VAR) or None, env).provider)
+
+
 def first_run(
     settings_file: Path, env: Mapping[str, str], ask: Callable[[], str | None]
 ) -> str | None:
@@ -243,7 +255,7 @@ def build_window(arguments: Sequence[str], *, run_setup: RunSetup | None = None)
     when this runs, so it is this module's `resolve_models` and `build_stages`
     as they are then."""
     if run_setup is None:
-        run_setup = RunSetup(resolve_models, build_stages)
+        run_setup = RunSetup(resolve_models, build_stages, selected_model)
     if not arguments:
         return MainWindow(open_folder=open_folder, run_setup=run_setup)
     if len(arguments) > 1:

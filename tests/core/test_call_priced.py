@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, get_args
 import pytest
 
 import mangatl.domain.events as events_module
-from mangatl.domain.budget import DEFAULT_CEILING, Projection
+from mangatl.domain.budget import BOOTSTRAP_PAGE_ESTIMATE, DEFAULT_CEILING, Projection
 from mangatl.domain.events import (
     CallPriced,
     PageStarted,
@@ -222,7 +222,13 @@ class _Fixture:
         events: list[RunEvent] = []
         run_chapter(
             self.project,
-            build_stages(_Detector(self.mask), _cleaner, _transcriber, _Translator(script)),
+            build_stages(
+                _Detector(self.mask),
+                _cleaner,
+                _transcriber,
+                _Translator(script),
+                BOOTSTRAP_PAGE_ESTIMATE,
+            ),
             events.append,
             _never,
         )
@@ -481,8 +487,8 @@ def test_the_last_event_agrees_with_the_ledger_read_after_the_run(fixture: _Fixt
         _SONNET_MICRO,
     ], "the rate table changed under this file's hand-worked literals"
     assert last.spent == chapter_total(fixture.project) == _usd(sum(_ledger_micro(fixture.db_path)))
-    assert last.ceiling == budget_for(fixture.project).ceiling
-    assert last.projection == budget_for(fixture.project).project(
+    assert last.ceiling == budget_for(fixture.project, BOOTSTRAP_PAGE_ESTIMATE).ceiling
+    assert last.projection == budget_for(fixture.project, BOOTSTRAP_PAGE_ESTIMATE).project(
         chapter_call_costs(fixture.project), 0
     )
 
@@ -640,7 +646,10 @@ def test_the_stage_emits_through_its_context_after_the_bill_and_before_the_propo
         )
 
     page = fixture.project.pages()[0]
-    stage = TranslateStage(translate=_Translator((_Reply(_OPUS, _OPUS_USAGE, (term,)),)))
+    stage = TranslateStage(
+        page_estimate=BOOTSTRAP_PAGE_ESTIMATE,
+        translate=_Translator((_Reply(_OPUS, _OPUS_USAGE, (term,)),)),
+    )
     stage.run(PageContext(project=fixture.project, page=page, run_id=run_id, emit=emit))
 
     assert len(seen) == 1, f"the stage emitted {len(seen)} events for one priced call"
@@ -665,7 +674,7 @@ def test_the_stage_emits_nothing_for_a_result_with_no_call(fixture: _Fixture) ->
     seen: list[RunEvent] = []
     page = fixture.project.pages()[0]
 
-    TranslateStage(translate=_Translator((_NO_CALL,))).run(
+    TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_Translator((_NO_CALL,))).run(
         PageContext(project=fixture.project, page=page, run_id=fixture.open_run(), emit=seen.append)
     )
 

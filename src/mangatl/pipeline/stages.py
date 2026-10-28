@@ -36,6 +36,7 @@ assertable in `tests/core` with no client, no key, no network and no model.
 
 from __future__ import annotations
 
+from mangatl.domain.money import Usd
 from mangatl.pipeline.clean_stage import CleanStage, PageCleaner
 from mangatl.pipeline.detect_stage import DetectStage, PageDetector
 from mangatl.pipeline.ocr_stage import OcrStage, PageTranscriber
@@ -50,6 +51,7 @@ def build_stages(
     clean: PageCleaner,
     transcribe: PageTranscriber,
     translate: PageTranslator | None,
+    page_estimate: Usd | None,
 ) -> tuple[Stage, ...]:
     """The pipeline's stage list: detect, clean, OCR, and translate unless asked not to.
 
@@ -69,6 +71,12 @@ def build_stages(
     free, and the flag is about the paid API (MT-065 PO-1). The short list is
     built **here**, as a prefix of the full one, so a composition root never
     assembles its own and the two cannot drift apart.
+
+    **`page_estimate` travels with `translate`** (MT-100 C-3): the selected
+    model's `domain.budget.page_estimate`, given with the translator and `None`
+    with it; under `None` it is unused. A translator handed with no estimate is
+    a `TypeError` rather than a stage that silently prices at Claude's figure -
+    the one check here, which `mypy` needs to narrow the type in any case.
     """
     stages: tuple[Stage, ...] = (
         DetectStage(detect=detect),
@@ -77,4 +85,6 @@ def build_stages(
     )
     if translate is None:
         return stages
-    return (*stages, TranslateStage(translate=translate))
+    if page_estimate is None:
+        raise TypeError("build_stages: a translator needs its page_estimate (MT-100 C-3)")
+    return (*stages, TranslateStage(translate=translate, page_estimate=page_estimate))

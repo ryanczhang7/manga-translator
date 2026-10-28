@@ -74,6 +74,7 @@ from mangatl.compose import (
     build_pipeline,
     resolve_models_dir,
 )
+from mangatl.domain.money import Usd
 from mangatl.domain.region import RawRegion
 from mangatl.ocr.session import DECODER_FILENAME, ENCODER_FILENAME, VOCAB_FILENAME
 from mangatl.pipeline.clean_stage import CleanStage
@@ -762,6 +763,58 @@ def test_a_gemini_selection_binds_the_gemini_adapter_to_one_client_built_with_it
     assert translator.args == (gemini_client_spy.clients[0],) and translator.keywords == {}, (
         f"gemini.translate_page is bound to {translator.args}/{translator.keywords}"
     )
+
+
+#: MT-100 C-1's settled per-page figures, in micro-dollars: read out of the
+#: contract, not re-derived from the token profile here.
+_GEMINI_PAGE_MICRO = 30_000
+_CLAUDE_PAGE_MICRO = 60_000
+
+
+@pytest.mark.parametrize(
+    ("provider", "micro"),
+    [("gemini", _GEMINI_PAGE_MICRO), ("anthropic", _CLAUDE_PAGE_MICRO)],
+    ids=["gemini-three-cents", "anthropic-six-cents"],
+)
+def test_the_translate_stage_is_built_with_the_selected_models_page_estimate(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    gemini_client_spy: _GeminiClientSpy,
+    keyless: None,
+    provider: str,
+    micro: int,
+) -> None:
+    """**MT-100 C-4 / AC-5's binding**: the composition root computes
+    `page_estimate(model_for(selection.provider))` once and hands it to the
+    translate stage, so the guard a Gemini run consults projects $0.03 a page
+    and a Claude run $0.06. A root that passed `BOOTSTRAP_PAGE_ESTIMATE` (or
+    nothing, letting `Budget()` default) would show $0.06 for Gemini."""
+    stages = build_pipeline(weights_dir, selection=_selection(provider))
+
+    (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
+    assert translate_stage.page_estimate == Usd.from_micro(micro), (
+        f"a {provider} build's translate stage carries {translate_stage.page_estimate!r}"
+        f" a page, not ${micro / 1e6:.2f}"
+    )
+
+
+def test_with_no_selection_a_lone_gemini_key_builds_the_stage_at_three_cents(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    gemini_client_spy: _GeminiClientSpy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MT-100 AC-5 through the window's path (`selection=None`): the user's
+    environment - `GEMINI_API_KEY` and nothing else - is the run the story was
+    filed for."""
+    _provider_env(monkeypatch, GEMINI_API_KEY="g-SECRET-env")
+
+    stages = build_pipeline(weights_dir)
+
+    (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
+    assert translate_stage.page_estimate == Usd.from_micro(_GEMINI_PAGE_MICRO)
 
 
 def test_an_anthropic_selection_constructs_no_gemini_client(

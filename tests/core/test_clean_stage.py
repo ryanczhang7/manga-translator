@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, get_args, get_origin
 import pytest
 from PIL import Image
 
+from mangatl.domain.budget import BOOTSTRAP_PAGE_ESTIMATE
 from mangatl.domain.events import PageSkipped, RunEvent, StageFinished
 from mangatl.domain.line import OcrResult
 from mangatl.domain.region import RawRegion
@@ -510,7 +511,9 @@ def test_a_second_run_over_a_cleaned_chapter_calls_the_cleaner_zero_times(
 
     outcome = run_chapter(
         fixture.project,
-        build_stages(_Detector(fixture.mask), cleaner, _Transcriber(), _Translator()),
+        build_stages(
+            _Detector(fixture.mask), cleaner, _Transcriber(), _Translator(), BOOTSTRAP_PAGE_ESTIMATE
+        ),
         lambda _event: None,
         _never,
     )
@@ -522,7 +525,9 @@ def test_a_second_run_over_a_cleaned_chapter_calls_the_cleaner_zero_times(
     events: list[RunEvent] = []
     run_chapter(
         fixture.project,
-        build_stages(_Detector(fixture.mask), cleaner, _Transcriber(), _Translator()),
+        build_stages(
+            _Detector(fixture.mask), cleaner, _Transcriber(), _Translator(), BOOTSTRAP_PAGE_ESTIMATE
+        ),
         events.append,
         _never,
     )
@@ -547,7 +552,9 @@ def test_a_translated_chapter_with_no_cleaned_images_is_cleaned_without_detect_o
     cleaner = _RecordingCleaner(png_bytes)
     run_chapter(
         fixture.project,
-        build_stages(_Detector(fixture.mask), cleaner, _Transcriber(), _Translator()),
+        build_stages(
+            _Detector(fixture.mask), cleaner, _Transcriber(), _Translator(), BOOTSTRAP_PAGE_ESTIMATE
+        ),
         lambda _event: None,
         _never,
     )
@@ -566,7 +573,7 @@ def test_a_translated_chapter_with_no_cleaned_images_is_cleaned_without_detect_o
     events: list[RunEvent] = []
     outcome = run_chapter(
         fixture.project,
-        build_stages(detector, resumed, transcriber, translator),
+        build_stages(detector, resumed, transcriber, translator, BOOTSTRAP_PAGE_ESTIMATE),
         events.append,
         _never,
     )

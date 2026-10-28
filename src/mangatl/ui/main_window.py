@@ -41,6 +41,7 @@ from mangatl.domain.page import Chapter
 from mangatl.pipeline.runner import RUN_FINISHED, RunOutcome
 from mangatl.store.project import create_project, project_dir_for
 from mangatl.translate.provider import ProviderError
+from mangatl.ui.cost_estimate import NoProvider
 from mangatl.ui.intake import FolderDropTarget, choose_folder_dialog
 from mangatl.ui.progress import RunProgressPanel
 from mangatl.ui.run import NO_MODELS, RunController, RunSetup
@@ -100,11 +101,23 @@ class MainWindow(QMainWindow):
     def show_summary(self, chapter: Chapter) -> None:
         """Replace the current view with `chapter`'s summary, focus on its
         scroll area so arrows and Page keys read it at once."""
-        summary = ChapterSummary(chapter, self)
+        summary = ChapterSummary(chapter, self, model=self._selected_model())
         summary.choose_other.connect(self._choose)
         summary.start_requested.connect(lambda: self._start(chapter))
         self.setCentralWidget(summary)
         summary.scroll_area.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _selected_model(self) -> str | NoProvider:
+        """The model the summary's estimate is priced on (MT-100 C-6): the one
+        Start would call, or `NoProvider` saying why there is none - Start's own
+        sentence, `NO_MODELS` with no setup, else the `ProviderError`'s."""
+        setup = self._run_setup
+        if setup is None:
+            return NoProvider(NO_MODELS)
+        try:
+            return setup.select_model()
+        except ProviderError as error:
+            return NoProvider(str(error))
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """A run in progress is cancelled and waited for before the window
