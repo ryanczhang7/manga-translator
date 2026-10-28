@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pytest
 
+from mangatl.domain.budget import BOOTSTRAP_PAGE_ESTIMATE
 from mangatl.domain.glossary import (
     EMPTY_CONTEXT,
     MAX_GLOSSARY_TOKENS,
@@ -305,7 +306,7 @@ def test_the_proposal_from_page_one_is_in_page_twos_request(chapter: _Chapter) -
         _result({0: "Wait, Sakura!"}, [ProposedTerm("さくら", "Sakura", "name")]),
         _result({0: "Where's Sakura?"}),
     )
-    stage = TranslateStage(translate=translator)
+    stage = TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator)
 
     stage.run(chapter.context(0))
     stage.run(chapter.context(1))
@@ -323,7 +324,9 @@ def test_page_one_is_translated_with_the_empty_context(chapter: _Chapter) -> Non
     `EMPTY_CONTEXT`, and the page completes."""
     translator = _Scripted(_result({0: "Wait, Sakura!"}))
 
-    TranslateStage(translate=translator).run(chapter.context(0))
+    TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(
+        chapter.context(0)
+    )
 
     assert translator.contexts == [EMPTY_CONTEXT]
     assert chapter.project.read_proposed(0) == ("Wait, Sakura!", None)
@@ -338,7 +341,7 @@ def test_page_n_is_handed_page_n_minus_ones_proposed_lines(chapter: _Chapter) ->
         _result({0: "Where's Sakura?", 1: "Home."}),
         _result({}),
     )
-    stage = TranslateStage(translate=translator)
+    stage = TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator)
 
     for ordinal in range(3):
         stage.run(chapter.context(ordinal))
@@ -355,7 +358,9 @@ def test_a_proposed_term_is_stored_as_first_and_last_seen_on_its_page(chapter: _
         _result({0: "Where's Sakura?"}, [ProposedTerm("さくら", "Sakura", "name")])
     )
 
-    TranslateStage(translate=translator).run(chapter.context(1))
+    TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(
+        chapter.context(1)
+    )
 
     assert read_entries(chapter.project) == [
         GlossaryEntry("さくら", "Sakura", "name", 1, 1, "model")
@@ -375,7 +380,9 @@ def test_a_name_on_the_page_is_seen_there_even_when_nobody_re_proposes_it(
     ):
         upsert(chapter.project, entry)
 
-    TranslateStage(translate=_Scripted(_result({0: "It's Tokyo Tower"}))).run(chapter.context(2))
+    TranslateStage(
+        page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_Scripted(_result({0: "It's Tokyo Tower"}))
+    ).run(chapter.context(2))
 
     assert read_entries(chapter.project) == [
         GlossaryEntry("さくら", "Sakura", "name", 0, 2, "model"),
@@ -395,7 +402,7 @@ def test_a_later_page_cannot_re_render_a_name_the_chapter_already_has(
         _result({0: "Where's Sakura-chan?"}, [ProposedTerm("さくら", "Sakura-chan", "name")]),
         _result({}),
     )
-    stage = TranslateStage(translate=translator)
+    stage = TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator)
 
     for ordinal in range(3):
         stage.run(chapter.context(ordinal))
@@ -417,7 +424,9 @@ def test_the_glossary_is_written_before_the_proposals(chapter: _Chapter) -> None
     )
 
     with pytest.raises(ValueError, match=r"\b99\b"):
-        TranslateStage(translate=translator).run(chapter.context(0))
+        TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(
+            chapter.context(0)
+        )
 
     assert read_entries(chapter.project) == [
         GlossaryEntry("さくら", "Sakura", "name", 0, 0, "model")
@@ -440,7 +449,9 @@ def test_a_call_that_cannot_be_priced_writes_no_glossary_either(chapter: _Chapte
     )
 
     with pytest.raises(UnknownModel):
-        TranslateStage(translate=translator).run(chapter.context(0))
+        TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(
+            chapter.context(0)
+        )
 
     assert read_entries(chapter.project) == []
     assert chapter.ledger_rows() == 0
@@ -460,7 +471,9 @@ def test_a_wordless_page_still_runs_the_glossary_step_and_changes_nothing(
     before = [GlossaryEntry("さくら", "Sakura", "name", 0, 0, "model")]
     upsert(chapter.project, before[0])
 
-    TranslateStage(translate=_Scripted(_result({}, call=False))).run(chapter.context(1))
+    TranslateStage(
+        page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_Scripted(_result({}, call=False))
+    ).run(chapter.context(1))
 
     assert read_entries(chapter.project) == before
     assert chapter.ledger_rows() == 0
@@ -473,7 +486,7 @@ def test_re_running_a_page_leaves_one_entry_per_term(chapter: _Chapter) -> None:
     grow."""
     terms = [ProposedTerm("さくら", "Sakura", "name")]
     translator = _Scripted(_result({0: "Wait!"}, terms), _result({0: "Wait!"}, terms))
-    stage = TranslateStage(translate=translator)
+    stage = TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator)
 
     stage.run(chapter.context(0))
     stage.run(chapter.context(0))

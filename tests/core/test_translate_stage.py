@@ -72,6 +72,7 @@ from typing import TYPE_CHECKING, get_args, get_origin
 
 import pytest
 
+from mangatl.domain.budget import BOOTSTRAP_PAGE_ESTIMATE
 from mangatl.domain.line import OcrResult
 from mangatl.domain.region import RawRegion
 from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
@@ -297,7 +298,7 @@ def test_the_stage_is_exported_from_mangatl_pipeline_translate_stage_under_that_
     ]
 
     translator = _FakeTranslator()
-    stage = TranslateStage(translate=translator)
+    stage = TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator)
 
     assert stage.name == _TRANSLATE
     assert stage.translate is translator
@@ -319,7 +320,7 @@ def test_the_stage_name_is_a_settable_instance_attribute_as_the_protocol_require
     Neither spelling of a frozen dataclass satisfies it, so the assignment below
     is the `unit` half of a failure that otherwise only `typecheck` sees.
     """
-    stage = TranslateStage(translate=_FakeTranslator())
+    stage = TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_FakeTranslator())
 
     stage.name = "renamed"
 
@@ -395,7 +396,7 @@ def test_the_stage_hands_over_the_pages_own_bytes_and_its_stored_ocr_results(
     fixture.seed()
     translator = _FakeTranslator({0: "Alpha.", 1: "Beta.", 2: "Gamma."})
 
-    TranslateStage(translate=translator).run(fixture.context)
+    TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(fixture.context)
 
     assert translator.calls == 1
     image, results = translator.seen[0]
@@ -410,7 +411,9 @@ def test_the_stage_writes_nothing_beside_the_scans(fixture: _Fixture) -> None:
     fixture.seed()
     before = _snapshot(fixture.source_dir)
 
-    TranslateStage(translate=_FakeTranslator({0: "Alpha."})).run(fixture.context)
+    TranslateStage(
+        page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_FakeTranslator({0: "Alpha."})
+    ).run(fixture.context)
 
     assert _snapshot(fixture.source_dir) == before
 
@@ -433,7 +436,9 @@ def test_every_region_receives_its_own_proposal_and_no_other_regions(
     fixture.seed()
     lines = {2: "...I see.", 0: "A demon obeying a human? Please.", 1: "A middle line."}
 
-    TranslateStage(translate=_FakeTranslator(lines)).run(fixture.context)
+    TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_FakeTranslator(lines)).run(
+        fixture.context
+    )
 
     assert fixture.project.read_proposed(_TARGET_ORDINAL) == (
         "A demon obeying a human? Please.",
@@ -459,7 +464,9 @@ def test_a_region_the_model_omitted_keeps_a_null_proposal_and_the_rest_are_store
     """
     fixture.seed()
 
-    TranslateStage(translate=_FakeTranslator({0: "Alpha.", 2: "Gamma."})).run(fixture.context)
+    TranslateStage(
+        page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_FakeTranslator({0: "Alpha.", 2: "Gamma."})
+    ).run(fixture.context)
 
     assert fixture.project.read_proposed(_TARGET_ORDINAL) == ("Alpha.", None, "Gamma.")
 
@@ -486,7 +493,9 @@ def test_an_unknown_region_index_aborts_the_page_with_nothing_written(
     translator = _FakeTranslator(raises=_UnknownRegionIndexStandIn("region 7 is not on this page"))
 
     with pytest.raises(_UnknownRegionIndexStandIn, match=r"\b7\b"):
-        TranslateStage(translate=translator).run(fixture.context)
+        TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(
+            fixture.context
+        )
 
     assert fixture.project.read_proposed(_TARGET_ORDINAL) == before
     assert before == (
@@ -512,7 +521,7 @@ def test_a_page_of_wordless_art_completes_with_no_proposed_lines(
     fixture.seed(_ALL_EMPTY)
     translator = _FakeTranslator({})
 
-    TranslateStage(translate=translator).run(fixture.context)
+    TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(fixture.context)
 
     assert fixture.project.read_proposed(_TARGET_ORDINAL) == (None, None, None)
 
@@ -525,7 +534,9 @@ def test_a_wordless_page_does_not_clear_what_an_earlier_run_proposed(
     English hanging off them with it."""
     fixture.seed(_ALL_EMPTY, proposals=True)
 
-    TranslateStage(translate=_FakeTranslator({})).run(fixture.context)
+    TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_FakeTranslator({})).run(
+        fixture.context
+    )
 
     assert fixture.project.read_proposed(_TARGET_ORDINAL) == (
         "A demon obeying a human? Please.",
@@ -549,7 +560,9 @@ def test_a_page_with_no_proposals_is_not_done_and_one_with_a_proposal_is(
     a killed run resume rather than restart (`architecture.md` §6).
     """
     fixture.seed()
-    stage = TranslateStage(translate=_FakeTranslator({0: "Alpha."}))
+    stage = TranslateStage(
+        page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_FakeTranslator({0: "Alpha."})
+    )
 
     assert stage.is_done(fixture.context) is False
 
@@ -562,7 +575,7 @@ def test_a_page_with_no_regions_at_all_is_never_done(fixture: _Fixture) -> None:
     """The zero of zero-one-many, and it matches what `OcrStage` and
     `DetectStage` decide for the same page: a page that has not been detected
     writes nothing and is never done."""
-    stage = TranslateStage(translate=_FakeTranslator({}))
+    stage = TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_FakeTranslator({}))
 
     assert stage.is_done(fixture.context) is False
 
@@ -577,7 +590,7 @@ def test_is_done_reads_the_page_it_is_given_and_not_the_first_one(
     fixture.seed(ordinal=_TARGET_ORDINAL)
     fixture.project.write_proposed(0, {0: "Alpha."})
 
-    stage = TranslateStage(translate=_FakeTranslator({}))
+    stage = TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_FakeTranslator({}))
 
     assert stage.is_done(fixture.page_context(0)) is True
     assert stage.is_done(fixture.context) is False

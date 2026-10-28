@@ -312,6 +312,13 @@ def _models(path: Path) -> Callable[[], Path | None]:
     return lambda: path
 
 
+def _claude() -> str:
+    """`RunSetup.select_model` for these tests (MT-100 C-5): a fixed model, so no
+    summary here reads the machine's provider keys, and MT-058's 33/34-page
+    boundary - which `Start run anyway` below relies on - is Claude's."""
+    return "claude-opus-5"
+
+
 # =============================================================================
 # Receiving the stream, and cleaning up after it
 # =============================================================================
@@ -504,14 +511,26 @@ def test_the_no_models_sentence_is_the_po_wording_character_for_character() -> N
     assert "--models" not in NO_MODELS
 
 
-def test_run_setup_is_a_frozen_pair_of_a_resolver_and_a_builder(tmp_path: Path) -> None:
+def test_run_setup_is_a_frozen_resolver_builder_and_model_selector(tmp_path: Path) -> None:
+    """MT-059 C-1, and MT-100 C-5's third field: `select_model`, the model the
+    run would call, which the window's summary prices against."""
     builder = Builder()
-    setup = RunSetup(resolve_models=_models(tmp_path), build_stages=builder)
+    setup = RunSetup(resolve_models=_models(tmp_path), build_stages=builder, select_model=_claude)
 
     assert setup.resolve_models() == tmp_path
     assert setup.build_stages(tmp_path) == ()
+    assert setup.select_model() == "claude-opus-5"
     with pytest.raises(AttributeError):
         setup.resolve_models = _models(tmp_path)  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        setup.select_model = _claude  # type: ignore[misc]
+
+
+def test_run_setup_requires_a_model_selector(tmp_path: Path) -> None:
+    """MT-100 C-5: REQUIRED, no default, for `build_stages`'s reason - a window
+    that forgot it must not quietly price every chapter at Claude's figure."""
+    with pytest.raises(TypeError):
+        RunSetup(_models(tmp_path), Builder())  # type: ignore[call-arg]
 
 
 # =============================================================================
@@ -827,7 +846,7 @@ def test_start_run_creates_the_project_beside_the_folder_and_the_run_begins(
     builder = Builder(
         [FakeStage("detect", calls, _on_page(0, gate)), FakeStage("translate", calls)]
     )
-    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder))
+    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder, _claude))
     assert window.run is None and window.run_panel is None, "a run exists before Start"
     assert _start_button(window).text() == "Start run"
 
@@ -859,7 +878,7 @@ def test_start_run_anyway_on_an_over_budget_chapter_does_the_same(
     before = _hashes(folder)
     calls = Calls()
     builder = Builder(_quick_stages(calls))
-    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder))
+    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder, _claude))
     assert _start_button(window).text() == "Start run anyway"
 
     _press_start(window)
@@ -905,7 +924,7 @@ def test_start_follows_the_order_models_then_build_then_create_then_run(
         [FakeStage("detect", calls, first_stage)],
         on_call=lambda: order.append(f"build (project exists: {database.exists()})"),
     )
-    window = _window(qtbot, world, folder, RunSetup(resolve, builder))
+    window = _window(qtbot, world, folder, RunSetup(resolve, builder, _claude))
 
     _press_start(window)
     _wait_workspace(qtbot, window)
@@ -936,7 +955,7 @@ def test_the_run_screen_is_the_progress_panel_alone_under_the_same_title(
         qtbot,
         world,
         _pages_folder(tmp_path, "ch", 1, page_png),
-        RunSetup(_models(tmp_path), builder),
+        RunSetup(_models(tmp_path), builder, _claude),
     )
 
     _press_start(window)
@@ -1001,7 +1020,7 @@ def test_the_run_screen_shows_the_chapters_page_and_its_markers_once_detected(
     builder = Builder(
         [DetectStage(detect=detector), FakeStage("translate", calls, _on_page(0, gate))]
     )
-    window = _window(qtbot, world, folder.resolve(), RunSetup(_models(tmp_path), builder))
+    window = _window(qtbot, world, folder.resolve(), RunSetup(_models(tmp_path), builder, _claude))
 
     _press_start(window)
 
@@ -1046,7 +1065,7 @@ def test_a_finished_run_opens_the_workspace_on_the_first_page_and_closes_the_int
     projects = _capture_app_projects(monkeypatch)
     calls = Calls()
     window = _window(
-        qtbot, world, folder, RunSetup(_models(tmp_path), Builder(_quick_stages(calls)))
+        qtbot, world, folder, RunSetup(_models(tmp_path), Builder(_quick_stages(calls)), _claude)
     )
 
     _press_start(window)
@@ -1102,7 +1121,7 @@ def test_an_aborted_run_keeps_its_pages_and_review_opens_the_workspace(
     folder = _pages_folder(tmp_path, "ch", 4, page_png)
     calls = Calls()
     stages = [FakeStage("detect", calls), FakeStage("translate", calls, _on_page(2, _raise(error)))]
-    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), Builder(stages)))
+    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), Builder(stages), _claude))
 
     _press_start(window)
     _wait_run_ended(qtbot, window)
@@ -1160,7 +1179,7 @@ def test_closing_the_window_mid_run_cancels_waits_and_keeps_the_pages_done(
     world.gates.append(gate)
     calls = Calls()
     stages = [FakeStage("detect", calls, _on_page(1, gate)), FakeStage("translate", calls)]
-    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), Builder(stages)))
+    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), Builder(stages), _claude))
     _press_start(window)
     qtbot.waitUntil(gate.entered.is_set, timeout=RUN_MS)
     run = window.run
@@ -1203,7 +1222,9 @@ def test_a_run_that_finishes_after_the_close_opens_nothing(
         qtbot,
         world,
         folder,
-        RunSetup(_models(tmp_path), Builder([FakeStage("translate", calls, _on_page(1, gate))])),
+        RunSetup(
+            _models(tmp_path), Builder([FakeStage("translate", calls, _on_page(1, gate))]), _claude
+        ),
     )
     _press_start(window)
     qtbot.waitUntil(gate.entered.is_set, timeout=RUN_MS)
@@ -1231,7 +1252,7 @@ def test_closing_the_window_with_no_run_closes_it_at_once(
         qtbot,
         world,
         _pages_folder(tmp_path, "ch", 1, page_png),
-        RunSetup(_models(tmp_path), Builder()),
+        RunSetup(_models(tmp_path), Builder(), _claude),
     )
 
     window.close()
@@ -1277,7 +1298,7 @@ def test_without_a_models_folder_start_shows_the_sentence_and_creates_nothing(
     folder = _pages_folder(tmp_path, "ch", 2, page_png)
     _set_models(monkeypatch, case, tmp_path)
     builder = Builder()
-    window = _window(qtbot, world, folder, RunSetup(app_module.resolve_models, builder))
+    window = _window(qtbot, world, folder, RunSetup(app_module.resolve_models, builder, _claude))
     before = _hashes(tmp_path)
 
     _press_start(window)
@@ -1309,7 +1330,7 @@ def test_control_with_an_existing_models_folder_the_builder_gets_exactly_that_pa
         qtbot,
         world,
         _pages_folder(tmp_path, "ch", 2, page_png),
-        RunSetup(app_module.resolve_models, builder),
+        RunSetup(app_module.resolve_models, builder, _claude),
     )
 
     _press_start(window)
@@ -1417,7 +1438,7 @@ def _keyed_run(
             FakeStage("translate", calls, translate),
         ]
     )
-    window = _window(qtbot, world, folder, RunSetup(app_module.resolve_models, builder))
+    window = _window(qtbot, world, folder, RunSetup(app_module.resolve_models, builder, _claude))
     environ = RecordingEnviron(_REAL_ENVIRON)
     monkeypatch.setattr(os, "environ", environ)
     _press_start(window)
@@ -1662,7 +1683,9 @@ def test_build_window_uses_an_injected_run_setup(
     calls = Calls()
     builder = Builder(_quick_stages(calls))
 
-    window = app_module.build_window([str(folder)], run_setup=RunSetup(_models(tmp_path), builder))
+    window = app_module.build_window(
+        [str(folder)], run_setup=RunSetup(_models(tmp_path), builder, _claude)
+    )
     _press_start_on_summary_of(qtbot, world, window, folder)
 
     assert builder.calls == [tmp_path]
@@ -1774,7 +1797,7 @@ def test_a_provider_refusal_at_start_is_shown_as_the_windows_error(
 
     builder = Builder(on_call=refuse)
     folder = _pages_folder(tmp_path, "ch", 2, page_png)
-    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder))
+    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder, _claude))
 
     _press_start(window)
 
@@ -1823,7 +1846,7 @@ def test_control_an_error_that_is_not_a_provider_refusal_is_not_swallowed(
 
     builder = Builder(on_call=explode)
     folder = _pages_folder(tmp_path, "ch", 1, page_png)
-    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder))
+    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder, _claude))
 
     with qtbot.capture_exceptions() as caught:
         _press_start(window)

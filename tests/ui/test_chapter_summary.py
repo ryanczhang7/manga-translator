@@ -30,7 +30,9 @@ a replaced widget may linger until deferred deletion.
 
 Widget-level tests build a `Chapter` directly: `ChapterSummary(chapter)` reads
 nothing from disk, so a filename holding `<b>` - which Windows cannot create -
-can still be shown, and a drive root can be the source folder.
+can still be shown, and a drive root can be the source folder. MT-100 C-6 makes
+the model the estimate prices a required keyword; these tests pass
+`model="claude-opus-5"`, so the estimate lines they describe are Claude's.
 
 **RED:** this file fails at import (`mangatl.ui.summary` does not exist), so no
 assertion here has run; see the story's handoff for each control's expected
@@ -341,7 +343,7 @@ AC1_FIELDS = (AC1_NAME, "3 pages", f"First page: {AC1_FIRST}", f"Last page: {AC1
 
 
 def _bare(qtbot, chapter: Chapter) -> ChapterSummary:  # type: ignore[no-untyped-def]
-    summary = ChapterSummary(chapter)
+    summary = ChapterSummary(chapter, model="claude-opus-5")
     qtbot.addWidget(summary)
     return summary
 
@@ -626,7 +628,7 @@ def test_the_scroll_area_is_named_chapter_summary_and_described_by_its_visible_l
             "3 pages",
             "First page: page 9.png",
             "Last page: page 11.png",
-            "Estimated for 3 pages: $0.18.",
+            "Estimated for 3 pages with claude-opus-5: $0.18.",
             "Budget $2.00.",
             LEAD,
             AC1_NATURAL,
@@ -639,7 +641,8 @@ def test_a_one_page_summary_is_described_without_first_last_or_notice(qtbot) -> 
     summary = _bare(qtbot, _chapter(("cover.png",), Path("C:/manga/One shot")))
 
     assert _scroll(summary).accessibleDescription() == (
-        "One shot\n1 page\nOnly page: cover.png\nEstimated for 1 page: $0.06.\nBudget $2.00."
+        "One shot\n1 page\nOnly page: cover.png\n"
+        "Estimated for 1 page with claude-opus-5: $0.06.\nBudget $2.00."
     )
 
 

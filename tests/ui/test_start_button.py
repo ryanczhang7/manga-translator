@@ -23,6 +23,13 @@ hover `#7ad3ff` (via `QTest.mouseMove`; `WA_UnderMouse` alone does not repaint
 `focus.width` px on the left and top, and the transparent band at rest showing
 the window's `#1c1c1c` (surface.base). Recorded in the story's `## Handoff`.
 
+**MT-100:** a summary now prices a named model (`ChapterSummary(..., model=)`),
+and a window learns it from `RunSetup.select_model`. These tests name
+claude-opus-5, so the 33/34 boundary they read is Claude's; the one test that
+moves the boundary does it by choosing the model through the window's
+`RunSetup` (Gemini: 66/67), and every window built here is given a setup, so
+nothing reads the machine's provider keys.
+
 **RED:** the summary has no Start button, so every test here fails on
 `findChild(QPushButton, "summary-start")` returning `None`, or on the missing
 `start_requested` attribute.
@@ -31,7 +38,7 @@ the window's `#1c1c1c` (surface.base). Recorded in the story's `## Handoff`.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from importlib.resources import files
 from pathlib import Path
 
@@ -44,8 +51,10 @@ from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 import mangatl.domain.budget as budget
 from mangatl import app as app_module
 from mangatl.domain.page import Chapter, Page
+from mangatl.pipeline.stage import Stage
 from mangatl.ui import tokens_gen
 from mangatl.ui.main_window import MainWindow
+from mangatl.ui.run import RunSetup
 from mangatl.ui.summary import ChapterSummary
 
 T = tokens_gen.TOKENS
@@ -54,9 +63,26 @@ START_ANYWAY = "Start run anyway"
 CHOOSE = "Choose a different folder"
 
 
-def _last_page_inside_budget() -> int:
-    """MT-058 AC-3's boundary, read from the two constants (33 today)."""
-    return budget.DEFAULT_CEILING.micro() // budget.BOOTSTRAP_PAGE_ESTIMATE.micro()
+#: MT-100 C-6: a summary prices a named model. These tests are about the button,
+#: so they name Claude's, whose boundary MT-058 tabulates (33 / 34).
+OPUS = "claude-opus-5"
+GEMINI = "gemini-3.1-pro-preview"
+
+
+def _last_page_inside_budget(model: str = OPUS) -> int:
+    """MT-058 AC-3's boundary on `model`, read from the domain (33 on Claude,
+    66 on Gemini - MT-100 AC-2)."""
+    return budget.DEFAULT_CEILING.micro() // budget.page_estimate(model).micro()
+
+
+def _no_stages(models_dir: Path) -> Sequence[Stage]:
+    return ()
+
+
+def _selecting(model: str) -> RunSetup:
+    """A `RunSetup` whose `select_model` answers `model` (MT-100 C-5): the way a
+    window is told which model its summaries price, with no environment read."""
+    return RunSetup(lambda: None, _no_stages, lambda: model)
 
 
 def _chapter(count: int, folder: Path = Path("C:/manga/Chapter 12")) -> Chapter:
@@ -70,7 +96,7 @@ def _chapter(count: int, folder: Path = Path("C:/manga/Chapter 12")) -> Chapter:
 
 
 def _bare(qtbot, count: int) -> ChapterSummary:  # type: ignore[no-untyped-def]
-    summary = ChapterSummary(_chapter(count))
+    summary = ChapterSummary(_chapter(count), model=OPUS)
     qtbot.addWidget(summary)
     return summary
 
@@ -109,6 +135,31 @@ def _settle() -> None:
 
 def test_the_boundary_is_33_pages_at_today_s_rates() -> None:
     assert _last_page_inside_budget() == 33
+
+
+@pytest.mark.parametrize(
+    ("model", "offset", "text"),
+    [(GEMINI, 0, START), (GEMINI, 1, START_ANYWAY), (OPUS, 0, START), (OPUS, 1, START_ANYWAY)],
+    ids=["gemini-66", "gemini-67", "claude-33", "claude-34"],
+)
+def test_through_the_window_the_start_label_follows_the_selected_models_boundary(
+    qtbot,  # type: ignore[no-untyped-def]
+    model: str,
+    offset: int,
+    text: str,
+) -> None:
+    """MT-100 AC-1/AC-2 at the button: the window's `RunSetup.select_model`
+    decides which boundary Start's label moves at - 66/67 on Gemini, 33/34 on
+    Claude. Before MT-100 a 66-page Gemini chapter read `Start run anyway`."""
+    window = MainWindow(open_folder=app_module.open_folder, run_setup=_selecting(model))
+    qtbot.addWidget(window)
+
+    window.show_summary(_chapter(_last_page_inside_budget(model) + offset))
+
+    summary = window.centralWidget()
+    assert isinstance(summary, ChapterSummary)
+    assert _start(summary).text() == text
+    assert _start(summary).accessibleName() == text
 
 
 @pytest.mark.parametrize(
@@ -297,7 +348,7 @@ def _themed_summary(qtbot, root: Path) -> tuple[QWidget, ChapterSummary]:  # typ
     png = _png()
     for name in ("p1.png", "p2.png"):
         (folder / name).write_bytes(png)
-    window = app_module.build_window([str(folder)])
+    window = app_module.build_window([str(folder)], run_setup=_selecting(OPUS))
     qtbot.addWidget(window)
     window.resize(1100, 720)
     with qtbot.waitExposed(window):

@@ -76,6 +76,8 @@ from decimal import Decimal
 
 import pytest
 
+import mangatl.domain.budget as budget_module
+import mangatl.domain.rates as rates_module
 from mangatl.domain.budget import (
     BOOTSTRAP_PAGE_ESTIMATE,
     DEFAULT_CEILING,
@@ -85,6 +87,8 @@ from mangatl.domain.budget import (
     Projection,
 )
 from mangatl.domain.money import Usd
+from mangatl.domain.rates import RATES, ModelRates, UnknownModel, price
+from mangatl.domain.translation import TokenUsage
 
 # --- the numbers, read out of the story ------------------------------------
 
@@ -456,3 +460,193 @@ def test_a_decision_cannot_be_rewritten_after_it_is_made() -> None:
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         decision.permitted = True  # type: ignore[misc]
+
+
+# =============================================================================
+# MT-100 C-1 / AC-7: the per-model estimate
+# =============================================================================
+#
+# **Settled, read out of MT-100 C-1 - not re-derived.** `DESIGN_A_PAGE_TOKENS`
+# is the contract's token profile, and the three figures below are its
+# arithmetic as the contract records it: opus 56,730 -> 60,000 micro-dollars,
+# sonnet 22,692 -> 30,000, gemini 25,692 -> 30,000. The exact pre-rounding
+# costs are pinned too, because "rounded UP to the cent" is only a claim about
+# rounding when both ends of it are on the page.
+#
+# The new names are read off the module at call time (`budget_module.X`), so
+# in RED each of these fails on its own `AttributeError` and the MT-013 tests
+# above still run. The rounding direction is exercised on two models that are
+# not in the shipped table, by replacing `domain.rates.RATES` - which `price`
+# reads at call time - for one test. That pins one thing about GREEN's
+# `page_estimate`: it prices at call time rather than from a table built at
+# import.
+
+#: AC-7, read out of C-1: model id -> (exact cost, estimate), in micro-dollars.
+_PAGE_FIGURES: dict[str, tuple[int, int]] = {
+    "claude-opus-5": (56_730, 60_000),
+    "claude-sonnet-5": (22_692, 30_000),
+    "gemini-3.1-pro-preview": (25_692, 30_000),
+}
+
+_CENT_MICRO = 10_000
+
+
+def _design_a() -> TokenUsage:
+    tokens: TokenUsage = budget_module.DESIGN_A_PAGE_TOKENS
+    return tokens
+
+
+def _page_estimate(model_id: str) -> Usd:
+    estimate: Usd = budget_module.page_estimate(model_id)
+    return estimate
+
+
+def _with_model(monkeypatch: pytest.MonkeyPatch, model_id: str, output_rate: str) -> None:
+    """The shipped table plus `model_id`, priced on output only, at
+    `output_rate` dollars per million tokens."""
+    table = dict(rates_module.RATES)
+    table[model_id] = ModelRates(
+        input_per_mtok=Decimal("0"),
+        output_per_mtok=Decimal(output_rate),
+        cache_write_per_mtok=Decimal("0"),
+        cache_read_per_mtok=Decimal("0"),
+    )
+    monkeypatch.setattr(rates_module, "RATES", table)
+
+
+def test_the_design_a_page_is_the_contracts_token_profile() -> None:
+    """C-1: 2,296 image + 500 OCR + 900 context uncached input, the 1,500-token
+    prefix as a cache read, 700 visible + 800 thinking output, no cache write."""
+    assert _design_a() == TokenUsage(
+        input_tokens=3696, output_tokens=1500, cache_read_tokens=1500, cache_write_tokens=0
+    )
+
+
+@pytest.mark.parametrize(("model_id", "figures"), list(_PAGE_FIGURES.items()))
+def test_each_listed_model_is_priced_per_page_and_rounded_up_to_the_cent(
+    model_id: str, figures: tuple[int, int]
+) -> None:
+    """AC-7: `price(model, DESIGN_A_PAGE_TOKENS).cost`, rounded **up**."""
+    exact_micro, estimate_micro = figures
+
+    assert price(model_id, _design_a()).cost.micro() == exact_micro, "precondition: C-1"
+    assert _page_estimate(model_id).micro() == estimate_micro, (
+        f"page_estimate({model_id!r}) is {_page_estimate(model_id)}, not"
+        f" ${estimate_micro / 1e6:.2f} ({exact_micro} micro-dollars rounded up to the cent)"
+    )
+
+
+def test_gemini_is_three_cents_a_page_not_claudes_six() -> None:
+    """AC-7, the figure the story exists for, on its own so that its failure
+    message is the bug report."""
+    assert _page_estimate("gemini-3.1-pro-preview").amount == Decimal("0.03")
+    assert _page_estimate("claude-opus-5").amount == Decimal("0.06")
+
+
+def test_every_listed_models_estimate_is_a_positive_whole_cent_within_a_cent_above_cost() -> None:
+    """AC-7 over the whole shipped table: strictly positive, a whole number of
+    cents, never below the exact cost and less than a cent above it."""
+    wrong = []
+    for model_id in RATES:
+        exact = price(model_id, _design_a()).cost.micro()
+        estimate = _page_estimate(model_id).micro()
+        whole_cent = estimate % _CENT_MICRO == 0
+        if not (estimate > 0 and whole_cent and exact <= estimate < exact + _CENT_MICRO):
+            wrong.append((model_id, exact, estimate))
+    assert wrong == [], f"(model, exact, estimate) breaking AC-7: {wrong}"
+
+
+def test_a_cost_just_past_a_cent_rounds_up_not_to_nearest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rounding direction, isolated: 1,500 output tokens at $7/M is 10,500
+    micro-dollars, $0.0105. Nearest gives $0.01; up gives $0.02."""
+    _with_model(monkeypatch, "test-ten-five", "7")
+
+    assert price("test-ten-five", _design_a()).cost.micro() == 10_500, "precondition"
+    assert _page_estimate("test-ten-five").micro() == 20_000
+
+
+def test_a_whole_number_of_cents_is_not_bumped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other side: 1,500 output tokens at $20/M is exactly $0.03. A ceiling
+    that adds a cent unconditionally gives $0.04."""
+    _with_model(monkeypatch, "test-three-cents", "20")
+
+    assert price("test-three-cents", _design_a()).cost.micro() == 30_000, "precondition"
+    assert _page_estimate("test-three-cents").micro() == 30_000
+
+
+def test_an_unlisted_model_is_refused_by_name_never_priced_at_a_neighbour() -> None:
+    """AC-7: `UnknownModel` naming the id - `claude-opus-4` is the stale id
+    `rates.py` names as the realistic mistake."""
+    with pytest.raises(UnknownModel) as caught:
+        _page_estimate("claude-opus-4")
+
+    assert "'claude-opus-4'" in str(caught.value), f"the refusal does not name it: {caught.value}"
+
+
+def test_the_bootstrap_estimate_is_the_dearest_listed_models_figure() -> None:
+    """AC-7: `Budget()` with no model named projects the dearest listed model's
+    estimate - $0.06 today, claude-opus-5 - so an unnamed model errs high."""
+    dearest = max(_page_estimate(model_id) for model_id in RATES)
+
+    assert dearest == BOOTSTRAP_PAGE_ESTIMATE
+    assert dearest.micro() == 60_000
+    assert Budget().project((), 1).next_call == dearest
+
+
+def test_a_budget_given_a_page_estimate_projects_it_with_no_priced_calls() -> None:
+    """C-1: `Budget(page_estimate=...)` is what the estimate branch uses, in
+    place of the module global. 200 pages at $0.03 are $6.00 - AC-1's figure."""
+    three_cents = Usd.from_micro(30_000)
+
+    projection = Budget(page_estimate=three_cents).project((), 200)
+
+    assert projection.next_call == three_cents
+    assert projection.remaining_chapter == Usd(Decimal("6.00"))
+    assert projection.basis == "estimate"
+    assert projection.sample_count == 0
+
+
+def test_a_budget_given_a_page_estimate_still_uses_it_with_one_priced_call() -> None:
+    """One call is not a sample (`MIN_SAMPLES_FOR_PROJECTION`): still the given
+    figure, not the module global."""
+    three_cents = Usd.from_micro(30_000)
+    budget = Budget(page_estimate=three_cents)
+
+    projection = budget.project((Usd.from_micro(5_700),), 19)
+
+    assert projection.next_call == three_cents
+    assert projection.basis == "estimate"
+
+
+def test_the_observed_mean_ignores_the_page_estimate() -> None:
+    """From two samples on the projection is observed, whatever was estimated."""
+    budget = Budget(page_estimate=Usd.from_micro(30_000))
+
+    projection = budget.project(_OBSERVED_COSTS, 1)
+
+    assert projection.basis == "observed"
+    assert projection.next_call.micro() == _OBSERVED_MEAN_MICRO
+
+
+def test_a_budget_keeps_its_ceiling_and_its_page_estimate_side_by_side() -> None:
+    """C-1: `Budget(ceiling, page_estimate=...)`; `page_estimate` is
+    keyword-only, so `Budget(ceiling)` keeps its meaning and nothing positional
+    can be mistaken for an estimate."""
+    budget = Budget(_CEILING, page_estimate=Usd.from_micro(30_000))
+
+    assert budget.ceiling == _CEILING
+    assert budget.page_estimate == Usd.from_micro(30_000)
+    assert Budget().page_estimate == BOOTSTRAP_PAGE_ESTIMATE
+    with pytest.raises(TypeError):
+        Budget(_CEILING, Usd.from_micro(30_000))
+
+
+def test_a_budget_at_three_cents_puts_the_boundary_between_sixty_six_and_sixty_seven() -> None:
+    """AC-2's boundary at the guard's own arithmetic: 66 x $0.03 = $1.98 and
+    67 x $0.03 = $2.01 against the $2.00 ceiling."""
+    budget = Budget(page_estimate=Usd.from_micro(30_000))
+
+    assert budget.project((), 66).remaining_chapter == Usd(Decimal("1.98"))
+    assert budget.project((), 67).remaining_chapter == Usd(Decimal("2.01"))

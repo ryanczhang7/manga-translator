@@ -32,6 +32,7 @@ import _glossary_live
 import pytest
 from _glossary_live import NAME_REGION, context_on, load_ocr
 
+from mangatl.domain.budget import BOOTSTRAP_PAGE_ESTIMATE
 from mangatl.domain.glossary import (
     EMPTY_CONTEXT,
     PromptContext,
@@ -107,7 +108,7 @@ def _pipeline_context(
             return result_p1
 
         page0 = next(page for page in project.pages() if page.ordinal == 0)
-        TranslateStage(translate=translator).run(
+        TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(
             PageContext(project=project, page=page0, run_id=run_id, emit=lambda _event: None)
         )
         assert handed == [EMPTY_CONTEXT], "page 1 was not sent EMPTY_CONTEXT"

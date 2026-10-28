@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import inspect
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -73,6 +74,8 @@ import pytest
 if TYPE_CHECKING:
     from mangatl.domain.glossary import PromptContext
 
+import mangatl.domain.budget as budget_module
+import mangatl.translate.provider as provider_module
 from mangatl.domain.budget import (
     BOOTSTRAP_PAGE_ESTIMATE,
     DEFAULT_CEILING,
@@ -80,7 +83,7 @@ from mangatl.domain.budget import (
     Budget,
     Decision,
 )
-from mangatl.domain.events import RunAborted, RunEvent, RunFinished
+from mangatl.domain.events import CallPriced, RunAborted, RunEvent, RunFinished
 from mangatl.domain.line import OcrResult
 from mangatl.domain.money import Usd
 from mangatl.domain.rates import price
@@ -464,7 +467,13 @@ def _run_chapter(
         fixture.project,
         # MT-065 C-1 (a): the required cleaner. The page's own bytes are a
         # decodable image of its own size, which is all `write_cleaned` checks.
-        build_stages(detector, lambda image_bytes, regions: image_bytes, transcriber, translator),
+        build_stages(
+            detector,
+            lambda image_bytes, regions: image_bytes,
+            transcriber,
+            translator,
+            BOOTSTRAP_PAGE_ESTIMATE,
+        ),
         events.append,
         cancelled,
     )
@@ -1039,7 +1048,7 @@ def test_a_chapter_row_carrying_a_ceiling_builds_the_guard_with_that_ceiling(
     """
     _set_ceiling(fixture.project, _CEILING_MICRO)
 
-    budget = budget_for(fixture.project)
+    budget = budget_for(fixture.project, BOOTSTRAP_PAGE_ESTIMATE)
 
     assert isinstance(budget, Budget)
     assert budget.ceiling == Usd.from_micro(_CEILING_MICRO)
@@ -1059,7 +1068,7 @@ def test_a_chapter_row_with_no_ceiling_builds_the_guard_with_the_default(
     """
     assert fixture.project.budget_ceiling() is None, "create_project invented a ceiling"
 
-    assert budget_for(fixture.project).ceiling == DEFAULT_CEILING
+    assert budget_for(fixture.project, BOOTSTRAP_PAGE_ESTIMATE).ceiling == DEFAULT_CEILING
 
 
 def test_a_stored_ceiling_of_zero_is_a_ceiling_and_not_an_absent_one(
@@ -1077,7 +1086,7 @@ def test_a_stored_ceiling_of_zero_is_a_ceiling_and_not_an_absent_one(
     """
     _set_ceiling(fixture.project, 0)
 
-    budget = budget_for(fixture.project)
+    budget = budget_for(fixture.project, BOOTSTRAP_PAGE_ESTIMATE)
 
     assert budget.ceiling == Usd.from_micro(0)
     assert budget.ceiling != DEFAULT_CEILING
@@ -1234,7 +1243,9 @@ def test_the_stage_records_the_bill_before_it_writes_the_proposals(
             )
 
     with pytest.raises(ValueError, match=r"\b99\b"):
-        TranslateStage(translate=_NamesAMissingRegion()).run(fixture.context(0, run_id))
+        TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_NamesAMissingRegion()).run(
+            fixture.context(0, run_id)
+        )
 
     assert _rows_for(fixture.db_path, 0) == 1, (
         "the proposals were written before the bill: a crash between the two"
@@ -1271,7 +1282,9 @@ def test_a_result_that_reports_no_call_writes_proposals_and_no_ledger_row(
                 proposed_terms=(),
             )
 
-    TranslateStage(translate=_NoCall()).run(fixture.context(0, run_id))
+    TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_NoCall()).run(
+        fixture.context(0, run_id)
+    )
 
     assert fixture.project.read_proposed(0) == ("EN(ja-0)", "EN(ja-1)")
     assert _rows_for(fixture.db_path, 0) == 0
@@ -1294,7 +1307,9 @@ def test_the_guard_refuses_before_the_translator_is_ever_called(
     translator = _Translator()
 
     with pytest.raises(BudgetRefused) as excinfo:
-        TranslateStage(translate=translator).run(fixture.context(0, run_id))
+        TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(
+            fixture.context(0, run_id)
+        )
 
     assert translator.calls == 0, (
         "the translator was called for a page the guard refused: the check runs"
@@ -1304,3 +1319,177 @@ def test_the_guard_refuses_before_the_translator_is_ever_called(
     assert excinfo.value.decision.ceiling == Usd.from_micro(0)
     assert _rows_for(fixture.db_path, 0) == 0
     assert fixture.project.read_proposed(0) == (None, None)
+
+
+# -- MT-100 AC-5: the guard projects the SELECTED model's figure ---------------
+#
+# Settled, read out of MT-100 C-1 and never re-derived here: the first page of
+# a chapter with no priced calls projects `page_estimate(model)` - $0.03 for
+# `gemini-3.1-pro-preview`, $0.06 for `claude-opus-5`. The model a selection
+# calls is `translate.provider.model_for(provider)` (C-2), and the stage is
+# handed `page_estimate(model_for(provider))`, which is exactly what
+# `compose.build_pipeline` computes from a selection (C-4;
+# `tests/core/test_compose.py` pins that the root does).
+#
+# Both names are read off their modules at call time, so in RED each test here
+# fails on the named absence and the ~40 MT-044 tests above still run.
+#
+# **The discriminating case is the PERMITTED Gemini run at $0.03** (DV-2): a
+# `budget_for` that ignored its estimate and projected Claude's $0.06 refuses
+# at $0.02 too, so the refusal alone cannot tell the two apart. The permit at
+# $0.03, and the `next_call` the permitted page's `CallPriced` reports, can.
+
+#: MT-100 C-1's settled figures, in micro-dollars.
+_GEMINI_FIRST_CALL_MICRO = 30_000
+_CLAUDE_FIRST_CALL_MICRO = 60_000
+
+
+def _estimate_for(provider: str) -> Usd:
+    """The per-page estimate a run on `provider` is built with (C-2, C-1)."""
+    model: str = provider_module.model_for(provider)
+    estimate: Usd = budget_module.page_estimate(model)
+    return estimate
+
+
+@dataclass(frozen=True)
+class _FirstPage:
+    """What the stage did with page 0 under one stored ceiling."""
+
+    refusal: BudgetRefused | None
+    priced: list[CallPriced]
+    translator_calls: int
+
+
+def _first_page(fixture: _Fixture, provider: str, ceiling_micro: int) -> _FirstPage:
+    """Page 0 of the fixture chapter, no priced calls, the ceiling stored, the
+    stage built for `provider` - run once, through the real `TranslateStage`."""
+    _set_ceiling(fixture.project, ceiling_micro)
+    run_id = _seed_page_zero(fixture)
+    translator = _Translator()
+    events: list[RunEvent] = []
+    page = next(page for page in fixture.project.pages() if page.ordinal == 0)
+    ctx = PageContext(project=fixture.project, page=page, run_id=run_id, emit=events.append)
+    stage = TranslateStage(translator, _estimate_for(provider))
+    refusal: BudgetRefused | None = None
+    try:
+        stage.run(ctx)
+    except BudgetRefused as error:
+        refusal = error
+    priced = [event for event in events if isinstance(event, CallPriced)]
+    return _FirstPage(refusal=refusal, priced=priced, translator_calls=translator.calls)
+
+
+def test_a_gemini_run_with_no_priced_calls_is_refused_at_two_cents_projecting_three(
+    fixture: _Fixture,
+) -> None:
+    """**MT-100 AC-5**, refusal half: $0.00 spent + $0.03 projected > $0.02."""
+    first = _first_page(fixture, "gemini", 20_000)
+
+    assert first.refusal is not None, "a $0.02 ceiling permitted a $0.03 first page"
+    projection = first.refusal.decision.projection
+    assert projection.next_call == Usd.from_micro(_GEMINI_FIRST_CALL_MICRO), (
+        f"the Gemini guard projected {projection.next_call} for its first page, not $0.03:"
+        " it is pricing a model other than the one the run calls"
+    )
+    assert projection.basis == "estimate"
+    assert projection.sample_count == 0
+    assert first.refusal.decision.ceiling == Usd.from_micro(20_000)
+    assert first.translator_calls == 0
+
+
+def test_a_gemini_run_with_no_priced_calls_is_permitted_at_three_cents(
+    fixture: _Fixture,
+) -> None:
+    """**MT-100 AC-5**, permit half - and DV-2's discriminating case.
+
+    $0.00 + $0.03 <= $0.03, inclusive. Before this story the guard projected
+    Claude's $0.06 for every provider and refused this page. The permitted
+    page's `CallPriced` carries the stage's own guard projecting one sample,
+    still on the estimate basis, so it shows the per-page figure the stage was
+    built with: $0.03, not $0.06.
+    """
+    first = _first_page(fixture, "gemini", _GEMINI_FIRST_CALL_MICRO)
+
+    assert first.refusal is None, (
+        f"a $0.03 ceiling refused the first Gemini page: {first.refusal}; the guard"
+        " projected Claude's figure, not the selected model's"
+    )
+    assert first.translator_calls == 1
+    assert len(first.priced) == 1, f"the permitted page emitted {first.priced}"
+    after = first.priced[0].projection
+    assert after.basis == "estimate", "one priced call is not enough to leave the estimate"
+    assert after.next_call == Usd.from_micro(_GEMINI_FIRST_CALL_MICRO), (
+        f"the permitted Gemini page's guard projects {after.next_call} a page, not $0.03"
+    )
+
+
+def test_an_anthropic_run_with_no_priced_calls_projects_six_cents_and_is_refused_at_five(
+    fixture: _Fixture,
+) -> None:
+    """**MT-100 AC-5**, the other selection: Claude keeps Claude's figure."""
+    first = _first_page(fixture, "anthropic", 50_000)
+
+    assert first.refusal is not None, "a $0.05 ceiling permitted a $0.06 Claude first page"
+    projection = first.refusal.decision.projection
+    assert projection.next_call == Usd.from_micro(_CLAUDE_FIRST_CALL_MICRO)
+    assert projection.basis == "estimate"
+    assert first.translator_calls == 0
+
+
+def test_an_anthropic_run_with_no_priced_calls_is_permitted_at_six_cents(
+    fixture: _Fixture,
+) -> None:
+    """AC-5's Claude case from the other side of its boundary, so the $0.05
+    refusal is a claim about $0.06 and not about refusing everything."""
+    first = _first_page(fixture, "anthropic", _CLAUDE_FIRST_CALL_MICRO)
+
+    assert first.refusal is None, f"a $0.06 ceiling refused the first Claude page: {first.refusal}"
+    assert first.translator_calls == 1
+
+
+def test_budget_for_carries_the_estimate_it_is_given_beside_the_stored_ceiling(
+    fixture: _Fixture,
+) -> None:
+    """MT-100 C-3: `budget_for(project, page_estimate)` - the stored ceiling as
+    before, and the given figure as what the estimate branch projects."""
+    _set_ceiling(fixture.project, _CEILING_MICRO)
+    estimate = Usd.from_micro(_GEMINI_FIRST_CALL_MICRO)
+
+    budget = budget_for(fixture.project, estimate)
+
+    assert budget.ceiling == Usd.from_micro(_CEILING_MICRO)
+    assert budget.project((), _PAGE_COUNT).next_call == estimate
+    assert budget.project((), _PAGE_COUNT).remaining_chapter == Usd.from_micro(90_000)
+
+
+def test_budget_for_with_no_stored_ceiling_still_carries_the_estimate(
+    fixture: _Fixture,
+) -> None:
+    """C-3's other branch: `DEFAULT_CEILING` and the given estimate, not
+    `Budget()`'s $0.06."""
+    estimate = Usd.from_micro(_GEMINI_FIRST_CALL_MICRO)
+
+    budget = budget_for(fixture.project, estimate)
+
+    assert budget.ceiling == DEFAULT_CEILING
+    assert budget.project((), 1).next_call == estimate
+
+
+def test_budget_for_requires_the_estimate() -> None:
+    """C-3: REQUIRED, no default - a stage that forgot it must not silently get
+    Claude's figure."""
+    parameters = inspect.signature(budget_for).parameters
+
+    assert list(parameters) == ["project", "page_estimate"]
+    assert parameters["page_estimate"].default is inspect.Parameter.empty
+
+
+def test_the_translate_stage_takes_its_estimate_second_with_no_default() -> None:
+    """C-3: `TranslateStage(translate, page_estimate, name="translate")` - the
+    estimate positional, after the translator and before the defaulted name."""
+    fields = dataclasses.fields(TranslateStage)
+
+    assert [field.name for field in fields] == ["translate", "page_estimate", "name"]
+    estimate_field = next(field for field in fields if field.name == "page_estimate")
+    assert estimate_field.default is dataclasses.MISSING
+    assert estimate_field.default_factory is dataclasses.MISSING

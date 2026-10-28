@@ -412,3 +412,69 @@ def test_an_unknown_choice_names_the_bad_value_and_the_three_valid_ones(value: s
 
     assert str(raised.value) == _unknown(value)
     _assert_no_key_in(str(raised.value))
+
+
+# =============================================================================
+# MT-100 C-2 / AC-8: which model each provider's translator calls
+# =============================================================================
+#
+# Read off the module at call time (`provider_module.MODEL_IDS`), so in RED
+# each test fails on the named absence and the MT-078 tests above still run.
+
+#: AC-8's openai refusal, the sentence `compose._translator` raises, spelled out.
+_OPENAI_UNAVAILABLE = "translation with openai is not available yet"
+
+
+def test_the_gemini_row_is_the_model_the_gemini_adapter_calls() -> None:
+    """AC-8: one spelling. `translate.gemini` imports the SDK, which this test
+    file may; `translate.provider` itself still must not (C-1 above)."""
+    from mangatl.translate import gemini
+
+    model_ids = provider_module.MODEL_IDS
+    assert model_ids["gemini"] == gemini.MODEL_ID
+    assert model_ids["gemini"] == "gemini-3.1-pro-preview"
+
+
+def test_the_anthropic_row_is_the_model_the_claude_prompt_names() -> None:
+    from mangatl.translate import prompt
+
+    model_ids = provider_module.MODEL_IDS
+    assert model_ids["anthropic"] == prompt.MODEL_ID
+    assert model_ids["anthropic"] == "claude-opus-5"
+
+
+def test_every_listed_model_is_one_the_rate_table_prices() -> None:
+    """AC-8: a model the table did not list would raise `UnknownModel` from
+    `page_estimate` on the summary screen. Exactly the two providers with a
+    translator have a row; `openai` has none (MT-078 PO-5)."""
+    from mangatl.domain.rates import RATES
+
+    model_ids = provider_module.MODEL_IDS
+    assert sorted(model_ids) == ["anthropic", "gemini"]
+    unpriced = [model for model in model_ids.values() if model not in RATES]
+    assert unpriced == [], f"MODEL_IDS names models the rate table does not price: {unpriced}"
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "gemini"])
+def test_model_for_a_provider_with_a_translator_is_its_row(provider: str) -> None:
+    model_ids = provider_module.MODEL_IDS
+
+    assert provider_module.model_for(provider) == model_ids[provider]
+
+
+def test_model_for_openai_is_refused_with_composes_sentence() -> None:
+    """AC-8: `ProviderUnavailable`, so the window and the CLI catch it as every
+    other `ProviderError`, and the sentence exactly - it becomes AC-4's
+    `No estimate: translation with openai is not available yet.`"""
+    with pytest.raises(ProviderUnavailable) as caught:
+        provider_module.model_for("openai")
+
+    assert str(caught.value) == _OPENAI_UNAVAILABLE
+
+
+def test_the_module_exports_the_model_table_and_its_lookup() -> None:
+    """C-2: `__all__` gains both names."""
+    exported = provider_module.__all__
+
+    assert "MODEL_IDS" in exported
+    assert "model_for" in exported
