@@ -882,6 +882,10 @@ class Workspace(QMainWindow):
         self._chapter: Chapter | None = None
         self._project: Project | None = None
         self._page_ordinal: int | None = None
+        #: The page the column's rows were loaded for. It changes only when the
+        #: rows are replaced, so a save retried after `_page_ordinal` has moved
+        #: on still updates the strip row of the page it belongs to (MT-099).
+        self._rows_ordinal: int | None = None
         self._render_controller: BakeController | None = None
         self._render_output = ""
         #: The theme controller the canvas follows; `None` until `follow_theme`.
@@ -1046,6 +1050,9 @@ class Workspace(QMainWindow):
         self._project = project
         self._chapter = project.chapter
         self._page_ordinal = None
+        # The old chapter's rows are not this strip's: their last saves, on
+        # the flush below, update no row of it.
+        self._rows_ordinal = None
         self._column_dragged = False
         name = display_name(self._chapter.source_dir)
         self.chapter_name.setText(name)
@@ -1060,17 +1067,20 @@ class Workspace(QMainWindow):
         self.set_regions([], [], [])
 
     def _refresh_page_progress(self) -> None:
-        """The shown page's strip row, re-derived from the column's lines and
-        the page's stored state - in place, never by reloading (MT-086 AC-4)."""
-        if self._project is None or self._page_ordinal is None:
+        """The strip row of the page the column's rows belong to, re-derived
+        from their lines and that page's stored state - in place, never by
+        reloading (MT-086 AC-4). Not the page shown: a save retried after a
+        page change re-renders the page left's rows (MT-099)."""
+        ordinal = self._rows_ordinal
+        if self._project is None or ordinal is None:
             return
-        status = self._project.page_status(self._page_ordinal)
+        status = self._project.page_status(ordinal)
         progress = page_progress(
             self.translation_column.statuses(),
             page_done=status == PAGE_DONE,
             stale=status == PAGE_STALE,
         )
-        self.page_strip.set_progress(self._page_ordinal, progress)
+        self.page_strip.set_progress(ordinal, progress)
 
     def show_page(self, ordinal: int) -> None:
         """Decode page `ordinal` synchronously and show it with its stored
@@ -1115,6 +1125,8 @@ class Workspace(QMainWindow):
         self.link.select(None)
         self.page_canvas.set_regions(regions)
         self.translation_column.set_rows(regions, japanese, english, lines=lines, saves=saves)
+        # After `set_rows`: its flush may still re-render the old rows.
+        self._rows_ordinal = self._page_ordinal
         if regions:
             self.link.select(0)
 
