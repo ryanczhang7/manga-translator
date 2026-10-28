@@ -936,6 +936,137 @@ def test_a_save_pending_when_the_page_changes_still_reaches_the_project_file(
     assert _stored_row(reviewing, 1, 0) == ("proposed", None, "en 0", "ja 0", False)
 
 
+# =============================================================================
+# MT-099: a save that keeps failing across the page change still belongs to the
+# page left
+# =============================================================================
+
+#: AC-2's value, read out of the shipped code (MT-099 `## Test plan`): page 1's
+#: row after its accept's save has failed once, with no page change - and the
+#: same value when only the first of the page change's flushes fails.
+PAGE_1_AFTER_A_FAILED_SAVE = PageProgress("partly_reviewed", 1, 3, 0)
+
+
+def _saves_fail(
+    monkeypatch: pytest.MonkeyPatch, *, first_only: bool = False
+) -> list[tuple[Any, ...]]:
+    """Replace the name `_saver` calls with one that raises - on every call, or
+    on the first only and then saves through the real `commit_line`. Returns
+    the calls it saw, as `(page_ordinal, reading_index, text, status)`."""
+    calls: list[tuple[Any, ...]] = []
+
+    def full_disk(project: Project, ordinal: int, index: int, text: Any, status: Any) -> None:
+        calls.append((ordinal, index, text, status))
+        if first_only and len(calls) > 1:
+            commit_line(project, ordinal, index, text, status)
+            return
+        raise OSError("disk is full")
+
+    monkeypatch.setattr("mangatl.ui.workspace.commit_line", full_disk)
+    return calls
+
+
+def _accept_then_change_page_with_every_save_failing(
+    qtbot,  # type: ignore[no-untyped-def]
+    project: Project,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Workspace, list[PageProgress], list[tuple[Any, ...]]]:
+    return _accept_then_change_page(qtbot, project, _saves_fail(monkeypatch))
+
+
+def _accept_then_change_page(
+    qtbot,  # type: ignore[no-untyped-def]
+    project: Project,
+    calls: list[tuple[Any, ...]],
+) -> tuple[Workspace, list[PageProgress], list[tuple[Any, ...]]]:
+    """Accept page 1's row 0, then select page 2 before its save timer fires,
+    with saves failing as `calls`' patch was told to."""
+    window = _reviewing(qtbot, project, 0)
+    strip = window.page_strip
+    before = [strip.progress(i) for i in range(4)]
+
+    _click(window, 0, "accept_button")
+    strip.setCurrentRow(1)
+    _settle()
+
+    # Preconditions: the save really failed on leaving page 1 and was retried
+    # after the page changed - the sequence this story is about.
+    assert len(calls) >= 2, f"the accept's save was attempted {len(calls)} time(s), not retried"
+    assert set(calls) == {(0, 0, None, "accepted")}, calls
+    assert strip.currentRow() == 1
+    return window, before, calls
+
+
+def test_a_save_failing_again_after_the_page_change_leaves_the_new_pages_row_its_own(
+    qtbot,  # type: ignore[no-untyped-def]
+    reviewing: Project,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MT-099 AC-1: the retried, failed save of page 1's accept re-renders a
+    page 1 row, and must not re-derive page 2's strip row from it."""
+    window, before, _ = _accept_then_change_page_with_every_save_failing(
+        qtbot, reviewing, monkeypatch
+    )
+    strip = window.page_strip
+
+    assert before[1] == PageProgress("translated", 0, 1, 0)
+    entered = strip.progress(1)
+    assert entered == before[1], (
+        f"page 2's strip row now reads {entered!r}, not its own {before[1]!r}:"
+        " the save that failed again after the page change was written onto"
+        " the page entered"
+    )
+    assert [strip.progress(i) for i in (2, 3)] == before[2:]
+
+
+def test_a_save_failing_again_after_the_page_change_leaves_the_left_pages_row_as_one_failure_did(
+    qtbot,  # type: ignore[no-untyped-def]
+    reviewing: Project,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MT-099 AC-2: the retried failure changes no row but its own page's, so
+    page 1's row reads what one failed flush leaves it reading."""
+    window, before, _ = _accept_then_change_page_with_every_save_failing(
+        qtbot, reviewing, monkeypatch
+    )
+
+    assert before[0] == PageProgress("translated", 0, 3, 0)
+    left = window.page_strip.progress(0)
+    assert left == PAGE_1_AFTER_A_FAILED_SAVE, (
+        f"page 1's strip row reads {left!r} after its save failed again on the"
+        f" next page, not {PAGE_1_AFTER_A_FAILED_SAVE!r} as after one failure"
+    )
+
+
+def test_a_save_that_succeeds_on_retry_after_the_page_change_leaves_the_new_pages_row_its_own(
+    qtbot,  # type: ignore[no-untyped-def]
+    reviewing: Project,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MT-099 AC-3: the first save of page 1's accept fails on leaving page 1
+    and the retry, after the page change, succeeds. The success re-renders a
+    page 1 row and must not re-derive page 2's strip row from it; the accept
+    reaches the project file."""
+    window, before, _ = _accept_then_change_page(
+        qtbot, reviewing, _saves_fail(monkeypatch, first_only=True)
+    )
+    strip = window.page_strip
+
+    assert before[1] == PageProgress("translated", 0, 1, 0)
+    # The store is checked before the strip, so it is observed even while the
+    # strip assertion below fails.
+    assert _stored_row(reviewing, 0, 0) == ("accepted", None, "en 0", "ja 0", True), (
+        "the retried save of page 1's accept did not reach the project file"
+    )
+    entered = strip.progress(1)
+    assert entered == before[1], (
+        f"page 2's strip row now reads {entered!r}, not its own {before[1]!r}:"
+        " the save that succeeded on retry after the page change was written"
+        " onto the page entered"
+    )
+    assert [strip.progress(i) for i in (2, 3)] == before[2:]
+
+
 @pytest.mark.parametrize(
     ("ordinal", "expected"),
     [
