@@ -478,3 +478,28 @@ def test_each_rows_accessible_name_names_its_status_in_words(qtbot) -> None:  # 
     assert unnamed == {}, f"rows whose accessible name does not end with their status: {unnamed}"
     assert "translation failed" in names["failed"], names["failed"]
     assert set(_STATUS_PHRASES) | {"failed"} == set(LINE_STATUSES)
+
+
+def test_a_line_typed_without_a_proposal_is_announced_as_its_text_not_as_not_translated(
+    qtbot,  # type: ignore[no-untyped-def]
+) -> None:
+    """MT-098 AC-1 (MT-017 C-8): "not translated" needs neither a proposal nor
+    committed text. A failed line typed into commits `edited` with no proposal,
+    and its accessible name reads the text that was typed."""
+    column = TranslationColumn()
+    qtbot.addWidget(column)
+    region = OrderedRegion(region_id=0, polygon=((0, 0), (10, 0), (10, 10), (0, 10), (0, 0)))
+    line = Line(
+        reading_index=0,
+        source_ja="一",
+        proposed_en=None,
+        final_en="Mine.",
+        status="edited",
+        edited_at=None,
+    )
+    column.set_rows([region], ["一"], [None], lines=[line])
+
+    name = column.list.item(0).data(Qt.ItemDataRole.AccessibleTextRole)
+
+    assert "not translated" not in name, ascii(name)
+    assert name == "Bubble 1 of 1. Japanese: 一. English: Mine.. edited.", ascii(name)
