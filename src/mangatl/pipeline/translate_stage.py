@@ -56,6 +56,7 @@ from mangatl.domain.budget import Budget
 from mangatl.domain.events import CallPriced
 from mangatl.domain.glossary import PromptContext, mark_seen, merge
 from mangatl.domain.line import OcrResult
+from mangatl.domain.money import Usd
 from mangatl.domain.rates import price
 from mangatl.domain.translation import TranslationResult
 from mangatl.pipeline.continuity import build_prompt_context
@@ -75,7 +76,7 @@ __all__ = ["PageTranslator", "TranslateStage", "budget_for", "pages_remaining"]
 PageTranslator = Callable[[bytes, Sequence[OcrResult], PromptContext], TranslationResult]
 
 
-def budget_for(project: Project) -> Budget:
+def budget_for(project: Project, page_estimate: Usd) -> Budget:
     """The guard for this chapter's run: the stored ceiling, or the default.
 
     MT-044 AC-5, both halves, and the seam between the two layers that each own
@@ -89,11 +90,16 @@ def budget_for(project: Project) -> Budget:
     `__len__`, at which point a stored $0.00 ceiling (MT-013 AC-7's "refuses
     everything, forever") silently becomes $2.00. The two spellings are one
     word apart in a diff.
+
+    **`page_estimate` is required** (MT-100 C-3): it is the selected model's
+    `domain.budget.page_estimate`, what the guard projects before two calls
+    are priced. A default would hand a stage that forgot it Claude's figure,
+    which is the defect MT-100 removes.
     """
     ceiling = project.budget_ceiling()
     if ceiling is None:
-        return Budget()
-    return Budget(ceiling)
+        return Budget(page_estimate=page_estimate)
+    return Budget(ceiling, page_estimate=page_estimate)
 
 
 def pages_remaining(ctx: PageContext) -> int:
@@ -142,6 +148,9 @@ class TranslateStage:
     """
 
     translate: PageTranslator
+    #: The selected model's per-page estimate (MT-100 C-3), handed to
+    #: `budget_for` so the guard and the pre-run summary share one number.
+    page_estimate: Usd
     name: str = "translate"
 
     def run(self, ctx: PageContext) -> None:
@@ -209,7 +218,7 @@ class TranslateStage:
         this story's whole subject. One `SELECT` a page is nothing at 20 pages.
         """
         ocr_results = ctx.project.read_lines(ctx.page.ordinal)
-        budget = budget_for(ctx.project)
+        budget = budget_for(ctx.project, self.page_estimate)
         projection = budget.project(chapter_call_costs(ctx.project), pages_remaining(ctx))
         decision = budget.check(chapter_total(ctx.project), projection)
         if not decision.permitted:

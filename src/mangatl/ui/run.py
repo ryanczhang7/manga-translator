@@ -33,7 +33,14 @@ from mangatl.pipeline.runner import run_chapter
 from mangatl.pipeline.stage import Stage
 from mangatl.store.project import open_project
 
-__all__ = ["NO_MODELS", "ModelsResolver", "RunController", "RunSetup", "StageBuilder"]
+__all__ = [
+    "NO_MODELS",
+    "ModelSelector",
+    "ModelsResolver",
+    "RunController",
+    "RunSetup",
+    "StageBuilder",
+]
 
 #: AC-7, the Lead PO's wording. It names the variable and not `--models`,
 #: which a window user cannot pass (PO-4).
@@ -46,6 +53,9 @@ NO_MODELS: str = (
 ModelsResolver = Callable[[], Path | None]
 #: The stage list for a models folder.
 StageBuilder = Callable[[Path], Sequence[Stage]]
+#: The model the run would call, or a `ProviderError` saying why none can be
+#: chosen (MT-100 C-5). What the summary's estimate is priced on.
+ModelSelector = Callable[[], str]
 
 
 @dataclass(frozen=True)
@@ -54,6 +64,7 @@ class RunSetup:
 
     resolve_models: ModelsResolver
     build_stages: StageBuilder
+    select_model: ModelSelector
 
 
 class RunController(QObject):

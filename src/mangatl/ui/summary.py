@@ -5,7 +5,8 @@ folder with no project has been read: the folder's name, its page count, its
 first and last page, and - when the filenames sort differently as numbers and
 as text - a notice listing both orders and saying which one the run uses.
 Between the page facts and the notice sits the chapter's `CostEstimate`
-(MT-058), so a long notice cannot push the cost out of sight.
+(MT-058), so a long notice cannot push the cost out of sight; it is priced on
+the `model` the window passes in - the one Start would call (MT-100).
 
 The widget is a view of a `Chapter` and reads nothing from disk: the order it
 shows is `chapter.pages`, which `read_chapter` built in `order_filenames`
@@ -49,7 +50,7 @@ from PySide6.QtWidgets import (
 from mangatl.domain.page import Chapter
 from mangatl.ui import tokens_gen
 from mangatl.ui.buttons import ActivatedByEnter
-from mangatl.ui.cost_estimate import CostEstimate
+from mangatl.ui.cost_estimate import CostEstimate, NoProvider
 from mangatl.ui.intake import display_name
 from mangatl.ui.labels import plain_label
 
@@ -73,7 +74,9 @@ class ChapterSummary(QWidget):
     #: The user pressed "Start run"; the owner runs the Start sequence (MT-059).
     start_requested = Signal()
 
-    def __init__(self, chapter: Chapter, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, chapter: Chapter, parent: QWidget | None = None, *, model: str | NoProvider
+    ) -> None:
         super().__init__(parent)
         self.setObjectName(SUMMARY_OBJECT_NAME)
         self.setAcceptDrops(False)  # PO-9: the button is the way out, not a drop
@@ -119,7 +122,7 @@ class ChapterSummary(QWidget):
 
         # Part 5 (MT-058): before the notice, so a long notice cannot push the
         # cost out of sight.
-        self.cost_estimate = CostEstimate(count)
+        self.cost_estimate = CostEstimate(count, model)
         column.addSpacing(tokens_gen.SPACE_S4)
         column.addWidget(self.cost_estimate)
         lines.extend(self.cost_estimate.lines)

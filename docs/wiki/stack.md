@@ -412,6 +412,13 @@ unverified). Measured figures:
 | Gemini `gemini-3.1-pro-preview` | **$0.0054-$0.0057** (2 calls, page 011, 2026-10-12; ~1,600 prompt tokens, ~209 output, 0 thinking reported) | **$0.11** (5.6 % of $2.00) | MT-080 `## Notes` PO-8 |
 | OpenAI `gpt-6.1-sol` | *not measured - MT-081 parked 2026-10-12 (v1 is Gemini-only)* | | `docs/backlog/parked/MT-081.md` |
 
+**The pre-run estimate per provider (MT-100).** What the window's summary shows
+before a run, and what the budget guard projects before two calls are priced, is
+`domain.budget.page_estimate(model)` - the `cost-model.awk` design-A page tokens
+priced at that provider's model's rates, rounded up to the cent: $0.06 a page on
+`claude-opus-5`, $0.03 on `gemini-3.1-pro-preview` - and Gemini's measured
+$0.0054-$0.0057 above remains the known lower bound, not the estimate.
+
 ### O6 — vertical text and furigana
 
 **Handled by the OCR path, but not for free — it needs two explicit
