@@ -680,6 +680,30 @@ side, then the state core. See tokens.md §5 for why.
 | error (line failed) | `overlay.bubble.error` | `overlay.stroke.core-error` | `overlay.fill.error` | filled badge, warning glyph instead of a numeral |
 | edited | core unchanged from its base state | — | — | a small pencil glyph appended beside the badge |
 | dimmed | the state's own core at `overlay.dim.opacity` | unchanged | unchanged | dimmed with it |
+| excluded (region removed from translation, MT-120) | `overlay.bubble.idle`, **dashed** (`Qt.PenStyle.DashLine`, Qt's default pattern: 4 × width on, 2 × width off) | `overlay.stroke.core-idle` | none | outline badge, `overlay.bubble.idle` numeral; the whole marker at `overlay.dim.opacity` **whether or not anything is selected** |
+
+**Excluded is a dash, not a hue** *(added 2026-10-29, MT-120)*. The dash is the
+one carrier that survives every state (A-10): hover over an excluded marker is
+the `hover` row above with a dashed core; selecting it is the `selected` row -
+selected core, selected fill, filled badge, **full opacity** like any selected
+marker (§4.5, so the A-06 render check for `selected` is unchanged) - with a
+dashed core. Only the **core** is dashed. The `overlay.halo` stroke under it
+stays solid, so the two-stroke A-06 guarantee is intact along the whole path:
+over dark art the dash reads as a light dashed line, over light art as a dark
+line carrying light dashes, and in both the pattern is visible at every zoom
+because the pens are cosmetic (8 px on / 4 px off at the 2 px idle core). The
+badge is never dashed: the ordinal is the link's primary carrier (§4.2) and
+stays as legible as every other badge. In the draw order (§4.8) an excluded
+idle marker sits in the bottom `dimmed idle` tier. Under High Contrast
+`overlay.dim.opacity` is 1.0 (§10.3), so the dash alone carries the state there
+- which is why there is a dash at all.
+
+**Why always dimmed.** Dimming already means "not the one you are working on";
+an excluded region is permanently that. With nothing selected it is the only
+dimmed marker on the page, and with something selected it dims with the rest
+and the dash tells it apart. The alternative - full opacity, dash only - made
+a removed bubble as loud as a live one, which is the wrong emphasis for a
+region the user has set aside.
 
 **Dimming is the disambiguator.** While anything is selected, every *other*
 marker drops to `overlay.dim.opacity`. On a dense page of eight overlapping
@@ -751,6 +775,7 @@ the same (Windows pane convention). The focus ring always says which.
 | `Ctrl+R` | column | revert the focused line to the machine proposal |
 | `Ctrl+Enter` | column | mark the focused line **accepted** without editing |
 | `Ctrl+J` | column or canvas | disclose / hide the Japanese source text for the selected line |
+| `Ctrl+E` | column (row focused, not editing) or canvas | remove the focused / selected bubble's line from translation, or restore it (toggle; §5 "Row actions"). Inert while a line is being edited |
 | `PageDown` / `PageUp` | anywhere not editing | next / previous page; selection lands on ordinal 1 |
 | `Ctrl+0` / `Ctrl+1` / `Ctrl+9` | canvas | fit page / 100% / fit selected bubble |
 | `Ctrl+=` / `Ctrl+-` | canvas | zoom in / out one step |
@@ -773,7 +798,8 @@ lowest ordinal. **Repeated clicks at the same point cycle** through every region
 containing that point, in ascending ordinal order, wrapping. The point counts as
 "the same" while the pointer stays within 3px of the first click.
 
-**Draw order.** Bottom to top: dimmed idle, idle, hover, error, selected. Within
+**Draw order.** Bottom to top: dimmed idle (an excluded idle marker is always
+in this tier), idle, hover, error, selected. Within
 a tier, larger area first, so a small region is never buried by a large one. The
 selected marker's core stroke is drawn last, so it is never clipped by a
 neighbour's stroke. Badges are drawn above every outline.
@@ -844,6 +870,32 @@ against (`tokens.md` §6).
 | `failed` | per selection + 1px `color.status.danger` border | none | filled warning triangle | `color.status.danger` |
 | `overflow` (text will not fit the bubble at `typeset.size-min`) | per selection | none | filled "shrink" glyph | `color.status.warning` |
 | disabled / locked | `color.surface.disabled`, text `color.text.secondary` | none | unchanged, dimmed | `color.text.disabled` |
+| `excluded` (the bubble is removed from translation, MT-120) | per selection; text `color.text.secondary` | none (an `edited` line's 2px bar is not shown while excluded; selection's 3px bar still is) | circle with a slash, `\N{CIRCLED DIVISION SLASH}` U+2298 ⊘ | `color.text.muted` |
+
+**`excluded` is a status, not a disabled row** *(added 2026-10-29, MT-120)*.
+The row stays selectable, focusable and hoverable, and carries a live
+**Restore** control, so it takes the ordinary per-selection grounds rather than
+`color.surface.disabled`, which §5 reserves for the locked column where nothing
+is interactive. The editor is read-only (§6 "read-only": renders as a label,
+not focusable for editing, the row stays focusable); `Enter` on the row or on
+the canvas lands focus on the row and does **not** begin editing. A removed
+line that was `edited` keeps its text in the field, in `color.text.secondary`,
+so restoring loses nothing; `excluded` wins over every stored status for
+display and the stored status returns on restore. The glyph is
+`color.text.muted`, not `color.text.disabled`, because the glyph is a status
+carrier (A-10) and `text.disabled` on `surface.selected` is 2.25:1 - below the
+3:1 non-text floor the moment the user selects the row (AC-7), while
+`text.muted` clears it on every row ground (4.99:1 raised, 3.51:1 selected;
+`tokens.md` §6). The glyph itself: the same hollow circle as `proposed` with a
+diagonal through it, distinct from all six existing silhouettes in one colour
+at 16px (A-15.7) and from `proposed` by the slash alone, which is a deliberate
+pairing - "a line, struck out" - rather than a seventh unrelated shape. The
+bundled UI font does not carry U+2298, but it carries none of the other status
+glyphs either (only the hollow circle is in Segoe UI itself); every one of
+them already renders through Qt's fallback to Segoe UI Symbol, which has
+U+2298 (measured with `QRawFont.supportsCharacter`, 2026-10-29). The gutter
+colour rule is `QLabel#rowGutter[status="excluded"] { color:
+@{color.text.muted}; }` in `theme.qss.in`, like every other status.
 
 A row may be `edited` **and** `overflow` at once: the gutter shows both glyphs,
 in that order, and the accessible name mentions both.
@@ -863,7 +915,7 @@ the gutter after changing `status` or the selector does not re-match.
 > "Bubble {n} of {total}. Japanese: {ocr, or 'not read'}. English: {text}.
 > {status}." where status ∈ "machine proposal" | "accepted" | "edited" |
 > "edited, then returned to the proposal" | "translation failed: {reason}" |
-> "text will not fit the bubble".
+> "text will not fit the bubble" | "removed from translation".
 
 ### Row actions
 
@@ -872,6 +924,23 @@ Always visible on the row when applicable — **never hover-only**:
 - `Revert` (`ghost`) — present whenever status is `edited`
 - `Accept` (`ghost`, check glyph) — present whenever status is `proposed`
 - `Retry line` (`secondary`) — present whenever status is `failed`
+- `Remove` (`ghost`) — present on every row whose status is not `excluded`,
+  **last** in the row's tab order, after whichever of the three above is
+  shown. Removes the bubble's line from translation (`Ctrl+E`, §4.7). Tooltip:
+  "Leave this bubble out of translation. Nothing on the page is erased."
+- `Restore` (`ghost`) — present whenever status is `excluded`, and then the
+  row's **only** action. Tooltip: "Put this bubble back into translation."
+
+**Remove, not Ignore, not Delete** *(2026-10-29, MT-120; EPIC-10 Q-4)*. The
+word is the user's own ("that text should be removed"), it is what the counts
+do - the column header's "N lines" drops by one - and it pairs with Restore.
+What it must not suggest is erasure: EPIC-10 Q-1 settled that a removed region
+is **left as drawn**. So the label is never "Delete", the accessible status
+phrase says what it is removed *from* ("removed from translation"), the marker
+stays on the art (dashed, §4.3) and the tooltip says so in one sentence.
+"Ignore" was considered and set aside: it reads as dismissing a warning the
+app raised rather than as the user's own decision about a bubble, and
+"Ignore" / "Restore" is not a pair.
 
 Hover-revealed actions were rejected: every one of these is a routine part of the
 review loop, they must be keyboard-reachable, and one of them (Revert) discards

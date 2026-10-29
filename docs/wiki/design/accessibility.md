@@ -112,10 +112,11 @@ that must never regress:
 | move between panes | `Tab` / `Shift+Tab`, and `F6` / `Shift+F6` |
 | jump from a bubble to its line | `Enter` on the canvas |
 | bring the selected bubble into view | `Ctrl+9` |
+| remove / restore a line from translation | `Ctrl+E` |
 | show the bindings | `?` |
 
-**No action is hover-only.** Revert, Accept and Retry are visible controls on the
-row, not hover reveals — Revert in particular discards the user's typing, and a
+**No action is hover-only.** Revert, Accept, Retry, Remove and Restore are
+visible controls on the row, not hover reveals — Revert in particular discards the user's typing, and a
 destructive action behind hover is unreachable without a pointer.
 
 *Testable as:* synthesise the key event on the focused widget and assert the state
@@ -166,7 +167,8 @@ shape change or text:
 | Signalled by colour | Also carried by |
 |---|---|
 | bubble selection | the ordinal badge fills, the stroke widens, every other marker dims |
-| row status | a distinct gutter glyph per status (hollow circle / check / pencil / pencil-with-return / triangle / shrink) |
+| a bubble removed from translation (MT-120) | a **dashed** core stroke in every marker state, the only dashed stroke on the art; in the row, the ⊘ glyph, the status phrase and the Restore control |
+| row status | a distinct gutter glyph per status (hollow circle / check / pencil / pencil-with-return / triangle / shrink / circle-with-slash) |
 | page status in the strip | a distinct glyph per status |
 | cost state | the figure, the budget and the projection as text, plus a warning glyph |
 | pre-run cost estimate over budget (`CostEstimate`, MT-058) | the sentence "The estimate is over budget." after the budget; the border is emphasis only |
@@ -198,6 +200,9 @@ Announced, and nothing else:
 - cost state entering `approaching` or `exceeded` — **once each**, not repeatedly
 - run stopped, by the user or by the budget
 - bake complete, with the output folder
+- a bubble removed from or restored to translation (MT-120) — "Bubble 4 removed
+  from translation." / "Bubble 4 restored.", once per toggle, by control or by
+  `Ctrl+E`
 
 ## A-13 — What Qt genuinely cannot promise
 
@@ -414,3 +419,4 @@ amendment to this document, made before RED, not a note in the story.
 |---|---|---|
 | 2026-09-12 | Original, during `/plan-product`. | **lead-designer on Claude Opus 5 (`claude-opus-5`)**, dispatched by lead-po on Claude Opus 5 (`claude-opus-5`). No override. |
 | 2026-09-12 | **A-13.3 revised** from "Windows High Contrast is not supported in v1; the honest minimum is detecting it and saying so" to a support commitment, and **A-15** added with sub-clauses A-15.1 – A-15.11. New companion file [`high-contrast.md`](./high-contrast.md). The user decided that High Contrast is supported rather than detected and declined. | **lead-designer on Claude Opus 5 (`claude-opus-5`)**, dispatched by lead-po on Claude Opus 5 (`claude-opus-5`). No override was applied to this dispatch. |
+| 2026-10-29 | **A-07** table gains "remove / restore a line from translation | `Ctrl+E`" and names Remove / Restore among the never-hover-only controls; **A-10** gains the removed-bubble row (dashed core, ⊘ glyph, phrase, Restore) and the glyph list its seventh silhouette; **A-12** gains the two toggle announcements. MT-120, EPIC-10 Q-4. A-15.7 still says "six" glyphs; the HC row for `excluded` is a named follow-up in the story. | **lead-designer on Claude Fable 5.1 (`claude-fable-5-1`)**, dispatched by lead-po. No override reported to this dispatch. |
