@@ -47,10 +47,13 @@ SAME_POINT_PX: int = 3
 @dataclass(frozen=True)
 class OrderedRegion:
     """A region in reading order. `polygon` is in page pixels, which are scene
-    coordinates; `region_id` is its 0-based position in `read_regions(page)`."""
+    coordinates; `region_id` is its 0-based position in `read_regions(page)`.
+    `excluded` is whether the region is removed from translation (MT-120 C-3):
+    it keeps its place and its ordinal, and its marker is dashed."""
 
     region_id: int
     polygon: tuple[tuple[int, int], ...]
+    excluded: bool = False
 
     @property
     def ordinal(self) -> int:

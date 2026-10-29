@@ -38,11 +38,15 @@ __all__ = [
 
 
 class MarkerState(Enum):
-    """The marker states this story builds (§4.3); error and edited come later."""
+    """The marker states (§4.3); error and edited come later."""
 
     IDLE = "idle"
     HOVER = "hover"
     SELECTED = "selected"
+    #: A region removed from translation (MT-120 C-3): IDLE's core, no fill,
+    #: an outline badge - and a dashed core, which `paint_marker` also draws
+    #: for HOVER and SELECTED when the region itself is excluded.
+    EXCLUDED = "excluded"
 
 
 #: state -> (core colour, core width, fill token or None). §4.3, read out.
@@ -57,6 +61,11 @@ _STYLE: dict[MarkerState, tuple[str, int, str | None]] = {
         tokens_gen.OVERLAY_BUBBLE_SELECTED,
         tokens_gen.OVERLAY_STROKE_CORE_SELECTED,
         tokens_gen.OVERLAY_FILL_SELECTED,
+    ),
+    MarkerState.EXCLUDED: (
+        tokens_gen.OVERLAY_BUBBLE_IDLE,
+        tokens_gen.OVERLAY_STROKE_CORE_IDLE,
+        None,
     ),
 }
 
@@ -110,7 +119,12 @@ def paint_marker(
     painter.strokePath(
         path, overlay_pen(tokens_gen.OVERLAY_HALO, core_width + 2 * tokens_gen.OVERLAY_STROKE_HALO)
     )
-    painter.strokePath(path, overlay_pen(core_colour, core_width))
+    core = overlay_pen(core_colour, core_width)
+    if state is MarkerState.EXCLUDED or region.excluded:
+        # Only the core: a dashed halo would open gaps in A-06's path, and
+        # the badge is never dashed (MT-120 C-3, §4.3). Qt's default pattern.
+        core.setStyle(Qt.PenStyle.DashLine)
+    painter.strokePath(path, core)
     _paint_badge(painter, region, state, badge_centre)
 
 
@@ -188,7 +202,15 @@ class BubbleMarker(QGraphicsItem):
         self._state = state
         self.setOpacity(tokens_gen.OVERLAY_DIM_OPACITY if dimmed else 1.0)
         # Selected above hover above idle (§4.8 draw order, by tier).
-        self.setZValue({MarkerState.IDLE: 2, MarkerState.HOVER: 3, MarkerState.SELECTED: 4}[state])
+        # An excluded marker sits with the dimmed idle ones (§4.8, MT-120).
+        self.setZValue(
+            {
+                MarkerState.EXCLUDED: 2,
+                MarkerState.IDLE: 2,
+                MarkerState.HOVER: 3,
+                MarkerState.SELECTED: 4,
+            }[state]
+        )
         self.update()
 
     def set_badge_centre(self, centre: QPointF | None) -> None:

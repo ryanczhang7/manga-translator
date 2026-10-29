@@ -19,8 +19,9 @@ three states a reopened project has to distinguish tellable apart: **no `line`
 row** (OCR has not run), **a row with `ocr_empty = 1`** (the model emitted
 nothing), **a row with `source_ja`** (read).
 
-`domain` imports nothing of ours and no third-party package (`architecture.md`
-§3 contract 2), which is why this is a value and the decoding that produces it
+`domain` imports nothing of ours outside `domain` (here, `domain.region` for
+`ExclusionReason`) and no third-party package (`architecture.md` §3 contract
+2), which is why this is a value and the decoding that produces it
 lives in `mangatl.ocr`.
 
 **A line under review (MT-017 C-1..C-4).** `Line` is one bubble's text as the
@@ -43,6 +44,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+from mangatl.domain.region import ExclusionReason
+
 __all__ = [
     "COMMITTED_STATUSES",
     "LINE_STATUSES",
@@ -56,13 +59,22 @@ __all__ = [
     "normalise",
 ]
 
-LineStatus = Literal["proposed", "accepted", "edited", "reverted", "failed"]
+LineStatus = Literal["proposed", "accepted", "edited", "reverted", "failed", "excluded"]
 
-#: The design vocabulary (components.md §5), in its order.
-LINE_STATUSES: tuple[LineStatus, ...] = ("proposed", "accepted", "edited", "reverted", "failed")
+#: The design vocabulary (components.md §5), in its order. `excluded` (MT-120)
+#: is last: it is the region's flag (`region.excluded`), folded into the line's
+#: status by `derive_status`, never written to `line.status`.
+LINE_STATUSES: tuple[LineStatus, ...] = (
+    "proposed",
+    "accepted",
+    "edited",
+    "reverted",
+    "failed",
+    "excluded",
+)
 
-#: The three statuses a user's act writes. `proposed` and `failed` are never
-#: stored; they are derived (`derive_status`).
+#: The three statuses a user's act writes. `proposed`, `failed` and `excluded`
+#: are never stored; they are derived (`derive_status`).
 COMMITTED_STATUSES: frozenset[LineStatus] = frozenset({"accepted", "edited", "reverted"})
 
 _REASON_OCR_EMPTY = "no text was read in this bubble"
@@ -87,6 +99,9 @@ class Line:
     status: LineStatus
     edited_at: datetime | None
     ocr_empty: bool = False
+    #: Why the region is out of translation, or `None` (MT-120 C-1). The row
+    #: renders from `status`, which `derive_status` already folded this into.
+    excluded: ExclusionReason | None = None
 
 
 def normalise(text: str) -> str:
@@ -119,14 +134,23 @@ def is_accepted_as_is(line: Line) -> bool:
 
 
 def derive_status(
-    stored: str | None, *, ocr_empty: bool, proposed_en: str | None, page_done: bool
+    stored: str | None,
+    *,
+    ocr_empty: bool,
+    proposed_en: str | None,
+    page_done: bool,
+    excluded: bool = False,
 ) -> LineStatus:
     """A line's status from what is stored (C-2's four rules, in order).
 
-    A user's act outranks the pipeline's flags; then `ocr_empty` is failed; then
-    no proposal on a page the run finished is failed; otherwise proposed. A
-    stored value outside `COMMITTED_STATUSES` is a corrupt file and raises.
+    An excluded region reads `excluded` over everything, a stored act included
+    (MT-120 C-1); restoring it reads the stored act again. Otherwise a user's
+    act outranks the pipeline's flags; then `ocr_empty` is failed; then no
+    proposal on a page the run finished is failed; otherwise proposed. A stored
+    value outside `COMMITTED_STATUSES` is a corrupt file and raises.
     """
+    if excluded:
+        return "excluded"
     if stored is not None:
         for status in COMMITTED_STATUSES:
             if stored == status:

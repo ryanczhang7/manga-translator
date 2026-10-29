@@ -78,11 +78,13 @@ from PySide6.QtGui import (
     QColor,
     QEnterEvent,
     QGuiApplication,
+    QKeySequence,
     QMoveEvent,
     QPainter,
     QPalette,
     QPixmap,
     QResizeEvent,
+    QShortcut,
     QShowEvent,
 )
 from PySide6.QtWidgets import (
@@ -108,6 +110,7 @@ from mangatl.domain.budget import DEFAULT_CEILING
 from mangatl.domain.line import Line, LineStatus, effective_text, failure_reason
 from mangatl.domain.page import Chapter
 from mangatl.domain.page_status import PageProgress, PageStatus, page_progress
+from mangatl.domain.region import RawRegion
 from mangatl.pipeline.bake import BakePreview, BakeReport
 from mangatl.store import ledger
 from mangatl.store.lines import commit_line, read_review_lines
@@ -189,6 +192,7 @@ STATUS_GLYPHS: dict[LineStatus, str] = {
     "edited": "\N{LOWER RIGHT PENCIL}",
     "reverted": "\N{LEFTWARDS ARROW WITH HOOK}",
     "failed": "\N{WARNING SIGN}",
+    "excluded": "\N{CIRCLED DIVISION SLASH}",
 }
 
 #: `components.md` §5's glyph colours, as tokens: resolved through
@@ -199,6 +203,7 @@ STATUS_COLOR_TOKENS: dict[LineStatus, str] = {
     "edited": "color.accent.base",
     "reverted": "color.text.secondary",
     "failed": "color.status.danger",
+    "excluded": "color.text.muted",
 }
 
 #: `components.md` §`PageStrip`'s glyphs (PO-1): circles for the run, diamonds
@@ -232,6 +237,7 @@ _STATUS_PHRASES: dict[LineStatus, str] = {
     "accepted": "accepted",
     "edited": "edited",
     "reverted": "edited, then returned to the proposal",
+    "excluded": "removed from translation",
 }
 
 #: `components.md` §3's primary footer action, and its §1 loading state.
@@ -628,6 +634,8 @@ class TranslationRow(QWidget):
     left = Signal(int)
     #: Retry line was pressed (PO-4: nothing is connected to it yet).
     retryRequested = Signal(int)
+    #: Remove, Restore or `Ctrl+E`: (region_id, whether it is now to be excluded).
+    exclusionToggled = Signal(int, bool)
     #: The row re-rendered after a commit or a save outcome.
     rendered = Signal()
 
@@ -653,6 +661,15 @@ class TranslationRow(QWidget):
         self.revert_button = self._action("Revert", self.editor.revert)
         self.accept_button = self._action("Accept", self.editor.accept_line)
         self.retry_button = self._action("Retry line", self._request_retry)
+        # MT-120, §5 "Row actions": Remove last in the tab order, Restore alone
+        # on a removed row. Styled as the row's other actions are (no `ghost`
+        # rule exists in theme.qss yet); the tooltips are the Lead Designer's.
+        self.exclude_button = self._action("Remove", self.toggle_exclusion)
+        self.exclude_button.setToolTip(
+            "Leave this bubble out of translation. Nothing on the page is erased."
+        )
+        self.restore_button = self._action("Restore", self.toggle_exclusion)
+        self.restore_button.setToolTip("Put this bubble back into translation.")
 
         # The row must hint no wider than the column (C-8's RED amendment): the
         # editor takes whatever width is left and claims none, and the caption
@@ -668,6 +685,8 @@ class TranslationRow(QWidget):
         line_layout.addWidget(self.revert_button)
         line_layout.addWidget(self.accept_button)
         line_layout.addWidget(self.retry_button)
+        line_layout.addWidget(self.exclude_button)
+        line_layout.addWidget(self.restore_button)
         layout = QVBoxLayout(self)
         layout.setSpacing(2)
         layout.addLayout(line_layout)
@@ -688,6 +707,16 @@ class TranslationRow(QWidget):
 
     def _request_retry(self) -> None:
         self.retryRequested.emit(self.region_id)
+
+    def toggle_exclusion(self) -> None:
+        """Ask for this row's region to be removed, or restored if it is removed
+        (Remove, Restore, `Ctrl+E`). The workspace stores it and calls `set_line`."""
+        self.exclusionToggled.emit(self.region_id, self.editor.status != "excluded")
+
+    def set_line(self, line: Line) -> None:
+        """Take `line` as the store now reads it, and re-render in place."""
+        self.editor.set_line(line)
+        self._render()
 
     def _on_save_failed(self, reason: str) -> None:
         self._save_error = reason
@@ -713,9 +742,18 @@ class TranslationRow(QWidget):
             QColor(tokens_gen.TOKENS[STATUS_COLOR_TOKENS[status]]),
         )
         self.gutter.setPalette(palette)
+        excluded = status == "excluded"
+        # theme.qss paints a removed row's text `color.text.secondary` by the
+        # editor's `status` (MT-120 C-6); re-polished as the gutter is.
+        self.editor.setProperty("status", status)
+        self.editor.style().unpolish(self.editor)
+        self.editor.style().polish(self.editor)
+        self.editor.setReadOnly(excluded)
         self.revert_button.setVisible(status == "edited")
         self.accept_button.setVisible(status == "proposed")
         self.retry_button.setVisible(status == "failed")
+        self.exclude_button.setVisible(not excluded)
+        self.restore_button.setVisible(excluded)
         caption = self._save_error or failure_reason(self.editor.line)
         self.error_caption.setText(caption or "")
         self.error_caption.setVisible(caption is not None)
@@ -748,19 +786,46 @@ class TranslationColumn(QWidget):
     #: have changed (MT-086 block 6). Not emitted by `set_rows`.
     linesChanged = Signal()
 
+    #: A row's Remove / Restore / `Ctrl+E`: (region_id, now to be excluded).
+    exclusionToggled = Signal(int, bool)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("translationColumn")
         self.setAccessibleName("Translations")
         self.setMinimumWidth(COLUMN_MIN_WIDTH)
         self.setMaximumWidth(COLUMN_MAX_WIDTH)
+        # §5 "Column header": "Page 7 — 18 lines, 12 reviewed", set by the
+        # workspace from the page's `PageProgress` (MT-120 C-4).
+        self.header = QLabel()
+        self.header.setObjectName("columnHeader")
         self.list = QListWidget()
         self.list.setObjectName("translationList")
         self.list.setAccessibleName("Lines")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.header)
         layout.addWidget(self.list)
         self._rows: list[TranslationRow] = []
+        # §4.7 / A-07: Ctrl+E toggles the focused row's exclusion. The shortcut
+        # reaches a focused editor too (measured in RED), so the slot checks.
+        self._exclusion_shortcut = QShortcut(QKeySequence("Ctrl+E"), self)
+        self._exclusion_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._exclusion_shortcut.activated.connect(self._toggle_focused_exclusion)
+
+    def _toggle_focused_exclusion(self) -> None:
+        """`Ctrl+E` in the column: the row holding focus, else the current row.
+        Inert while a line is being edited (AC-3)."""
+        focused = QApplication.focusWidget()
+        if isinstance(focused, LineEditor) and not focused.isReadOnly():
+            return
+        for row in self._rows:
+            if focused is not None and row.isAncestorOf(focused):
+                row.toggle_exclusion()
+                return
+        current = self.list.currentRow()
+        if 0 <= current < len(self._rows):
+            self._rows[current].toggle_exclusion()
 
     def set_rows(
         self,
@@ -790,6 +855,7 @@ class TranslationColumn(QWidget):
                 row = TranslationRow(region.region_id, shown, save)
                 row.entered.connect(self.rowEntered.emit)
                 row.left.connect(self.rowLeft.emit)
+                row.exclusionToggled.connect(self.exclusionToggled.emit)
                 item = QListWidgetItem()
                 self.list.addItem(item)
                 self.list.setItemWidget(item, row)
@@ -858,11 +924,35 @@ def _saver(project: Project, page_ordinal: int, reading_index: int) -> SaveFn:
     return save
 
 
+def _shown_lines(regions: Sequence[RawRegion], review: Sequence[Line | None]) -> list[Line | None]:
+    """One page's review lines, one per stored region, with a region removed
+    from translation that has no `line` row given an `excluded` line of its
+    own - `read_review_lines` says `None` for it (MT-120 C-2), and the row, the
+    marker and the counts all have to see it removed."""
+    lines: list[Line | None] = []
+    for index, region in enumerate(regions):
+        line = review[index] if index < len(review) else None
+        if line is None and region.excluded is not None:
+            line = Line(
+                reading_index=index,
+                source_ja="",
+                proposed_en=None,
+                final_en=None,
+                status="excluded",
+                edited_at=None,
+                excluded=region.excluded,
+            )
+        lines.append(line)
+    return lines
+
+
 def _stored_progress(project: Project, ordinal: int) -> PageProgress:
     """One page's progress as the store has it (MT-086 block 6). `running` is
-    never set: the workspace is not open during a run."""
+    never set: the workspace is not open during a run. A removed region counts
+    in nothing (MT-120 AC-5), with or without a `line` row."""
     status = project.page_status(ordinal)
-    lines = [None if line is None else line.status for line in read_review_lines(project, ordinal)]
+    shown = _shown_lines(project.read_regions(ordinal), read_review_lines(project, ordinal))
+    lines = [None if line is None else line.status for line in shown]
     return page_progress(lines, page_done=status == PAGE_DONE, stale=status == PAGE_STALE)
 
 
@@ -976,6 +1066,11 @@ class Workspace(QMainWindow):
         self.translation_column.rowEntered.connect(self.link.hover)
         self.translation_column.rowLeft.connect(self._on_row_left)
         self.translation_column.linesChanged.connect(self._refresh_page_progress)
+        self.translation_column.exclusionToggled.connect(self._on_exclusion_toggled)
+        # §4.7 / A-07: Ctrl+E on the canvas toggles the selected region.
+        self._canvas_exclusion_shortcut = QShortcut(QKeySequence("Ctrl+E"), self.page_canvas)
+        self._canvas_exclusion_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._canvas_exclusion_shortcut.activated.connect(self._toggle_selected_exclusion)
         self.render_button.clicked.connect(self._render_pages)
 
     def follow_theme(self, controller: ThemeController) -> None:
@@ -1066,21 +1161,46 @@ class Workspace(QMainWindow):
         self.page_canvas.set_page(None)
         self.set_regions([], [], [])
 
-    def _refresh_page_progress(self) -> None:
-        """The strip row of the page the column's rows belong to, re-derived
-        from their lines and that page's stored state - in place, never by
-        reloading (MT-086 AC-4). Not the page shown: a save retried after a
-        page change re-renders the page left's rows (MT-099)."""
+    def _column_progress(self) -> tuple[int, PageProgress] | None:
+        """The page the column's rows belong to, and its progress re-derived
+        from their lines and that page's stored state; `None` with no project."""
         ordinal = self._rows_ordinal
         if self._project is None or ordinal is None:
-            return
+            return None
         status = self._project.page_status(ordinal)
         progress = page_progress(
             self.translation_column.statuses(),
             page_done=status == PAGE_DONE,
             stale=status == PAGE_STALE,
         )
+        return ordinal, progress
+
+    def _refresh_page_progress(self) -> None:
+        """The strip row of the page the column's rows belong to, re-derived
+        from their lines and that page's stored state - in place, never by
+        reloading (MT-086 AC-4). Not the page shown: a save retried after a
+        page change re-renders the page left's rows (MT-099). The column's
+        header follows the same progress (MT-120 C-4)."""
+        current = self._column_progress()
+        if current is None:
+            return
+        ordinal, progress = current
         self.page_strip.set_progress(ordinal, progress)
+        self._show_header(ordinal, progress)
+
+    def _refresh_header(self) -> None:
+        """The column's header for the rows just loaded; the strip is left as
+        `load_chapter` read it from the store."""
+        current = self._column_progress()
+        if current is not None:
+            self._show_header(*current)
+
+    def _show_header(self, ordinal: int, progress: PageProgress) -> None:
+        """§5 "Column header": the lines a page has to review, removed ones not
+        counted (MT-120 AC-5)."""
+        self.translation_column.header.setText(
+            f"Page {ordinal + 1} \N{EM DASH} {progress.total} lines, {progress.reviewed} reviewed"
+        )
 
     def show_page(self, ordinal: int) -> None:
         """Decode page `ordinal` synchronously and show it with its stored
@@ -1132,7 +1252,9 @@ class Workspace(QMainWindow):
 
     def _load_regions(self, ordinal: int) -> None:
         """PO-2: the page's regions and their review lines (`None` where OCR has
-        not run), each row saving to its own line of *this* page."""
+        not run), each row saving to its own line of *this* page. A region
+        removed from translation is marked so on its marker and its row
+        (MT-120), whichever writer removed it."""
         assert self._project is not None
         # Pending saves first, so what is read below includes them.
         self.translation_column.flush()
@@ -1140,14 +1262,18 @@ class Workspace(QMainWindow):
         stored = project.read_regions(ordinal)
         review = read_review_lines(project, ordinal)
         regions = [
-            OrderedRegion(region_id=index, polygon=region.polygon)
+            OrderedRegion(
+                region_id=index, polygon=region.polygon, excluded=region.excluded is not None
+            )
             for index, region in enumerate(stored)
         ]
-        lines = [review[index] if index < len(review) else None for index in range(len(regions))]
-        japanese = [None if line is None or line.ocr_empty else line.source_ja for line in lines]
-        english = [None if line is None else line.proposed_en for line in lines]
+        read = [review[index] if index < len(review) else None for index in range(len(regions))]
+        japanese = [None if line is None or line.ocr_empty else line.source_ja for line in read]
+        english = [None if line is None else line.proposed_en for line in read]
+        lines = _shown_lines(stored, review)
         saves = [_saver(project, ordinal, index) for index in range(len(regions))]
         self._set_regions(regions, japanese, english, lines, saves)
+        self._refresh_header()
 
     def render(self, *args: Any, **kwargs: Any) -> None:
         """Render pages (MT-066 C-4) when called bare; `QWidget.render` otherwise.
@@ -1344,6 +1470,49 @@ class Workspace(QMainWindow):
         self.translation_column.set_hovered(region_id)
 
     def _edit_selected(self) -> None:
+        """Enter on the canvas: begin editing the selected line - except a line
+        removed from translation, where focus lands on the column's list and
+        nothing becomes editable (MT-120 AC-7)."""
+        selected = self.link.state.selected_region_id
+        if selected is None:
+            return
+        row = self.translation_column.row(selected)
+        if row.editor.status == "excluded":
+            self.translation_column.list.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
+        row.editor.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _toggle_selected_exclusion(self) -> None:
+        """`Ctrl+E` on the canvas: the selected region's row toggles (AC-3)."""
         selected = self.link.state.selected_region_id
         if selected is not None:
-            self.translation_column.row(selected).editor.setFocus(Qt.FocusReason.OtherFocusReason)
+            self.translation_column.row(selected).toggle_exclusion()
+
+    def _on_exclusion_toggled(self, region_id: int, excluded: bool) -> None:
+        """Store the user's removal (or its undoing), then update that row and
+        marker in place from what the store now reads - no rebuild, no change of
+        selection - announce it, and refresh the counts (MT-120 C-4, C-5).
+
+        Rows with nothing behind them to save to (`set_regions`) are left as
+        they are: there is no store to remove the region from."""
+        ordinal = self._rows_ordinal
+        if self._project is None or ordinal is None:
+            return
+        project = self._project
+        row = self.translation_column.row(region_id)
+        # A pending save first: once removed, the line refuses a commit.
+        row.editor.flush()
+        project.set_excluded(ordinal, region_id, "user" if excluded else None)
+        stored = project.read_regions(ordinal)
+        review = read_review_lines(project, ordinal)
+        line = _shown_lines(stored, review)[region_id]
+        is_excluded = stored[region_id].excluded is not None
+        self.page_canvas.set_region_excluded(region_id, is_excluded)
+        # Re-renders the row, which refreshes the strip and the header.
+        row.set_line(line if line is not None else _unsaved_line(region_id, None, None))
+        number = region_id + 1
+        self.live_region.announce(
+            f"Bubble {number} removed from translation."
+            if is_excluded
+            else f"Bubble {number} restored."
+        )

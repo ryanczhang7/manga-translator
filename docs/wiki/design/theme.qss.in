@@ -416,6 +416,19 @@ QLabel#rowGutter[status="failed"] {
     color: @{color.status.danger};
 }
 
+/* MT-120: a line removed from translation. The glyph is text.muted, not  */
+/* text.disabled, which is 2.25:1 on the selected ground (Lead Designer). */
+QLabel#rowGutter[status="excluded"] {
+    color: @{color.text.muted};
+}
+
+/* MT-120 AC-1: a removed row's text is text.secondary. The base QWidget */
+/* and QLineEdit rules beat setPalette, so it needs its own rule; keyed  */
+/* on the editor's status property, re-polished as the gutter is.         */
+QLineEdit#rowEditor[status="excluded"] {
+    color: @{color.text.secondary};
+}
+
 /* ====================================================================== */
 /* components.md PageStrip - each page's status glyph (MT-086)            */
 /* ====================================================================== */
