@@ -277,8 +277,9 @@ def _migrated(source_dir: Path, mask: bytes) -> Path:
     with open_project(project_dir_for(source_dir)):
         pass
 
-    # 7 since MT-065 C-2: opening a v5 file runs the v6 -> v7 step as well.
-    assert _user_version(db_path) == 7, (
+    # 7 since MT-065 C-2: opening a v5 file runs the v6 -> v7 step as well;
+    # 8 since MT-118 C-2, which adds the v7 -> v8 step.
+    assert _user_version(db_path) == 8, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -316,9 +317,10 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"), mask)
 
     # MT-065 C-2 takes it to 7: `cleaned_page`. `test_schema_v7.py` owns it.
-    assert SCHEMA_VERSION == 7
-    assert _user_version(db_path) == 7
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(7,)]
+    # MT-118 C-2 takes it to 8: `region.excluded`. `test_schema_v8.py` owns it.
+    assert SCHEMA_VERSION == 8
+    assert _user_version(db_path) == 8
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(8,)]
 
 
 def test_a_fresh_line_table_has_a_nullable_status_column_declared_last(
@@ -353,7 +355,7 @@ def test_a_version_five_file_is_migrated_to_six_when_it_is_opened(
 ) -> None:
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"), mask)
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(7,)]
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(8,)]
     assert _columns(db_path) == _LINE_COLUMNS_V6
 
 
@@ -424,15 +426,16 @@ def test_the_v6_step_changes_only_the_line_table(
     db_path = _build_v5_file(source_dir, mask)
     # `cleaned_page` excluded since MT-065: a v5 file opened today also runs the
     # v6 -> v7 step, which creates it on purpose (C-2); `test_schema_v7.py`
-    # owns it.
+    # owns it. `region` excluded since MT-118: the v7 -> v8 step ALTERs it on
+    # purpose (C-2), which rewrites its stored DDL; `test_schema_v8.py` owns it.
     query = (
         "SELECT type, name, sql FROM sqlite_master"
-        " WHERE name NOT IN ('cleaned_page', 'line') ORDER BY name"
+        " WHERE name NOT IN ('cleaned_page', 'line', 'region') ORDER BY name"
     )
     before = _raw(db_path, query)
 
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 7
+    assert _user_version(db_path) == 8
     assert _raw(db_path, query) == before

@@ -439,7 +439,8 @@ def test_this_build_writes_and_reads_the_current_schema_version(
 
     # MT-017 C-5 takes it to 6: `line` gains `status`.
     # MT-065 C-2 takes it to 7: `cleaned_page`.
-    assert SCHEMA_VERSION == 7
+    # MT-118 C-2 takes it to 8: `region.excluded`.
+    assert SCHEMA_VERSION == 8
     assert _user_version(db_path) == SCHEMA_VERSION
     assert _raw(db_path, "SELECT schema_version FROM chapter") == [(SCHEMA_VERSION,)]
 
@@ -730,9 +731,11 @@ def test_a_migrated_chapter_table_is_the_same_table_as_a_freshly_created_one(
 #: it (C-5), and `tests/core/test_schema_v6.py` asserts what that step does.
 #: `cleaned_page` is excluded since MT-065: the v6 -> v7 step creates it on
 #: purpose (C-2), and `tests/core/test_schema_v7.py` asserts what that step does.
+#: `region` is excluded since MT-118: the v7 -> v8 step ALTERs it on purpose (C-2),
+#: and `tests/core/test_schema_v8.py` asserts what that step does.
 _UNTOUCHED_BY_THE_V4_STEP = (
     "SELECT name, sql FROM sqlite_master"
-    " WHERE name NOT IN ('chapter', 'cleaned_page', 'glossary', 'line')"
+    " WHERE name NOT IN ('chapter', 'cleaned_page', 'glossary', 'line', 'region')"
 )
 
 
