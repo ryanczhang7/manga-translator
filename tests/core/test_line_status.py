@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import typing
 import unicodedata
 from datetime import UTC, datetime
 
@@ -42,6 +43,7 @@ from mangatl.domain.line import (
     COMMITTED_STATUSES,
     LINE_STATUSES,
     Line,
+    LineStatus,
     derive_status,
     effective_text,
     failure_reason,
@@ -77,8 +79,9 @@ def _line(
 # =============================================================================
 
 
-def test_the_five_statuses_are_exactly_the_design_vocabulary_in_order() -> None:
-    assert LINE_STATUSES == ("proposed", "accepted", "edited", "reverted", "failed")
+def test_the_six_statuses_are_exactly_the_design_vocabulary_in_order() -> None:
+    """MT-120 C-1 adds `excluded`, last (components.md §5's order)."""
+    assert LINE_STATUSES == ("proposed", "accepted", "edited", "reverted", "failed", "excluded")
 
 
 def test_only_the_three_user_acts_are_committed_statuses() -> None:
@@ -96,6 +99,7 @@ def test_a_line_carries_its_reading_index_not_a_region_id_in_the_contract_field_
         "status",
         "edited_at",
         "ocr_empty",
+        "excluded",
     )
 
 
@@ -315,3 +319,79 @@ def test_an_untranslated_failed_line_says_no_translation_was_returned() -> None:
 def test_a_line_that_has_not_failed_has_no_failure_reason(status: str) -> None:
     # ocr_empty=True on an edited line too: the reason follows status, not the flag.
     assert failure_reason(_line(None, "x", status, ocr_empty=True)) is None
+
+
+# =============================================================================
+# MT-120 C-1 - a region removed from translation
+# =============================================================================
+
+
+def test_the_line_status_type_names_exactly_the_six_statuses_in_order() -> None:
+    assert typing.get_args(LineStatus) == LINE_STATUSES
+
+
+def test_excluded_is_not_a_committed_user_act() -> None:
+    """C-1: `excluded` is derived from `region.excluded`, never stored in `line.status`."""
+    assert "excluded" not in COMMITTED_STATUSES
+
+
+def test_a_lines_exclusion_defaults_to_none_so_every_existing_construction_stands() -> None:
+    line = Line(0, "ja", "en", None, "proposed", None)
+    assert line.excluded is None
+    assert Line(0, "ja", "en", None, "excluded", None, excluded="user").excluded == "user"
+
+
+@pytest.mark.parametrize("stored", [None, *sorted(COMMITTED_STATUSES)])
+@pytest.mark.parametrize(
+    ("ocr_empty", "proposed_en", "page_done"),
+    [
+        pytest.param(False, "Hi", True, id="proposed"),
+        pytest.param(True, None, True, id="ocr-empty"),
+        pytest.param(False, None, True, id="untranslated-on-a-done-page"),
+        pytest.param(False, None, False, id="not-yet-translated"),
+    ],
+)
+def test_an_excluded_region_reads_excluded_over_every_stored_act_and_pipeline_flag(
+    stored: str | None, ocr_empty: bool, proposed_en: str | None, page_done: bool
+) -> None:
+    """C-1: excluded wins over everything, including a user's stored act."""
+    got = derive_status(
+        stored,
+        ocr_empty=ocr_empty,
+        proposed_en=proposed_en,
+        page_done=page_done,
+        excluded=True,
+    )
+    assert got == "excluded"
+
+
+@pytest.mark.parametrize("stored", [None, *sorted(COMMITTED_STATUSES)])
+def test_not_excluded_is_exactly_the_four_rules_as_before(stored: str | None) -> None:
+    """`excluded=False` changes nothing: the defaulted keyword is the old function."""
+    for ocr_empty, proposed_en, page_done in itertools.product(
+        (False, True), (None, "Hi"), (False, True)
+    ):
+        kwargs = {"ocr_empty": ocr_empty, "proposed_en": proposed_en, "page_done": page_done}
+        assert derive_status(stored, **kwargs, excluded=False) == derive_status(stored, **kwargs)
+
+
+@settings(deadline=None, max_examples=200)
+@given(
+    stored=st.sampled_from([None, *sorted(COMMITTED_STATUSES)]),
+    ocr_empty=st.booleans(),
+    proposed_en=st.one_of(st.none(), st.text(max_size=8)),
+    page_done=st.booleans(),
+)
+def test_excluded_always_wins(
+    stored: str | None, ocr_empty: bool, proposed_en: str | None, page_done: bool
+) -> None:
+    got = derive_status(
+        stored, ocr_empty=ocr_empty, proposed_en=proposed_en, page_done=page_done, excluded=True
+    )
+    assert got == "excluded"
+
+
+@pytest.mark.parametrize("ocr_empty", [False, True])
+def test_an_excluded_line_has_no_failure_reason(ocr_empty: bool) -> None:
+    """C-1: a removed line is not a failure, whatever OCR or the model did."""
+    assert failure_reason(_line(None, None, "excluded", ocr_empty=ocr_empty)) is None

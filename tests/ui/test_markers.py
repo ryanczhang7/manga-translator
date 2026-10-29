@@ -23,6 +23,7 @@ the fill is read back off the image rather than trusted from the string.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 from collections.abc import Callable
 from types import ModuleType
@@ -37,6 +38,7 @@ from mangatl.ui import tokens_gen
 
 HALO = tokens_gen.OVERLAY_HALO
 HALO_EACH_SIDE = tokens_gen.OVERLAY_STROKE_HALO
+DIM_OPACITY = tokens_gen.OVERLAY_DIM_OPACITY
 
 # (state name, core colour token, core width token, fill token or None)
 # components.md §4.3, read out.
@@ -280,8 +282,11 @@ def _paint_real(state_name: str) -> Callable[[QPainter], None]:
     return lambda painter: markers.paint_marker(painter, region, state)
 
 
-def test_marker_state_has_exactly_idle_hover_and_selected() -> None:
-    assert [member.name for member in _markers().MarkerState] == ["IDLE", "HOVER", "SELECTED"]
+def test_marker_state_has_exactly_idle_hover_selected_and_excluded() -> None:
+    """MT-120 C-3 adds `EXCLUDED = "excluded"` after the three MT-016 built."""
+    states = _markers().MarkerState
+    assert [member.name for member in states] == ["IDLE", "HOVER", "SELECTED", "EXCLUDED"]
+    assert states["EXCLUDED"].value == "excluded"
 
 
 @pytest.mark.parametrize(("state_name", "core", "width", "fill"), STATES, ids=STATE_IDS)
@@ -370,3 +375,216 @@ def test_each_marker_on_the_canvas_paints_its_own_reading_order_ordinal(qtbot) -
         assert str(marker.region.ordinal) in texts, (
             f"marker {marker.region.region_id} drew {texts}, not its ordinal"
         )
+
+
+# =============================================================================
+# MT-120 C-3 - a region removed from translation: a dashed core, never a hue
+# =============================================================================
+
+#: (state painted, core colour, core width, fill) for a region with
+#: `excluded=True` - components.md §4.3's `excluded` row and its paragraph:
+#: idle is `excluded`; hover and selected keep their own core, fill and badge.
+EXCLUDED_STATES: list[tuple[str, str, int, str | None]] = [
+    ("EXCLUDED", tokens_gen.OVERLAY_BUBBLE_IDLE, tokens_gen.OVERLAY_STROKE_CORE_IDLE, None),
+    (
+        "HOVER",
+        tokens_gen.OVERLAY_BUBBLE_HOVER,
+        tokens_gen.OVERLAY_STROKE_CORE_HOVER,
+        tokens_gen.OVERLAY_FILL_HOVER,
+    ),
+    (
+        "SELECTED",
+        tokens_gen.OVERLAY_BUBBLE_SELECTED,
+        tokens_gen.OVERLAY_STROKE_CORE_SELECTED,
+        tokens_gen.OVERLAY_FILL_SELECTED,
+    ),
+]
+EXCLUDED_IDS = [state[0] for state in EXCLUDED_STATES]
+
+
+class _PenRecordingPainter(RecordingPainter):
+    """Also records the pen each badge disc is drawn with."""
+
+    def drawEllipse(self, *args: Any) -> None:  # type: ignore[override]
+        self.calls.append(("drawEllipse", (QPen(self.pen()),)))
+        super().drawEllipse(*args)
+
+
+def _capture_pens(paint: Callable[[QPainter], None]) -> list[tuple[str, tuple[Any, ...]]]:
+    image = _white_image()
+    painter = _PenRecordingPainter(image)
+    try:
+        paint(painter)
+    finally:
+        painter.end()
+    return painter.calls
+
+
+def _excluded_region() -> Any:
+    return _link().OrderedRegion(region_id=REGION_ID, polygon=SQUARE, excluded=True)
+
+
+def _paint_excluded(state_name: str) -> Callable[[QPainter], None]:
+    markers = _markers()
+    region = _excluded_region()
+    state = markers.MarkerState[state_name]
+    return lambda painter: markers.paint_marker(painter, region, state)
+
+
+def _stroke_styles(calls: list[tuple[str, tuple[Any, ...]]]) -> list[Qt.PenStyle]:
+    return [args[1].style() for name, args in calls if name == "strokePath"]
+
+
+def test_an_ordered_region_is_not_excluded_unless_it_says_so() -> None:
+    """C-3: `excluded: bool = False`, trailing, so every existing construction stands."""
+    region_type = _link().OrderedRegion
+    assert [f.name for f in dataclasses.fields(region_type)] == [
+        "region_id",
+        "polygon",
+        "excluded",
+    ]
+    assert region_type(region_id=0, polygon=SQUARE).excluded is False
+
+
+@pytest.mark.parametrize(("state_name", "core", "width", "fill"), EXCLUDED_STATES, ids=EXCLUDED_IDS)
+def test_a_removed_regions_marker_keeps_its_states_halo_and_core_colours_and_widths(
+    qapp,  # type: ignore[no-untyped-def]
+    state_name: str,
+    core: str,
+    width: int,
+    fill: str | None,
+) -> None:
+    calls = _capture(_paint_excluded(state_name))
+    assert _outline_problems(calls, core, width, SQUARE_BOUNDS) == []
+
+
+@pytest.mark.parametrize(("state_name", "core", "width", "fill"), EXCLUDED_STATES, ids=EXCLUDED_IDS)
+def test_a_removed_regions_core_is_dashed_and_its_halo_solid_in_every_state(
+    qapp,  # type: ignore[no-untyped-def]
+    state_name: str,
+    core: str,
+    width: int,
+    fill: str | None,
+) -> None:
+    """A-10 / §4.3: the dash is the one carrier that survives every state, and
+    only the core carries it - a dashed halo would open gaps in A-06's path.
+    `DashLine` is Qt's default pattern; a custom one is `CustomDashLine`."""
+    styles = _stroke_styles(_capture(_paint_excluded(state_name)))
+    assert styles[:2] == [Qt.PenStyle.SolidLine, Qt.PenStyle.DashLine], styles
+
+
+@pytest.mark.parametrize("state_name", STATE_IDS)
+def test_control_a_region_that_is_not_removed_has_a_solid_core_in_every_state(
+    qapp,  # type: ignore[no-untyped-def]
+    state_name: str,
+) -> None:
+    """The control for the dash check: the same reading of the same strokes is
+    `SolidLine` for a region that is not removed. Green on arrival (MT-016's
+    pens); it is what makes `DashLine` above a difference, not a default."""
+    styles = _stroke_styles(_capture(_paint_real(state_name)))
+    assert styles[:2] == [Qt.PenStyle.SolidLine, Qt.PenStyle.SolidLine], styles
+
+
+@pytest.mark.parametrize(("state_name", "core", "width", "fill"), EXCLUDED_STATES, ids=EXCLUDED_IDS)
+def test_a_removed_regions_badge_is_never_dashed_and_still_reads_its_ordinal(
+    qapp,  # type: ignore[no-untyped-def]
+    state_name: str,
+    core: str,
+    width: int,
+    fill: str | None,
+) -> None:
+    calls = _capture_pens(_paint_excluded(state_name))
+    discs = [args[0] for name, args in calls if name == "drawEllipse"]
+    assert discs, "no badge disc was drawn"
+    assert all(pen.style() == Qt.PenStyle.SolidLine for pen in discs), [p.style() for p in discs]
+    assert ORDINAL_TEXT in [text for _, text in _texts(calls)]
+
+
+def test_a_removed_idle_marker_has_no_fill_and_an_outline_badge_in_the_idle_colour(
+    qapp,  # type: ignore[no-untyped-def]
+) -> None:
+    image = _white_image()
+    painter = _PenRecordingPainter(image)
+    try:
+        _paint_excluded("EXCLUDED")(painter)
+    finally:
+        painter.end()
+    pixel = image.pixelColor(*CENTRE)
+    discs = [args[0] for name, args in painter.calls if name == "drawEllipse"]
+
+    assert (pixel.red(), pixel.green(), pixel.blue()) == (255, 255, 255), "the marker is filled"
+    assert discs[0].color().rgba() == QColor(tokens_gen.OVERLAY_BUBBLE_IDLE).rgba(), (
+        "the removed badge is not outlined in overlay.bubble.idle"
+    )
+
+
+# --- On the canvas: state and opacity follow the link state (§4.3, §4.5) ------
+
+
+def _canvas_with_a_removed_region(qtbot) -> Any:  # type: ignore[no-untyped-def]
+    from mangatl.ui.canvas import PageCanvas
+
+    link = _link()
+    regions = [
+        link.OrderedRegion(
+            region_id=i,
+            polygon=((x, 20), (x + 40, 20), (x + 40, 60), (x, 60), (x, 20)),
+            excluded=(i == 1),
+        )
+        for i, x in enumerate((20, 80, 140))
+    ]
+    canvas = PageCanvas()
+    qtbot.addWidget(canvas)
+    canvas.set_regions(regions)
+    return canvas
+
+
+def _look(canvas: Any, selected: int | None, hovered: int | None) -> list[tuple[Any, float]]:
+    canvas.set_link_state(_link().LinkState(selected_region_id=selected, hovered_region_id=hovered))
+    return [(marker.state(), marker.opacity()) for marker in canvas.markers]
+
+
+def test_a_removed_marker_is_excluded_and_dimmed_with_nothing_selected(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """§4.3 "Why always dimmed": with nothing selected it is the only dimmed marker."""
+    states = _markers().MarkerState
+    canvas = _canvas_with_a_removed_region(qtbot)
+
+    assert _look(canvas, None, None) == [
+        (states.IDLE, 1.0),
+        (states.EXCLUDED, DIM_OPACITY),
+        (states.IDLE, 1.0),
+    ]
+
+
+def test_a_removed_marker_stays_excluded_and_dimmed_while_another_is_selected(qtbot) -> None:  # type: ignore[no-untyped-def]
+    states = _markers().MarkerState
+    canvas = _canvas_with_a_removed_region(qtbot)
+
+    assert _look(canvas, 0, None) == [
+        (states.SELECTED, 1.0),
+        (states.EXCLUDED, DIM_OPACITY),
+        (states.IDLE, DIM_OPACITY),
+    ]
+
+
+def test_a_hovered_removed_marker_takes_hover_and_stays_dimmed(qtbot) -> None:  # type: ignore[no-untyped-def]
+    states = _markers().MarkerState
+    canvas = _canvas_with_a_removed_region(qtbot)
+
+    assert _look(canvas, None, 1) == [
+        (states.IDLE, 1.0),
+        (states.HOVER, DIM_OPACITY),
+        (states.IDLE, 1.0),
+    ]
+
+
+def test_a_selected_removed_marker_is_selected_at_full_opacity(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """C-3 (Lead Designer): selected stays unmistakable (§4.5)."""
+    states = _markers().MarkerState
+    canvas = _canvas_with_a_removed_region(qtbot)
+
+    assert _look(canvas, 1, None) == [
+        (states.IDLE, DIM_OPACITY),
+        (states.SELECTED, 1.0),
+        (states.IDLE, DIM_OPACITY),
+    ]

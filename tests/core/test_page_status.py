@@ -236,7 +236,17 @@ def test_any_sequence_is_accepted_and_left_unchanged() -> None:
 # Properties over the whole domain (no generator narrowed)
 # =============================================================================
 
-line_lists = st.lists(st.one_of(st.none(), st.sampled_from(LINE_STATUSES)), max_size=30)
+#: Every `LineStatus` - and `excluded` by name, so the domain includes it
+#: whether or not `LINE_STATUSES` carries it yet (MT-120 C-1). A widening, not a
+#: narrowing: the criterion now holds over one more value.
+ALL_LINE_STATUSES = tuple(sorted({*LINE_STATUSES, "excluded"}))
+
+line_lists = st.lists(st.one_of(st.none(), st.sampled_from(ALL_LINE_STATUSES)), max_size=30)
+
+
+def _included(lines: list[str | None]) -> int:
+    """MT-120 AC-5: an `excluded` entry is not a line of the page."""
+    return sum(1 for line in lines if line != "excluded")
 
 
 @settings(deadline=None, max_examples=200)
@@ -247,7 +257,7 @@ def test_the_counts_are_the_lines_whatever_the_flags(
     got = page_progress(lines, page_done=page_done, stale=stale, running=running)
     reviewed = sum(1 for line in lines if line in DESIGN_REVIEWED)
     failed = sum(1 for line in lines if line == "failed")
-    assert (got.reviewed, got.total, got.failed) == (reviewed, len(lines), failed)
+    assert (got.reviewed, got.total, got.failed) == (reviewed, _included(lines), failed)
     assert got.reviewed + got.failed <= got.total
     assert got.status in DESIGN_PAGE_STATUSES
 
@@ -280,6 +290,8 @@ def test_a_done_pages_status_is_decided_by_its_counts_alone(lines: list[str | No
     got = page_progress(lines, page_done=True)
     if got.failed > 0:
         expected = "failed"
+    elif lines and got.total == 0:
+        expected = "fully_reviewed"  # every region removed (MT-120 AC-5)
     elif got.reviewed == 0:
         expected = "translated"
     elif got.reviewed < got.total:
@@ -287,3 +299,56 @@ def test_a_done_pages_status_is_decided_by_its_counts_alone(lines: list[str | No
     else:
         expected = "fully_reviewed"
     assert got.status == expected, got
+
+
+# =============================================================================
+# MT-120 AC-5 - a region removed from translation is not a line of the page
+# =============================================================================
+
+
+def test_four_regions_with_one_excluded_count_three_lines() -> None:
+    lines = ["accepted", "excluded", "failed", "proposed"]
+    assert page_progress(lines, page_done=True) == PageProgress("failed", 1, 3, 1)
+
+
+def test_control_the_same_four_regions_with_the_exclusion_cleared_count_four() -> None:
+    lines = ["accepted", "proposed", "failed", "proposed"]
+    assert page_progress(lines, page_done=True) == PageProgress("failed", 1, 4, 1)
+
+
+def test_an_excluded_region_is_neither_reviewed_nor_failed() -> None:
+    lines = ["accepted", "excluded", "proposed"]
+    assert page_progress(lines, page_done=True) == PageProgress("partly_reviewed", 1, 2, 0)
+
+
+def test_excluding_the_only_unreviewed_line_makes_the_page_fully_reviewed() -> None:
+    lines = ["accepted", "edited", "excluded"]
+    assert page_progress(lines, page_done=True) == PageProgress("fully_reviewed", 2, 2, 0)
+
+
+def test_excluding_the_only_failed_line_clears_the_pages_failure() -> None:
+    lines = ["proposed", "excluded", "proposed"]
+    assert page_progress(lines, page_done=True) == PageProgress("translated", 0, 2, 0)
+
+
+def test_a_done_page_whose_every_region_is_excluded_is_zero_lines_and_fully_reviewed() -> None:
+    assert page_progress(["excluded"] * 4, page_done=True) == PageProgress(
+        "fully_reviewed", 0, 0, 0
+    )
+
+
+def test_a_done_page_with_no_regions_at_all_is_still_translated() -> None:
+    """MT-086 PO-3 stands: "every region excluded" is not "no regions"."""
+    assert page_progress([], page_done=True) == PageProgress("translated", 0, 0, 0)
+
+
+def test_a_page_whose_every_region_is_excluded_still_obeys_the_run_flags_first() -> None:
+    every = ["excluded", "excluded"]
+    assert page_progress(every, page_done=False).status == "pending"
+    assert page_progress(every, page_done=True, stale=True).status == "skipped"
+    assert page_progress(every, page_done=True, running=True).status == "running"
+
+
+def test_an_excluded_region_with_no_line_row_and_a_region_with_none_differ() -> None:
+    """`None` counts in total (MT-086); `excluded` does not."""
+    assert page_progress([None, "excluded"], page_done=True) == PageProgress("translated", 0, 1, 0)
