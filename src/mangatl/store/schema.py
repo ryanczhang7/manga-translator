@@ -51,6 +51,12 @@ supplies it, because a writer forced to invent a value stores a lie:
   translation exists to propose anything.
 - `run.ended_at`, `outcome`, `aborted_reason` - a run in flight has not ended.
 - `region.merged_from` - most regions have no furigana merged into them (O6).
+- `region.excluded` - NULL is "included" (MT-118 C-2): most regions are, and
+  the reason, `watermark` or `user`, is only known to whoever excluded it. It is
+  declared after `merged_from` and before the `UNIQUE` constraint because that
+  is where `ALTER TABLE ... ADD COLUMN` splices it into a migrated file
+  (measured on sqlite 3.53.1), so the two files hold the same table. Its CHECK
+  is the same words as `store.project._MIGRATE_TO_V8`'s.
 """
 
 from __future__ import annotations
@@ -214,6 +220,7 @@ CREATE TABLE region (
     kind          TEXT    NOT NULL,
     confidence    REAL    NOT NULL,
     merged_from   TEXT,
+    excluded      TEXT CHECK (excluded IS NULL OR excluded IN ('watermark', 'user')),
     UNIQUE (page_id, reading_index)
 );
 

@@ -112,6 +112,9 @@ _SCHEMA_COLUMNS: dict[str, frozenset[str]] = {
             "kind",
             "confidence",
             "merged_from",
+            # MT-118 C-2: why a region is out of translation; NULL is
+            # "included". `test_schema_v8.py` pins its type and its CHECK.
+            "excluded",
         }
     ),
     # `ocr_empty` added by MT-010 (C-1, PO-3): the flag that distinguishes "the
@@ -474,7 +477,8 @@ def test_the_schema_version_and_the_two_page_status_values_are_the_pinned_ones()
     # MT-014 C-7 takes it to 5: `glossary` gains `last_seen_page` and `source`.
     # MT-017 C-5 takes it to 6: `line` gains `status`.
     # MT-065 C-2 takes it to 7: `cleaned_page`.
-    assert SCHEMA_VERSION == 7
+    # MT-118 C-2 takes it to 8: `region.excluded`.
+    assert SCHEMA_VERSION == 8
     assert PAGE_PENDING == "pending"
     assert PAGE_STALE == "stale"
     assert PAGE_PENDING != PAGE_STALE

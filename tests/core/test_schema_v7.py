@@ -246,7 +246,8 @@ def _migrated(source_dir: Path, mask: bytes) -> Path:
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 7, (
+    # 8 since MT-118 C-2: opening a v6 file runs the v7 -> v8 step as well.
+    assert _user_version(db_path) == 8, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -261,15 +262,16 @@ def mask(one_bit_png: Callable[..., bytes]) -> bytes:
 # -- the version, the constant, and the fresh table ------------------------------
 
 
-def test_this_build_writes_and_reads_schema_version_seven(
+def test_this_build_writes_and_reads_the_current_schema_version(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
     """C-2's bump, in both records of it (MT-005 PO-7)."""
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"))
 
-    assert SCHEMA_VERSION == 7
-    assert _user_version(db_path) == 7
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(7,)]
+    # MT-118 C-2 takes it to 8: `region.excluded`. `test_schema_v8.py` owns it.
+    assert SCHEMA_VERSION == 8
+    assert _user_version(db_path) == 8
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(8,)]
 
 
 def test_the_cleaned_page_ddl_is_its_own_exported_string_appended_last() -> None:
@@ -359,7 +361,7 @@ def test_a_version_six_file_is_migrated_to_seven_with_an_empty_cleaned_page_tabl
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _migrated(source_dir, mask)
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(7,)]
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(8,)]
     assert _raw(db_path, _SHAPE) == _CLEANED_PAGE_SHAPE
     assert _raw(db_path, "SELECT count(*) FROM cleaned_page") == [(0,)]
     with open_project(project_dir_for(source_dir)) as project:
@@ -389,13 +391,19 @@ def test_the_v7_step_adds_only_cleaned_page(
     table or a re-run earlier step is caught (DV-5)."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _build_v6_file(source_dir, mask)
-    query = "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+    # `region` excluded since MT-118: a v6 file opened today also runs the
+    # v7 -> v8 step, which ALTERs `region` on purpose (C-2) and so rewrites its
+    # stored DDL; `test_schema_v8.py` owns what that step does.
+    query = (
+        "SELECT type, name, tbl_name, sql FROM sqlite_master"
+        " WHERE name != 'region' ORDER BY type, name"
+    )
     before = _raw(db_path, query)
 
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 7
+    assert _user_version(db_path) == 8
     after = _raw(db_path, query)
     added = [row[:3] for row in after if row not in before]
     assert added == [("table", "cleaned_page", "cleaned_page")], (
