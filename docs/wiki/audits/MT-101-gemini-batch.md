@@ -6,9 +6,9 @@
 source, test, gate or `project.conf` file was changed; the only write is this
 document. The SDK facts were introspected from the installed `google-genai`
 2.29.0 (`uv.lock`), which is the version `translate/gemini.py` was written
-against (MT-080 V-3). The live probe (AC-7) is **PENDING**: the account
-reported `prepayment credits are depleted` on 2026-10-28 (MT-100 gate run,
-MT-101 `## Notes` PO-1).*
+against (MT-080 V-3). The live probe (AC-7) **ran on 2026-10-29T02:18Z UTC**
+on the user's key (story `## Notes` PO-4): the batch accepted every config
+field, but **did not enforce the response schema** (D-4, D-14).*
 
 Every fact below carries one of three tags: **[READ]** from a page or the
 installed SDK, **[MEASURED]** by the live probe (none yet), **[INFERRED]**
@@ -195,10 +195,10 @@ Each finding says what the page says, and nothing more. Interpretation is in
 
 ## Live probe
 
-**Status: PENDING** - the user runs this once the account has credit (it
-reported "prepayment credits are depleted" on 2026-10-28) and pastes the
-output into the results block below. Until then AC-7, and the "live probe"
-column of D-4, are open.
+**Status: RUN 2026-10-29T02:18Z UTC** by the orchestrator, on the user's
+`GEMINI_API_KEY` at the user's request (*"Run the probe"*), with the script
+below saved to the scratchpad unchanged. Results under **Results**; D-4's live
+column and D-14 are filled from them.
 
 **What it does.** Builds one page request with `build_request` from
 `mangatl.translate.gemini` - the exact `GenerateContentConfig` the per-page
@@ -361,9 +361,75 @@ if __name__ == "__main__":
 **Results**
 
 ```text
-PENDING — the user runs this once the account has credit (it reported
-"prepayment credits are depleted" on 2026-10-28) and pastes the output here.
+# request config printed first (schema and MEDIUM thinking as sent); image data omitted
+job name: batches/8nljwsd7tmm0eate5qtcdrcvm9hpxd9mgaxk  state: JOB_STATE_PENDING  created: 2026-10-29 02:18:20.275134+00:00
+       30s  JOB_STATE_RUNNING
+       60s  JOB_STATE_RUNNING
+       91s  JOB_STATE_RUNNING
+      121s  JOB_STATE_SUCCEEDED
+final state: JOB_STATE_SUCCEEDED  start: None  end: 2026-10-29 02:20:06.981614+00:00
+job.error: None
+completion_stats: None
+inlined_responses: 1
+-- item 0 metadata={'key': 'kakeru-p1'}
+[batch item 0] usage_metadata as reported: {'candidates_token_count': 83, 'prompt_token_count': 1487, 'prompt_tokens_details': [{'modality': <MediaModality.TEXT: 'TEXT'>, 'token_count': 395}, {'modality': <MediaModality.IMAGE: 'IMAGE'>, 'token_count': 1092}], 'thoughts_token_count': 1031, 'total_token_count': 2601}
+[batch item 0] TokenUsage: TokenUsage(input_tokens=1487, output_tokens=1114, cache_read_tokens=0, cache_write_tokens=0)
+[batch item 0] interactive row (2026-10-12): $$0.0163
+[batch item 0] batch figure (MT-101 D-1): $0.008171
+[batch item 0] response.text (verbatim):
+{
+  "glossary": [
+    "{\"japanese\": \"翔\", \"english\": \"Kakeru\", \"type\": \"name\"}"
+  ],
+  "0": "Hey, hurry!",
+  "1": "Kakeru, over here!",
+  "2": "Wait up...",
+  "3": "The train's about to leave!"
+}
+[batch item 0] parsed JSON: {
+  "glossary": [
+    "{\"japanese\": \"翔\", \"english\": \"Kakeru\", \"type\": \"name\"}"
+  ],
+  "0": "Hey, hurry!",
+  "1": "Kakeru, over here!",
+  "2": "Wait up...",
+  "3": "The train's about to leave!"
+}
+
+=== control: translate_page interactively ===
+call: CallInfo(request_id='Z63iao_MJ8Ksz7IP1uqGiAE', model_id='gemini-3.1-pro-preview')
+usage: TokenUsage(input_tokens=1487, output_tokens=2052, cache_read_tokens=0, cache_write_tokens=0)
+interactive row: $$0.0276
+lines: {0: 'Hey, hurry up!', 1: 'Kakeru, over here!', 2: 'Wait up...'}
+proposed_terms: (ProposedTerm(term_ja='翔', term_en='Kakeru', note='name'),)
 ```
+
+**Read out.**
+
+- **Job:** `batches/8nljwsd7tmm0eate5qtcdrcvm9hpxd9mgaxk`, created
+  02:18:20Z, `JOB_STATE_SUCCEEDED` at 02:20:07Z: **about 2 minutes** for one
+  request (one observation, not a measurement). `job.start_time` and
+  `completion_stats` came back `None`.
+- **Accepted at create:** no `400`; every field of the config was taken.
+- **Thinking ran in batch:** `thoughts_token_count` 1,031 under
+  `thinking_level=MEDIUM`.
+- **Usage as reported (batch item):** prompt 1,487 (text 395, image 1,092),
+  candidates 83, thoughts 1,031, total 2,601. `TokenUsage(input=1487,
+  output=1114)`.
+- **Cost:** batch figure (D-1) **$0.008171**; the same usage at the
+  interactive row would be $0.0163. The interactive control used 2,052 output
+  tokens and cost **$0.0276** - thinking varies run to run, so the two legs'
+  output counts are not comparable as a measurement of batch.
+- **The batch response broke the schema it was sent.** The schema allows
+  exactly the keys `0`, `1`, `2` and `glossary`, `additionalProperties:
+  false`, glossary items as objects `{term_ja, term_en, note}`. The batch
+  item returned an extra key **`"3"`** (a fourth line for a three-region
+  page) and glossary items as **JSON-encoded strings** with the field names
+  `japanese`/`english`/`type`. It was still valid JSON
+  (`response_mime_type` was honoured).
+- **Control:** the same request through `translate_page` interactively
+  returned exactly keys `0-2` and a well-formed `ProposedTerm('翔',
+  'Kakeru', 'name')` - the schema was enforced there.
 
 When pasted, fill in: job name, final state, turnaround (start to end time,
 recorded as one observation, not a measurement - `## Out of scope`), each
@@ -404,11 +470,11 @@ one tagged **probe** is open until `## Live probe` has results.
 
   | Field | Docs say | Live probe |
   |---|---|---|
-  | `response_mime_type="application/json"` | accepted - S1's own batch example sets it (F-3) | pending |
-  | `response_json_schema=<schema>` | accepted by the "any request configuration" rule (S1, F-3), but S1's example uses `response_schema`, not `response_json_schema`; `additionalProperties` is supported (S4, F-6) | pending |
-  | `thinking_config=ThinkingConfig(thinking_level=MEDIUM)` | **NOT FOUND in the docs read** - S1's body never mentions thinking; S11 shows `InlinedRequest.config.thinking_config` working with `thinking_budget` since SDK 1.29 (F-4); `thinking_level` on 3.1 Pro in batch is unconfirmed | pending - this is the field the probe exists for |
-  | `max_output_tokens=4096` | accepted by the "any request configuration" rule (S1); includes thought tokens (S5, F-5) | pending |
-  | `system_instruction=SYSTEM_PROMPT` | accepted - S1 lists "system instructions" (F-3) | pending |
+  | `response_mime_type="application/json"` | accepted - S1's own batch example sets it (F-3) | **accepted and honoured**: the item was valid JSON |
+  | `response_json_schema=<schema>` | accepted by the "any request configuration" rule (S1, F-3), but S1's example uses `response_schema`, not `response_json_schema`; `additionalProperties` is supported (S4, F-6) | **accepted but NOT enforced**: extra key `"3"`, glossary items as strings with other field names (D-14) |
+  | `thinking_config=ThinkingConfig(thinking_level=MEDIUM)` | **NOT FOUND in the docs read** - S1's body never mentions thinking; S11 shows `InlinedRequest.config.thinking_config` working with `thinking_budget` since SDK 1.29 (F-4); `thinking_level` on 3.1 Pro in batch is unconfirmed | **accepted and used**: 1,031 thought tokens |
+  | `max_output_tokens=4096` | accepted by the "any request configuration" rule (S1); includes thought tokens (S5, F-5) | accepted (not reached: 1,114 output tokens) |
+  | `system_instruction=SYSTEM_PROMPT` | accepted - S1 lists "system instructions" (F-3) | accepted; the reply follows it (English, per-index keys) |
 
   Source: S1, S4, S5, S11. **For MT-110:** a config field the batch path
   refuses is refused at `client.batches.create` as a `400 INVALID_ARGUMENT`
@@ -492,6 +558,22 @@ one tagged **probe** is open until `## Live probe` has results.
   ~3,000 prompt tokens, so MT-102's batch row is the <=200k tier and `price`
   needs no tier selection for per-page calls; the tier matters only to
   MT-114's chunking. Source: D-12 and `translate/gemini.py` C-2. **[INFERRED]**
+
+- **D-14** - **In batch, `response_json_schema` is accepted but was not
+  enforced** on the one item probed (`## Live probe`, Read out): an extra
+  index key and wrongly shaped glossary items, where the identical
+  interactive request was held to the schema. One item is not a measurement,
+  but it is enough that **MT-110 must not trust a batch response's shape**.
+  The interactive path's parser (`translate/parse.py`) validates
+  independently of the schema and raises `UnknownRegionIndex` naming an
+  index outside the page, so **this very item would have failed its page**
+  on key `"3"`, and its string glossary items would have been dropped. MT-110
+  parses every batch item through that same parser, reports such a page as
+  failed with the parser's message, and its RED carries this response
+  verbatim as a fixture.
+  Whether S1's spelling `response_schema` (the OpenAPI subset) is enforced in
+  batch where `response_json_schema` is not is **NOT FOUND** and is MT-110's
+  first probe, before it relies on either. Source: the live probe (AC-7).
 
 ### For the implementing stories
 
