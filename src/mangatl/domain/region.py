@@ -25,7 +25,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-__all__ = ["RawRegion"]
+__all__ = ["EXCLUSION_REASONS", "ExclusionReason", "RawRegion"]
+
+#: Why a region is out of translation, cleaning and typesetting (MT-118 C-1).
+#: `watermark` is the detector's rule (MT-121), `user` the workspace's (MT-120).
+#: A plain assignment, not a PEP 695 `type` statement: `typing.get_args` sees
+#: through this spelling and returns `()` for the other.
+ExclusionReason = Literal["watermark", "user"]
+
+#: The values `RawRegion.excluded` may take besides `None`, in this order. The
+#: domain validation and `store.project.Project.set_excluded` both check against
+#: it, and `store/schema.py`'s CHECK spells the same two.
+EXCLUSION_REASONS: tuple[ExclusionReason, ...] = ("watermark", "user")
 
 #: The 8 bytes every PNG file begins with. A mask that does not start with them
 #: is not an image, whatever else it may be.
@@ -58,6 +69,10 @@ class RawRegion:
     #: write. It is **last** so that MT-007's positional construction sites keep
     #: working, and it has a default so that they need not mention it at all.
     merged_from: tuple[int, ...] = ()
+    #: Why this region is out of translation, cleaning and typesetting; None
+    #: is "included". `watermark` is the detector's rule (MT-121), `user` the
+    #: workspace's (MT-120). LAST and defaulted, for merged_from's reason.
+    excluded: ExclusionReason | None = None
 
     def __post_init__(self) -> None:
         if len(self.polygon) < 4 or self.polygon[0] != self.polygon[-1]:
@@ -95,4 +110,8 @@ class RawRegion:
             raise ValueError(
                 "merged_from indices must be distinct - a region absorbed twice means"
                 f" the merge walked one input twice; got {self.merged_from!r}"
+            )
+        if self.excluded is not None and self.excluded not in EXCLUSION_REASONS:
+            raise ValueError(
+                f"excluded must be None or one of {EXCLUSION_REASONS}; got {self.excluded!r}"
             )

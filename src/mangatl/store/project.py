@@ -59,7 +59,7 @@ from PIL import Image, UnidentifiedImageError
 from mangatl.domain.line import OcrResult
 from mangatl.domain.money import Usd
 from mangatl.domain.page import Chapter, Page
-from mangatl.domain.region import RawRegion
+from mangatl.domain.region import EXCLUSION_REASONS, ExclusionReason, RawRegion
 from mangatl.store.intake import read_chapter
 from mangatl.store.schema import CHAPTER_DDL, CLEANED_PAGE_DDL, DDL, LLM_CALL_DDL
 
@@ -108,7 +108,12 @@ __all__ = [
 #: encoded image per page. A migrated file has it empty, so every page is
 #: not-yet-cleaned and the next run cleans it without re-running any other
 #: stage.
-SCHEMA_VERSION: int = 7
+#:
+#: Version 8 is MT-118's exclusion (C-2): `region.excluded`, why a region is out
+#: of translation, appended by `ALTER TABLE ... ADD COLUMN`. Every existing row
+#: is NULL, "included", which is the truth about a region no earlier version
+#: could exclude.
+SCHEMA_VERSION: int = 8
 
 #: `page.status` as `create_project` writes it: read, hashed, nothing done yet.
 PAGE_PENDING: str = "pending"
@@ -166,18 +171,24 @@ _INSERT_CHAPTER = (
 # them. A re-detection therefore produces a fresh merge set, and omitting the
 # field from the `DO UPDATE` would preserve the previous one against regions
 # that no longer exist.
+#
+# `excluded` is in both clauses too (MT-118 C-2), so a re-detection overwrites a
+# stored exclusion with whatever the `RawRegion` carries - the rule for every
+# column, pinned rather than hidden (`## Context`). In `excluded.excluded` the
+# first `excluded` is SQLite's upsert alias for the row that was refused and the
+# second is the column; the name collision is cosmetic.
 _UPSERT_REGION = (
     "INSERT INTO region (page_id, reading_index, polygon, mask_blob, kind, confidence,"
-    " merged_from)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?)"
+    " merged_from, excluded)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     " ON CONFLICT (page_id, reading_index) DO UPDATE SET"
     " polygon = excluded.polygon, mask_blob = excluded.mask_blob,"
     " kind = excluded.kind, confidence = excluded.confidence,"
-    " merged_from = excluded.merged_from"
+    " merged_from = excluded.merged_from, excluded = excluded.excluded"
 )
 _SELECT_REGIONS = (
     "SELECT region.polygon, region.mask_blob, region.kind, region.confidence,"
-    " region.merged_from"
+    " region.merged_from, region.excluded"
     " FROM region JOIN page ON page.id = region.page_id"
     " WHERE page.ordinal = ? ORDER BY region.reading_index"
 )
@@ -403,6 +414,16 @@ _MIGRATE_TO_V6 = (
 #: migrated one. Kept to exactly one line: DV-5 anchors on it.
 _MIGRATE_TO_V7: str = CLEANED_PAGE_DDL
 
+#: Version 7 to version 8 (MT-118 C-2): `region.excluded`. `ADD COLUMN` for
+#: `_MIGRATE_TO_V2`'s reason, and `_MIGRATE_TO_V6`'s shape: no DEFAULT and no
+#: `UPDATE`, so every existing region reads NULL, "included". The CHECK is the
+#: same words as `schema.py`'s, and `test_schema_v8.py` holds the two stored
+#: declarations to each other through `sqlite_master.sql`.
+_MIGRATE_TO_V8 = (
+    "ALTER TABLE region ADD COLUMN"
+    " excluded TEXT CHECK (excluded IS NULL OR excluded IN ('watermark', 'user'))"
+)
+
 #: The migration chain, in order, each step keyed on the version it *produces*.
 #: A step runs when the file found on disk is older than that.
 #:
@@ -419,6 +440,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (5, _MIGRATE_TO_V5),
     (6, _MIGRATE_TO_V6),
     (7, _MIGRATE_TO_V7),
+    (8, _MIGRATE_TO_V8),
 )
 
 
@@ -743,6 +765,7 @@ class Project:
                         region.kind,
                         region.confidence,
                         json.dumps(list(region.merged_from)) if region.merged_from else None,
+                        region.excluded,
                     ),
                 )
             cursor.execute(
@@ -771,11 +794,51 @@ class Project:
                 merged_from=()
                 if merged_from is None
                 else tuple(int(index) for index in json.loads(str(merged_from))),
+                # NULL is "included" (MT-118 C-2), and what every row written
+                # before version 8 carries. The CHECK admits nothing else.
+                excluded=None if excluded is None else cast(ExclusionReason, str(excluded)),
             )
-            for polygon, mask_blob, kind, confidence, merged_from in self._connection.execute(
-                _SELECT_REGIONS, (page_ordinal,)
-            )
+            for (
+                polygon,
+                mask_blob,
+                kind,
+                confidence,
+                merged_from,
+                excluded,
+            ) in self._connection.execute(_SELECT_REGIONS, (page_ordinal,))
         )
+
+    def set_excluded(
+        self, page_ordinal: int, reading_index: int, reason: ExclusionReason | None
+    ) -> None:
+        """Exclude one region from translation, or include it again with `None`
+        (MT-118 C-3).
+
+        Touches the `excluded` column of one `region` row and nothing else: no
+        `line` row and no `cleaned_page` row is invalidated here - MT-119 decides
+        what a toggle does to the cleaned image.
+
+        Both arguments are checked **before** the write, so "nothing is written"
+        does not rest on the rollback alone. An index outside the page's reading
+        indices raises `ValueError` naming it, as `write_proposed` does; a
+        `reason` outside `EXCLUSION_REASONS` and `None` raises `ValueError` here,
+        in Python, rather than reaching the column's CHECK as an
+        `IntegrityError` that names neither the field nor the value. Opens its
+        own `transaction()`, so it refuses a caller already holding one.
+        """
+        if reason is not None and reason not in EXCLUSION_REASONS:
+            raise ValueError(f"excluded must be None or one of {EXCLUSION_REASONS}; got {reason!r}")
+        with self.transaction() as cursor:
+            region_ids = [row[0] for row in cursor.execute(_SELECT_REGION_IDS, (page_ordinal,))]
+            if not 0 <= reading_index < len(region_ids):
+                raise ValueError(
+                    f"reading index {reading_index} is not on page {page_ordinal}:"
+                    f" the page has {len(region_ids)} region(s)"
+                )
+            cursor.execute(
+                "UPDATE region SET excluded = ? WHERE id = ?",
+                (reason, region_ids[reading_index]),
+            )
 
     def write_cleaned(self, page_ordinal: int, image: bytes) -> None:
         """Store one page's cleaned image, replacing any previous one (MT-065 C-3).

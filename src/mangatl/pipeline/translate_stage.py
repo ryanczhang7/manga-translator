@@ -136,6 +136,31 @@ def _update_glossary(
             upsert(ctx.project, entry)
 
 
+def _to_reading_indices(result: TranslationResult, included: Sequence[int]) -> dict[int, str]:
+    """MT-118 C-4: the answer's keys index the listing that was **sent**; the
+    store's index the page. `included[k]` is the reading index of the `k`-th
+    region sent.
+
+    A key outside the listing is refused here as `ValueError` naming it, before
+    anything is written - the refusal `write_proposed` gave for it before this
+    story, when the two index spaces were one. The real translator already
+    raises `UnknownRegionIndex` for such a key (parse checks against the count
+    it was handed), so this is reached only by a translator that did not; but
+    an `IndexError` would break MT-044 C-7's "a bad answer reaches the runner
+    as `ValueError`, after the bill and with no proposal", and passing the key
+    through unmapped would land it on whichever region has that reading index.
+    """
+    proposals: dict[int, str] = {}
+    for index, english in result.lines.items():
+        if not 0 <= index < len(included):
+            raise ValueError(
+                f"the translator answered for index {index}, but only"
+                f" {len(included)} region(s) were sent"
+            )
+        proposals[included[index]] = english
+    return proposals
+
+
 @dataclass
 class TranslateStage:
     """Translate one page's stored lines and store the English against them.
@@ -226,7 +251,14 @@ class TranslateStage:
 
         image_bytes = (ctx.project.chapter.source_dir / ctx.page.filename).read_bytes()
         context = build_prompt_context(ctx.project, ctx.page.ordinal)
-        result = self.translate(image_bytes, ocr_results, context)
+        # MT-118 C-4: only the included regions cross the seam, as a contiguous
+        # listing, and the answer's indices are mapped back to reading indices.
+        # A page with none included hands over `()`, and the translator's own
+        # `all(ocr_empty)` guard makes no call for it - `all([])` is True.
+        regions = ctx.project.read_regions(ctx.page.ordinal)
+        included = [i for i, region in enumerate(regions) if region.excluded is None]
+        sent = [ocr_results[i] for i in included]
+        result = self.translate(image_bytes, sent, context)
         if result.call is not None:
             record_call(
                 ctx.project,
@@ -245,8 +277,8 @@ class TranslateStage:
                     ),
                 )
             )
-        _update_glossary(ctx, result, ocr_results)
-        ctx.project.write_proposed(ctx.page.ordinal, result.lines)
+        _update_glossary(ctx, result, sent)
+        ctx.project.write_proposed(ctx.page.ordinal, _to_reading_indices(result, included))
 
     def is_done(self, ctx: PageContext) -> bool:
         """Whether this page already carries a **proposal**.

@@ -224,7 +224,9 @@ page       id, chapter_id, ordinal, filename, width, height, sha256, status
            -- ordinal is filename order at intake and never changes
 
 region     id, page_id, reading_index, polygon, mask_blob, kind, confidence,
-           merged_from            -- furigana regions merged in (O6)
+           merged_from,           -- furigana regions merged in (O6)
+           excluded               -- NULL, 'watermark' or 'user': out of
+                                  -- translation (MT-118, schema v8; D14)
            -- reading_index is assigned by the reading-order pass (MT-007)
 
 line       id, region_id, source_ja, proposed_en, final_en, edited_at,
@@ -504,6 +506,30 @@ obligations of their own. MT-002 flagged the LaMa checkpoint's provenance as
 lineage are sometimes distributed under non-commercial terms. That is unresolved
 and is a separate question from this one; MT-024 must not read D13 as clearing
 it.
+
+**D14 — An excluded region is a stored flag on the region, filtered at the
+stage, invisible to the model.** *(Drafted by the Feature Developer in MT-118
+GREEN; the Lead PO owns the final wording at REVIEW.)* EPIC-10 PO-1..PO-3/PO-6.
+`region.excluded` (schema v8) is NULL for an included region and the reason
+otherwise - `watermark` for the detector's rule (MT-121), `user` for the
+workspace's toggle (MT-120) - with a CHECK admitting only those, and
+`domain.region.RawRegion.excluded` carries it as `ExclusionReason | None`. Both
+writers go through one mechanism: `RawRegion`s handed to `write_regions`, or
+`Project.set_excluded(ordinal, reading_index, reason)` for one region in place.
+`TranslateStage` reads the flags and hands the translator **only the included
+regions' OCR results**, as a contiguous listing, then maps the answer's indices
+back to reading indices before `write_proposed`; the glossary sees only the text
+that was sent. `translate/*` and `PageTranslator` are unchanged, so the model
+never learns a region existed, and reading indices stay stable (`components.md`
+§4.2). OCR still transcribes every region (PO-2): a restored region needs its
+line to be reviewed, and OCR is local and free.
+
+*Lost:* a re-detection keeps a user's exclusion. `write_regions` writes every
+column from the `RawRegion`, `excluded` included, so re-running detection over
+a page overwrites the user's choice with the detector's - the rule for every
+region column, pinned rather than special-cased (EPIC-10 "Deliberately not").
+Also lost, for now: the cleaner and the typesetter still treat an excluded
+region like any other; MT-119 decides what exclusion means for them.
 
 ## 8. Deployment shape
 
