@@ -8,10 +8,14 @@ MT-021 C-3..C-6. For each page, in the chapter's reading order:
 | regions, no cleaned image | the source file's bytes, verbatim; counted in `pages_uncleaned` |
 | regions and a cleaned image | `bake_page(cleaned, blocks, bake area)`, in the source's format |
 
-The **bake area** is MT-019's erase mask united with every region's polygon
-filled (C-3): the cleaner touches the dilation ring, and English is fitted
-inside the polygon, whose fill covers the holes in a mask. Ink is clipped to it,
-so an overflowed block never reaches the art.
+English is fitted into the **bubble's interior** found on the cleaned page
+(`typeset.interior.bubble_interior`, MT-123), which is the region's polygon
+itself for a `box` region and wherever no bubble is found. The **bake area** is
+MT-019's erase mask united with every region's polygon and every set block's
+interior, filled (C-3, widened by MT-123): the cleaner touches the dilation
+ring, the polygon's fill covers the holes in a mask, and the interior is where
+the English was fitted. Ink is clipped to it, so an overflowed block never
+reaches the art.
 
 **Written atomically, kept from MT-006.** The output folder is created if absent
 and emptied first - "overwritten on each bake" (`architecture.md` §5), which is
@@ -53,6 +57,7 @@ from mangatl.store.project import Project
 from mangatl.store.settings import lettering_font_dir
 from mangatl.typeset.fit import TypesetBlock, typeset
 from mangatl.typeset.font import FONT_FAMILY, Faces, FallbackReason, load_faces
+from mangatl.typeset.interior import Ring, bubble_interior
 from mangatl.typeset.render import bake_page
 from mangatl.typeset.resolve import FaceResolution, resolve_faces
 
@@ -151,10 +156,11 @@ def preview_bake(project: Project) -> BakePreview:
         total += len(present)
         unreviewed += [LineRef(page.ordinal, i) for i, line in present if line.status == "proposed"]
         failed += [LineRef(page.ordinal, i) for i, line in present if line.status == "failed"]
-        if page_regions and project.has_cleaned(page.ordinal):
+        cleaned = project.read_cleaned(page.ordinal) if page_regions else None
+        if cleaned is not None:
             overflowing += [
                 LineRef(page.ordinal, index)
-                for index, block in _set_blocks(page_regions, lines, faces)
+                for index, _, block in _set_blocks(page_regions, lines, faces, _grey(cleaned))
                 if block.overflowed
             ]
     return BakePreview(
@@ -196,9 +202,15 @@ def bake_chapter(project: Project, output_dir: Path) -> BakeReport:
         if page_regions and cleaned is None:
             uncleaned += 1
         if cleaned is not None:
-            blocks = [block for _, block in _set_blocks(page_regions, lines, faces)]
-            regions_empty += len(page_regions) - len(blocks)
-            payload = _bake(cleaned, page_regions, blocks, page.filename)
+            set_blocks = _set_blocks(page_regions, lines, faces, _grey(cleaned))
+            regions_empty += len(page_regions) - len(set_blocks)
+            payload = _bake(
+                cleaned,
+                page_regions,
+                [block for _, _, block in set_blocks],
+                [interior for _, interior, _ in set_blocks],
+                page.filename,
+            )
         _write_atomically(output_dir / page.filename, payload)
         written += 1
 
@@ -225,25 +237,40 @@ def _resolve_faces() -> FaceResolution:
     return resolve_faces(configured)
 
 
+def _grey(cleaned: bytes) -> NDArray[np.uint8]:
+    """The cleaned page as `(H, W)` grey, PIL `convert("L")` - what
+    `bubble_interior` reads (MT-123 Contract block 2)."""
+    with Image.open(BytesIO(cleaned)) as image:
+        return np.asarray(image.convert("L"))
+
+
 def _set_blocks(
-    page_regions: Sequence[RawRegion], lines: Sequence[Line | None], faces: Faces
-) -> list[tuple[int, TypesetBlock]]:
-    """`(reading_index, block)` for each region with text to set, in reading
-    order (C-4). The one rule for which lines a bake sets: `preview_bake`'s
-    overflow count reads it too (MT-066 C-1)."""
-    return [
-        (index, typeset(effective_text(line), region.polygon, faces))
-        for index, (region, line) in enumerate(zip(page_regions, lines, strict=True))
-        if line is not None and line.status != "failed" and effective_text(line).strip()
-    ]
+    page_regions: Sequence[RawRegion],
+    lines: Sequence[Line | None],
+    faces: Faces,
+    cleaned: NDArray[np.uint8],
+) -> list[tuple[int, Ring, TypesetBlock]]:
+    """`(reading_index, interior, block)` for each region with text to set, in
+    reading order (C-4). The one rule for which lines a bake sets, and where:
+    each block is fitted into the bubble's interior found on the `cleaned`
+    grey page (MT-123). `preview_bake`'s overflow count reads it too (MT-066 C-1)."""
+    blocks: list[tuple[int, Ring, TypesetBlock]] = []
+    for index, (region, line) in enumerate(zip(page_regions, lines, strict=True)):
+        if line is not None and line.status != "failed" and effective_text(line).strip():
+            interior = bubble_interior(cleaned, region.polygon, region.kind)
+            blocks.append((index, interior, typeset(effective_text(line), interior, faces)))
+    return blocks
 
 
-def _bake_area(page_regions: Sequence[RawRegion], size: tuple[int, int]) -> NDArray[np.bool_]:
-    """C-3: the erase mask united with every region's polygon, filled."""
+def _bake_area(
+    page_regions: Sequence[RawRegion], size: tuple[int, int], interiors: Sequence[Ring]
+) -> NDArray[np.bool_]:
+    """C-3, widened by MT-123: the erase mask united with every region's polygon
+    and every set block's interior, filled."""
     width, height = size
     filled = np.zeros((height, width), dtype=np.uint8)
-    for region in page_regions:
-        cv2.fillPoly(filled, [np.array(region.polygon, dtype=np.int32)], 1)
+    for ring in [region.polygon for region in page_regions] + list(interiors):
+        cv2.fillPoly(filled, [np.array(ring, dtype=np.int32)], 1)
     return np.asarray(erase_mask(page_regions, size) | filled.astype(bool))
 
 
@@ -251,13 +278,14 @@ def _bake(
     cleaned: bytes,
     page_regions: Sequence[RawRegion],
     blocks: Sequence[TypesetBlock],
+    interiors: Sequence[Ring],
     filename: str,
 ) -> bytes:
     """The cleaned page with `blocks` composited, encoded as `filename`'s format (C-5)."""
     with Image.open(BytesIO(cleaned)) as image:
         rgb = np.asarray(image.convert("RGB"))
     height, width, _ = rgb.shape
-    baked = bake_page(rgb, blocks, _bake_area(page_regions, (width, height)))
+    baked = bake_page(rgb, blocks, _bake_area(page_regions, (width, height), interiors))
     buffer = BytesIO()
     if Path(filename).suffix.lower() == ".png":
         Image.fromarray(baked, "RGB").save(buffer, format="PNG")
