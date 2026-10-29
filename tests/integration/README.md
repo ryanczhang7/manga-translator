@@ -1,7 +1,9 @@
 # `tests/integration/`
 
-Everything here is marked `gpu`, `network`, or both, and **never runs on CI**.
-The `integration` gate is `optional` for exactly that reason.
+Everything here is marked `gpu`, `network` or `pages` (or more than one), and
+**never runs on CI**. `pages` (MT-123) marks a test that reads non-redistributable
+scans under `spikes/` and needs no GPU; it is registered in this folder's
+`conftest.py`. The `integration` gate is `optional` for exactly that reason.
 
 This directory is empty at MT-001. It is created here rather than by the first
 story that needs it because `docs/wiki/stack.md` §4 makes the adapter split

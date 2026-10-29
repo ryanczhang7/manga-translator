@@ -65,7 +65,7 @@ Three things about this picture are load-bearing:
 | `ocr` | Turning a region crop into Japanese text, vertical-native | Region geometry. Translation |
 | `translate` | Prompt assembly, the one LLM call per page, response parsing, **token accounting and budget enforcement** | OCR, detection, anything visual |
 | `clean` | Erasing the Japanese inside a region mask and reconstructing the interior | Deciding which regions to erase (`pipeline` decides) |
-| `typeset` | Font metrics, line breaking, fitting English into a region polygon, rendering it | Letting the human move a box — the brief forbids it |
+| `typeset` | Font metrics, line breaking, fitting English into a region polygon - into the bubble interior found on the cleaned page (MT-123) - rendering it | Letting the human move a box — the brief forbids it |
 | `pipeline` | Stage sequencing, resumability, cancellation, progress events, writing the sibling output folder | Any of the above stages' logic |
 | `bench` | The ground-truth format, its validator and the single region-matching rule; computing S1b (the headline) and S1a (diagnostic), S2 and S5 against a benchmark chapter; the metrics' own negative controls | Choosing the benchmark chapter, or producing its annotation — both the user's (O1) |
 | `ui` | The workspace, the review interaction, the progress and cost readout | Any rule. It renders `domain` and issues `pipeline` commands |

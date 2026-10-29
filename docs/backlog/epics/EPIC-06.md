@@ -2,7 +2,7 @@
 id: EPIC-06
 title: Cleaning and typesetting — the pages come out looking like a release
 status: todo
-stories: [MT-019, MT-065, MT-020, MT-021, MT-066, MT-027]
+stories: [MT-019, MT-065, MT-020, MT-021, MT-066, MT-027, MT-123]
 ---
 
 ## Goal
