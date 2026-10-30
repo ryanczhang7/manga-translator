@@ -61,7 +61,7 @@ supplies it, because a writer forced to invent a value stores a lie:
 
 from __future__ import annotations
 
-__all__ = ["CHAPTER_DDL", "CLEANED_PAGE_DDL", "DDL", "LLM_CALL_DDL"]
+__all__ = ["CHAPTER_DDL", "CLEANED_ERASED_DDL", "CLEANED_PAGE_DDL", "DDL", "LLM_CALL_DDL"]
 
 #: The chapter table, as its own string because **two** callers create it
 #: (MT-044 C-12, for MT-012 RED-A5's reason): `DDL` below, for a fresh file, and
@@ -173,6 +173,17 @@ CREATE TABLE cleaned_page (
     image_blob BLOB    NOT NULL
 );
 """
+
+#: `cleaned_page.erased` (MT-119 C-4, schema version 9): the reading indices of
+#: the regions the cleaner was handed when that image was written, as a sorted
+#: JSON array. A **separate** string, appended after `CLEANED_PAGE_DDL` both in
+#: `DDL` and in `store.project._MIGRATE_TO_V9`, because `CLEANED_PAGE_DDL` *is*
+#: `_MIGRATE_TO_V7`: a column written into it would be created by a v6 file's
+#: v7 step and then added again by its v9 step, `duplicate column name`. So a
+#: fresh file creates the table and then alters it, exactly as a migrated one
+#: does, and `sqlite_master.sql` comes out the same. `DEFAULT '[]'` only because
+#: `ADD COLUMN ... NOT NULL` needs one; the store's upsert always names it.
+CLEANED_ERASED_DDL: str = "ALTER TABLE cleaned_page ADD COLUMN erased TEXT NOT NULL DEFAULT '[]';\n"
 
 #: Every table of `architecture.md` §4, its foreign keys, and the UNIQUE keys
 #: `store.project` and the stage writers depend on. Executed with
@@ -291,7 +302,10 @@ CREATE TABLE glossary (
 
 -- The cleaned page, MT-065's and the reason this schema is at version 7:
 -- `CLEANED_PAGE_DDL` above. Appended **last**, after `glossary`, so a fresh file
--- and a migrated one create it in the same position.
+-- and a migrated one create it in the same position. Its `erased` column is
+-- MT-119's and the reason this schema is at version 9: `CLEANED_ERASED_DDL`,
+-- appended after it on both paths.
 """
     + CLEANED_PAGE_DDL
+    + CLEANED_ERASED_DDL
 )
