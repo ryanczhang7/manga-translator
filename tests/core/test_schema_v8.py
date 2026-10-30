@@ -328,7 +328,8 @@ def _migrated(source_dir: Path, mask: bytes) -> Path:
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 8, (
+    # 9 since MT-119 C-4: opening a v7 file runs the v8 -> v9 step as well.
+    assert _user_version(db_path) == 9, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -360,15 +361,16 @@ def mask(one_bit_png: Callable[..., bytes]) -> bytes:
 # -- the version, and the fresh table --------------------------------------------
 
 
-def test_this_build_writes_and_reads_schema_version_eight(
+def test_this_build_writes_and_reads_the_current_schema_version(
     tmp_path: Path, png_bytes: Callable[..., bytes], mask: bytes
 ) -> None:
     """C-2's bump, in both records of it (MT-005 PO-7)."""
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"), mask)
 
-    assert SCHEMA_VERSION == 8
-    assert _user_version(db_path) == 8
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(8,)]
+    # MT-119 C-4 takes it to 9: `cleaned_page.erased`. `test_schema_v9.py` owns it.
+    assert SCHEMA_VERSION == 9
+    assert _user_version(db_path) == 9
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(9,)]
 
 
 def test_a_fresh_region_table_has_a_nullable_excluded_column_declared_last(
@@ -414,7 +416,7 @@ def test_a_version_seven_file_is_migrated_to_eight_when_it_is_opened(
     """AC-4: "`schema_version` is 8" - in both records of it."""
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"), mask)
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(8,)]
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(9,)]  # MT-119 C-4
     assert _columns(db_path) == _REGION_COLUMNS_V8
 
 
@@ -466,7 +468,7 @@ def test_every_region_a_version_seven_file_held_reads_back_included_and_unchange
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 8
+    assert _user_version(db_path) == 9  # MT-119 C-4
     assert _raw(db_path, f"SELECT {v7_columns} FROM region ORDER BY id") == before
     assert _raw(db_path, "SELECT excluded FROM region ORDER BY id") == [(None,)] * 3
 
@@ -490,20 +492,32 @@ def test_the_v8_step_changes_only_the_region_table(
     it by cascade and show here as well as above."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _build_v7_file(source_dir, mask)
-    schema = "SELECT type, name, sql FROM sqlite_master WHERE name != 'region' ORDER BY name"
-    tables = ("chapter", "page", "line", "run", "llm_call", "glossary", "cleaned_page")
+    # `cleaned_page` excluded since MT-119: a v7 file opened today also runs the
+    # v8 -> v9 step, which ALTERs `cleaned_page` on purpose (C-4) and so rewrites
+    # its stored DDL and gives every row an `erased` cell; `test_schema_v9.py`
+    # owns what that step does. Its two v7 columns are still compared, below.
+    schema = (
+        "SELECT type, name, sql FROM sqlite_master"
+        " WHERE name NOT IN ('cleaned_page', 'region') ORDER BY name"
+    )
+    tables = ("chapter", "page", "line", "run", "llm_call", "glossary")
 
     def rows() -> dict[str, list[tuple[object, ...]]]:
-        return {table: _raw(db_path, f"SELECT * FROM {table} ORDER BY rowid") for table in tables}
+        found = {t: _raw(db_path, f"SELECT * FROM {t} ORDER BY rowid") for t in tables}
+        found["cleaned_page"] = _raw(
+            db_path, "SELECT page_id, image_blob FROM cleaned_page ORDER BY rowid"
+        )
+        return found
 
     schema_before = _raw(db_path, schema)
     rows_before = rows()
     assert rows_before["line"] != [], "the v7 fixture has no lines to preserve"
+    assert rows_before["cleaned_page"] != [], "the v7 fixture has no cleaned image to preserve"
 
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 8
+    assert _user_version(db_path) == 9  # MT-119 C-4
     assert _raw(db_path, schema) == schema_before
     rows_after = rows()
     # The chapter row's `schema_version` is the one cell the step must change.
@@ -547,6 +561,14 @@ def test_a_version_eight_file_is_refused_by_a_reader_that_supports_seven(
     constant set back to 7."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _fresh(source_dir, mask)
+    # MT-119 C-4: a fresh file is version 9 now. The refusal comes before any
+    # read, so the file is stamped 8 - the version this test is about - with a
+    # plain connection; what its tables hold beyond that is never reached.
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("PRAGMA user_version = 8")
+    finally:
+        connection.close()
     assert _user_version(db_path) == 8, "the fixture is not a version-8 file"
 
     monkeypatch.setattr(project_module, "SCHEMA_VERSION", 7)
@@ -565,7 +587,9 @@ def test_the_same_version_eight_file_opens_in_this_build(
     tmp_path: Path, png_bytes: Callable[..., bytes], mask: bytes
 ) -> None:
     """The control for the refusal above: without it, a store that raised
-    `SchemaTooNew` for every file would pass it."""
+    `SchemaTooNew` for every file would pass it. (Since MT-119 the fresh file
+    is version 9, which is this build's; `test_schema_v9.py` holds the same
+    control for the version-9 refusal.)"""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     _fresh(source_dir, mask)
 

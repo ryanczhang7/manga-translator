@@ -356,7 +356,8 @@ def _arrange(
         for ordinal, page_regions in detections.items():
             project.write_regions(ordinal, page_regions)
         for ordinal, image in cleaned.items():
-            project.write_cleaned(ordinal, image)
+            # MT-119 C-4: the image erased every region the page holds.
+            project.write_cleaned(ordinal, image, erased=range(len(project.read_regions(ordinal))))
         return measure_s2(project, load_ground_truth(truth_path_for(folder)))
 
 

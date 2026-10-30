@@ -278,8 +278,9 @@ def _migrated(source_dir: Path, mask: bytes) -> Path:
         pass
 
     # 7 since MT-065 C-2: opening a v5 file runs the v6 -> v7 step as well;
-    # 8 since MT-118 C-2, which adds the v7 -> v8 step.
-    assert _user_version(db_path) == 8, (
+    # 8 since MT-118 C-2, which adds the v7 -> v8 step; 9 since MT-119 C-4
+    # (v8 -> v9).
+    assert _user_version(db_path) == 9, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -318,9 +319,10 @@ def test_this_build_writes_and_reads_the_current_schema_version(
 
     # MT-065 C-2 takes it to 7: `cleaned_page`. `test_schema_v7.py` owns it.
     # MT-118 C-2 takes it to 8: `region.excluded`. `test_schema_v8.py` owns it.
-    assert SCHEMA_VERSION == 8
-    assert _user_version(db_path) == 8
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(8,)]
+    # MT-119 C-4 takes it to 9: `cleaned_page.erased`. `test_schema_v9.py` owns it.
+    assert SCHEMA_VERSION == 9
+    assert _user_version(db_path) == 9
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(9,)]
 
 
 def test_a_fresh_line_table_has_a_nullable_status_column_declared_last(
@@ -355,7 +357,7 @@ def test_a_version_five_file_is_migrated_to_six_when_it_is_opened(
 ) -> None:
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"), mask)
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(8,)]
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(9,)]  # MT-119 C-4
     assert _columns(db_path) == _LINE_COLUMNS_V6
 
 
@@ -437,5 +439,5 @@ def test_the_v6_step_changes_only_the_line_table(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 8
+    assert _user_version(db_path) == 9
     assert _raw(db_path, query) == before

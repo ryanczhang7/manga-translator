@@ -52,6 +52,11 @@ _CLEANED_PAGE_SHAPE: list[tuple[object, ...]] = [
 ]
 _SHAPE = "SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info('cleaned_page')"
 
+#: MT-119 C-4 appends `erased` at version 9, on a fresh file and on a v6 file
+#: opened today alike. This file owns the two columns MT-065 drew, so it reads
+#: the shape up to them; `test_schema_v9.py` owns the third.
+_SHAPE_V7_COLUMNS = _SHAPE + " WHERE name != 'erased'"
+
 #: DO NOT UPDATE THIS WHEN `schema.py` CHANGES. See the module docstring.
 _V6_DDL = """
 CREATE TABLE chapter (
@@ -246,8 +251,9 @@ def _migrated(source_dir: Path, mask: bytes) -> Path:
     with open_project(project_dir_for(source_dir)):
         pass
 
-    # 8 since MT-118 C-2: opening a v6 file runs the v7 -> v8 step as well.
-    assert _user_version(db_path) == 8, (
+    # 8 since MT-118 C-2: opening a v6 file runs the v7 -> v8 step as well;
+    # 9 since MT-119 C-4 (v8 -> v9).
+    assert _user_version(db_path) == 9, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -269,9 +275,10 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"))
 
     # MT-118 C-2 takes it to 8: `region.excluded`. `test_schema_v8.py` owns it.
-    assert SCHEMA_VERSION == 8
-    assert _user_version(db_path) == 8
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(8,)]
+    # MT-119 C-4 takes it to 9: `cleaned_page.erased`. `test_schema_v9.py` owns it.
+    assert SCHEMA_VERSION == 9
+    assert _user_version(db_path) == 9
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(9,)]
 
 
 def test_the_cleaned_page_ddl_is_its_own_exported_string_appended_last() -> None:
@@ -280,11 +287,20 @@ def test_the_cleaned_page_ddl_is_its_own_exported_string_appended_last() -> None
     one create it in the same position."""
     import mangatl.store.schema as module
 
-    assert module.__all__ == ["CHAPTER_DDL", "CLEANED_PAGE_DDL", "DDL", "LLM_CALL_DDL"]
+    # MT-119 C-4 adds `CLEANED_ERASED_DDL`, shared by a fresh file and the v9 step.
+    assert module.__all__ == [
+        "CHAPTER_DDL",
+        "CLEANED_ERASED_DDL",
+        "CLEANED_PAGE_DDL",
+        "DDL",
+        "LLM_CALL_DDL",
+    ]
     assert "CREATE TABLE cleaned_page" in module.CLEANED_PAGE_DDL
-    assert module.DDL.rstrip().endswith(module.CLEANED_PAGE_DDL.strip()), (
-        "DDL does not end with CLEANED_PAGE_DDL verbatim; C-2 appends it last"
-    )
+    # MT-119 C-4 appends `CLEANED_ERASED_DDL` directly after it: the table is
+    # still created last, and then given its v9 column (`test_schema_v9.py`).
+    assert module.DDL.rstrip().endswith(
+        (module.CLEANED_PAGE_DDL + module.CLEANED_ERASED_DDL).strip()
+    ), "DDL does not end with CLEANED_PAGE_DDL then CLEANED_ERASED_DDL, verbatim"
     assert module.DDL.index("CREATE TABLE glossary") < module.DDL.index("CREATE TABLE cleaned_page")
 
 
@@ -293,7 +309,7 @@ def test_a_fresh_cleaned_page_table_has_the_shape_c2_draws(
 ) -> None:
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"))
 
-    assert _raw(db_path, _SHAPE) == _CLEANED_PAGE_SHAPE
+    assert _raw(db_path, _SHAPE_V7_COLUMNS) == _CLEANED_PAGE_SHAPE
     assert _raw(db_path, "PRAGMA foreign_key_list(cleaned_page)") == [
         (0, 0, "page", "page_id", "id", "NO ACTION", "CASCADE", "NONE")
     ]
@@ -361,8 +377,8 @@ def test_a_version_six_file_is_migrated_to_seven_with_an_empty_cleaned_page_tabl
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _migrated(source_dir, mask)
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(8,)]
-    assert _raw(db_path, _SHAPE) == _CLEANED_PAGE_SHAPE
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(9,)]  # MT-119 C-4
+    assert _raw(db_path, _SHAPE_V7_COLUMNS) == _CLEANED_PAGE_SHAPE
     assert _raw(db_path, "SELECT count(*) FROM cleaned_page") == [(0,)]
     with open_project(project_dir_for(source_dir)) as project:
         ordinals = [page.ordinal for page in project.pages()]
@@ -403,7 +419,7 @@ def test_the_v7_step_adds_only_cleaned_page(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 8
+    assert _user_version(db_path) == 9
     after = _raw(db_path, query)
     added = [row[:3] for row in after if row not in before]
     assert added == [("table", "cleaned_page", "cleaned_page")], (
@@ -438,5 +454,6 @@ def test_a_migrated_project_accepts_a_cleaned_image(
     image = png_bytes(7, 3, (1, 2, 3))
 
     with open_project(project_dir_for(source_dir)) as project:
-        project.write_cleaned(0, image)
+        # MT-119 C-4: page 0 holds the v6 file's one region, and the image erased it.
+        project.write_cleaned(0, image, erased=[0])
         assert project.read_cleaned(0) == image

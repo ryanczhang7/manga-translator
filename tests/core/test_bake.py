@@ -36,6 +36,7 @@ different in what they trust:
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 from collections.abc import Callable, Sequence
@@ -43,13 +44,17 @@ from io import BytesIO
 from pathlib import Path
 
 import _bake_world as world
+import cv2
 import numpy as np
 import pytest
 from _bake_world import Spec
+from numpy.typing import NDArray
 from PIL import Image, JpegImagePlugin
 
+import mangatl.pipeline.bake as bake_module
 from mangatl.domain.line import effective_text
 from mangatl.domain.page import order_filenames
+from mangatl.domain.region import RawRegion
 from mangatl.pipeline.bake import BakeReport, bake_chapter
 from mangatl.store.intake import read_chapter
 from mangatl.store.lines import read_review_lines
@@ -708,3 +713,338 @@ def test_a_bake_that_fails_partway_still_touches_nothing_in_the_source_folder(
         bake_chapter(project, output_dir)
 
     assert world.snapshot(eight_pages) == before
+
+
+# -- MT-119 AC-2..AC-4: an excluded region is left as drawn ---------------------
+#
+# One 160x120 PNG page, two `box` regions side by side (`box`, so each set
+# block's interior is its polygon - MT-123 - and the bake area is computable
+# here without `bubble_interior`). A is included and carries "HELLO"; B is the
+# region the user removes. Their inner strokes are 2 px apart, so A's and B's
+# dilated erase masks SHARE a band two columns wide (x 59..60): the case C-3's
+# "an included region's erased pixels are never restored" exists for.
+#
+# The oracle is `_bake_world`: the source is a texture, the stored cleaned page
+# is `cleaned_from(source, <the regions the cleaner was handed>)` - flat white
+# over their dilated masks, from `PINNED_DILATION_PX`, never from `erase_mask`.
+# So "equals the source" and "equals the cleaned page" are different
+# observations at every pixel of B's mask, and every one of them is checked.
+#
+# The bake area is read from the call itself: `bake_page` is wrapped (not
+# replaced) in `mangatl.pipeline.bake`, which looks it up at call time, and the
+# wrapper records the `cleaned` array and the `clip` it was handed.
+
+_A_BOX = (6, 6, 60, 56)
+_A_STROKES = ((20, 14, 26, 48), (55, 14, 59, 48))
+_B_BOX = (60, 6, 120, 56)
+_B_STROKES = ((61, 14, 65, 48), (90, 14, 96, 48))
+
+
+def _ab_regions(b_excluded: bool) -> tuple[RawRegion, RawRegion]:
+    a, b = (
+        RawRegion(
+            polygon=world.ring(*box),
+            mask=world.mask_png(world.PAGE_W, world.PAGE_H, strokes),
+            confidence=0.9,
+            kind="box",
+        )
+        for box, strokes in ((_A_BOX, _A_STROKES), (_B_BOX, _B_STROKES))
+    )
+    return a, dataclasses.replace(b, excluded="user") if b_excluded else b
+
+
+def _fill(ring: Sequence[tuple[int, int]]) -> NDArray[np.bool_]:
+    filled = np.zeros((world.PAGE_H, world.PAGE_W), dtype=np.uint8)
+    cv2.fillPoly(filled, [np.array(ring, dtype=np.int32)], 1)
+    return filled.astype(bool)
+
+
+def _geometry() -> dict[str, NDArray[np.bool_]]:
+    """The pixel sets AC-2 names, computed from the pinned radius."""
+    a, b = _ab_regions(b_excluded=False)
+    dil_a = world.dilated_masks([a], SIZE)
+    dil_b = world.dilated_masks([b], SIZE)
+    poly_a, poly_b = _fill(a.polygon), _fill(b.polygon)
+    return {
+        # AC-2: "inside B's polygon and inside B's dilated erase mask, minus A's own".
+        "restored": poly_b & dil_b & ~dil_a,
+        # AC-2: "B's polygon minus A's bake contribution" (A's interior is its polygon).
+        "b_only_area": poly_b & ~(dil_a | poly_a),
+        "poly_b": poly_b,
+        # The band both dilated masks cover (C-3, `## Out of scope`).
+        "shared_band": dil_a & dil_b,
+        "dil_a": dil_a,
+    }
+
+
+@dataclasses.dataclass(frozen=True)
+class _Baked:
+    source: NDArray[np.uint8]
+    cleaned: NDArray[np.uint8]  # the stored cleaned page, decoded
+    out: NDArray[np.uint8]  # the baked file, decoded
+    clip: NDArray[np.bool_]  # the bake area `bake_page` was handed
+    handed: NDArray[np.uint8]  # the page `bake_page` was handed
+    report: BakeReport
+
+
+def _bake_ab(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    b_excluded: bool,
+    cleaner_erased: str,
+    b_text: str | None = None,
+    a_text: str | None = "HELLO",
+    only_a: bool = False,
+    grey: bool = False,
+) -> _Baked:
+    """Seed one page with A and B (or A alone), bake it, and return what came out.
+
+    `cleaner_erased` is `"AB"` (the page was cleaned with both - B removed
+    after the clean) or `"A"` (cleaned with A alone - B removed before). It
+    sets both the stored image and the stored `erased` set, which always
+    agree, as `CleanStage` writes them.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    a, b = _ab_regions(b_excluded)
+    page_regions: list[RawRegion] = [a] if only_a else [a, b]
+    texture = world.texture(*SIZE, salt=5)
+    if grey:
+        source_bytes = _encode_grey(texture[:, :, 0])
+        source = np.stack([texture[:, :, 0]] * 3, axis=-1)
+    else:
+        source_bytes = world.encode(texture, "PNG")
+        source = texture
+    handed_to_cleaner = [a, b] if cleaner_erased == "AB" else [a]
+    cleaned = world.cleaned_from(source, handed_to_cleaner)
+    source_dir = tmp_path / "scans"
+    _write_source(source_dir, [("p1.png", source_bytes)])
+    specs = [Spec(proposed=a_text)] + ([] if only_a else [Spec(proposed=b_text)])
+    with _new_project(source_dir) as project:
+        world.seed_page(
+            project,
+            0,
+            page_regions,
+            specs,
+            world.encode(cleaned, "PNG"),
+            erased=range(len(handed_to_cleaner)),
+        )
+
+    calls: list[tuple[NDArray[np.uint8], NDArray[np.bool_]]] = []
+
+    def recording_bake_page(
+        page: NDArray[np.uint8], blocks: Sequence[TypesetBlock], clip: NDArray[np.bool_]
+    ) -> NDArray[np.uint8]:
+        calls.append((page.copy(), clip.copy()))
+        return bake_page(page, blocks, clip)  # the real one, imported above
+
+    monkeypatch.setattr(bake_module, "bake_page", recording_bake_page)
+    output_dir = world.output_dir_for(source_dir)
+    with _open(source_dir) as project:
+        report = bake_chapter(project, output_dir)
+
+    assert len(calls) == 1, f"bake_page was called {len(calls)} times for one cleaned page"
+    return _Baked(
+        source=source,
+        cleaned=cleaned,
+        out=world.decode_rgb((output_dir / "p1.png").read_bytes()),
+        clip=calls[0][1],
+        handed=calls[0][0],
+        report=report,
+    )
+
+
+def _encode_grey(grey: NDArray[np.uint8]) -> bytes:
+    buffer = BytesIO()
+    Image.fromarray(grey, "L").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _mismatches(left: NDArray[np.uint8], right: NDArray[np.uint8], where: NDArray[np.bool_]) -> int:
+    """How many pixels of `where` differ between the two pages - one count,
+    asserted once, so a failure says how much of the area is wrong."""
+    return int(np.any(left[where] != right[where], axis=-1).sum())
+
+
+def test_the_fixture_makes_the_cleaned_page_differ_from_the_source_over_bs_mask() -> None:
+    """The control every pixel assertion below rests on: over the set AC-2
+    names, a page cleaned with A and B differs from the source at EVERY pixel,
+    so "equals the source" cannot be satisfied by the cleaned page. And the
+    set, and the shared band, are not empty."""
+    geometry = _geometry()
+    a, b = _ab_regions(b_excluded=False)
+    source = world.texture(*SIZE, salt=5)
+    cleaned = world.cleaned_from(source, [a, b])
+    restored = geometry["restored"]
+
+    assert int(restored.sum()) > 300, int(restored.sum())
+    assert int(geometry["shared_band"].sum()) > 50, int(geometry["shared_band"].sum())
+    assert not (geometry["shared_band"] & geometry["restored"]).any()
+    assert _mismatches(cleaned, source, restored) == int(restored.sum())
+
+
+def test_a_region_removed_after_the_clean_has_the_source_pasted_back_over_its_erased_area(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**AC-2**: B is excluded and the stored image erased it (`erased` is
+    `{A, B}`). Every pixel inside B's polygon and B's dilated mask, minus A's
+    own dilated mask, is the SOURCE's - not the flat white the cleaner left.
+    B carries a proposal, so a bake that still typeset an excluded region
+    puts ink here too."""
+    restored = _geometry()["restored"]
+
+    baked = _bake_ab(tmp_path, monkeypatch, b_excluded=True, cleaner_erased="AB", b_text="THERE")
+
+    wrong = _mismatches(baked.out, baked.source, restored)
+    assert wrong == 0, (
+        f"{wrong} of {int(restored.sum())} pixels of the removed region's erased area"
+        " are not the source's; AC-2 says the source is pasted back over them"
+    )
+
+
+def test_a_region_removed_after_the_clean_is_outside_the_bake_area(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**AC-2**'s second half: the bake area handed to `bake_page` is `False`
+    over B's polygon except where A's own mask or polygon reaches."""
+    b_only = _geometry()["b_only_area"]
+
+    baked = _bake_ab(tmp_path, monkeypatch, b_excluded=True, cleaner_erased="AB", b_text="THERE")
+
+    inside = int((baked.clip & b_only).sum())
+    assert inside == 0, (
+        f"the bake area covers {inside} of {int(b_only.sum())} pixels of the removed"
+        " region's polygon; AC-2 says it covers none outside A's contribution"
+    )
+
+
+def test_an_included_region_in_bs_place_keeps_the_cleaned_page_and_the_bake_area(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**AC-2**'s control: the same page with B INCLUDED (no proposal) bakes
+    the cleaned page's flat white over B's erased area, and the bake area is
+    `True` over all of B's polygon - so the two assertions above are about
+    exclusion, not about this page."""
+    geometry = _geometry()
+
+    baked = _bake_ab(tmp_path, monkeypatch, b_excluded=False, cleaner_erased="AB")
+
+    assert _mismatches(baked.out, baked.cleaned, geometry["restored"]) == 0
+    assert _mismatches(baked.out, baked.source, geometry["restored"]) == int(
+        geometry["restored"].sum()
+    )
+    assert bool(baked.clip[geometry["poly_b"]].all()), "the bake area misses an included polygon"
+
+
+def test_a_region_removed_before_the_clean_shows_the_source_with_nothing_to_paste(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**AC-3**: B was excluded BEFORE the clean (`erased` is `{A}`), so the
+    stored image never touched it. The same pixels of B are the source's, and
+    the page `bake_page` is handed is the stored cleaned page exactly - there
+    was nothing erased to put back. Under DV-1 (paste-back made the identity)
+    this test stays green: it is the path that never needed one."""
+    restored = _geometry()["restored"]
+
+    baked = _bake_ab(tmp_path, monkeypatch, b_excluded=True, cleaner_erased="A", b_text="THERE")
+
+    assert _mismatches(baked.out, baked.source, restored) == 0
+    assert np.array_equal(baked.handed, baked.cleaned)
+
+
+def _bake_a_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Baked:
+    """The control bake both paths must meet: the page with B not there at
+    all - a cleaned image that already carries the source over B."""
+    return _bake_ab(
+        tmp_path / "alone", monkeypatch, b_excluded=False, cleaner_erased="A", only_a=True
+    )
+
+
+def test_a_region_removed_before_the_clean_bakes_to_the_page_without_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**AC-3**'s "the baked page equals the control bake of a cleaned image
+    that already carried the source there": the whole file, pixel for pixel.
+    Green under DV-1 as well - nothing was erased, so nothing is put back."""
+    before = _bake_ab(
+        tmp_path / "before", monkeypatch, b_excluded=True, cleaner_erased="A", b_text="THERE"
+    )
+    alone = _bake_a_alone(tmp_path, monkeypatch)
+
+    assert np.array_equal(before.out, alone.out), (
+        f"{_mismatches(before.out, alone.out, np.ones(SIZE[::-1], dtype=bool))} pixels differ"
+        " from the page with the removed region never there"
+    )
+
+
+def test_a_region_removed_after_the_clean_bakes_to_the_page_without_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**AC-2** meeting AC-3: erased and pasted back, the page is the same file
+    as one whose removed region was never erased - the paste-back puts back
+    exactly what the cleaner took, no more (A's band) and no less."""
+    after = _bake_ab(
+        tmp_path / "after", monkeypatch, b_excluded=True, cleaner_erased="AB", b_text="THERE"
+    )
+    alone = _bake_a_alone(tmp_path, monkeypatch)
+
+    assert np.array_equal(after.out, alone.out), (
+        f"{_mismatches(after.out, alone.out, np.ones(SIZE[::-1], dtype=bool))} pixels differ"
+        " from the page with the removed region never there"
+    )
+
+
+def test_an_included_regions_erased_pixels_are_never_restored_even_in_a_shared_band(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C-3 and `## Out of scope`: "Pasting back over an included region's
+    pixels, ever - even inside an excluded region's band". A's and B's dilated
+    masks share two columns; there, and over all of A's mask, the baked page
+    is the CLEANED page. A has no proposal, so no ink can land there either."""
+    geometry = _geometry()
+
+    baked = _bake_ab(tmp_path, monkeypatch, b_excluded=True, cleaner_erased="AB", a_text=None)
+
+    wrong = _mismatches(baked.out, baked.cleaned, geometry["dil_a"])
+    assert wrong == 0, (
+        f"{wrong} pixels of the included region's erased area are not the cleaned page;"
+        f" {_mismatches(baked.out, baked.source, geometry['shared_band'])} of the"
+        f" {int(geometry['shared_band'].sum())} shared-band pixels equal the source"
+    )
+
+
+def test_a_greyscale_page_has_its_grey_source_pasted_back_as_rgb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C-3: `_bake` decodes the source with `.convert("RGB")`, because a
+    greyscale scan has to match the cleaned page's shape. The pasted pixels are
+    the grey value in all three channels."""
+    restored = _geometry()["restored"]
+
+    baked = _bake_ab(
+        tmp_path, monkeypatch, b_excluded=True, cleaner_erased="AB", b_text="THERE", grey=True
+    )
+
+    assert _mismatches(baked.out, baked.source, restored) == 0
+
+
+def test_an_excluded_region_is_not_counted_as_a_region_left_without_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**AC-4**: B excluded and without a proposal is not "left without text"
+    - it is left as drawn. A is set, so nothing on the page is empty."""
+    baked = _bake_ab(tmp_path, monkeypatch, b_excluded=True, cleaner_erased="AB")
+
+    assert baked.report.regions_empty == 0, (
+        f"regions_empty is {baked.report.regions_empty}; AC-4 says an excluded region"
+        " is not counted"
+    )
+
+
+def test_the_same_region_included_and_without_a_proposal_is_counted_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**AC-4**'s control: B included, no proposal - one empty region."""
+    baked = _bake_ab(tmp_path, monkeypatch, b_excluded=False, cleaner_erased="AB")
+
+    assert baked.report.regions_empty == 1

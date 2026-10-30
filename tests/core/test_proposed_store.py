@@ -161,7 +161,8 @@ def test_storing_a_proposal_needs_no_schema_version_bump() -> None:
     # MT-017 C-5 takes it to 6: `line` gains `status`.
     # MT-065 C-2 takes it to 7: `cleaned_page`.
     # MT-118 C-2 takes it to 8: `region.excluded`.
-    assert SCHEMA_VERSION == 8
+    # MT-119 C-4 takes it to 9: `cleaned_page.erased`.
+    assert SCHEMA_VERSION == 9
 
 
 def test_the_two_methods_are_named_on_the_project_beside_their_line_siblings() -> None:
