@@ -70,7 +70,9 @@ class _OneLogicalLine(QValidator):
 
 
 class LineEditor(QLineEdit):
-    """One line under review. Always editable, whatever its status (PO-5)."""
+    """One line under review. Editable whatever its review status (PO-5) -
+    except a line removed from translation, which its row makes read-only
+    (MT-120)."""
 
     #: The line's status after a commit (emitted on every commit, so a listener
     #: can re-read `line` for its text as well).
@@ -103,6 +105,16 @@ class LineEditor(QLineEdit):
     def line(self) -> Line:
         """The in-memory state after the last commit."""
         return self._line
+
+    def set_line(self, line: Line) -> None:
+        """Take `line` as re-read from the store (MT-120: removed or restored).
+
+        Not a commit: nothing is queued to save and `statusChanged` is not
+        emitted - the caller re-renders. Write any pending save first.
+        """
+        self._line = line
+        self.setText(effective_text(line))
+        self._edit_start = self.text()
 
     # -- the acts ----------------------------------------------------------------
 

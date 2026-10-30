@@ -476,15 +476,38 @@ class PageCanvas(QGraphicsView):
         hovered = self._link_state.hovered_region_id
         for marker in self.markers:
             region_id = marker.region.region_id
+            excluded = marker.region.excluded
             if region_id == selected:
                 state = MarkerState.SELECTED  # hover never changes the selected look (§4.4)
             elif region_id == hovered:
                 state = MarkerState.HOVER
+            elif excluded:
+                state = MarkerState.EXCLUDED
             else:
                 state = MarkerState.IDLE
-            # Under High Contrast dimming stops (A-15.6, §7.1); nothing else does.
-            dimmed = not self._high_contrast and selected is not None and region_id != selected
+            # A removed region is always dimmed unless it is itself the
+            # selection (MT-120 C-3, §4.3 "Why always dimmed"). Under High
+            # Contrast dimming stops (A-15.6, §7.1); nothing else does.
+            dimmed = (
+                not self._high_contrast
+                and region_id != selected
+                and (selected is not None or excluded)
+            )
             marker.set_appearance(state, dimmed=dimmed)
+
+    def set_region_excluded(self, region_id: int, excluded: bool) -> None:
+        """Mark one region removed from translation or restored, in place.
+
+        The marker object is kept (MT-120 C-4: no rebuild); only its region
+        value and its look change. The selection and the viewport do not.
+        """
+        for index, region in enumerate(self._regions):
+            if region.region_id == region_id:
+                self._regions[index] = replace(region, excluded=excluded)
+        for marker in self.markers:
+            if marker.region.region_id == region_id:
+                marker.region = replace(marker.region, excluded=excluded)
+        self._restyle()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:

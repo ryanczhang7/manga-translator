@@ -125,6 +125,7 @@ GLYPH_COLOURS: dict[str, str] = {
     "edited": "color.accent.base",
     "reverted": "color.text.secondary",
     "failed": "color.status.danger",
+    "excluded": "color.text.muted",  # MT-120: shares proposed's hue; the glyph differs
 }
 #: section 2, the window ground (`QMainWindow, QDialog` rule).
 WINDOW_GROUND = "color.surface.base"
@@ -176,8 +177,10 @@ def test_the_glyph_table_is_the_one_workspace_uses() -> None:
 
 
 def test_the_five_glyph_colours_are_pairwise_distinct_and_none_is_text_primary() -> None:
-    """Without this AC-7's control could not tell the statuses apart."""
-    colours = [_colour(token) for token in GLYPH_COLOURS.values()]
+    """Without this AC-7's control could not tell the statuses apart. Over the
+    five MT-061 measured: MT-120's `excluded` is `color.text.muted` like
+    `proposed`, deliberately - the slash through the circle tells them apart."""
+    colours = [_colour(GLYPH_COLOURS[status]) for status in STATUSES]
     assert len(set(colours)) == 5, colours
     assert _colour("color.text.primary") not in colours
 
@@ -946,7 +949,9 @@ def _line(status: str, index: int) -> Line:
     )
 
 
-def _workspace_with_rows(qtbot, root: Path) -> Workspace:  # type: ignore[no-untyped-def]
+def _workspace_with_rows(  # type: ignore[no-untyped-def]
+    qtbot, root: Path, statuses: tuple[str, ...] = STATUSES
+) -> Workspace:
     """A Workspace as `build_window` returns it - pages in its strip - with one
     row per status in its column."""
     window = app_module.build_window([str(_project_folder(root))])
@@ -954,16 +959,16 @@ def _workspace_with_rows(qtbot, root: Path) -> Workspace:  # type: ignore[no-unt
     _show(qtbot, window)
     regions = [
         OrderedRegion(i, ((10, 10 + 40 * i), (60, 10 + 40 * i), (60, 40 + 40 * i)))
-        for i in range(len(STATUSES))
+        for i in range(len(statuses))
     ]
     window.set_regions(
         regions,
-        [f"ja {i}" for i in range(len(STATUSES))],
-        ["Hello."] * len(STATUSES),
-        [_line(status, i) for i, status in enumerate(STATUSES)],
+        [f"ja {i}" for i in range(len(statuses))],
+        ["Hello."] * len(statuses),
+        [_line(status, i) for i, status in enumerate(statuses)],
     )
     _settle()
-    for i, status in enumerate(STATUSES):
+    for i, status in enumerate(statuses):
         assert window.translation_column.row(i).editor.status == status, "precondition"
     return window
 
@@ -1122,3 +1127,59 @@ def test_control_without_the_sheet_a_page_strip_items_text_is_not_primary(
     window = _workspace_with_rows(qtbot, tmp_path)
 
     assert _strip_row_one_ink(window) != _colour(LIST_TEXT)
+
+
+# =============================================================================
+# MT-120 C-6 / AC-1: a removed row - its glyph text.muted, its text text.secondary
+# =============================================================================
+
+#: components.md §5 anatomy, `excluded` row: text `color.text.secondary`.
+EXCLUDED_ROW_TEXT = "color.text.secondary"
+#: Inside the editor's 1 px `color.border.interactive` frame: `_ink` over the
+#: whole editor reads the frame (`#7a7a7a`, measured in RED), not the text.
+EDITOR_INSET = 3
+
+
+def _text_ink(editor: QWidget) -> str:
+    """The editor's text colour, sampled inside its frame."""
+    image = _grab(editor)
+    inner = QRect(
+        EDITOR_INSET,
+        EDITOR_INSET,
+        image.width() - 2 * EDITOR_INSET,
+        image.height() - 2 * EDITOR_INSET,
+    )
+    return _ink(image.copy(inner))
+
+
+def test_a_removed_rows_glyph_is_painted_text_muted(
+    qtbot,  # type: ignore[no-untyped-def]
+    application_sheet: Callable[[str], None],
+    tmp_path: Path,
+) -> None:
+    """C-6: `QLabel#rowGutter[status="excluded"]` resolves `color.text.muted`.
+    Without the rule the base `QWidget` rule paints `color.text.primary`."""
+    application_sheet(packaged_theme())
+    window = _workspace_with_rows(qtbot, tmp_path, ("proposed", "excluded"))
+
+    painted = _ink(_grab(window.translation_column.row(1).gutter))
+
+    assert painted == _colour(GLYPH_COLOURS["excluded"]), f"excluded glyph painted {painted}"
+
+
+def test_a_removed_rows_text_is_painted_text_secondary_and_a_live_rows_is_not(
+    qtbot,  # type: ignore[no-untyped-def]
+    application_sheet: Callable[[str], None],
+    tmp_path: Path,
+) -> None:
+    """AC-1: a removed line's text is `color.text.secondary`. Its control is the
+    proposed row beside it, the same text under the same sheet: it reads
+    `color.text.primary` (measured in RED: `#ededed`), so the measurement tells
+    the two apart."""
+    application_sheet(packaged_theme())
+    window = _workspace_with_rows(qtbot, tmp_path, ("proposed", "excluded"))
+    live = _text_ink(window.translation_column.row(0).editor)
+    removed = _text_ink(window.translation_column.row(1).editor)
+
+    assert live == _colour("color.text.primary"), f"control: a live row's text is {live}"
+    assert removed == _colour(EXCLUDED_ROW_TEXT), f"a removed row's text painted {removed}"

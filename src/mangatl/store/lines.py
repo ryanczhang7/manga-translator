@@ -19,8 +19,10 @@ reentrant - and because the line is on disk whether or not the glossary agrees.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 
 from mangatl.domain.line import COMMITTED_STATUSES, Line, LineStatus, derive_status
+from mangatl.domain.region import ExclusionReason
 from mangatl.store.glossary import reconcile_from_edit
 from mangatl.store.project import PAGE_DONE, Project
 
@@ -32,16 +34,16 @@ __all__ = ["commit_line", "read_review_lines"]
 # the reason `project._SELECT_PAGES` gives.
 _SELECT_REVIEW = (
     "SELECT region.reading_index, line.id, line.source_ja, line.proposed_en,"
-    " line.final_en, line.status, line.edited_at, line.ocr_empty"
+    " line.final_en, line.status, line.edited_at, line.ocr_empty, region.excluded"
     " FROM region LEFT JOIN line ON line.region_id = region.id"
     " JOIN page ON page.id = region.page_id"
     " WHERE page.ordinal = ? ORDER BY region.reading_index"
 )
 
-# The line hung off each region of one page, in reading order; `NULL` where
-# the region has no line row.
+# The line hung off each region of one page, in reading order, with the
+# region's exclusion; `NULL` line id where the region has no line row.
 _SELECT_LINE_IDS = (
-    "SELECT line.id FROM region LEFT JOIN line ON line.region_id = region.id"
+    "SELECT line.id, region.excluded FROM region LEFT JOIN line ON line.region_id = region.id"
     " JOIN page ON page.id = region.page_id"
     " WHERE page.ordinal = ? ORDER BY region.reading_index"
 )
@@ -54,7 +56,10 @@ def read_review_lines(project: Project, page_ordinal: int) -> tuple[Line | None,
     with no `line` row; `()` for a page with no regions. Opens no transaction.
 
     Each status is `derive_status` of the stored one, with `page_done` read
-    from the page (C-2 rule 3, PO-3).
+    from the page (C-2 rule 3, PO-3) and `excluded` from the region (MT-120
+    C-2): an excluded region's line reads `excluded`, its reason in
+    `Line.excluded`. A region with no line row is `None` whether or not it is
+    excluded; the workspace reads that flag from `read_regions`.
     """
     rows = project.select(_SELECT_REVIEW, (page_ordinal,))
     if not rows:
@@ -73,9 +78,11 @@ def read_review_lines(project: Project, page_ordinal: int) -> tuple[Line | None,
                 ocr_empty=bool(ocr_empty),
                 proposed_en=proposed_en,
                 page_done=page_done,
+                excluded=excluded is not None,
             ),
             edited_at=None if edited_at is None else datetime.fromisoformat(str(edited_at)),
             ocr_empty=bool(ocr_empty),
+            excluded=None if excluded is None else cast(ExclusionReason, str(excluded)),
         )
         for (
             reading_index,
@@ -86,6 +93,7 @@ def read_review_lines(project: Project, page_ordinal: int) -> tuple[Line | None,
             status,
             edited_at,
             ocr_empty,
+            excluded,
         ) in rows
     )
 
@@ -101,25 +109,31 @@ def commit_line(
     status, and `edited_at` = now in UTC - in one transaction.
 
     Refused before anything is written: a status that is not a user act
-    (`ValueError`), a reading index not on the page (`ValueError`), and a
-    region with no `line` row (`LookupError`). Then, if `text` is not `None`,
-    the glossary is reconciled against it (see the module docstring).
+    (`ValueError`), a reading index not on the page (`ValueError`), a region
+    with no `line` row (`LookupError`), and a region removed from translation
+    (`ValueError`, MT-120 C-2: restore it first). Then, if `text` is not
+    `None`, the glossary is reconciled against it (see the module docstring).
     """
     if status not in COMMITTED_STATUSES:
         raise ValueError(
             f"{status!r} is not a user act; commit one of {sorted(COMMITTED_STATUSES)}"
         )
     with project.transaction() as cursor:
-        line_ids = [row[0] for row in cursor.execute(_SELECT_LINE_IDS, (page_ordinal,))]
-        if not 0 <= reading_index < len(line_ids):
+        regions = list(cursor.execute(_SELECT_LINE_IDS, (page_ordinal,)))
+        if not 0 <= reading_index < len(regions):
             raise ValueError(
                 f"reading index {reading_index} is not on page {page_ordinal}:"
-                f" the page has {len(line_ids)} region(s)"
+                f" the page has {len(regions)} region(s)"
             )
-        line_id = line_ids[reading_index]
+        line_id, excluded = regions[reading_index]
         if line_id is None:
             raise LookupError(
                 f"region {reading_index} of page {page_ordinal} has no line: OCR has not run"
+            )
+        if excluded is not None:
+            raise ValueError(
+                f"region {reading_index} of page {page_ordinal} is removed from"
+                " translation; restore it first"
             )
         cursor.execute(_UPDATE_LINE, (text, status, datetime.now(UTC).isoformat(), line_id))
     if text is not None:

@@ -311,3 +311,86 @@ def test_an_accept_carries_no_text_and_leaves_the_glossary_alone(project: Projec
     commit_line(project, 0, 0, None, "accepted")
 
     assert read_entries(project) == [GlossaryEntry("さくら", "Sakura", "name", 0, 0, "model")]
+
+
+# =============================================================================
+# MT-120 C-2 - a region removed from translation
+# =============================================================================
+
+
+def test_an_excluded_regions_line_reads_back_excluded_with_its_reason(project: Project) -> None:
+    project.set_excluded(0, 0, "user")
+    project.set_excluded(0, 3, "watermark")
+
+    lines = read_review_lines(project, 0)
+
+    assert lines == (
+        Line(0, "さくら、待って!", "Sakura, wait!", None, "excluded", None, False, "user"),
+        Line(1, "なるほど", None, None, "proposed", None, False),
+        Line(2, "", None, None, "failed", None, True),
+        Line(3, "またね", "See  you. ", None, "excluded", None, False, "watermark"),
+    )
+
+
+def test_excluded_wins_over_a_failure_and_over_a_stored_act(project: Project) -> None:
+    commit_line(project, 0, 1, "Got it.", "edited")
+    _mark_done(project, 0)
+    project.set_excluded(0, 1, "user")  # edited by the user
+    project.set_excluded(0, 2, "user")  # ocr_empty: failed
+
+    got = [(line.status, line.excluded) for line in read_review_lines(project, 0) if line]
+
+    assert got == [
+        ("proposed", None),
+        ("excluded", "user"),
+        ("excluded", "user"),
+        ("proposed", None),
+    ]
+
+
+def test_restoring_a_region_reads_its_stored_act_and_its_pipeline_status_again(
+    project: Project,
+) -> None:
+    commit_line(project, 0, 0, None, "accepted")
+    _mark_done(project, 0)
+    for index in (0, 1):
+        project.set_excluded(0, index, "user")
+        project.set_excluded(0, index, None)
+
+    got = [(line.status, line.excluded) for line in read_review_lines(project, 0) if line]
+
+    assert got == [("accepted", None), ("failed", None), ("failed", None), ("proposed", None)]
+
+
+def test_an_excluded_region_with_no_line_row_still_reads_back_as_none(project: Project) -> None:
+    """C-2: no `Line` is invented for it; the workspace reads the flag from
+    `read_regions` instead."""
+    project.set_excluded(1, 1, "user")
+    assert read_review_lines(project, 1) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("text", "status"),
+    [("Anything.", "edited"), (None, "accepted"), ("See  you. ", "reverted")],
+)
+def test_committing_to_an_excluded_line_is_refused_and_writes_nothing(
+    project: Project, source_dir: Path, text: str | None, status: str
+) -> None:
+    project.set_excluded(0, 3, "user")
+    before = _stored(source_dir)
+
+    with pytest.raises(ValueError, match="removed from translation"):
+        commit_line(project, 0, 3, text, status)  # type: ignore[arg-type]
+
+    assert _stored(source_dir) == before
+
+
+def test_control_committing_to_the_same_line_once_restored_is_written(
+    project: Project, source_dir: Path
+) -> None:
+    project.set_excluded(0, 3, "user")
+    project.set_excluded(0, 3, None)
+
+    commit_line(project, 0, 3, "Bye.", "edited")
+
+    assert _stored(source_dir)[3][1:3] == ("Bye.", "edited")

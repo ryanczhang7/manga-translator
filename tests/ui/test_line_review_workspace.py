@@ -64,6 +64,7 @@ DESIGN_GLYPHS = {
     "edited": "✎",  # ✎ pencil
     "reverted": "↩",  # ↩ return arrow, alone (PO-2)
     "failed": "⚠",  # ⚠ warning triangle
+    "excluded": "\N{CIRCLED DIVISION SLASH}",  # ⊘ U+2298 (MT-120, §5 anatomy)
 }
 DESIGN_COLOR_TOKENS = {
     "proposed": "color.text.muted",
@@ -71,6 +72,7 @@ DESIGN_COLOR_TOKENS = {
     "edited": "color.accent.base",
     "reverted": "color.text.secondary",
     "failed": "color.status.danger",
+    "excluded": "color.text.muted",  # MT-120, Lead Designer decision 1
 }
 #: Which of (Revert, Accept, Retry line) each status shows - §5 "Row actions".
 DESIGN_ACTIONS = {
@@ -210,10 +212,11 @@ def test_the_status_glyphs_are_the_design_table() -> None:
     assert dict(STATUS_GLYPHS) == DESIGN_GLYPHS
 
 
-def test_the_five_status_glyphs_are_pairwise_distinct() -> None:
-    """accessibility.md A-15.7's "testable as": colour is never the only cue."""
-    assert set(STATUS_GLYPHS) == set(STATUSES)
-    assert len(set(STATUS_GLYPHS.values())) == len(STATUSES)
+def test_the_six_status_glyphs_are_pairwise_distinct() -> None:
+    """accessibility.md A-15.7's "testable as": colour is never the only cue.
+    MT-120 adds `excluded` as the sixth line status."""
+    assert set(STATUS_GLYPHS) == {*STATUSES, "excluded"}
+    assert len(set(STATUS_GLYPHS.values())) == len(STATUSES) + 1
 
 
 def test_reverted_is_a_return_arrow_alone_and_not_a_pencil_variant() -> None:
