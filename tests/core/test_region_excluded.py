@@ -56,7 +56,13 @@ def test_the_two_exclusion_reasons_are_exported_as_a_constant_and_a_literal_type
 
     assert module.EXCLUSION_REASONS == ("watermark", "user")
     assert get_args(module.ExclusionReason) == ("watermark", "user")
-    assert sorted(module.__all__) == ["EXCLUSION_REASONS", "ExclusionReason", "RawRegion"]
+    # MT-119 C-1 adds `included`, the one filter; `test_region.py` pins it.
+    assert sorted(module.__all__) == [
+        "EXCLUSION_REASONS",
+        "ExclusionReason",
+        "RawRegion",
+        "included",
+    ]
 
 
 # -- AC-1: accepted and read back ------------------------------------------------

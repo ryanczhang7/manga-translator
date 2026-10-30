@@ -242,8 +242,10 @@ llm_call   id, run_id, page_id, request_id, model_id,
 glossary   id, chapter_id, term_ja, term_en, note, first_seen_page
            -- continuity across pages: names, honorifics, place names
 
-cleaned_page  page_id, image_blob
+cleaned_page  page_id, image_blob, erased
            -- the page with its regions erased (MT-065, schema v7); one per page
+           -- erased: JSON array of the reading indices the cleaner was handed
+           --         for this image (MT-119, schema v9)
 ```
 
 Notes that are decisions, not description:
@@ -271,6 +273,17 @@ Notes that are decisions, not description:
   `refresh_from_source` delete it explicitly rather than by cascade. Cost: about
   1-2 MB per page (measured on the 1125×1600 fixture scans), and the space a
   deleted blob frees stays in the file until a `VACUUM`.
+- **`cleaned_page.erased` records which regions the stored image erased**
+  (MT-119 C-4, schema v9): the reading indices `CleanStage` handed the cleaner
+  - the included regions at the time of the clean - as a sorted JSON array,
+  written with the image and deleted with the row, so every existing
+  invalidation takes it along. It is what lets an exclusion toggle keep the
+  image (D14): the bake pastes the **source** back over an excluded region
+  whose index is in `erased`, and `set_excluded` deletes the row in exactly one
+  case - restoring a region whose index is *not* in `erased`, whose Japanese is
+  still in the image. A per-region flag was the alternative and lost: it would
+  outlive the row it describes. A v8 file migrates with every reading index of
+  its page, which is what a v8 cleaner was handed.
 
 ## 5. Where state lives
 
@@ -528,8 +541,16 @@ line to be reviewed, and OCR is local and free.
 column from the `RawRegion`, `excluded` included, so re-running detection over
 a page overwrites the user's choice with the detector's - the rule for every
 region column, pinned rather than special-cased (EPIC-10 "Deliberately not").
-Also lost, for now: the cleaner and the typesetter still treat an excluded
-region like any other; MT-119 decides what exclusion means for them.
+*Cleaning and typesetting (MT-119, the user's choice 2026-10-30: "Paste back
+at render").* An excluded region is **left as drawn**. `CleanStage` hands the
+cleaner only `domain.region.included(...)` and records the reading indices it
+erased in `cleaned_page.erased`; the bake typesets no excluded region, leaves
+it out of the bake area and out of `regions_empty`, and pastes the source back
+over each excluded region the stored image erased - its own dilated erase mask
+minus every included region's - so a region removed after the clean comes out
+as drawn with no re-clean. Excluding never invalidates the cleaned image; only
+restoring a region the image never erased does, and that page bakes as source,
+counted `pages_uncleaned`, until a re-run exists (EPIC-11).
 
 ## 8. Deployment shape
 

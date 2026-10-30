@@ -7,11 +7,23 @@ MT-021 C-3..C-6. For each page, in the chapter's reading order:
 | no regions | the source file's bytes, verbatim |
 | regions, no cleaned image | the source file's bytes, verbatim; counted in `pages_uncleaned` |
 | regions and a cleaned image | `bake_page(cleaned, blocks, bake area)`, in the source's format |
+| regions, a cleaned image and an excluded region | as above, the source put back first (below) |
+
+That last row in full: *the cleaned page with the source put back over the
+excluded region's erased area, then `bake_page`*. (Split from the table only
+for the line-length rule.)
+
+**An excluded region is left as drawn** (MT-119): it is never typeset, it is
+outside the bake area, it is not counted in `regions_empty`, and wherever the
+stored cleaned image erased it (the image's `erased` set says so - it was
+removed after the page was cleaned) the source's pixels are pasted back over
+its own dilated erase mask, minus every included region's. A region excluded
+before the clean was never erased, so there is nothing to put back.
 
 English is fitted into the **bubble's interior** found on the cleaned page
 (`typeset.interior.bubble_interior`, MT-123), which is the region's polygon
 itself for a `box` region and wherever no bubble is found. The **bake area** is
-MT-019's erase mask united with every region's polygon and every set block's
+MT-019's erase mask united with every included region's polygon and every set block's
 interior, filled (C-3, widened by MT-123): the cleaner touches the dilation
 ring, the polygon's fill covers the holes in a mask, and the interior is where
 the English was fitted. Ink is clipped to it, so an overflowed block never
@@ -51,7 +63,7 @@ from PIL import Image
 from mangatl.app_paths import settings_path
 from mangatl.clean.mask import erase_mask
 from mangatl.domain.line import Line, effective_text
-from mangatl.domain.region import RawRegion
+from mangatl.domain.region import RawRegion, included
 from mangatl.store.lines import read_review_lines
 from mangatl.store.project import Project
 from mangatl.store.settings import lettering_font_dir
@@ -203,10 +215,13 @@ def bake_chapter(project: Project, output_dir: Path) -> BakeReport:
             uncleaned += 1
         if cleaned is not None:
             set_blocks = _set_blocks(page_regions, lines, faces, _grey(cleaned))
-            regions_empty += len(page_regions) - len(set_blocks)
+            # An excluded region is not one "left without text" (MT-119 AC-4).
+            regions_empty += len(included(page_regions)) - len(set_blocks)
             payload = _bake(
                 cleaned,
+                payload,
                 page_regions,
+                project.read_erased(page.ordinal) or frozenset(),
                 [block for _, _, block in set_blocks],
                 [interior for _, interior, _ in set_blocks],
                 page.filename,
@@ -253,9 +268,13 @@ def _set_blocks(
     """`(reading_index, interior, block)` for each region with text to set, in
     reading order (C-4). The one rule for which lines a bake sets, and where:
     each block is fitted into the bubble's interior found on the `cleaned`
-    grey page (MT-123). `preview_bake`'s overflow count reads it too (MT-066 C-1)."""
+    grey page (MT-123). `preview_bake`'s overflow count reads it too (MT-066 C-1).
+    An excluded region is never set (MT-119 C-3); `enumerate` runs over every
+    region so the reading indices stay aligned with `lines`."""
     blocks: list[tuple[int, Ring, TypesetBlock]] = []
     for index, (region, line) in enumerate(zip(page_regions, lines, strict=True)):
+        if region.excluded is not None:
+            continue
         if line is not None and line.status != "failed" and effective_text(line).strip():
             interior = bubble_interior(cleaned, region.polygon, region.kind)
             blocks.append((index, interior, typeset(effective_text(line), interior, faces)))
@@ -265,27 +284,71 @@ def _set_blocks(
 def _bake_area(
     page_regions: Sequence[RawRegion], size: tuple[int, int], interiors: Sequence[Ring]
 ) -> NDArray[np.bool_]:
-    """C-3, widened by MT-123: the erase mask united with every region's polygon
-    and every set block's interior, filled."""
+    """C-3, widened by MT-123: the erase mask united with every included
+    region's polygon and every set block's interior, filled. An excluded region
+    contributes nothing (MT-119 C-3), so the area is `False` over it except
+    where an included region reaches into it."""
     width, height = size
+    kept = included(page_regions)
     filled = np.zeros((height, width), dtype=np.uint8)
-    for ring in [region.polygon for region in page_regions] + list(interiors):
+    for ring in [region.polygon for region in kept] + list(interiors):
         cv2.fillPoly(filled, [np.array(ring, dtype=np.int32)], 1)
-    return np.asarray(erase_mask(page_regions, size) | filled.astype(bool))
+    return np.asarray(erase_mask(kept, size) | filled.astype(bool))
+
+
+def _restore_excluded(
+    cleaned: NDArray[np.uint8],
+    source: NDArray[np.uint8],
+    page_regions: Sequence[RawRegion],
+    erased: frozenset[int],
+    size: tuple[int, int],
+) -> NDArray[np.uint8]:
+    """A copy of `cleaned` with the source put back wherever an excluded region
+    was erased (MT-119 C-3): for each region with `excluded is not None` and
+    index in `erased`, its own `erase_mask([region], size)` - dilation included
+    - minus `erase_mask(included(page_regions), size)`. An included region's
+    erased pixels are never restored (two bubbles 2 px apart share a band).
+    Nothing to do returns `cleaned` unchanged.
+
+    Dilation distributes over union, so one region's mask is exactly its
+    contribution to the page's (MT-019 C-3); outside it the cleaner touched
+    nothing, so after the paste the region's whole polygon is the source."""
+    restore = [
+        region
+        for index, region in enumerate(page_regions)
+        if region.excluded is not None and index in erased
+    ]
+    if not restore:
+        return cleaned
+    width, height = size
+    paste = np.zeros((height, width), dtype=bool)
+    for region in restore:
+        paste |= erase_mask([region], size)
+    paste &= ~erase_mask(included(page_regions), size)
+    restored = cleaned.copy()
+    restored[paste] = source[paste]
+    return restored
 
 
 def _bake(
     cleaned: bytes,
+    source: bytes,
     page_regions: Sequence[RawRegion],
+    erased: frozenset[int],
     blocks: Sequence[TypesetBlock],
     interiors: Sequence[Ring],
     filename: str,
 ) -> bytes:
-    """The cleaned page with `blocks` composited, encoded as `filename`'s format (C-5)."""
+    """The cleaned page with the source put back over every erased excluded
+    region and `blocks` composited, encoded as `filename`'s format (C-5)."""
     with Image.open(BytesIO(cleaned)) as image:
         rgb = np.asarray(image.convert("RGB"))
+    with Image.open(BytesIO(source)) as image:
+        scan = np.asarray(image.convert("RGB"))
     height, width, _ = rgb.shape
-    baked = bake_page(rgb, blocks, _bake_area(page_regions, (width, height), interiors))
+    size = (width, height)
+    rgb = _restore_excluded(rgb, scan, page_regions, erased, size)
+    baked = bake_page(rgb, blocks, _bake_area(page_regions, size, interiors))
     buffer = BytesIO()
     if Path(filename).suffix.lower() == ".png":
         Image.fromarray(baked, "RGB").save(buffer, format="PNG")

@@ -32,6 +32,7 @@ file to size. Every page is at most 40x30; nothing here decodes a mask.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
@@ -495,7 +496,8 @@ def test_is_done_reads_the_stored_cleaned_image_and_nothing_else(
     no regions, no lines and status `pending` and an image written directly is."""
     stage = CleanStage(clean=_RecordingCleaner(png_bytes))
     fixture.project.write_regions(0, fixture.regions(1))
-    fixture.project.write_cleaned(_TARGET, fixture.source_bytes(_TARGET))
+    # MT-119 C-4: `_TARGET` has no regions here, so the image erased none.
+    fixture.project.write_cleaned(_TARGET, fixture.source_bytes(_TARGET), erased=())
 
     assert stage.is_done(fixture.context(0)) is False
     assert stage.is_done(fixture.context(_TARGET)) is True
@@ -607,3 +609,97 @@ def test_writing_a_pages_regions_again_makes_its_clean_stage_not_done(
 
     assert stage.is_done(fixture.context(_TARGET)) is False
     assert stage.is_done(fixture.context(0)) is True
+
+
+# -- MT-119 AC-1: only included regions reach the cleaner, and the store says so ---
+#
+# `CleanStage.run` hands the cleaner `included(regions)` and records, beside the
+# image, the reading indices of the page it was handed (C-2). The excluded
+# region is written through `write_regions` with `excluded` set - the state a
+# page is in once the user or the detector has removed it - not through
+# `set_excluded`, so these tests do not depend on AC-5's rule.
+
+
+def _with_excluded(regions: list[RawRegion], *indices: int) -> list[RawRegion]:
+    return [
+        dataclasses.replace(region, excluded="user") if index in indices else region
+        for index, region in enumerate(regions)
+    ]
+
+
+def test_an_excluded_region_is_not_handed_to_the_cleaner_and_is_not_recorded_as_erased(
+    fixture: _Fixture, png_bytes: Callable[..., bytes]
+) -> None:
+    """**AC-1**: two regions, the second excluded - the cleaner is called once
+    with the first alone, and `read_erased` is `{0}`."""
+    regions = _with_excluded(fixture.regions(2), 1)
+    fixture.project.write_regions(_TARGET, regions)
+    cleaner = _RecordingCleaner(png_bytes)
+
+    CleanStage(clean=cleaner).run(fixture.context(_TARGET))
+
+    assert cleaner.calls == 1
+    assert cleaner.seen[0][1] == (regions[0],), (
+        f"the cleaner was handed {len(cleaner.seen[0][1])} region(s); AC-1 says the"
+        " excluded second region is not among them"
+    )
+    assert fixture.project.read_erased(_TARGET) == frozenset({0})
+    assert fixture.project.read_cleaned(_TARGET) == cleaner.returned[0]
+
+
+def test_the_erased_record_is_in_reading_indices_of_the_page_not_positions_handed_over(
+    fixture: _Fixture, png_bytes: Callable[..., bytes]
+) -> None:
+    """C-2: "`erased` is in reading indices of the page, not positions in
+    `kept`". With the FIRST of three excluded, the cleaner is handed regions 1
+    and 2 - and `enumerate(kept)` would record `{0, 1}`."""
+    regions = _with_excluded(fixture.regions(3), 0)
+    fixture.project.write_regions(_TARGET, regions)
+    cleaner = _RecordingCleaner(png_bytes)
+
+    CleanStage(clean=cleaner).run(fixture.context(_TARGET))
+
+    assert cleaner.seen[0][1] == (regions[1], regions[2])
+    assert fixture.project.read_erased(_TARGET) == frozenset({1, 2})
+
+
+def test_a_page_whose_every_region_is_excluded_stores_its_source_and_erased_nothing(
+    fixture: _Fixture, png_bytes: Callable[..., bytes]
+) -> None:
+    """**AC-1**'s second half: both excluded - the cleaner is not called, the
+    stored image is the source bytes verbatim (the no-regions rule, MT-065
+    PO-4), and `read_erased` is the empty set, not `None`: the page HAS a
+    cleaned image, and it erased nothing."""
+    fixture.project.write_regions(_TARGET, _with_excluded(fixture.regions(2), 0, 1))
+    cleaner = _RecordingCleaner(png_bytes)
+
+    CleanStage(clean=cleaner).run(fixture.context(_TARGET))
+
+    assert cleaner.calls == 0, "the cleaner was called for a page whose regions are all excluded"
+    assert fixture.project.read_cleaned(_TARGET) == fixture.source_bytes(_TARGET)
+    assert fixture.project.read_erased(_TARGET) == frozenset()
+
+
+def test_with_nothing_excluded_the_cleaner_gets_both_regions_and_both_are_recorded(
+    fixture: _Fixture, png_bytes: Callable[..., bytes]
+) -> None:
+    """**AC-1**'s control: nothing excluded - the cleaner receives both and
+    `read_erased` is `{0, 1}`. A stage that dropped a region regardless, or
+    recorded nothing, fails here."""
+    regions = fixture.regions(2)
+    fixture.project.write_regions(_TARGET, regions)
+    cleaner = _RecordingCleaner(png_bytes)
+
+    CleanStage(clean=cleaner).run(fixture.context(_TARGET))
+
+    assert cleaner.seen[0][1] == tuple(regions)
+    assert fixture.project.read_erased(_TARGET) == frozenset({0, 1})
+
+
+def test_a_page_with_no_regions_records_that_its_image_erased_nothing(
+    fixture: _Fixture, png_bytes: Callable[..., bytes]
+) -> None:
+    """The zero case beside AC-1: no regions, source stored, empty set."""
+    CleanStage(clean=_RecordingCleaner(png_bytes)).run(fixture.context(_TARGET))
+
+    assert fixture.project.read_erased(_TARGET) == frozenset()

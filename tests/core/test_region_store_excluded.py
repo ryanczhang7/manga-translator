@@ -14,10 +14,12 @@ there:**
   is EPIC-10's "Deliberately not" and this story's `## Context`, and it is
   pinned here rather than left to be discovered (`## Out of scope`).
 
-**`set_excluded` touches the one column.** C-3: no `line` row and no
-`cleaned_page` row is invalidated by it - MT-119 decides what a toggle does to
-the cleaned image. The "unchanged" assertions below therefore compare whole raw
-rows, not a field or two.
+**`set_excluded` touches the one column** of `region` (MT-118 C-3), and no
+`line` row: the "unchanged" assertions below therefore compare whole raw rows,
+not a field or two. Its effect on `cleaned_page` is MT-119's and has its own
+section at the end of this file (MT-119 AC-5): only a restore of a region the
+stored image never erased deletes that page's image. The MT-118 tests here seed
+no cleaned image, so that rule never fires in them.
 """
 
 from __future__ import annotations
@@ -347,3 +349,226 @@ def test_set_excluded_refuses_a_caller_already_holding_a_transaction(
 
     with pytest.raises(RuntimeError, match="reentrant"), project.transaction():
         project.set_excluded(_ORDINAL, 1, "user")
+
+
+# -- MT-119 AC-5: what a toggle does to the cleaned image ------------------------------
+#
+# The rule (C-4; the user's decision of 2026-10-30, "Paste back at render"): the
+# stored cleaned image is kept on every toggle EXCEPT a restore of a region the
+# image never erased - its index is not in `cleaned_page.erased`, because it was
+# excluded when the page was cleaned. That page needs re-cleaning, so the row
+# goes. Excluding never invalidates (the bake pastes the source back);
+# restoring an erased region never invalidates (its pixels are erased already).
+#
+# Every image is distinct (`_FILLS`), and "kept" is read byte for byte, with
+# its `erased` text, through a plain `sqlite3` connection - together with the
+# bystander page 0's row, so a delete keyed on the wrong page and a rewrite of
+# the right one both show.
+
+#: One distinct page-sized fill per ordinal.
+_FILLS = {0: (10, 20, 30), _ORDINAL: (200, 100, 50)}
+
+
+def _cleaned_rows(db_path: Path) -> dict[int, tuple[bytes, object]]:
+    """ordinal -> (image bytes, erased as stored), for every cleaned page."""
+    return {
+        int(str(ordinal)): (bytes(blob), erased)  # type: ignore[call-overload]
+        for ordinal, blob, erased in _raw(
+            db_path,
+            "SELECT page.ordinal, cleaned_page.image_blob, cleaned_page.erased"
+            " FROM cleaned_page JOIN page ON page.id = cleaned_page.page_id",
+        )
+    }
+
+
+def _seed_cleaned(
+    project: Project,
+    one_bit_png: Callable[..., bytes],
+    png_bytes: Callable[..., bytes],
+    *,
+    erased: tuple[int, ...],
+    excluded: str | None = None,
+) -> None:
+    """`_seed` with region 1 carrying `excluded`, then a cleaned image on both
+    pages: `_ORDINAL`'s erased `erased`; page 0's - the bystander - all three."""
+    _seed(project, _three(one_bit_png, excluded=excluded))
+    project.write_cleaned(_ORDINAL, png_bytes(_PAGE_W, _PAGE_H, _FILLS[_ORDINAL]), erased=erased)
+    project.write_cleaned(0, png_bytes(_PAGE_W, _PAGE_H, _FILLS[0]), erased=(0, 1, 2))
+
+
+@pytest.mark.parametrize(
+    "erased", [(0, 1, 2), (0, 2), ()], ids=["erased-it", "never-erased-it", "erased-nothing"]
+)
+@pytest.mark.parametrize("reason", ["user", "watermark"])
+def test_excluding_an_included_region_keeps_the_cleaned_image_whatever_erased_holds(
+    project: Project,
+    source_dir: Path,
+    one_bit_png: Callable[..., bytes],
+    png_bytes: Callable[..., bytes],
+    erased: tuple[int, ...],
+    reason: str,
+) -> None:
+    """**AC-5 (a)**: excluding never invalidates - the bake pastes the source
+    back over the erased area (AC-2), so the image is still the page's. Both
+    reasons, and every shape of `erased`, because AC-5 (a) says "whatever
+    `erased` holds"."""
+    _seed_cleaned(project, one_bit_png, png_bytes, erased=erased)
+    db_path = _db(source_dir)
+    before = _cleaned_rows(db_path)
+
+    project.set_excluded(_ORDINAL, 1, reason)  # type: ignore[arg-type]
+
+    assert project.has_cleaned(_ORDINAL) is True
+    assert _cleaned_rows(db_path) == before
+    assert _excluded_column(db_path, _ORDINAL) == [None, reason, None]
+
+
+@pytest.mark.parametrize("reason", ["user", "watermark"])
+def test_restoring_a_region_the_cleaned_image_erased_keeps_the_image(
+    project: Project,
+    source_dir: Path,
+    one_bit_png: Callable[..., bytes],
+    png_bytes: Callable[..., bytes],
+    reason: str,
+) -> None:
+    """**AC-5 (b)**: region 1 was removed AFTER the clean - its index is in
+    `erased` - so its pixels are erased in the stored image and restoring it
+    needs no re-clean."""
+    _seed_cleaned(project, one_bit_png, png_bytes, erased=(0, 1, 2), excluded=reason)
+    db_path = _db(source_dir)
+    before = _cleaned_rows(db_path)
+
+    project.set_excluded(_ORDINAL, 1, None)
+
+    assert project.has_cleaned(_ORDINAL) is True
+    assert _cleaned_rows(db_path) == before
+    assert _excluded_column(db_path, _ORDINAL) == [None, None, None]
+
+
+@pytest.mark.parametrize("reason", ["user", "watermark"])
+def test_restoring_a_region_the_cleaned_image_never_erased_deletes_that_pages_image_only(
+    project: Project,
+    source_dir: Path,
+    one_bit_png: Callable[..., bytes],
+    png_bytes: Callable[..., bytes],
+    reason: str,
+) -> None:
+    """**AC-5 (c)**: region 1 was excluded when the page was cleaned - `erased`
+    is `{0, 2}` - so the stored image still carries its Japanese, and the
+    English would sit on top of it. The row goes: `has_cleaned` is `False`,
+    `read_cleaned` and `read_erased` are `None`, and page 0's row is byte for
+    byte what it was."""
+    _seed_cleaned(project, one_bit_png, png_bytes, erased=(0, 2), excluded=reason)
+    db_path = _db(source_dir)
+    bystander = _cleaned_rows(db_path)[0]
+
+    project.set_excluded(_ORDINAL, 1, None)
+
+    assert project.has_cleaned(_ORDINAL) is False, (
+        "restoring a region the stored image never erased left the image in place;"
+        " AC-5 (c) says the page must be re-cleaned"
+    )
+    assert project.read_cleaned(_ORDINAL) is None
+    assert project.read_erased(_ORDINAL) is None
+    assert _cleaned_rows(db_path) == {0: bystander}, "another page's image was touched"
+    assert _excluded_column(db_path, _ORDINAL) == [None, None, None]
+
+
+@pytest.mark.parametrize(
+    ("excluded", "again"),
+    [("user", "user"), ("watermark", "watermark"), (None, None)],
+    ids=["user-again", "watermark-again", "included-again"],
+)
+def test_setting_the_value_a_region_already_has_keeps_the_cleaned_image(
+    project: Project,
+    source_dir: Path,
+    one_bit_png: Callable[..., bytes],
+    png_bytes: Callable[..., bytes],
+    excluded: str | None,
+    again: str | None,
+) -> None:
+    """**AC-5 (d)**: a no-op keeps the image. `erased` is `{0, 2}` - the shape
+    in which a restore WOULD delete - so `set_excluded(..., None)` on a region
+    that is already included is told apart from a restore by the region's
+    current value, not by `erased` alone (C-4: "the current value is not
+    `None` (a restore)")."""
+    _seed_cleaned(project, one_bit_png, png_bytes, erased=(0, 2), excluded=excluded)
+    db_path = _db(source_dir)
+    before = _cleaned_rows(db_path)
+
+    project.set_excluded(_ORDINAL, 1, again)  # type: ignore[arg-type]
+
+    assert project.has_cleaned(_ORDINAL) is True
+    assert _cleaned_rows(db_path) == before
+    assert _excluded_column(db_path, _ORDINAL) == [None, again, None]
+
+
+def test_changing_one_reason_for_the_other_is_not_a_restore_and_keeps_the_image(
+    project: Project,
+    source_dir: Path,
+    one_bit_png: Callable[..., bytes],
+    png_bytes: Callable[..., bytes],
+) -> None:
+    """`watermark` to `user` on a never-erased region: still excluded, so
+    nothing will be typeset over its Japanese and nothing needs re-cleaning."""
+    _seed_cleaned(project, one_bit_png, png_bytes, erased=(0, 2), excluded="watermark")
+    db_path = _db(source_dir)
+    before = _cleaned_rows(db_path)
+
+    project.set_excluded(_ORDINAL, 1, "user")
+
+    assert _cleaned_rows(db_path) == before
+    assert _excluded_column(db_path, _ORDINAL) == [None, "user", None]
+
+
+def test_restoring_a_region_on_a_page_with_no_cleaned_image_deletes_nothing_and_restores_it(
+    project: Project,
+    source_dir: Path,
+    one_bit_png: Callable[..., bytes],
+    png_bytes: Callable[..., bytes],
+) -> None:
+    """The edge: no `cleaned_page` row for the page - nothing to invalidate,
+    and the restore itself still lands. Page 0's image is untouched."""
+    _seed(project, _three(one_bit_png, excluded="user"))
+    project.write_cleaned(0, png_bytes(_PAGE_W, _PAGE_H, _FILLS[0]), erased=(0, 1, 2))
+    db_path = _db(source_dir)
+    before = _cleaned_rows(db_path)
+
+    project.set_excluded(_ORDINAL, 1, None)
+
+    assert _cleaned_rows(db_path) == before
+    assert _excluded_column(db_path, _ORDINAL) == [None, None, None]
+
+
+def test_a_delete_that_fails_leaves_the_exclusion_unchanged(
+    project: Project,
+    source_dir: Path,
+    one_bit_png: Callable[..., bytes],
+    png_bytes: Callable[..., bytes],
+) -> None:
+    """**AC-5**'s last clause: the `region.excluded` write and the delete are
+    one transaction. A trigger on the file makes `DELETE FROM cleaned_page`
+    abort; the restore that needs the delete must then raise, and leave the
+    region excluded and the image in place - an `UPDATE` committed on its own
+    would leave the region restored over a page still carrying its Japanese.
+
+    The trigger is created through a plain connection AFTER the seed, because
+    `write_regions` deletes from `cleaned_page` as well."""
+    _seed_cleaned(project, one_bit_png, png_bytes, erased=(0, 2), excluded="user")
+    db_path = _db(source_dir)
+    connection = sqlite3.connect(db_path)
+    try:
+        with connection:
+            connection.execute(
+                "CREATE TRIGGER mt119_injected_delete_failure BEFORE DELETE ON cleaned_page"
+                " BEGIN SELECT RAISE(ABORT, 'mt119 injected delete failure'); END"
+            )
+    finally:
+        connection.close()
+    before = _cleaned_rows(db_path)
+
+    with pytest.raises(sqlite3.Error, match="mt119 injected delete failure"):
+        project.set_excluded(_ORDINAL, 1, None)
+
+    assert _excluded_column(db_path, _ORDINAL) == [None, "user", None]
+    assert _cleaned_rows(db_path) == before

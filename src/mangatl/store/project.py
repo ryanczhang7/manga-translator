@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from io import BytesIO
@@ -61,7 +61,13 @@ from mangatl.domain.money import Usd
 from mangatl.domain.page import Chapter, Page
 from mangatl.domain.region import EXCLUSION_REASONS, ExclusionReason, RawRegion
 from mangatl.store.intake import read_chapter
-from mangatl.store.schema import CHAPTER_DDL, CLEANED_PAGE_DDL, DDL, LLM_CALL_DDL
+from mangatl.store.schema import (
+    CHAPTER_DDL,
+    CLEANED_ERASED_DDL,
+    CLEANED_PAGE_DDL,
+    DDL,
+    LLM_CALL_DDL,
+)
 
 __all__ = [
     "PAGE_DONE",
@@ -113,7 +119,14 @@ __all__ = [
 #: of translation, appended by `ALTER TABLE ... ADD COLUMN`. Every existing row
 #: is NULL, "included", which is the truth about a region no earlier version
 #: could exclude.
-SCHEMA_VERSION: int = 8
+#:
+#: Version 9 is MT-119's paste-back (C-4): `cleaned_page.erased`, the reading
+#: indices of the regions the cleaner was handed for the stored image, so a bake
+#: knows which excluded regions it has to paste the source back over and
+#: `set_excluded` knows which restore leaves Japanese under the English. A
+#: migrated row reads every reading index of its page: a version 8 cleaner was
+#: handed every region.
+SCHEMA_VERSION: int = 9
 
 #: `page.status` as `create_project` writes it: read, hashed, nothing done yet.
 PAGE_PENDING: str = "pending"
@@ -244,10 +257,16 @@ _SELECT_PROPOSED = (
 )
 
 # MT-065 C-3. An upsert on the primary key: a second clean of a page replaces
-# its image and leaves one row.
+# its image and leaves one row. `erased` in both clauses (MT-119 C-4): the set
+# describes the image, so it is replaced with it.
 _UPSERT_CLEANED = (
-    "INSERT INTO cleaned_page (page_id, image_blob) VALUES (?, ?)"
-    " ON CONFLICT (page_id) DO UPDATE SET image_blob = excluded.image_blob"
+    "INSERT INTO cleaned_page (page_id, image_blob, erased) VALUES (?, ?, ?)"
+    " ON CONFLICT (page_id) DO UPDATE SET"
+    " image_blob = excluded.image_blob, erased = excluded.erased"
+)
+_SELECT_ERASED = (
+    "SELECT cleaned_page.erased FROM cleaned_page"
+    " JOIN page ON page.id = cleaned_page.page_id WHERE page.ordinal = ?"
 )
 _SELECT_CLEANED = (
     "SELECT cleaned_page.image_blob FROM cleaned_page"
@@ -424,6 +443,25 @@ _MIGRATE_TO_V8 = (
     " excluded TEXT CHECK (excluded IS NULL OR excluded IN ('watermark', 'user'))"
 )
 
+#: Version 8 to version 9 (MT-119 C-4): `cleaned_page.erased`. The column is
+#: `schema.CLEANED_ERASED_DDL`, the string the fresh schema appends too, so the
+#: two files declare the same table. The `UPDATE` fills every existing row with
+#: every reading index of its page, in order - the truth about an image a
+#: version 8 cleaner wrote, since it was handed every region and `write_regions`
+#: deletes the image whenever the regions change. A page with no regions gets
+#: `[]`.
+_MIGRATE_TO_V9 = (
+    CLEANED_ERASED_DDL
+    + """
+UPDATE cleaned_page SET erased = (
+    SELECT json_group_array(reading_index) FROM (
+        SELECT reading_index FROM region
+        WHERE region.page_id = cleaned_page.page_id ORDER BY reading_index
+    )
+);
+"""
+)
+
 #: The migration chain, in order, each step keyed on the version it *produces*.
 #: A step runs when the file found on disk is older than that.
 #:
@@ -441,6 +479,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (6, _MIGRATE_TO_V6),
     (7, _MIGRATE_TO_V7),
     (8, _MIGRATE_TO_V8),
+    (9, _MIGRATE_TO_V9),
 )
 
 
@@ -814,9 +853,19 @@ class Project:
         """Exclude one region from translation, or include it again with `None`
         (MT-118 C-3).
 
-        Touches the `excluded` column of one `region` row and nothing else: no
-        `line` row and no `cleaned_page` row is invalidated here - MT-119 decides
-        what a toggle does to the cleaned image.
+        Touches the `excluded` column of one `region` row, never a `line` row,
+        and the page's `cleaned_page` row in **exactly one** case (MT-119 C-4,
+        AC-5): a **restore** - `reason is None` on a region currently excluded -
+        of a region whose index is not in the stored image's `erased` set. That
+        region was excluded when the page was cleaned, so its Japanese is still
+        in the image and there is nothing for the bake to paste back; the image
+        is deleted (MT-065 C-3's `_DELETE_CLEANED`) and the page bakes as source
+        until it is cleaned again. Every other toggle keeps the image: excluding
+        never invalidates (the bake pastes the source back over what the cleaner
+        erased), restoring an erased region finds its pixels already erased, and
+        setting the value a region already has changes nothing. The `UPDATE`
+        and the delete are one transaction, so a delete that fails leaves the
+        exclusion as it was.
 
         Both arguments are checked **before** the write, so "nothing is written"
         does not rest on the rollback alone. An index outside the page's reading
@@ -835,12 +884,19 @@ class Project:
                     f"reading index {reading_index} is not on page {page_ordinal}:"
                     f" the page has {len(region_ids)} region(s)"
                 )
-            cursor.execute(
-                "UPDATE region SET excluded = ? WHERE id = ?",
-                (reason, region_ids[reading_index]),
-            )
+            region_id = region_ids[reading_index]
+            current, page_id, erased = cursor.execute(
+                "SELECT region.excluded, region.page_id, cleaned_page.erased FROM region"
+                " LEFT JOIN cleaned_page ON cleaned_page.page_id = region.page_id"
+                " WHERE region.id = ?",
+                (region_id,),
+            ).fetchone()
+            cursor.execute("UPDATE region SET excluded = ? WHERE id = ?", (reason, region_id))
+            restoring = reason is None and current is not None
+            if restoring and erased is not None and reading_index not in json.loads(str(erased)):
+                cursor.execute(_DELETE_CLEANED, (page_id,))  # invalidate: never erased
 
-    def write_cleaned(self, page_ordinal: int, image: bytes) -> None:
+    def write_cleaned(self, page_ordinal: int, image: bytes, *, erased: Iterable[int]) -> None:
         """Store one page's cleaned image, replacing any previous one (MT-065 C-3).
 
         `image` is stored exactly as handed over - an encoded image, PNG from the
@@ -852,9 +908,18 @@ class Project:
         gives AC-1's "the size of the source page" a mechanism: a mis-bound
         cleaner is refused by name rather than stored.
 
+        `erased` is the reading indices of the regions the cleaner was handed
+        for this image (MT-119 C-4). Keyword-only and **required**: a default
+        would say "every region" for a page with excluded regions, and a
+        restore of one would then not re-clean (AC-5c). Each index must be a
+        reading index of the page, else `ValueError` naming it, with nothing
+        written, as `write_proposed` refuses. Stored as a sorted JSON array of
+        distinct ints.
+
         Opens its own `transaction()`, so like `write_regions` it refuses a
         caller already holding one.
         """
+        indices = sorted(set(erased))
         with self.transaction() as cursor:
             page_id, width, height = cursor.execute(
                 "SELECT id, width, height FROM page WHERE ordinal = ?", (page_ordinal,)
@@ -865,7 +930,20 @@ class Project:
                     f"cleaned image for page {page_ordinal} is {size[0]}x{size[1]};"
                     f" the page is {width}x{height}"
                 )
-            cursor.execute(_UPSERT_CLEANED, (page_id, image))
+            region_count = len(cursor.execute(_SELECT_REGION_IDS, (page_ordinal,)).fetchall())
+            for reading_index in indices:
+                if not 0 <= reading_index < region_count:
+                    raise ValueError(
+                        f"erased reading index {reading_index} is not on page {page_ordinal}:"
+                        f" the page has {region_count} region(s)"
+                    )
+            cursor.execute(_UPSERT_CLEANED, (page_id, image, json.dumps(indices)))
+
+    def read_erased(self, page_ordinal: int) -> frozenset[int] | None:
+        """The reading indices the stored cleaned image erased (MT-119 C-4), or
+        `None` when the page has no cleaned image. Opens no transaction."""
+        row = self._connection.execute(_SELECT_ERASED, (page_ordinal,)).fetchone()
+        return None if row is None else frozenset(int(i) for i in json.loads(str(row[0])))
 
     def read_cleaned(self, page_ordinal: int) -> bytes | None:
         """One page's stored cleaned image, byte for byte, or `None` if it has

@@ -182,7 +182,9 @@ def project(
     for ordinal, page_regions in detections.items():
         made.write_regions(ordinal, page_regions)
     for ordinal, image in (cleaned or {}).items():
-        made.write_cleaned(ordinal, image)
+        # MT-119 C-4: the image erased every region the page holds, which is
+        # what every S2 control means.
+        made.write_cleaned(ordinal, image, erased=range(len(made.read_regions(ordinal))))
     return made
 
 

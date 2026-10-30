@@ -29,7 +29,7 @@ project, but the coverage gate runs this suite instrumented on CI.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -137,7 +137,13 @@ def texture(width: int, height: int, salt: int = 0) -> NDArray[np.uint8]:
 
 
 def cleaned_from(source: NDArray[np.uint8], page_regions: Sequence[RawRegion]) -> NDArray[np.uint8]:
-    """What a cleaner would store: the source, flat white inside the erase mask."""
+    """What a cleaner would store: the source, flat white inside the erase mask.
+
+    `page_regions` is the regions the cleaner was HANDED, which since MT-119 is
+    not always every region of the page: MT-119 AC-2 seeds an image that erased
+    an excluded region (it was removed after the clean), AC-3 one that did not
+    (removed before), by passing the page's regions or only the included ones.
+    """
     height, width, _ = source.shape
     cleaned = source.copy()
     cleaned[dilated_masks(page_regions, (width, height))] = 255
@@ -182,10 +188,14 @@ def seed_page(
     page_regions: Sequence[RawRegion],
     specs: Sequence[Spec] | None,
     cleaned: bytes | None,
+    erased: Iterable[int] | None = None,
 ) -> None:
     """Regions, then lines (`None` = OCR never ran), then the cleaned image.
 
     The cleaned image goes last: `write_regions` invalidates it (MT-065 C-3).
+    `erased` is the reading indices the stored image erased (MT-119 C-4);
+    `None` is every region of the page - what a cleaner before MT-119 was
+    handed, and what every seeded page in the suites written before it means.
     """
     project.write_regions(ordinal, page_regions)
     if specs is not None:
@@ -204,7 +214,11 @@ def seed_page(
                 status, text = s.commit
                 commit_line(project, ordinal, i, text, status)  # type: ignore[arg-type]
     if cleaned is not None:
-        project.write_cleaned(ordinal, cleaned)
+        project.write_cleaned(
+            ordinal,
+            cleaned,
+            erased=range(len(page_regions)) if erased is None else erased,
+        )
 
 
 # -- folders -------------------------------------------------------------------

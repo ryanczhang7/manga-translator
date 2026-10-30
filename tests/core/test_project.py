@@ -478,7 +478,8 @@ def test_the_schema_version_and_the_two_page_status_values_are_the_pinned_ones()
     # MT-017 C-5 takes it to 6: `line` gains `status`.
     # MT-065 C-2 takes it to 7: `cleaned_page`.
     # MT-118 C-2 takes it to 8: `region.excluded`.
-    assert SCHEMA_VERSION == 8
+    # MT-119 C-4 takes it to 9: `cleaned_page.erased`.
+    assert SCHEMA_VERSION == 9
     assert PAGE_PENDING == "pending"
     assert PAGE_STALE == "stale"
     assert PAGE_PENDING != PAGE_STALE

@@ -28,6 +28,7 @@ from collections.abc import Callable
 
 import pytest
 
+import mangatl.domain.region as region_module
 from mangatl.domain.region import RawRegion
 
 # A closed triangle: three distinct vertices and the first repeated. This is the
@@ -212,3 +213,60 @@ def test_both_kinds_the_detector_can_emit_are_accepted(
         kind=kind,  # type: ignore[arg-type]
     )
     assert region.kind == kind
+
+
+# -- MT-119 C-1: `included`, the one filter ------------------------------------
+#
+# Reached through the module rather than imported by name, so that while it
+# does not exist only these tests fail - on their own line, naming the missing
+# attribute - and the rest of this file still runs.
+
+
+def _four(one_bit_png: Callable[..., bytes]) -> tuple[RawRegion, ...]:
+    """Four distinct regions: included, excluded `watermark`, included,
+    excluded `user` - both reasons, so a filter keyed on one is caught."""
+    mask = one_bit_png(320, 240, [(10, 10, 30, 40)])
+    return tuple(
+        RawRegion(
+            polygon=_CLOSED_TRIANGLE,
+            mask=mask,
+            confidence=confidence,
+            kind="bubble",
+            excluded=excluded,  # type: ignore[arg-type]
+        )
+        for confidence, excluded in ((0.1, None), (0.2, "watermark"), (0.3, None), (0.4, "user"))
+    )
+
+
+def test_included_keeps_the_regions_whose_excluded_is_none_in_the_order_given(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """C-1: "those whose `excluded is None`, in the order given" - checked
+    forwards and reversed, so a filter that sorted would show."""
+    regions = _four(one_bit_png)
+
+    assert region_module.included(regions) == (regions[0], regions[2])
+    assert region_module.included(regions[::-1]) == (regions[2], regions[0])
+
+
+def test_included_returns_a_tuple_of_every_region_when_none_is_excluded(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """The control: nothing excluded, nothing dropped - and a list handed in
+    comes back as a tuple (C-1's return type)."""
+    regions = [_four(one_bit_png)[0], _four(one_bit_png)[2]]
+
+    kept = region_module.included(regions)
+
+    assert kept == tuple(regions)
+    assert isinstance(kept, tuple)
+
+
+def test_included_of_no_regions_is_empty_and_of_only_excluded_ones_is_empty(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """Zero of zero-one-many, and the all-excluded page AC-1 cleans as source."""
+    regions = _four(one_bit_png)
+
+    assert region_module.included(()) == ()
+    assert region_module.included((regions[1], regions[3])) == ()

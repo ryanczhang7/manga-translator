@@ -444,9 +444,10 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     # MT-017 C-5 takes it to 6: `line` gains `status`.
     # MT-065 C-2 takes it to 7: `cleaned_page`.
     # MT-118 C-2 takes it to 8: `region.excluded`.
-    assert SCHEMA_VERSION == 8
-    assert _user_version(db_path) == 8
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(8,)]
+    # MT-119 C-4 takes it to 9: `cleaned_page.erased`.
+    assert SCHEMA_VERSION == 9
+    assert _user_version(db_path) == 9
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(9,)]
 
 
 def test_the_ledger_stores_integer_micro_dollars_and_carries_no_real_cost_column(

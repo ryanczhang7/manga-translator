@@ -22,6 +22,13 @@ stage's output, which has had its text erased.
 cleaner is never called for it (AC-2): identical by construction, with no
 re-encode and so no PIL here.
 
+**An excluded region is never handed to the cleaner** (MT-119 C-2): it is left
+as drawn. The stored image records the reading indices it *did* erase
+(`write_cleaned(erased=...)`) - reading indices of the page, not positions in
+the filtered tuple - so the bake knows where to paste the source back over a
+region excluded after the clean, and the store knows which restore needs a
+re-clean. A page whose every region is excluded takes the no-regions branch.
+
 No transaction is opened: `write_cleaned` opens its own, and
 `Project.transaction()` is not reentrant. No event is emitted: the runner's
 `StageFinished(stage="clean")` is the whole of its progress.
@@ -32,7 +39,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from mangatl.domain.region import RawRegion
+from mangatl.domain.region import RawRegion, included
 from mangatl.pipeline.stage import PageContext
 
 __all__ = ["CleanStage", "PageCleaner"]
@@ -54,11 +61,17 @@ class CleanStage:
     name: str = "clean"
 
     def run(self, ctx: PageContext) -> None:
-        """Clean `ctx.page` from its stored regions and store the image."""
+        """Clean `ctx.page` from its stored, included regions and store the
+        image with the reading indices it erased (MT-119 C-2)."""
         regions = ctx.project.read_regions(ctx.page.ordinal)
+        kept = included(regions)
         image_bytes = (ctx.project.chapter.source_dir / ctx.page.filename).read_bytes()
-        cleaned = self.clean(image_bytes, regions) if regions else image_bytes
-        ctx.project.write_cleaned(ctx.page.ordinal, cleaned)
+        cleaned = self.clean(image_bytes, kept) if kept else image_bytes
+        ctx.project.write_cleaned(
+            ctx.page.ordinal,
+            cleaned,
+            erased=[i for i, region in enumerate(regions) if region.excluded is None],
+        )
 
     def is_done(self, ctx: PageContext) -> bool:
         """Whether a cleaned image is stored for this page, and nothing else."""

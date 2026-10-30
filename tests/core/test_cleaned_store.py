@@ -19,11 +19,19 @@ that shares neither's assumptions (`test_pipeline.py`'s convention).
 an upsert that wrote one page's bytes against another, changes a value rather
 than leaving three identical rows identical.
 
+**MT-119 adds `cleaned_page.erased`** (C-4, AC-6): every `write_cleaned` here
+passes `erased=` - the reading indices the stored image erased, which for a page
+with no regions is `()` and for `clean_all` is every region the page holds now -
+and the last section pins `read_erased`, the stored JSON, the upsert and the
+refusal of an index not on the page.
+
 **Timing.** No `pytest-timeout` in this project; three tiny pages per test.
 """
 
 from __future__ import annotations
 
+import inspect
+import json
 import sqlite3
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -73,7 +81,10 @@ class _Fixture:
 
     def clean_all(self) -> None:
         for ordinal, image in self.images.items():
-            self.project.write_cleaned(ordinal, image)
+            # MT-119 C-4: the image erased every region the page holds now.
+            self.project.write_cleaned(
+                ordinal, image, erased=range(len(self.project.read_regions(ordinal)))
+            )
 
     def stored(self) -> dict[int, bytes]:
         """ordinal -> blob, through a plain `sqlite3` connection."""
@@ -129,7 +140,7 @@ def fixture(
 
 
 def test_a_written_cleaned_image_reads_back_as_the_same_bytes(fixture: _Fixture) -> None:
-    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET])
+    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=())
 
     assert fixture.project.read_cleaned(_TARGET) == fixture.images[_TARGET]
     assert fixture.stored() == {_TARGET: fixture.images[_TARGET]}
@@ -141,7 +152,7 @@ def test_a_page_with_no_cleaned_image_reads_none_and_has_cleaned_is_false(
     assert fixture.project.read_cleaned(_TARGET) is None
     assert fixture.project.has_cleaned(_TARGET) is False
 
-    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET])
+    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=())
 
     assert fixture.project.has_cleaned(_TARGET) is True
     assert fixture.project.has_cleaned(0) is False
@@ -154,9 +165,9 @@ def test_a_second_write_replaces_the_first_and_leaves_one_row(
     """C-3: "replacing any previous one" - an upsert on the page, never a
     second row."""
     replacement = png_bytes(40, 30, (200, 100, 50))
-    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET])
+    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=())
 
-    fixture.project.write_cleaned(_TARGET, replacement)
+    fixture.project.write_cleaned(_TARGET, replacement, erased=())
 
     assert fixture.project.read_cleaned(_TARGET) == replacement
     assert fixture.stored() == {_TARGET: replacement}
@@ -166,7 +177,7 @@ def test_a_jpeg_of_the_pages_size_is_accepted_verbatim(
     fixture: _Fixture, jpeg_7x3_bytes: bytes
 ) -> None:
     """C-2/PO-4: the column is an encoded image, not always a PNG."""
-    fixture.project.write_cleaned(_JPEG_ORDINAL, jpeg_7x3_bytes)
+    fixture.project.write_cleaned(_JPEG_ORDINAL, jpeg_7x3_bytes, erased=())
 
     assert fixture.project.read_cleaned(_JPEG_ORDINAL) == jpeg_7x3_bytes
 
@@ -176,7 +187,7 @@ def test_write_cleaned_opens_its_own_transaction_and_refuses_a_caller_holding_on
 ) -> None:
     """C-3: like `write_regions`, `transaction()` is not reentrant (MT-005 PO-5)."""
     with pytest.raises(RuntimeError, match="reentrant"), fixture.project.transaction():
-        fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET])
+        fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=())
 
     assert fixture.project.read_cleaned(_TARGET) is None
 
@@ -195,7 +206,7 @@ def test_an_image_that_is_not_the_pages_size_is_refused_by_ordinal_and_not_store
     """**AC-1**'s "the size of the source page", given a mechanism (C-3). The
     transposed case is the `(height, width)` slip numpy invites."""
     with pytest.raises(ValueError, match=_NAMES_TARGET):
-        fixture.project.write_cleaned(_TARGET, png_bytes(*size))
+        fixture.project.write_cleaned(_TARGET, png_bytes(*size), erased=())
 
     assert fixture.project.has_cleaned(_TARGET) is False
     assert fixture.stored() == {}
@@ -205,10 +216,10 @@ def test_a_refused_image_leaves_the_previous_cleaned_image_in_place(
     fixture: _Fixture, png_bytes: Callable[..., bytes]
 ) -> None:
     """ "With nothing written" includes not deleting what was there."""
-    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET])
+    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=())
 
     with pytest.raises(ValueError, match=_NAMES_TARGET):
-        fixture.project.write_cleaned(_TARGET, png_bytes(50, 30))
+        fixture.project.write_cleaned(_TARGET, png_bytes(50, 30), erased=())
 
     assert fixture.stored() == {_TARGET: fixture.images[_TARGET]}
 
@@ -217,7 +228,7 @@ def test_bytes_that_are_not_an_image_are_refused_by_ordinal_and_not_stored(
     fixture: _Fixture, garbage_bytes: bytes
 ) -> None:
     with pytest.raises(ValueError, match=_NAMES_TARGET):
-        fixture.project.write_cleaned(_TARGET, garbage_bytes)
+        fixture.project.write_cleaned(_TARGET, garbage_bytes, erased=())
 
     assert fixture.project.read_cleaned(_TARGET) is None
 
@@ -373,7 +384,7 @@ def test_a_refresh_after_a_regionless_scan_changed_removes_its_cleaned_image(
     """C-3: "and one with no regions" - the stored image is the old scan's own
     bytes (PO-4), so leaving it would show the user a page that no longer
     exists. No region row exists here, so only the explicit `DELETE` can go."""
-    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET])
+    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=())
     (fixture.source_dir / _PNG_PAGES[_TARGET][0]).write_bytes(png_bytes(*_TARGET_SIZE, (9, 9, 9)))
 
     fixture.project.refresh_from_source()
@@ -388,3 +399,142 @@ def test_a_refresh_with_nothing_changed_removes_no_cleaned_image(fixture: _Fixtu
 
     assert fixture.project.refresh_from_source() == ()
     assert fixture.stored() == fixture.images
+
+
+# -- MT-119 C-4 / AC-6: what the stored image erased -------------------------------
+#
+# `cleaned_page.erased` is the reading indices of the regions the cleaner was
+# handed for the stored image. `write_cleaned` takes it as a REQUIRED keyword
+# (C-4: a default would say "every region" for a page with an excluded one, and
+# restoring that region would then not re-clean - AC-5c). The stored value is
+# observed through a plain `sqlite3` connection and parsed as JSON, so the test
+# pins the set and its order, not the spacing `json.dumps` happens to use.
+
+
+def _erased_on_disk(fixture: _Fixture, ordinal: int) -> object:
+    """`cleaned_page.erased` for one page, parsed, through a plain connection;
+    the sentinel `"no row"` when the page has no cleaned image."""
+    connection = sqlite3.connect(fixture.db_path)
+    try:
+        row = connection.execute(
+            "SELECT cleaned_page.erased FROM cleaned_page"
+            " JOIN page ON page.id = cleaned_page.page_id WHERE page.ordinal = ?",
+            (ordinal,),
+        ).fetchone()
+    finally:
+        connection.close()
+    return "no row" if row is None else json.loads(str(row[0]))
+
+
+def test_the_erased_indices_are_read_back_as_a_frozenset(fixture: _Fixture) -> None:
+    """C-4's `read_erased`: the reading indices handed over, as a frozenset."""
+    fixture.project.write_regions(_TARGET, [fixture.region(i) for i in range(3)])
+
+    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=[0, 2])
+
+    assert fixture.project.read_erased(_TARGET) == frozenset({0, 2})
+    assert isinstance(fixture.project.read_erased(_TARGET), frozenset)
+
+
+def test_the_erased_indices_are_stored_as_a_sorted_json_array_of_distinct_ints(
+    fixture: _Fixture,
+) -> None:
+    """C-4: "stored as a sorted JSON array of distinct ints" - handed over out
+    of order and with a repeat, a `range`, and the empty case."""
+    fixture.project.write_regions(_TARGET, [fixture.region(i) for i in range(3)])
+    fixture.project.write_regions(0, [fixture.region(0)])
+
+    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=[2, 0, 2])
+    fixture.project.write_cleaned(0, fixture.images[0], erased=range(1))
+    fixture.project.write_cleaned(_JPEG_ORDINAL, fixture.images[_JPEG_ORDINAL], erased=())
+
+    assert _erased_on_disk(fixture, _TARGET) == [0, 2]
+    assert _erased_on_disk(fixture, 0) == [0]
+    assert _erased_on_disk(fixture, _JPEG_ORDINAL) == []
+    assert fixture.project.read_erased(_JPEG_ORDINAL) == frozenset()
+
+
+def test_a_page_with_no_cleaned_image_has_no_erased_set_and_not_an_empty_one(
+    fixture: _Fixture,
+) -> None:
+    """C-4: `None` when the page has no cleaned image. `frozenset()` would be
+    the answer for a page whose image erased nothing - a different fact."""
+    assert fixture.project.read_erased(_TARGET) is None
+
+    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=())
+
+    assert fixture.project.read_erased(_TARGET) == frozenset()
+    assert fixture.project.read_erased(0) is None
+
+
+def test_a_second_write_replaces_the_erased_set_with_the_image(fixture: _Fixture) -> None:
+    """C-4: `_UPSERT_CLEANED` names `erased` in the `DO UPDATE SET` as well as
+    the `INSERT` - an upsert that forgot it keeps the first write's set."""
+    fixture.project.write_regions(_TARGET, [fixture.region(i) for i in range(3)])
+    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=[0, 1, 2])
+
+    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=[1])
+
+    assert fixture.project.read_erased(_TARGET) == frozenset({1})
+    assert _erased_on_disk(fixture, _TARGET) == [1]
+
+
+def test_read_erased_opens_no_transaction(fixture: _Fixture) -> None:
+    """C-4: "Opens no transaction" - `read_cleaned`'s rule, so a caller holding
+    one can still ask."""
+    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=())
+
+    with fixture.project.transaction():
+        assert fixture.project.read_erased(_TARGET) == frozenset()
+
+
+def test_the_erased_set_goes_with_the_row_when_regions_are_rewritten(fixture: _Fixture) -> None:
+    """C-4: the fact lives beside the artefact it describes, so every existing
+    invalidation takes it along - here `write_regions`."""
+    fixture.project.write_regions(_TARGET, [fixture.region(0), fixture.region(1)])
+    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=[0, 1])
+
+    fixture.project.write_regions(_TARGET, [fixture.region(0), fixture.region(1)])
+
+    assert fixture.project.read_erased(_TARGET) is None
+    assert _erased_on_disk(fixture, _TARGET) == "no row"
+
+
+@pytest.mark.parametrize("bad", [2, 7, -1])
+def test_an_erased_index_not_on_the_page_is_refused_naming_it_with_nothing_written(
+    fixture: _Fixture, bad: int
+) -> None:
+    """**AC-6**'s last clause: an `erased` index not on the page raises
+    `ValueError` naming it, as `write_proposed` does, and nothing is written -
+    the earlier image and its set stay. `2` is one past the end of a
+    two-region page; `-1` is the index Python would resolve to the last one.
+    The needle is `index <n>`, not a bare number (`test_region_store_excluded.py`'s
+    reason: a message naming the region count `2` would satisfy a bare `2`)."""
+    fixture.project.write_regions(_TARGET, [fixture.region(0), fixture.region(1)])
+    fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=[0, 1])
+    before = fixture.stored()
+
+    with pytest.raises(ValueError, match=rf"\bindex {bad}(?!\d)"):
+        fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=[0, bad])
+
+    assert fixture.stored() == before
+    assert fixture.project.read_erased(_TARGET) == frozenset({0, 1})
+
+
+def test_any_erased_index_on_a_page_with_no_regions_is_refused_with_nothing_written(
+    fixture: _Fixture,
+) -> None:
+    """The zero of zero-one-many: no region, so index 0 is not on the page."""
+    with pytest.raises(ValueError, match=r"\bindex 0(?!\d)"):
+        fixture.project.write_cleaned(_TARGET, fixture.images[_TARGET], erased=[0])
+
+    assert fixture.project.has_cleaned(_TARGET) is False
+    assert fixture.stored() == {}
+
+
+def test_erased_is_a_required_keyword_of_write_cleaned() -> None:
+    """C-4: keyword-only and REQUIRED, no default (the AC-5c reason above)."""
+    parameter = inspect.signature(Project.write_cleaned).parameters["erased"]
+
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty

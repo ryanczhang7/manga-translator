@@ -22,10 +22,11 @@ from its cause (MT-007 amendment A-9).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-__all__ = ["EXCLUSION_REASONS", "ExclusionReason", "RawRegion"]
+__all__ = ["EXCLUSION_REASONS", "ExclusionReason", "RawRegion", "included"]
 
 #: Why a region is out of translation, cleaning and typesetting (MT-118 C-1).
 #: `watermark` is the detector's rule (MT-121), `user` the workspace's (MT-120).
@@ -115,3 +116,12 @@ class RawRegion:
             raise ValueError(
                 f"excluded must be None or one of {EXCLUSION_REASONS}; got {self.excluded!r}"
             )
+
+
+def included(regions: Sequence[RawRegion]) -> tuple[RawRegion, ...]:
+    """The regions the pipeline treats as text to translate, clean and
+    typeset: those whose `excluded is None`, in the order given (MT-119 C-1).
+
+    Here rather than in `pipeline` because both `clean_stage.py` and `bake.py`
+    filter by it, and `clean_stage.py` may import nothing `bake.py` does."""
+    return tuple(region for region in regions if region.excluded is None)

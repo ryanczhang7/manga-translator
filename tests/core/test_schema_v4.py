@@ -440,7 +440,8 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     # MT-017 C-5 takes it to 6: `line` gains `status`.
     # MT-065 C-2 takes it to 7: `cleaned_page`.
     # MT-118 C-2 takes it to 8: `region.excluded`.
-    assert SCHEMA_VERSION == 8
+    # MT-119 C-4 takes it to 9: `cleaned_page.erased`.
+    assert SCHEMA_VERSION == 9
     assert _user_version(db_path) == SCHEMA_VERSION
     assert _raw(db_path, "SELECT schema_version FROM chapter") == [(SCHEMA_VERSION,)]
 
@@ -477,7 +478,14 @@ def test_the_chapter_ddl_is_its_own_string_with_two_callers(fresh: Project) -> N
     import mangatl.store.schema as module
 
     # MT-065 C-2 adds `CLEANED_PAGE_DDL`, the second shared definition.
-    assert module.__all__ == ["CHAPTER_DDL", "CLEANED_PAGE_DDL", "DDL", "LLM_CALL_DDL"]
+    # MT-119 C-4 adds `CLEANED_ERASED_DDL`, shared by a fresh file and the v9 step.
+    assert module.__all__ == [
+        "CHAPTER_DDL",
+        "CLEANED_ERASED_DDL",
+        "CLEANED_PAGE_DDL",
+        "DDL",
+        "LLM_CALL_DDL",
+    ]
     assert "budget_ceiling_micro_usd" in module.CHAPTER_DDL
     assert "budget_ceiling_usd" not in module.DDL, (
         "the REAL ceiling column is still in the shipped schema; C-12 replaces"

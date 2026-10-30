@@ -146,7 +146,11 @@ def _complete(folder: Path, *, priced: bool) -> None:
                     commit_line(project, ordinal, index, "A different line.", "edited")
                 else:
                     commit_line(project, ordinal, index, _proposal(ordinal, index), "accepted")
-            project.write_cleaned(ordinal, w.cleaned_page(ordinal, w.WHITE))
+            project.write_cleaned(
+                ordinal,
+                w.cleaned_page(ordinal, w.WHITE),
+                erased=range(len(project.read_regions(ordinal))),  # MT-119 C-4: every region
+            )
         if priced:
             run_id = _open_run(project, "2026-10-22T09:00:00+00:00")
             for index, call in enumerate(_CALLS):
