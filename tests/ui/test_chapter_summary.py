@@ -66,8 +66,27 @@ from mangatl.store.project import create_project
 from mangatl.ui import tokens_gen
 from mangatl.ui.intake import FolderDropTarget
 from mangatl.ui.main_window import MainWindow
+from mangatl.ui.run import RunSetup
 from mangatl.ui.summary import ChapterSummary
 from mangatl.ui.workspace import Workspace
+
+
+def _assert_opens_with_open_folder_bound_to_its_setup(window: MainWindow) -> None:
+    """MT-125 PO-2: the "one path" rule (MT-056 C-2) with the run setup bound.
+    The opener is `mangatl.app.open_folder` itself, given nothing but the
+    `RunSetup` `build_window` made - its default, compared by value (a frozen
+    dataclass)."""
+    opener = window.open_folder
+    assert getattr(opener, "func", None) is app_module.open_folder, (
+        f"the intake's opener is {opener!r}, not mangatl.app.open_folder bound with a run setup"
+    )
+    assert getattr(opener, "args", None) == ()
+    assert getattr(opener, "keywords", None) == {
+        "run_setup": RunSetup(
+            app_module.resolve_models, app_module.build_stages, app_module.selected_model
+        )
+    }
+
 
 # --- Settled strings, spelled out (never read back from the module under test) ------
 SCROLL_NAME = "Chapter summary"
@@ -381,7 +400,7 @@ def test_mangatl_folder_builds_the_intake_window_showing_the_summary_not_a_notic
     assert type(window) is MainWindow, f"build_window returned a {type(window).__name__}"
     assert not window.isVisible(), "build_window showed its window"
     assert window.findChild(QObject, "notice") is None, "MT-054's notice window was built"
-    assert window.open_folder is app_module.open_folder
+    _assert_opens_with_open_folder_bound_to_its_setup(window)
     assert _fields(_summary(window)) == AC1_FIELDS
 
 
