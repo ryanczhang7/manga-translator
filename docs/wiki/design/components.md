@@ -525,8 +525,23 @@ Three regions, all always present:
 
 Plus a slim header carrying the chapter name, the page counter
 (`type.numeric`, "Page 7 / 20"), the reviewed counter ("12 / 18 reviewed"), the
-`CostReadout` and the `ZoomControl`, and a footer with the `primary` "Render
-pages" and the reviewed-total.
+`secondary` **"Run again"** button, the `CostReadout` and the `ZoomControl`, and
+a footer with the `primary` "Render pages" and the reviewed-total.
+
+**"Run again"** (MT-125, EPIC-11 Q-1). A `secondary` button (§1, activated by
+Space, Return and Enter) placed immediately before the `CostReadout`, in the
+header's right-hand cluster, so the narrow breakpoint hiding the chapter name
+does not move it. Text and accessible name "Run again"; tooltip at rest "Run
+what is not done yet. Pages already done are kept."; while disabled "A run is
+on." It is a Tab stop in header order and has no shortcut (a one-key start of a
+paid run is not wanted). **Absent, not disabled**, when the window was given no
+run setup. Disabled, with the tooltip, while a run is on. Activating it opens
+the `RerunDialog` (§9); on confirm the body (strip, canvas, column) is replaced
+by the `RunProgressPanel` (§8) for the run, header and footer staying, "Run
+again" and "Render pages" disabled; the body returns on the page shown before,
+focus back on "Run again", and the live region says "Run finished. {d} of {m}
+pages done." or, after an abort's "Review pages" action, "Run stopped. {d} of
+{m} pages done." (`{d}` = strip rows reading `done`; noun follows `{m}`).
 
 ### `PageCanvas` (`QGraphicsView` over a `QGraphicsScene`)
 
@@ -1163,6 +1178,27 @@ unreviewed-line count and the list of pages containing them, and any `overflow`
 or `failed` lines. Primary "Render 20 pages", secondary "Cancel". Focus is
 trapped while open and returned to the invoking control on close.
 
+### `RerunDialog` (MT-125)
+
+Modal, `elevation.e2`, title and accessible name "Run again" - the button's own
+word, as "Render pages" names both its button and its dialog. Built from
+`rerun_preview`'s value, reads nothing, starts nothing. Plain-text lines, top to
+bottom, each absent rather than empty when it does not apply; the dialog's
+accessible description is the visible lines joined by `\n`:
+
+| Line | Copy |
+|---|---|
+| what runs | "{n} of {m} pages still to run." (noun follows `{m}`: "1 of 1 page still to run."). With nothing to run: "Every page is done. Nothing to run." |
+| stages | "{k} to detect, {k} to clean, {k} to read, {k} to translate." - one clause per stage with pages pending, in stage order, non-zero only; no noun, no plural. `ocr` is said as *read*. Absent with nothing to run. |
+| estimate | "Estimated cost to translate {t} pages: {estimate}." / "... 1 page: ..."; `format_usd`. Absent when no page is to be translated. |
+| budget | "{spent} spent of the {ceiling} budget." / "Nothing spent yet of the {ceiling} budget." (never `$0.00`). Over budget: " The estimate is over budget." appended (`CostEstimate`'s sentence), or " The budget is already spent." when there is no estimate line. The frame takes `CostEstimate`'s warning hairline; the sentence carries the state (A-10). |
+| actions | primary "Run {n} pages" / "Run 1 page", secondary "Cancel", Cancel left of the primary. With nothing to run: "Close" alone. |
+
+Focus starts on the primary (else on "Close"); `Esc` and Cancel reject. The
+sentence informs and never blocks: the primary stays enabled over budget, as
+"Start run anyway" does. Focus is trapped while open and the workspace returns
+it to "Run again" on close.
+
 ### `ShortcutSheet`
 
 Opened with `?`. A read-only two-column list of every binding in §4.7. Closes
@@ -1335,8 +1371,9 @@ distinguished by glyph and wording. It still never carries the only copy of
 anything and never carries the only action, which is what makes the collapse
 safe.
 
-`BakeConfirmDialog`, `ShortcutSheet`: `Window` + 2px `WindowText`. Focus trap and
-focus return unchanged.
+`BakeConfirmDialog`, `RerunDialog`, `ShortcutSheet`: `Window` + 2px `WindowText`.
+Focus trap and focus return unchanged. `RerunDialog`'s over-budget border
+collapses to `WindowText` like every other; the sentence already carries it.
 
 ### 10.8 A live change loses nothing
 

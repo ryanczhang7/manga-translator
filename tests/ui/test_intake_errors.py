@@ -45,6 +45,25 @@ from mangatl import app as app_module
 from mangatl.ui import tokens_gen
 from mangatl.ui.intake import FolderDropTarget
 from mangatl.ui.main_window import WINDOW_TITLE, MainWindow
+from mangatl.ui.run import RunSetup
+
+
+def _assert_opens_with_open_folder_bound_to_its_setup(window: MainWindow) -> None:
+    """MT-125 PO-2: the "one path" rule (MT-056 C-2) with the run setup bound.
+    The opener is `mangatl.app.open_folder` itself, given nothing but the
+    `RunSetup` `build_window` made - its default, compared by value (a frozen
+    dataclass)."""
+    opener = window.open_folder
+    assert getattr(opener, "func", None) is app_module.open_folder, (
+        f"the intake's opener is {opener!r}, not mangatl.app.open_folder bound with a run setup"
+    )
+    assert getattr(opener, "args", None) == ()
+    assert getattr(opener, "keywords", None) == {
+        "run_setup": RunSetup(
+            app_module.resolve_models, app_module.build_stages, app_module.selected_model
+        )
+    }
+
 
 # --- Settled strings, spelled out (never read back from the module under test) ------
 AFFORDANCE_ERROR = "Choose a different folder"
@@ -278,7 +297,7 @@ def _assert_launched_error(window: QMainWindow, text: str) -> None:
     assert window.windowTitle() == WINDOW_TITLE
     assert not window.isVisible(), "build_window showed its window"
     _assert_error(window, text)
-    assert window.open_folder is app_module.open_folder, "the intake window has no open_folder"
+    _assert_opens_with_open_folder_bound_to_its_setup(window)
 
 
 # =============================================================================

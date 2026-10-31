@@ -45,6 +45,7 @@ import logging
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from importlib.resources import files
 from pathlib import Path
 
@@ -126,11 +127,12 @@ class IntakeError(str):
     __slots__ = ()
 
 
-def open_folder(folder: Path) -> QMainWindow | Chapter | str:
+def open_folder(folder: Path, run_setup: RunSetup | None = None) -> QMainWindow | Chapter | str:
     """What `folder` opens as: its project's `Workspace` NOT shown, the
     `Chapter` a run would read when it has no project, or the reason it is
     neither - an `IntakeError` when the folder itself cannot be read as a
-    chapter, a plain notice otherwise."""
+    chapter, a plain notice otherwise. The `Workspace` gets `run_setup`, so
+    it can run the chapter again; without one it has no such action."""
     folder = folder.resolve()
     if not folder.is_dir():
         return NO_FOLDER_NOTICE.format(folder=folder)
@@ -142,7 +144,7 @@ def open_folder(folder: Path) -> QMainWindow | Chapter | str:
         return _read(folder)
     except SchemaTooNew as error:
         return str(error)
-    window = Workspace()
+    window = Workspace(run_setup=run_setup)
     if _theme is not None:
         # The canvas follows the running contrast theme (MT-073 AC-6).
         window.follow_theme(_theme)
@@ -253,20 +255,23 @@ def build_window(arguments: Sequence[str], *, run_setup: RunSetup | None = None)
 
     Every intake window gets `run_setup`, by default the real one - looked up
     when this runs, so it is this module's `resolve_models` and `build_stages`
-    as they are then."""
+    as they are then. The same setup reaches every `Workspace` opened, from
+    the command line or from an intake window: each window's opener is
+    `open_folder` bound with it (MT-125 C-3)."""
     if run_setup is None:
         run_setup = RunSetup(resolve_models, build_stages, selected_model)
+    opener = partial(open_folder, run_setup=run_setup)
     if not arguments:
-        return MainWindow(open_folder=open_folder, run_setup=run_setup)
+        return MainWindow(open_folder=opener, run_setup=run_setup)
     if len(arguments) > 1:
         return MainWindow(notice=USAGE_NOTICE)
-    outcome = open_folder(Path(arguments[0]))
+    outcome = open_folder(Path(arguments[0]), run_setup=run_setup)
     if isinstance(outcome, Chapter):
-        intake = MainWindow(open_folder=open_folder, run_setup=run_setup)
+        intake = MainWindow(open_folder=opener, run_setup=run_setup)
         intake.show_summary(outcome)
         return intake
     if isinstance(outcome, IntakeError):
-        intake = MainWindow(open_folder=open_folder, run_setup=run_setup)
+        intake = MainWindow(open_folder=opener, run_setup=run_setup)
         intake.show_error(outcome)
         return intake
     if isinstance(outcome, str):

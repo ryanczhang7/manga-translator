@@ -119,6 +119,15 @@ that must never regress:
 visible controls on the row, not hover reveals — Revert in particular discards the user's typing, and a
 destructive action behind hover is unreachable without a pointer.
 
+**"Run again" (MT-125)** is a Tab stop in header order, before anything in the
+body, activated by Space, Return and Enter; it has no shortcut, because a paid
+run should not start from one key. Its `RerunDialog` traps focus while open,
+starts on the primary action (else on "Close"), rejects on `Esc`, and on close
+focus returns to "Run again" — the workspace does it on `finished`, as for the
+render dialog. While a run is on, the body is the progress panel and "Run
+again" and "Render pages" are disabled with a tooltip saying why; when the body
+returns, focus is on "Run again".
+
 *Testable as:* synthesise the key event on the focused widget and assert the state
 change, for each row of the table.
 
@@ -137,6 +146,8 @@ Required names (exact wording in components.md):
 - `FolderDropTarget` → role `Button`, name "Choose chapter folder"
 - `CostReadout` → name "Run cost {x} of {budget} budget, {state}"
 - `OffscreenIndicator` → name "Bubble {n} is off screen. Activate to show it."
+- "Run again" button → role `Button`, name "Run again"; `RerunDialog` → name
+  "Run again", description the dialog's visible lines joined by `\n` (MT-125)
 
 *Testable as:* query the widget's `QAccessible` interface by role and name and
 assert the string, so a broken label fails a test rather than degrading silently.
@@ -173,6 +184,7 @@ shape change or text:
 | cost state | the figure, the budget and the projection as text, plus a warning glyph |
 | pre-run cost estimate over budget (`CostEstimate`, MT-058) | the sentence "The estimate is over budget." after the budget; the border is emphasis only |
 | filename-order notice (`ChapterSummary`, MT-057) | its lead sentence; the border is emphasis only |
+| re-run estimate over budget (`RerunDialog`, MT-125) | the sentence "The estimate is over budget." (or "The budget is already spent.") on the budget line; the border is emphasis only |
 | run stage | the step's label and a check or triangle |
 | drop-target validity | the headline changes wording |
 
@@ -203,6 +215,10 @@ Announced, and nothing else:
 - a bubble removed from or restored to translation (MT-120) — "Bubble 4 removed
   from translation." / "Bubble 4 restored.", once per toggle, by control or by
   `Ctrl+E`
+- the workspace body returning after a re-run (MT-125) — "Run finished. {d} of
+  {m} pages done." for a finished run; "Run stopped. {d} of {m} pages done."
+  when the user returns from an abort's banner, whose reason was already
+  announced once and is not repeated
 
 ## A-13 — What Qt genuinely cannot promise
 
@@ -420,3 +436,4 @@ amendment to this document, made before RED, not a note in the story.
 | 2026-09-12 | Original, during `/plan-product`. | **lead-designer on Claude Opus 5 (`claude-opus-5`)**, dispatched by lead-po on Claude Opus 5 (`claude-opus-5`). No override. |
 | 2026-09-12 | **A-13.3 revised** from "Windows High Contrast is not supported in v1; the honest minimum is detecting it and saying so" to a support commitment, and **A-15** added with sub-clauses A-15.1 – A-15.11. New companion file [`high-contrast.md`](./high-contrast.md). The user decided that High Contrast is supported rather than detected and declined. | **lead-designer on Claude Opus 5 (`claude-opus-5`)**, dispatched by lead-po on Claude Opus 5 (`claude-opus-5`). No override was applied to this dispatch. |
 | 2026-10-29 | **A-07** table gains "remove / restore a line from translation | `Ctrl+E`" and names Remove / Restore among the never-hover-only controls; **A-10** gains the removed-bubble row (dashed core, ⊘ glyph, phrase, Restore) and the glyph list its seventh silhouette; **A-12** gains the two toggle announcements. MT-120, EPIC-10 Q-4. A-15.7 still says "six" glyphs; the HC row for `excluded` is a named follow-up in the story. | **lead-designer on Claude Fable 5.1 (`claude-fable-5-1`)**, dispatched by lead-po. No override reported to this dispatch. |
+| 2026-10-30 | **A-07** gains the "Run again" paragraph (Tab stop, no shortcut, `RerunDialog` focus trap and return); **A-08** gains the button's and dialog's names; **A-10** gains the re-run over-budget row; **A-12** gains the two return sentences. MT-125, EPIC-11 Q-1. | **lead-designer on Claude Fable 5.1 (`claude-fable-5-1`)**, dispatched by lead-po. No override reported to this dispatch. |

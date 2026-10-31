@@ -50,6 +50,16 @@ canvas, as before.
 a glyph for its page's `domain.page_status` derivation, coloured by `theme.qss`
 through the glyph's `status` property. A line committed in the column re-derives
 the shown page's row in place (`linesChanged`); the chapter is never reloaded.
+**Run again** (MT-125, `components.md` §3, §9). Given a `RunSetup`, the header
+carries "Run again" just before the cost readout; without one it is absent.
+It writes pending saves, resolves the models, builds the stages and states the
+run in a `RerunDialog` (`pipeline.resume.rerun_preview`). Confirming hides the
+splitter and puts a `RunProgressPanel` in its place while a `RunController`
+runs the chapter on a worker over its own `Project`; this window's reads
+nothing meanwhile, and both actions are disabled. A finished run - or the
+banner's "Review pages" after an abort - takes the panel out and reloads the
+chapter from the same open project. Closing mid-run cancels and waits first.
+
 `mangatl.app` opens this window on a chapter folder (MT-054) and closes the
 project on `closed`, which is emitted after a render in flight has finished and
 the pending saves are written.
@@ -106,15 +116,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mangatl.domain.budget import DEFAULT_CEILING
+from mangatl.domain.budget import DEFAULT_CEILING, page_estimate
 from mangatl.domain.line import Line, LineStatus, effective_text, failure_reason
 from mangatl.domain.page import Chapter
 from mangatl.domain.page_status import PageProgress, PageStatus, page_progress
 from mangatl.domain.region import RawRegion
 from mangatl.pipeline.bake import BakePreview, BakeReport
+from mangatl.pipeline.resume import rerun_preview
+from mangatl.pipeline.runner import RUN_FINISHED, RunOutcome
+from mangatl.pipeline.stage import Stage
 from mangatl.store import ledger
 from mangatl.store.lines import commit_line, read_review_lines
 from mangatl.store.project import PAGE_DONE, PAGE_STALE, Project, project_dir_for
+from mangatl.translate.provider import ProviderError
 from mangatl.ui import tokens_gen
 from mangatl.ui.bake import BakeController
 from mangatl.ui.bake_dialog import BakeConfirmDialog
@@ -125,6 +139,9 @@ from mangatl.ui.intake import display_name
 from mangatl.ui.labels import plain_label
 from mangatl.ui.line_editor import LineEditor, SaveFn
 from mangatl.ui.link import LinkController, LiveRegion, OrderedRegion
+from mangatl.ui.progress import RunProgressPanel
+from mangatl.ui.rerun_dialog import RerunDialog
+from mangatl.ui.run import NO_MODELS, RunController, RunSetup
 from mangatl.ui.theme import ThemeController
 from mangatl.ui.thumbnail import decode_thumbnail, thumbnail_size
 from mangatl.ui.workspace_state import (
@@ -244,6 +261,10 @@ _STATUS_PHRASES: dict[LineStatus, str] = {
 _RENDER_TEXT = "Render pages"
 _RENDER_LOADING_TEXT = "\N{MIDDLE DOT}" * 3
 _RENDER_LOADING_NAME = "Render pages, working"
+_RERUN_TEXT = "Run again"
+_RERUN_TOOLTIP = "Run what is not done yet. Pages already done are kept."
+#: Both actions' tooltip while a run is on (§1: a disabled control says why).
+_RUN_ON_TOOLTIP = "A run is on."
 
 
 def page_accessible_text(
@@ -948,12 +969,21 @@ def _shown_lines(regions: Sequence[RawRegion], review: Sequence[Line | None]) ->
 
 def _stored_progress(project: Project, ordinal: int) -> PageProgress:
     """One page's progress as the store has it (MT-086 block 6). `running` is
-    never set: the workspace is not open during a run. A removed region counts
+    never set: the workspace reads nothing during a run. A removed region counts
     in nothing (MT-120 AC-5), with or without a `line` row."""
     status = project.page_status(ordinal)
     shown = _shown_lines(project.read_regions(ordinal), read_review_lines(project, ordinal))
     lines = [None if line is None else line.status for line in shown]
     return page_progress(lines, page_done=status == PAGE_DONE, stale=status == PAGE_STALE)
+
+
+def _return_sentence(project: Project, finished: bool) -> str:
+    """MT-125's return announcement; `{d}` counts pages stored `done` (PO-3)."""
+    pages = project.pages()
+    done = sum(project.page_status(page.ordinal) == PAGE_DONE for page in pages)
+    noun = "page" if len(pages) == 1 else "pages"
+    lead = "Run finished." if finished else "Run stopped."
+    return f"{lead} {done} of {len(pages)} {noun} done."
 
 
 class Workspace(QMainWindow):
@@ -966,9 +996,19 @@ class Workspace(QMainWindow):
     #: C-4): whoever opened the project closes it on this, never before.
     closed = Signal()
 
-    def __init__(self) -> None:
+    def __init__(self, run_setup: RunSetup | None = None) -> None:
         super().__init__()
         self.setMinimumSize(*self.MIN_SIZE)
+        # `None`: a window nobody gave a run setup cannot run (MainWindow C-3).
+        self._run_setup = run_setup
+        #: The run in flight, until the body returns; its panel in the body.
+        self.run: RunController | None = None
+        self.run_panel: RunProgressPanel | None = None
+        #: The Run again dialog last opened, kept after it closes; `None` before.
+        self.rerun_dialog: RerunDialog | None = None
+        self._rerun_stages: Sequence[Stage] = ()
+        self._run_outcome: RunOutcome | None = None
+        self._run_row = -1
         self._chapter: Chapter | None = None
         self._project: Project | None = None
         self._page_ordinal: int | None = None
@@ -1010,6 +1050,16 @@ class Workspace(QMainWindow):
         header_row.setContentsMargins(tokens_gen.SPACE_S4, 0, tokens_gen.SPACE_S4, 0)
         header_row.addWidget(self.chapter_name)
         header_row.addStretch(1)
+        # Run again (MT-125): absent, not disabled, without a run setup; just
+        # before the figure it concerns, unaffected by the name's hiding.
+        self.rerun_button: ActivatedByEnter | None = None
+        if run_setup is not None:
+            self.rerun_button = ActivatedByEnter(_RERUN_TEXT)
+            self.rerun_button.setObjectName("rerunButton")
+            self.rerun_button.setAccessibleName(_RERUN_TEXT)
+            self.rerun_button.setToolTip(_RERUN_TOOLTIP)
+            self.rerun_button.clicked.connect(self._rerun)
+            header_row.addWidget(self.rerun_button)
         header_row.addWidget(self.cost_readout)
         self.footer = QWidget()
         self.footer.setObjectName("workspaceFooter")
@@ -1050,6 +1100,7 @@ class Workspace(QMainWindow):
         layout.addWidget(self.splitter, 1)
         layout.addWidget(self.footer)
         self.setCentralWidget(body)
+        self._body = layout
 
         self.link = LinkController(self)
         # Outside every layout and off-screen: read, never seen (§4.9).
@@ -1289,8 +1340,8 @@ class Workspace(QMainWindow):
     def _render_pages(self) -> None:
         """Write pending saves, then count on a worker; the dialog opens when
         the counts arrive. Before `load_chapter`, and while a step is running,
-        it does nothing."""
-        if self._chapter is None or self.render_button.property("loading"):
+        it does nothing - nor while a run is on (MT-125)."""
+        if self._chapter is None or self.run is not None or self.render_button.property("loading"):
             return
         # First, so an edit typed and not yet saved is counted as reviewed.
         self.translation_column.flush()
@@ -1349,9 +1400,116 @@ class Workspace(QMainWindow):
         self._end_render(f"Render failed: {reason}")
 
     def _end_render(self, sentence: str) -> None:
+        self._say(sentence)
+        self._set_render_loading(False)
+
+    def _say(self, sentence: str) -> None:
+        """The footer's status line, announced."""
         self.render_status.setText(sentence)
         self.live_region.announce(sentence)
-        self._set_render_loading(False)
+
+    def _rerun(self) -> None:
+        """Run again (MT-125 C-1): write pending saves, then models, build and
+        select - each refusal said in the footer - then state the run in a
+        `RerunDialog`. Nothing is created and nothing runs before the confirm.
+        Before `load_chapter`, during a run, or while a render step is
+        loading, it does nothing."""
+        setup = self._run_setup
+        if (
+            setup is None
+            or self._project is None
+            or self.run is not None
+            or self.render_button.property("loading")
+        ):
+            return
+        self.translation_column.flush()
+        models = setup.resolve_models()
+        if models is None:
+            self._say(NO_MODELS)
+            return
+        try:
+            stages = setup.build_stages(models)
+            estimate = page_estimate(setup.select_model())
+        except ProviderError as error:
+            self._say(str(error))
+            return
+        # Reads only, one pass, on this thread: nothing is running.
+        preview = rerun_preview(self._project, stages, estimate)
+        self._rerun_stages = stages
+        if self.rerun_dialog is not None:
+            self.rerun_dialog.deleteLater()
+        self.rerun_dialog = RerunDialog(preview, self)
+        self.rerun_dialog.finished.connect(self._on_rerun_dialog_finished)
+        self.rerun_dialog.open()
+
+    def _on_rerun_dialog_finished(self, result: int) -> None:
+        # The window first, as `_on_bake_dialog_finished` (offscreen focus).
+        self.activateWindow()
+        if result != QDialog.DialogCode.Accepted.value:
+            self._focus_rerun()
+            return
+        self._start_run()
+
+    def _focus_rerun(self) -> None:
+        if self.rerun_button is not None:
+            self.rerun_button.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _start_run(self) -> None:
+        """The body becomes the run's `RunProgressPanel`; the stages run on a
+        worker over its own `Project`, while this window's reads nothing."""
+        assert self._project is not None and self._chapter is not None
+        self._run_row = self.page_strip.currentRow()
+        ceiling = self._project.budget_ceiling() or DEFAULT_CEILING
+        panel = RunProgressPanel(ceiling, chapter=self._chapter)
+        self.run_panel = panel
+        self._run_outcome = None
+        # The focused control is about to be hidden or disabled (D-2).
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.splitter.hide()
+        self._body.insertWidget(self._body.indexOf(self.splitter) + 1, panel, 1)
+        self._set_run_on(True)
+        run = RunController(project_dir_for(self._chapter.source_dir), self._rerun_stages, self)
+        self.run = run
+        # Bound methods, so each arrives queued on this thread.
+        run.event.connect(panel.on_event)
+        run.ended.connect(self._run_ended)
+        panel.review_requested.connect(self._return_from_run)
+        run.start()
+
+    def _set_run_on(self, on: bool) -> None:
+        """Neither action is activatable while a run is on, and each says why."""
+        self.render_button.setEnabled(not on)
+        self.render_button.setToolTip(_RUN_ON_TOOLTIP if on else "")
+        if self.rerun_button is not None:
+            self.rerun_button.setEnabled(not on)
+            self.rerun_button.setToolTip(_RUN_ON_TOOLTIP if on else _RERUN_TOOLTIP)
+
+    def _run_ended(self, outcome: RunOutcome) -> None:
+        """A finished run returns the body; any other outcome leaves the panel's
+        banner saying why, and its action returns it."""
+        self._run_outcome = outcome
+        if outcome.outcome == RUN_FINISHED:
+            self._return_from_run()
+
+    def _return_from_run(self, _kept: int = 0) -> None:
+        """The body back, reloaded from the same open project, on the page shown
+        before the run, focus on Run again, and the run's end announced."""
+        panel, self.run_panel = self.run_panel, None
+        if panel is None or self._project is None:
+            return
+        self._body.removeWidget(panel)
+        panel.hide()
+        panel.deleteLater()
+        self.splitter.show()
+        self._set_run_on(False)
+        self.load_chapter(self._project)
+        if 0 <= self._run_row < self.page_strip.count():
+            self.page_strip.setCurrentRow(self._run_row)
+        finished = self._run_outcome is not None and self._run_outcome.outcome == RUN_FINISHED
+        self.live_region.announce(_return_sentence(self._project, finished))
+        self.run = None
+        self.activateWindow()
+        self._focus_rerun()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -1419,7 +1577,12 @@ class Workspace(QMainWindow):
         A render cannot be cancelled, and the project is closed on `closed`,
         so the wait comes first. `closed` is the last thing done: a slot that
         closes the project must find nothing left to write (MT-054 C-4). An
-        armed window (`remember_layout`) writes its layout just before it."""
+        armed window (`remember_layout`) writes its layout just before it. A
+        run in progress is cancelled and waited for first, `MainWindow`'s
+        order, so its worker has closed its project (MT-125 AC-6)."""
+        if self.run is not None and self.run.is_running():
+            self.run.cancel()
+            self.run.wait()
         if self._render_controller is not None:
             self._render_controller.wait()
         self.translation_column.flush()
