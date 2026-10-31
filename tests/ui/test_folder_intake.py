@@ -65,7 +65,26 @@ from mangatl.ui import intake, tokens_gen
 from mangatl.ui.canvas import LOADED
 from mangatl.ui.intake import FolderDropTarget, choose_folder_dialog
 from mangatl.ui.main_window import WINDOW_TITLE, MainWindow
+from mangatl.ui.run import RunSetup
 from mangatl.ui.workspace import Workspace
+
+
+def _assert_opens_with_open_folder_bound_to_its_setup(window: MainWindow) -> None:
+    """MT-125 PO-2: the "one path" rule (MT-056 C-2) with the run setup bound.
+    The opener is `mangatl.app.open_folder` itself, given nothing but the
+    `RunSetup` `build_window` made - its default, compared by value (a frozen
+    dataclass)."""
+    opener = window.open_folder
+    assert getattr(opener, "func", None) is app_module.open_folder, (
+        f"the intake's opener is {opener!r}, not mangatl.app.open_folder bound with a run setup"
+    )
+    assert getattr(opener, "args", None) == ()
+    assert getattr(opener, "keywords", None) == {
+        "run_setup": RunSetup(
+            app_module.resolve_models, app_module.build_stages, app_module.selected_model
+        )
+    }
+
 
 # --- Settled strings, spelled out (never read back from the module under test) ------
 HEADLINE_EMPTY = "Drop a chapter folder here"
@@ -656,7 +675,7 @@ def test_the_no_argument_window_opens_folders_with_the_command_lines_function(qt
     qtbot.addWidget(window)
 
     assert isinstance(window, MainWindow)
-    assert window.open_folder is app_module.open_folder
+    _assert_opens_with_open_folder_bound_to_its_setup(window)
     _assert_empty(_target(window))
 
 
@@ -1020,6 +1039,6 @@ def test_launched_with_no_argument_main_shows_the_empty_drop_target(
     assert len(built) == 1
     window = built[0]
     assert type(window) is MainWindow
-    assert window.open_folder is app_module.open_folder
+    _assert_opens_with_open_folder_bound_to_its_setup(window)
     _assert_empty(_target(window))
     assert seen == [True]

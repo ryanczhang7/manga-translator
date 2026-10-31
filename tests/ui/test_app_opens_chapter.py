@@ -718,3 +718,130 @@ def test_notice_none_with_an_opener_is_the_folder_intake(qtbot) -> None:  # type
     qtbot.addWidget(window)
 
     _assert_intake_window(window)
+
+
+# =============================================================================
+# MT-125 AC-8: the run setup reaches every Workspace `open_folder` builds
+# =============================================================================
+#
+# Observed through the setup itself: the `Workspace` has `rerun_button`
+# (MT-125 C-1) and activating it calls THIS setup's `resolve_models` - which
+# answers `None`, so nothing opens and nothing runs (AC-7). A Workspace given
+# some other setup, or the real one, leaves this log empty.
+
+
+class _LoggingSetup:
+    """A `RunSetup` whose `resolve_models` logs and finds no models folder."""
+
+    def __init__(self) -> None:
+        self.log: list[str] = []
+
+    def resolve_models(self) -> Path | None:
+        self.log.append("resolve")
+        return None
+
+    def build_stages(self, models_dir: Path) -> tuple[()]:
+        self.log.append("build")
+        return ()
+
+    def select_model(self) -> str:
+        self.log.append("select")
+        return "claude-sonnet-5"
+
+    def run_setup(self) -> Any:
+        from mangatl.ui.run import RunSetup
+
+        return RunSetup(self.resolve_models, self.build_stages, self.select_model)
+
+
+def _press_run_again(window: QMainWindow) -> None:
+    assert isinstance(window, Workspace), f"opened a {type(window).__name__}"
+    button = getattr(window, "rerun_button", None)
+    assert button is not None, "the Workspace has no Run again (rerun_button is None)"
+    button.click()
+    _settle()
+
+
+def test_open_folder_hands_its_run_setup_to_the_workspace(qtbot, source: Path) -> None:  # type: ignore[no-untyped-def]
+    setup = _LoggingSetup()
+    window = app_module.open_folder(source, run_setup=setup.run_setup())
+    assert isinstance(window, Workspace), f"open_folder returned {window!r}"
+    qtbot.addWidget(window)
+    try:
+        _press_run_again(window)
+        assert setup.log == ["resolve"], f"Run again reached {setup.log}, not the given setup"
+    finally:
+        window.close()
+
+
+def test_control_open_folder_without_a_run_setup_builds_a_workspace_with_no_run_again(
+    qtbot,  # type: ignore[no-untyped-def]
+    source: Path,
+) -> None:
+    window = app_module.open_folder(source)
+    assert isinstance(window, Workspace), f"open_folder returned {window!r}"
+    qtbot.addWidget(window)
+    try:
+        assert window.rerun_button is None
+    finally:
+        window.close()
+
+
+def test_build_window_hands_its_run_setup_to_the_command_line_workspace(
+    qtbot, source: Path
+) -> None:  # type: ignore[no-untyped-def]
+    setup = _LoggingSetup()
+    window = app_module.build_window([str(source)], run_setup=setup.run_setup())
+    qtbot.addWidget(window)
+
+    _press_run_again(window)
+
+    assert setup.log == ["resolve"], f"Run again reached {setup.log}, not the given setup"
+
+
+def test_build_window_with_its_default_setup_gives_the_command_line_workspace_run_again(
+    qtbot,  # type: ignore[no-untyped-def]
+    source: Path,
+) -> None:
+    window = _build(qtbot, [str(source)])
+
+    assert isinstance(window, Workspace)
+    assert window.rerun_button is not None, "mangatl <folder> opened a Workspace with no Run again"
+
+
+@pytest.mark.parametrize("start", ["no-argument", "summary", "intake-error"])
+def test_the_intake_windows_opener_hands_the_run_setup_to_the_workspace(
+    qtbot,  # type: ignore[no-untyped-def]
+    source: Path,
+    tmp_path: Path,
+    page_png: bytes,
+    start: str,
+) -> None:
+    """Every `MainWindow` `build_window` makes gets the bound opener, so a
+    chapter opened from the intake window - first view, after a summary, after
+    an error - has Run again wired to the same setup."""
+    arguments: list[str] = []
+    if start == "summary":
+        fresh = tmp_path / "fresh"
+        fresh.mkdir()
+        (fresh / "01.png").write_bytes(page_png)
+        arguments = [str(fresh)]
+    elif start == "intake-error":
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        arguments = [str(empty)]
+    setup = _LoggingSetup()
+    intake = app_module.build_window(arguments, run_setup=setup.run_setup())
+    qtbot.addWidget(intake)
+    assert type(intake) is MainWindow, f"precondition: build_window made a {type(intake).__name__}"
+    assert intake.open_folder is not None
+    setup.log.clear()  # a summary prices its estimate on select_model
+
+    opened = intake.open_folder(source)
+    assert isinstance(opened, Workspace), f"the intake's opener returned {opened!r}"
+    qtbot.addWidget(opened)
+    try:
+        _press_run_again(opened)
+        assert setup.log == ["resolve"], f"Run again reached {setup.log}, not the given setup"
+    finally:
+        opened.close()

@@ -220,22 +220,24 @@ class Chooser:
 
 class Opener:
     """A `FolderOpener` that records every path and delegates to `delegate`,
-    or returns `reason` when there is none."""
+    or returns `reason` when there is none. Keyword options - the `run_setup`
+    `build_window` binds into the opener it hands the window (MT-125 PO-2) -
+    are passed through to `delegate` untouched."""
 
     def __init__(
         self,
-        delegate: Callable[[Path], QMainWindow | Chapter | str] | None = None,
+        delegate: Callable[..., QMainWindow | Chapter | str] | None = None,
         reason: str = "stub opener: no folder expected",
     ) -> None:
         self.delegate = delegate
         self.reason = reason
         self.calls: list[Path] = []
 
-    def __call__(self, folder: Path) -> QMainWindow | Chapter | str:
+    def __call__(self, folder: Path, **options: Any) -> QMainWindow | Chapter | str:
         self.calls.append(folder)
         if self.delegate is None:
             return self.reason
-        return self.delegate(folder)
+        return self.delegate(folder, **options)
 
 
 # --- The target, bare and in its window -----------------------------------------------
