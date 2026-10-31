@@ -28,7 +28,10 @@ cannot import unless the published rates are complete.
 zero-priced call is the worst failure this module has: it spends real money and
 reports none, and the budget ceiling MT-013 builds on top of this would never
 fire. The error names the id, because "unknown model" without it tells the user
-nothing to do.
+nothing to do. The same holds one tier over (MT-102): a batch rate applied to
+an interactive call under-reports by the whole discount, so each tier reads
+its own table, a model absent from the batch table cannot be batch-priced, and
+the error names the tier as well as the id.
 """
 
 from __future__ import annotations
@@ -36,26 +39,34 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Literal
 
 from mangatl.domain.money import Usd
 from mangatl.domain.translation import TokenUsage
 
 __all__ = [
+    "BATCH_RATES",
     "RATES",
     "RATE_TABLE_VERSION",
     "CostRecord",
     "IncompleteRateTable",
     "ModelRates",
+    "Pricing",
     "UnknownModel",
     "load_rates",
     "price",
 ]
 
-#: The identifier of the table below, stored on **every** ledger row. Rates
+#: The identifier of the tables below, stored on **every** ledger row. Rates
 #: change; a ledger that cannot say which table priced a call cannot be
 #: reconciled against the provider's bill, which is what the brief's S5 asks
-#: for. Bump it in the same commit as any number in `_PUBLISHED`.
-RATE_TABLE_VERSION: str = "2026-10-12"
+#: for. Bump it in the same commit as any number in `_PUBLISHED` or
+#: `_PUBLISHED_BATCH`. 2026-10-28 is the read date of MT-101 D-1's batch row.
+RATE_TABLE_VERSION: str = "2026-10-28"
+
+#: Which of the provider's price lists a call is billed at (EPIC-09 PO-4):
+#: `"standard"` is the interactive row, `"batch"` the Batch API's own row.
+Pricing = Literal["standard", "batch"]
 
 
 @dataclass(frozen=True)
@@ -85,6 +96,9 @@ class CostRecord:
     `cost` is already quantised to a whole number of micro-dollars: `price`
     does PO-4's single rounding, and `store/ledger.py` stores `cost.micro()`
     without rounding again.
+
+    `pricing` is the tier the call was priced at (MT-102). Last and defaulted,
+    so every existing keyword construction still builds a standard record.
     """
 
     model_id: str
@@ -94,6 +108,7 @@ class CostRecord:
     cache_read_tokens: int
     cost: Usd
     rate_table_version: str
+    pricing: Pricing = "standard"
 
 
 class UnknownModel(Exception):
@@ -196,22 +211,46 @@ _PUBLISHED: Mapping[str, Mapping[str, Decimal]] = {
 #: pricing that category at nothing.
 RATES: Mapping[str, ModelRates] = load_rates(_PUBLISHED)
 
+#: Batch-tier rows, same shape, same loader. Only models with a published batch
+#: price appear; a model absent here cannot be batch-priced (MT-102 AC-3), and
+#: there is deliberately no fallback to the interactive row.
+_PUBLISHED_BATCH: Mapping[str, Mapping[str, Decimal]] = {
+    # MT-101 D-1: https://ai.google.dev/gemini-api/docs/pricing, read
+    # 2026-10-28, Gemini 3.1 Pro Preview batch, prompts <= 200k tokens. The
+    # discount is 50% on input and output only (D-2).
+    "gemini-3.1-pro-preview": {
+        "input_per_mtok": Decimal("1.00"),
+        "output_per_mtok": Decimal("6.00"),  # thinking tokens included
+        "cache_write_per_mtok": Decimal("1.00"),  # no write surcharge, as the interactive row
+        "cache_read_per_mtok": Decimal("0.20"),  # "Same as Standard" - not discounted
+    },
+}
 
-def price(model_id: str, usage: TokenUsage) -> CostRecord:
-    """Price one call's token usage, exactly, against `RATES`.
+#: The shipped batch table, guarded by the same loader as `RATES`.
+BATCH_RATES: Mapping[str, ModelRates] = load_rates(_PUBLISHED_BATCH)
 
-    Raises `UnknownModel`, naming the id, if the table does not list it -
-    AC-5's "and nothing is recorded" follows from that, because the caller
-    never reaches `store.ledger.record_call`.
+
+def price(model_id: str, usage: TokenUsage, *, pricing: Pricing = "standard") -> CostRecord:
+    """Price one call's token usage, exactly, against the table for `pricing`.
+
+    `"standard"` reads `RATES`, `"batch"` reads `BATCH_RATES`. Raises
+    `UnknownModel`, naming the id and the tier, if that tier's table does not
+    list it - AC-5's "and nothing is recorded" follows from that, because the
+    caller never reaches `store.ledger.record_call`.
 
     A page that made no call is `TokenUsage(0, 0, 0, 0)` and prices to zero:
     wordless art is a legal outcome, not an error.
     """
-    rates = RATES.get(model_id)
+    # A lookup rather than an `if`, so the tier adds no branch; built per call so
+    # the module globals are read when `price` runs, not when it was defined
+    # (`tests/core/test_budget.py` substitutes `RATES` with a fixture table).
+    tables: dict[Pricing, Mapping[str, ModelRates]] = {"standard": RATES, "batch": BATCH_RATES}
+    table = tables[pricing]
+    rates = table.get(model_id)
     if rates is None:
         raise UnknownModel(
-            f"no rates for model {model_id!r} in rate table {RATE_TABLE_VERSION};"
-            f" the table lists {', '.join(sorted(RATES))}"
+            f"no rates for model {model_id!r} in rate table {RATE_TABLE_VERSION}"
+            f" at {pricing} rates; the table lists {', '.join(sorted(table))}"
         )
     # Summed as `Usd` - exact `Decimal` throughout - and quantised once, here,
     # by `micro()`. PO-4.
@@ -229,4 +268,5 @@ def price(model_id: str, usage: TokenUsage) -> CostRecord:
         cache_read_tokens=usage.cache_read_tokens,
         cost=Usd.from_micro(exact.micro()),
         rate_table_version=RATE_TABLE_VERSION,
+        pricing=pricing,
     )
