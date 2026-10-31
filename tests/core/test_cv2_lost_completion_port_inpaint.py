@@ -35,6 +35,18 @@ Three checks keep the equality from being vacuous:
 - **The earning mutation** (story contract): with `cv2.setNumThreads(-1)` in
   `inpaint.py` replaced by `pass`, this test goes red with `Unknown C++
   exception` from the induced child. Recorded in the story's handoff.
+
+A vacuous induction is retried (MT-126): in about one full gate run in ten the
+induced child's canary succeeded with no code change, cause not yet known. When -
+and only when - the canary succeeded, `_lost_port.run_induced` starts one fresh
+induced child alone, up to `INDUCTION_ATTEMPTS` children in all, and the result
+compared is the last attempt's. A canary that raised, a failed close or a failed
+`clean_page` is never retried, so a real regression still fails on the first
+child. Every attempt vacuous fails with each child's closed handle,
+`CloseHandle` result and `io_completion_handles` (the ascending IoCompletion
+handle values both children now report); a later attempt that took passes with
+one `InductionRetried` warning carrying the same facts. The retry policy is
+shared with MT-069's file; the child script is not.
 """
 
 from __future__ import annotations
@@ -50,6 +62,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from _lost_port import Induction, run_induced, warn_if_retried
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32",
@@ -93,6 +106,7 @@ report = {
     "closed_handle": None,
     "close_ok": None,
     "close_error": None,
+    "io_completion_handles": None,
     "call": None,
     "model_calls": 0,
     "others_loaded": None,
@@ -131,34 +145,41 @@ class StubSession:
 session = StubSession()
 
 # --- close the lowest-valued IoCompletion handle ---------------------------------
-if MODE == "induced":
-
-    class UnicodeString(ctypes.Structure):
-        _fields_ = [
-            ("Length", ctypes.c_ushort),
-            ("MaximumLength", ctypes.c_ushort),
-            ("Buffer", ctypes.c_void_p),
-        ]
-
-    ntdll = ctypes.WinDLL("ntdll")
-    ntdll.NtQueryObject.restype = ctypes.c_long
-    ntdll.NtQueryObject.argtypes = [
-        ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p
+# MT-126 AC-6: both children walk the handle values and report every IoCompletion
+# handle found; only the induced child closes one, the lowest-valued.
+class UnicodeString(ctypes.Structure):
+    _fields_ = [
+        ("Length", ctypes.c_ushort),
+        ("MaximumLength", ctypes.c_ushort),
+        ("Buffer", ctypes.c_void_p),
     ]
+
+
+ntdll = ctypes.WinDLL("ntdll")
+ntdll.NtQueryObject.restype = ctypes.c_long
+ntdll.NtQueryObject.argtypes = [
+    ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p
+]
+OBJECT_TYPE_INFORMATION = 2
+info = ctypes.create_string_buffer(4096)
+
+
+def type_name(value):
+    status = ntdll.NtQueryObject(value, OBJECT_TYPE_INFORMATION, info, len(info), None)
+    if status < 0:
+        return None
+    name = UnicodeString.from_buffer(info)
+    return ctypes.wstring_at(name.Buffer, name.Length // 2) if name.Buffer else None
+
+
+io_completion = [v for v in range(4, 0x8000, 4) if type_name(v) == "IoCompletion"]
+report["io_completion_handles"] = io_completion
+
+if MODE == "induced":
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CloseHandle.restype = wt.BOOL
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-    OBJECT_TYPE_INFORMATION = 2
-    info = ctypes.create_string_buffer(4096)
-
-    def type_name(value):
-        status = ntdll.NtQueryObject(value, OBJECT_TYPE_INFORMATION, info, len(info), None)
-        if status < 0:
-            return None
-        name = UnicodeString.from_buffer(info)
-        return ctypes.wstring_at(name.Buffer, name.Length // 2) if name.Buffer else None
-
-    target = next((v for v in range(4, 0x8000, 4) if type_name(v) == "IoCompletion"), None)
+    target = io_completion[0] if io_completion else None
     if target is None:
         report["close_error"] = "no handle of type IoCompletion in handle values 4..0x8000"
     else:
@@ -265,6 +286,55 @@ def _report(proc: subprocess.Popen[str], label: str) -> dict[str, Any]:
     return report
 
 
+def _induced_npz(tmp_path: Path, attempt: int) -> Path:
+    """Attempt 1 is the side-by-side child's file; a retry writes its own (MT-126 C-3)."""
+    return tmp_path / ("induced.npz" if attempt == 1 else f"induced-{attempt}.npz")
+
+
+def _induced_alone(tmp_path: Path, attempt: int) -> dict[str, Any]:
+    """A retry (MT-126): one fresh induced child, alone, with the same argv."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _CHILD, "induced", str(_induced_npz(tmp_path, attempt))],
+        cwd=_REPO_ROOT,
+        env=dict(os.environ),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        return _report(proc, f"induced (attempt {attempt})")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+
+
+def _walk_problems(clean: dict[str, Any], induction: Induction) -> list[str]:
+    """MT-126 AC-6: both children report their IoCompletion handles; the lowest is closed.
+
+    Judged on the clean child and on the induced child whose result is compared -
+    the last attempt. A discarded vacuous attempt is not failed on: its walk is in
+    the `InductionRetried` warning, and the test passes when a later attempt took.
+    """
+    problems: list[str] = []
+    if not clean["io_completion_handles"]:
+        problems.append(
+            f"the clean child reported no IoCompletion handles: {clean['io_completion_handles']}"
+        )
+    number, report = len(induction.attempts), induction.report
+    handles = report["io_completion_handles"]
+    if not handles:
+        problems.append(f"induced attempt {number} reported no IoCompletion handles: {handles}")
+    elif report["closed_handle"] != handles[0]:
+        closed = report["closed_handle"]
+        problems.append(
+            f"induced attempt {number} closed {'none' if closed is None else hex(closed)},"
+            f" not the lowest IoCompletion handle {handles[0]:#x} of"
+            f" {[hex(v) for v in handles]}"
+        )
+    return problems
+
+
 def _import_problems(report: dict[str, Any], label: str) -> list[str]:
     """The child must have loaded neither module whose own containment would protect it."""
     problems: list[str] = []
@@ -284,7 +354,14 @@ def test_clean_page_in_an_inpaint_only_process_survives_a_closed_completion_port
     """AC-1: with only inpaint imported and the port closed, clean_page equals a clean run."""
     with _children(tmp_path) as (clean_proc, induced_proc):
         clean = _report(clean_proc, "clean")
-        induced = _report(induced_proc, "induced")
+        first = _report(induced_proc, "induced")
+
+    def spawn(attempt: int) -> dict[str, Any]:
+        return first if attempt == 1 else _induced_alone(tmp_path, attempt)
+
+    induction = run_induced(spawn)
+    induced = induction.report
+    warn_if_retried(induction)
     problems: list[str] = []
 
     # The reference: the clean child must produce it, and its canary must succeed,
@@ -297,6 +374,7 @@ def test_clean_page_in_an_inpaint_only_process_survives_a_closed_completion_port
         )
     problems += _import_problems(clean, "clean")
     problems += _import_problems(induced, "induced")
+    problems += _walk_problems(clean, induction)
 
     # The state must really have been induced, and still hold after the call.
     if induced["close_error"] is not None or induced["close_ok"] is not True:
@@ -304,11 +382,8 @@ def test_clean_page_in_an_inpaint_only_process_survives_a_closed_completion_port
             f"the induced child did not close the completion port: {induced['close_error']}"
         )
     canary = induced["canary"]
-    if canary["ok"]:
-        problems.append(
-            "VACUOUS: the canary SetThreadpoolWait on a fresh thread succeeded in the induced"
-            " child, so the default thread pool's completion port was never lost"
-        )
+    if not induction.took:
+        problems.append(induction.vacuous_message())
     elif canary["winerror"] != _THREADPOOL_HANDLE_EXCEPTION:
         problems.append(
             f"the induced canary failed, but not with {_THREADPOOL_HANDLE_EXCEPTION:#x}:"
@@ -334,7 +409,7 @@ def test_clean_page_in_an_inpaint_only_process_survives_a_closed_completion_port
     # ... and returns exactly what a process with nothing closed returns.
     with (
         np.load(tmp_path / "clean.npz") as reference,
-        np.load(tmp_path / "induced.npz") as observed,
+        np.load(_induced_npz(tmp_path, len(induction.attempts))) as observed,
     ):
         expected, actual = reference["cleaned"], observed["cleaned"]
         assert expected.shape == _PAGE_SHAPE and expected.dtype == np.uint8, (
