@@ -364,6 +364,20 @@ QScrollBar::add-page, QScrollBar::sub-page {
     font-weight: @{type.body.weight};
 }
 
+/* ---- RerunDialog: the over-budget frame (MT-127) ---------------------- */
+/* components.md 9 RerunDialog, budget row: the frame takes CostEstimate's  */
+/* warning hairline. The state is the dynamic property overBudget, a bool   */
+/* rerun_dialog.py sets once before first polish (MT-125). A type selector  */
+/* on the Python class: Qt matches metaObject()->className(), and PySide6   */
+/* names a subclass's metaobject after the class. Specificity (0,1,1) over  */
+/* the QDialog ground rule's (0,0,1), so order does not matter. Colour is   */
+/* emphasis only: the budget sentence carries the state (A-10). Under HC    */
+/* the token resolves to WindowText; no override rule (components.md 10.9). */
+
+RerunDialog[overBudget="true"] {
+    border: @{border-width.hairline}px solid @{color.status.warning};
+}
+
 /* The scroll area is the summary's reading stop. Its border is always    */
 /* focus.width wide, transparent at rest, so taking focus repaints the    */
 /* ring without moving any line of text.                                  */
