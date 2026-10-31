@@ -2,7 +2,7 @@
 id: EPIC-11
 title: Running the chapter again - a stopped or invalidated run resumes from the workspace
 status: todo
-stories: [MT-124, MT-125]
+stories: [MT-124, MT-125, MT-127]
 ---
 
 *Added 2026-10-30 by lead-po on Claude Fable 5.1, from two things the user hit.
