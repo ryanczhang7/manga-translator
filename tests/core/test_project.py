@@ -479,7 +479,8 @@ def test_the_schema_version_and_the_two_page_status_values_are_the_pinned_ones()
     # MT-065 C-2 takes it to 7: `cleaned_page`.
     # MT-118 C-2 takes it to 8: `region.excluded`.
     # MT-119 C-4 takes it to 9: `cleaned_page.erased`.
-    assert SCHEMA_VERSION == 9
+    # MT-103 PO-3 takes it to 10: chapter-level ledger rows, `pricing`, two tables.
+    assert SCHEMA_VERSION == 10
     assert PAGE_PENDING == "pending"
     assert PAGE_STALE == "stale"
     assert PAGE_PENDING != PAGE_STALE

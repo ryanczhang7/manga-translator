@@ -315,7 +315,7 @@ def _migrated(source_dir: Path, mask: bytes) -> Path:
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 9, (
+    assert _user_version(db_path) == 10, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -336,9 +336,9 @@ def test_this_build_writes_and_reads_schema_version_nine(
     """C-4's bump, in both records of it (MT-005 PO-7)."""
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"))
 
-    assert SCHEMA_VERSION == 9
-    assert _user_version(db_path) == 9
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(9,)]
+    assert SCHEMA_VERSION == 10
+    assert _user_version(db_path) == 10
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(10,)]
 
 
 def test_the_erased_column_is_a_shared_string_appended_after_the_cleaned_page_table() -> None:
@@ -372,7 +372,7 @@ def test_a_version_eight_file_is_migrated_to_nine_when_it_is_opened(
     """**AC-6**: "a version 8 file opens at 9" - in both records of it."""
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"), mask)
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(9,)]
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(10,)]
     assert _raw(db_path, _SHAPE) == _CLEANED_PAGE_SHAPE_V9
 
 
@@ -421,11 +421,32 @@ def test_the_v9_step_changes_only_the_cleaned_page_erased_column(
     `page_id` and `image_blob` are byte for byte what they were."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _build_v8_file(source_dir, mask)
-    schema = "SELECT type, name, sql FROM sqlite_master WHERE name != 'cleaned_page' ORDER BY name"
-    tables = ("chapter", "page", "region", "line", "run", "llm_call", "glossary")
+    # `batch_job`, `chapter`, `correction` and `llm_call` excluded since MT-103: the
+    # v9 -> v10 step creates the first and third, ALTERs `chapter` and rebuilds
+    # `llm_call` on purpose; `test_schema_v10.py` owns what that step does.
+    schema = (
+        "SELECT type, name, sql FROM sqlite_master"
+        " WHERE name NOT IN ('batch_job', 'chapter', 'cleaned_page', 'correction',"
+        " 'llm_call') ORDER BY name"
+    )
+    tables = ("page", "region", "line", "run", "glossary")
 
     def rows() -> dict[str, list[tuple[object, ...]]]:
-        return {table: _raw(db_path, f"SELECT * FROM {table} ORDER BY rowid") for table in tables}
+        found = {t: _raw(db_path, f"SELECT * FROM {t} ORDER BY rowid") for t in tables}
+        # `chapter` and `llm_call` are read on their pre-v10 columns since MT-103:
+        # the v9 -> v10 step adds `glossary_proposed_at` and `pricing` on purpose.
+        found["chapter"] = _raw(
+            db_path,
+            "SELECT id, source_dir, output_dir, created_at, schema_version,"
+            " budget_ceiling_micro_usd, model_id, rate_table_version FROM chapter ORDER BY rowid",
+        )
+        found["llm_call"] = _raw(
+            db_path,
+            "SELECT id, run_id, page_id, request_id, model_id, input_tokens, output_tokens,"
+            " cache_write_tokens, cache_read_tokens, cost_micro_usd, rate_table_version, at"
+            " FROM llm_call ORDER BY rowid",
+        )
+        return found
 
     def images() -> list[tuple[object, ...]]:
         return _raw(db_path, "SELECT page_id, image_blob FROM cleaned_page ORDER BY page_id")
@@ -436,7 +457,7 @@ def test_the_v9_step_changes_only_the_cleaned_page_erased_column(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 9
+    assert _user_version(db_path) == 10
     assert _raw(db_path, schema) == schema_before
     assert images() == images_before
     rows_after = rows()
@@ -466,7 +487,7 @@ def test_a_version_six_file_migrates_all_the_way_to_nine(
         project.write_cleaned(0, png_bytes(7, 3, (1, 2, 3)), erased=[0])
         assert project.read_erased(0) == frozenset({0})
 
-    assert _user_version(db_path) == 9
+    assert _user_version(db_path) == 10
     assert _cleaned_page_sql(db_path) == _cleaned_page_sql(
         _fresh(_sources(tmp_path, png_bytes, "fresh"))
     )
@@ -504,6 +525,15 @@ def test_a_version_nine_file_is_refused_by_a_reader_that_supports_eight(
     about. `open_project` reads the module's constant at call time."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _fresh(source_dir)
+    # MT-103 PO-3: a fresh file is version 10 now. The refusal comes before any
+    # read, so the file is stamped 9 - the version this test is about - with a
+    # plain connection; what its tables hold beyond that is never reached
+    # (`test_schema_v8.py`'s version-8 refusal, the same move).
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("PRAGMA user_version = 9")
+    finally:
+        connection.close()
     assert _user_version(db_path) == 9, "the fixture is not a version-9 file"
 
     monkeypatch.setattr(project_module, "SCHEMA_VERSION", 8)

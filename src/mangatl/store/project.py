@@ -62,9 +62,12 @@ from mangatl.domain.page import Chapter, Page
 from mangatl.domain.region import EXCLUSION_REASONS, ExclusionReason, RawRegion
 from mangatl.store.intake import read_chapter
 from mangatl.store.schema import (
+    BATCH_JOB_DDL,
     CHAPTER_DDL,
+    CHAPTER_GLOSSARY_PROPOSED_DDL,
     CLEANED_ERASED_DDL,
     CLEANED_PAGE_DDL,
+    CORRECTION_DDL,
     DDL,
     LLM_CALL_DDL,
 )
@@ -126,7 +129,14 @@ __all__ = [
 #: `set_excluded` knows which restore leaves Japanese under the English. A
 #: migrated row reads every reading index of its page: a version 8 cleaner was
 #: handed every region.
-SCHEMA_VERSION: int = 9
+#:
+#: Version 10 is MT-103's, one step for EPIC-09's four later stories:
+#: `llm_call.page_id` nullable (a chapter-level call), `llm_call.pricing` (the
+#: tier that priced a call), the `batch_job` and `correction` tables, and
+#: `chapter.glossary_proposed_at`. Every migrated call reads `'standard'`, every
+#: migrated chapter has not run the glossary pre-pass, and both tables are empty:
+#: each is the truth about a file no earlier version could write otherwise.
+SCHEMA_VERSION: int = 10
 
 #: `page.status` as `create_project` writes it: read, hashed, nothing done yet.
 PAGE_PENDING: str = "pending"
@@ -160,6 +170,10 @@ _SELECT_PAGES = "SELECT ordinal, filename, width, height, sha256 FROM page ORDER
 #: MT-044 C-10. Unqualified, because one project file is one chapter - the same
 #: reason `store.ledger`'s totals carry no `WHERE chapter_id`.
 _SELECT_CEILING = "SELECT budget_ceiling_micro_usd FROM chapter"
+
+#: MT-103 AC-6, unqualified for `_SELECT_CEILING`'s reason.
+_SELECT_GLOSSARY_PROPOSED = "SELECT glossary_proposed_at FROM chapter"
+_UPDATE_GLOSSARY_PROPOSED = "UPDATE chapter SET glossary_proposed_at = ?"
 
 _INSERT_CHAPTER = (
     "INSERT INTO chapter (source_dir, output_dir, created_at, schema_version,"
@@ -462,6 +476,54 @@ UPDATE cleaned_page SET erased = (
 """
 )
 
+#: Version 9 to version 10 (MT-103): a chapter-level ledger row, the pricing
+#: tier, two new tables and the glossary marker.
+#:
+#: **`llm_call` is rebuilt**, because SQLite cannot drop a NOT NULL in place,
+#: and a rebuild is where the append-only triggers are lost without a sound. So
+#: the order is the point, and each step is measured (MT-103 F-4):
+#:
+#: - **The triggers are dropped first.** `RENAME` carries a table's triggers
+#:   with it, so left in place they would follow the old rows to `llm_call_v9`,
+#:   and `LLM_CALL_DDL`'s `CREATE TRIGGER llm_call_no_update` would then fail on
+#:   the name. They are recreated by the same string a fresh file runs.
+#: - **The old table is renamed aside and the new one created under its real
+#:   name**, `_MIGRATE_TO_V3`'s recipe. Built under a temporary name and renamed
+#:   to `llm_call` instead, SQLite stores `CREATE TABLE "llm_call"`, quoted, and
+#:   the migrated declaration no longer matches a fresh file's.
+#: - **No pragmas**, unlike `_MIGRATE_TO_V4`: `llm_call` is a child, not a
+#:   parent - nothing references it - so renaming and dropping it repoints and
+#:   cascades nothing.
+#:
+#: The copy names the twelve version 9 columns and leaves `pricing` to its
+#: `DEFAULT 'standard'`, keeping every `id`, so a row is the same bill on the
+#: same page afterwards. `chapter`, a parent table, is **altered, not rebuilt**
+#: (`CHAPTER_GLOSSARY_PROPOSED_DDL`, for `_MIGRATE_TO_V2`'s reason), and the two
+#: tables are the fresh schema's strings: one definition each, so
+#: `sqlite_master.sql` agrees between a fresh file and a migrated one.
+_MIGRATE_TO_V10 = (
+    """
+DROP TRIGGER llm_call_no_update;
+DROP TRIGGER llm_call_no_delete;
+ALTER TABLE llm_call RENAME TO llm_call_v9;
+"""
+    + LLM_CALL_DDL
+    + """
+INSERT INTO llm_call (
+    id, run_id, page_id, request_id, model_id, input_tokens, output_tokens,
+    cache_write_tokens, cache_read_tokens, cost_micro_usd, rate_table_version, at
+)
+SELECT id, run_id, page_id, request_id, model_id, input_tokens, output_tokens,
+       cache_write_tokens, cache_read_tokens, cost_micro_usd, rate_table_version, at
+FROM llm_call_v9;
+
+DROP TABLE llm_call_v9;
+"""
+    + CHAPTER_GLOSSARY_PROPOSED_DDL
+    + BATCH_JOB_DDL
+    + CORRECTION_DDL
+)
+
 #: The migration chain, in order, each step keyed on the version it *produces*.
 #: A step runs when the file found on disk is older than that.
 #:
@@ -480,6 +542,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (7, _MIGRATE_TO_V7),
     (8, _MIGRATE_TO_V8),
     (9, _MIGRATE_TO_V9),
+    (10, _MIGRATE_TO_V10),
 )
 
 
@@ -754,6 +817,29 @@ class Project:
         """
         row = self._connection.execute(_SELECT_CEILING).fetchone()
         return None if row[0] is None else Usd.from_micro(int(row[0]))
+
+    def glossary_proposed_at(self) -> str | None:
+        """When the glossary pre-pass ran for this chapter, as the UTC ISO
+        instant `mark_glossary_proposed` stored, or `None` if it has not run
+        (MT-103 AC-6).
+
+        A read and only a read: the marker is what lets the pass run once per
+        chapter across a crash between it and page 1, and a read that stamped it
+        would make every chapter look already proposed. Opens no transaction,
+        as `budget_ceiling` opens none.
+        """
+        row = self._connection.execute(_SELECT_GLOSSARY_PROPOSED).fetchone()
+        return None if row[0] is None else str(row[0])
+
+    def mark_glossary_proposed(self) -> None:
+        """Record that the glossary pre-pass has run, stamped now in UTC.
+
+        Committed before it returns - a marker that is not on disk does not
+        survive the crash it exists for. A second call re-stamps it; the caller
+        asks `glossary_proposed_at` first, and nothing here second-guesses it.
+        """
+        with self.transaction() as cursor:
+            cursor.execute(_UPDATE_GLOSSARY_PROPOSED, (datetime.now(UTC).isoformat(),))
 
     def write_regions(self, page_ordinal: int, regions: Sequence[RawRegion]) -> None:
         """Replace one page's regions with `regions`, in the order handed over.
