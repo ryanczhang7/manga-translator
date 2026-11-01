@@ -124,11 +124,25 @@ CREATE TABLE chapter (
 #: the unqualified case: SQLite optimises `DELETE FROM llm_call` with no
 #: `WHERE` into a truncate that skips row triggers *unless* a delete trigger
 #: exists, which is exactly why one does.
+#:
+#: **Version 10 (MT-103) gives the table a third caller**,
+#: `store.project._MIGRATE_TO_V10`, which rebuilds it again. `page_id` is
+#: nullable: a chapter-level call (the glossary pre-pass, the consistency pass)
+#: is about no page, and `store.ledger.chapter_call_costs` is what keeps such a
+#: row out of the guard's per-page samples. `pricing` is the tier that priced the
+#: call (`domain.rates.Pricing`), declared last because the v10 rebuild appends
+#: it there, and `DEFAULT 'standard'` because that is the truth about every row a
+#: version 9 file held - batch pricing did not exist. No CHECK on it: the table
+#: is append-only, so widening a CHECK means rebuilding the ledger, and the
+#: vocabulary is `domain.rates`' to grow. The v2 -> v3 step runs this string as
+#: well, so a version 2 file is briefly at the version 10 shape before the v10
+#: step rebuilds it once more; nothing is lost, because nothing it held had a
+#: tier other than `'standard'`.
 LLM_CALL_DDL: str = """
 CREATE TABLE llm_call (
     id                 INTEGER PRIMARY KEY,
     run_id             INTEGER NOT NULL REFERENCES run(id),
-    page_id            INTEGER NOT NULL REFERENCES page(id),
+    page_id            INTEGER REFERENCES page(id),
     request_id         TEXT    NOT NULL,
     model_id           TEXT    NOT NULL,
     input_tokens       INTEGER NOT NULL,
@@ -137,7 +151,8 @@ CREATE TABLE llm_call (
     cache_read_tokens  INTEGER NOT NULL,
     cost_micro_usd     INTEGER NOT NULL,
     rate_table_version TEXT    NOT NULL DEFAULT '',
-    at                 TEXT    NOT NULL
+    at                 TEXT    NOT NULL,
+    pricing            TEXT    NOT NULL DEFAULT 'standard'
 );
 
 CREATE TRIGGER llm_call_no_update
@@ -185,17 +200,74 @@ CREATE TABLE cleaned_page (
 #: `ADD COLUMN ... NOT NULL` needs one; the store's upsert always names it.
 CLEANED_ERASED_DDL: str = "ALTER TABLE cleaned_page ADD COLUMN erased TEXT NOT NULL DEFAULT '[]';\n"
 
+#: `chapter.glossary_proposed_at` (MT-103, schema version 10): when the glossary
+#: pre-pass ran for this chapter, NULL until it has. Stored rather than inferred
+#: so the pass runs once even across a crash between it and page 1. A
+#: **separate** `ALTER`, for `CLEANED_ERASED_DDL`'s reason: `CHAPTER_DDL` *is*
+#: `_MIGRATE_TO_V4`'s table, so a column written into it would be created by a
+#: v3 file's v4 step and added again by its v10 step. Appended directly after
+#: `CHAPTER_DDL` in `DDL` and run by `store.project._MIGRATE_TO_V10`, so both
+#: paths store the same `chapter` declaration. Not in `__all__`, which three
+#: suites pin (MT-103 F-2); `store.project` imports it by name.
+CHAPTER_GLOSSARY_PROPOSED_DDL: str = "ALTER TABLE chapter ADD COLUMN glossary_proposed_at TEXT;\n"
+
+#: One provider Batch API job (MT-103 AC-4; MT-111, MT-112), so a closed app can
+#: find the job it left running and resume collecting it. `provider_job_id` is
+#: the provider's name for the job (`batches/...`). `collected_at` and
+#: `failure` are nullable because a submitted job has neither. The CHECK is the
+#: vocabulary of `domain.batch.BatchState`; "at most one `submitted`" is
+#: `store.batch.BatchPending`'s refusal, not a constraint, because a partial
+#: unique index would answer a second submission with an `IntegrityError` that
+#: cannot name the job in the way. Shared with `store.project._MIGRATE_TO_V10`,
+#: and outside `__all__` for `CHAPTER_GLOSSARY_PROPOSED_DDL`'s reason.
+BATCH_JOB_DDL: str = """
+CREATE TABLE batch_job (
+    id              INTEGER PRIMARY KEY,
+    run_id          INTEGER NOT NULL REFERENCES run(id),
+    provider_job_id TEXT    NOT NULL,
+    model_id        TEXT    NOT NULL,
+    state           TEXT    NOT NULL CHECK (state IN ('submitted', 'collected', 'failed')),
+    submitted_at    TEXT    NOT NULL,
+    collected_at    TEXT,
+    failure         TEXT
+);
+"""
+
+#: One change the consistency pass made to a line's English (MT-103 AC-5;
+#: MT-115): from what, to what, and why, against the page and reading index the
+#: rest of the store addresses lines by. `page_id` is `page.id`, resolved from
+#: the ordinal by `store.corrections`, as `llm_call.page_id` is. No `ON DELETE`,
+#: for `llm_call.page_id`'s reason: a record of what was changed should not
+#: vanish with the row it describes. Shared with `_MIGRATE_TO_V10`, outside
+#: `__all__`.
+CORRECTION_DDL: str = """
+CREATE TABLE correction (
+    id            INTEGER PRIMARY KEY,
+    run_id        INTEGER NOT NULL REFERENCES run(id),
+    page_id       INTEGER NOT NULL REFERENCES page(id),
+    reading_index INTEGER NOT NULL,
+    before_en     TEXT    NOT NULL,
+    after_en      TEXT    NOT NULL,
+    reason        TEXT    NOT NULL,
+    at            TEXT    NOT NULL
+);
+"""
+
 #: Every table of `architecture.md` §4, its foreign keys, and the UNIQUE keys
 #: `store.project` and the stage writers depend on. Executed with
 #: `Connection.executescript`, so statements are separated by semicolons and
 #: nothing here is parameterised.
 #:
-#: Concatenated rather than written as one literal only because `CHAPTER_DDL`
-#: and `LLM_CALL_DDL` above each have a second caller - the migration that
-#: rebuilds that table. It is still one string and still the whole schema:
-#: `executescript(DDL)` on a bare connection creates every table.
+#: Concatenated rather than written as one literal only because every string
+#: above has a second caller - the migration that builds or rebuilds that
+#: table. It is still one string and still the whole schema:
+#: `executescript(DDL)` on a bare connection creates every table. MT-103's
+#: `batch_job` and `correction` follow the ledger rather than going last,
+#: because `test_schema_v7.py` and `test_schema_v9.py` pin `DDL`'s end to
+#: `CLEANED_PAGE_DDL + CLEANED_ERASED_DDL` (F-2).
 DDL: str = (
     CHAPTER_DDL
+    + CHAPTER_GLOSSARY_PROPOSED_DDL
     + """
 -- `ordinal` is filename order at intake and never changes: it is the page's
 -- identity for the rest of the product (MT-004), which is why it is unique
@@ -280,6 +352,12 @@ CREATE TABLE run (
 -- The ledger, and the triggers that make it append-only: `LLM_CALL_DDL` above.
 """
     + LLM_CALL_DDL
+    + """
+-- The batch jobs and the consistency pass's corrections, MT-103's and two of the
+-- reasons this schema is at version 10: `BATCH_JOB_DDL` and `CORRECTION_DDL`.
+"""
+    + BATCH_JOB_DDL
+    + CORRECTION_DDL
     + """
 -- `last_seen_page` and `source` are MT-014's and the reason this schema is at
 -- version 5 (C-7): AC-3's least-recently-seen eviction sorts on the first, and

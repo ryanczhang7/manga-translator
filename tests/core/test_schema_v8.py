@@ -329,7 +329,7 @@ def _migrated(source_dir: Path, mask: bytes) -> Path:
         pass
 
     # 9 since MT-119 C-4: opening a v7 file runs the v8 -> v9 step as well.
-    assert _user_version(db_path) == 9, (
+    assert _user_version(db_path) == 10, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -368,9 +368,9 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"), mask)
 
     # MT-119 C-4 takes it to 9: `cleaned_page.erased`. `test_schema_v9.py` owns it.
-    assert SCHEMA_VERSION == 9
-    assert _user_version(db_path) == 9
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(9,)]
+    assert SCHEMA_VERSION == 10
+    assert _user_version(db_path) == 10
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(10,)]
 
 
 def test_a_fresh_region_table_has_a_nullable_excluded_column_declared_last(
@@ -416,7 +416,7 @@ def test_a_version_seven_file_is_migrated_to_eight_when_it_is_opened(
     """AC-4: "`schema_version` is 8" - in both records of it."""
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"), mask)
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(9,)]  # MT-119 C-4
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(10,)]  # MT-103 PO-3
     assert _columns(db_path) == _REGION_COLUMNS_V8
 
 
@@ -468,7 +468,7 @@ def test_every_region_a_version_seven_file_held_reads_back_included_and_unchange
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 9  # MT-119 C-4
+    assert _user_version(db_path) == 10  # MT-103 PO-3
     assert _raw(db_path, f"SELECT {v7_columns} FROM region ORDER BY id") == before
     assert _raw(db_path, "SELECT excluded FROM region ORDER BY id") == [(None,)] * 3
 
@@ -496,14 +496,31 @@ def test_the_v8_step_changes_only_the_region_table(
     # v8 -> v9 step, which ALTERs `cleaned_page` on purpose (C-4) and so rewrites
     # its stored DDL and gives every row an `erased` cell; `test_schema_v9.py`
     # owns what that step does. Its two v7 columns are still compared, below.
+    # `batch_job`, `chapter`, `correction` and `llm_call` excluded since MT-103: the
+    # v9 -> v10 step creates the first and third, ALTERs `chapter` and rebuilds
+    # `llm_call` on purpose; `test_schema_v10.py` owns what that step does.
     schema = (
         "SELECT type, name, sql FROM sqlite_master"
-        " WHERE name NOT IN ('cleaned_page', 'region') ORDER BY name"
+        " WHERE name NOT IN ('batch_job', 'chapter', 'cleaned_page', 'correction',"
+        " 'llm_call', 'region') ORDER BY name"
     )
-    tables = ("chapter", "page", "line", "run", "llm_call", "glossary")
+    tables = ("page", "line", "run", "glossary")
 
     def rows() -> dict[str, list[tuple[object, ...]]]:
         found = {t: _raw(db_path, f"SELECT * FROM {t} ORDER BY rowid") for t in tables}
+        # `chapter` and `llm_call` are read on their pre-v10 columns since MT-103:
+        # the v9 -> v10 step adds `glossary_proposed_at` and `pricing` on purpose.
+        found["chapter"] = _raw(
+            db_path,
+            "SELECT id, source_dir, output_dir, created_at, schema_version,"
+            " budget_ceiling_micro_usd, model_id, rate_table_version FROM chapter ORDER BY rowid",
+        )
+        found["llm_call"] = _raw(
+            db_path,
+            "SELECT id, run_id, page_id, request_id, model_id, input_tokens, output_tokens,"
+            " cache_write_tokens, cache_read_tokens, cost_micro_usd, rate_table_version, at"
+            " FROM llm_call ORDER BY rowid",
+        )
         found["cleaned_page"] = _raw(
             db_path, "SELECT page_id, image_blob FROM cleaned_page ORDER BY rowid"
         )
@@ -517,7 +534,7 @@ def test_the_v8_step_changes_only_the_region_table(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 9  # MT-119 C-4
+    assert _user_version(db_path) == 10  # MT-103 PO-3
     assert _raw(db_path, schema) == schema_before
     rows_after = rows()
     # The chapter row's `schema_version` is the one cell the step must change.

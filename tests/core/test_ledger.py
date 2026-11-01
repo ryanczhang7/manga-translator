@@ -67,10 +67,10 @@ from typing import NamedTuple
 import pytest
 
 from mangatl.domain.money import Usd
-from mangatl.domain.rates import RATE_TABLE_VERSION, UnknownModel, price
+from mangatl.domain.rates import RATE_TABLE_VERSION, CostRecord, Pricing, UnknownModel, price
 from mangatl.domain.translation import TokenUsage
 from mangatl.store.intake import read_chapter
-from mangatl.store.ledger import chapter_total, record_call, run_total
+from mangatl.store.ledger import chapter_call_costs, chapter_total, record_call, run_total
 from mangatl.store.project import (
     SCHEMA_VERSION,
     Project,
@@ -104,6 +104,10 @@ _LLM_CALL_COLUMNS_V3 = frozenset(
         "at",
     }
 )
+
+#: The column list at version 10 (MT-103 PO-3): v3's, plus `pricing`. What
+#: a fresh file, and any older file once opened, holds today.
+_LLM_CALL_COLUMNS_V10 = _LLM_CALL_COLUMNS_V3 | {"pricing"}
 
 
 class _Call(NamedTuple):
@@ -445,9 +449,10 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     # MT-065 C-2 takes it to 7: `cleaned_page`.
     # MT-118 C-2 takes it to 8: `region.excluded`.
     # MT-119 C-4 takes it to 9: `cleaned_page.erased`.
-    assert SCHEMA_VERSION == 9
-    assert _user_version(db_path) == 9
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(9,)]
+    # MT-103 PO-3 takes it to 10: chapter-level ledger rows, `pricing`, two tables.
+    assert SCHEMA_VERSION == 10
+    assert _user_version(db_path) == 10
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(10,)]
 
 
 def test_the_ledger_stores_integer_micro_dollars_and_carries_no_real_cost_column(
@@ -463,7 +468,7 @@ def test_the_ledger_stores_integer_micro_dollars_and_carries_no_real_cost_column
     columns = _columns(db_path, "llm_call")
 
     assert "cost_usd" not in columns, f"the REAL cost column is still there: {columns}"
-    assert set(columns) == _LLM_CALL_COLUMNS_V3, f"llm_call has {sorted(columns)}"
+    assert set(columns) == _LLM_CALL_COLUMNS_V10, f"llm_call has {sorted(columns)}"
 
     declared = {str(row[1]): row for row in _raw(db_path, "PRAGMA table_info(llm_call)")}
     _cid, _name, cost_type, cost_notnull, _default, _pk = declared["cost_micro_usd"]
@@ -775,7 +780,7 @@ def test_a_version_two_file_is_migrated_to_the_current_version_when_it_is_opened
 
     assert _user_version(db_path) == SCHEMA_VERSION
     assert _raw(db_path, "SELECT schema_version FROM chapter") == [(SCHEMA_VERSION,)]
-    assert set(_columns(db_path, "llm_call")) == _LLM_CALL_COLUMNS_V3
+    assert set(_columns(db_path, "llm_call")) == _LLM_CALL_COLUMNS_V10
     # The v4 step rebuilds `chapter`, not `llm_call`. A v2 file's ledger rows
     # must survive the *second* rebuild untouched, and the two tests below say
     # so about their contents; this says so about the table's shape.
@@ -863,3 +868,160 @@ def test_a_migrated_file_records_and_totals_a_new_call(source_dir: Path) -> None
 
         assert run_total(project, run) == cost
         assert chapter_total(project).micro() == 12300 + 64875 + 15006
+
+
+# -- MT-103 AC-2: a chapter-level call has no page -----------------------------
+#
+# The glossary pre-pass (MT-105) and the consistency pass (MT-115) are calls
+# about the chapter, not a page: `record_call(..., None, ...)` writes
+# `page_id NULL`. `chapter_total` and `run_total` count it - it was spent -
+# and `chapter_call_costs` does **not**, because its rows are `Budget.project`'s
+# per-page samples (MT-103 `## Context`): a $0.50 pass averaged into two priced
+# pages would triple the projection. The two halves are separate tests on
+# purpose: DV-1 removes the `page_id IS NOT NULL` filter and expects exactly
+# `test_a_chapter_level_call_is_not_a_page_sample` to go red while
+# `test_the_chapter_total_counts_page_and_chapter_rows_alike` stays green.
+
+#: AC-2's two rows: one page call of $0.03 and one chapter call of $0.50.
+_PAGE_MICRO = 30_000
+_CHAPTER_MICRO = 500_000
+
+
+def _priced(micro: int, *, pricing: Pricing = "standard") -> CostRecord:
+    """A `CostRecord` costing exactly `micro`, built directly so the expected
+    figures are the literals above rather than the output of `price`."""
+    return CostRecord(
+        model_id="gemini-3.1-pro-preview",
+        input_tokens=10_000,
+        output_tokens=2_000,
+        cache_write_tokens=0,
+        cache_read_tokens=0,
+        cost=Usd.from_micro(micro),
+        rate_table_version=RATE_TABLE_VERSION,
+        pricing=pricing,
+    )
+
+
+def _page_and_chapter_rows(project: Project, run_id: int) -> None:
+    record_call(project, run_id, 0, "req-page", _priced(_PAGE_MICRO))
+    record_call(project, run_id, None, "req-chapter", _priced(_CHAPTER_MICRO))
+
+
+def test_a_chapter_level_call_is_recorded_with_no_page(
+    project: Project, db_path: Path, run_id: int
+) -> None:
+    """**AC-2**: `ordinal=None` stores `page_id NULL` - not page 0, not a
+    sentinel id - with the run, request, cost and pricing of the record."""
+    _page_and_chapter_rows(project, run_id)
+
+    assert _raw(
+        db_path,
+        "SELECT request_id, run_id, page_id IS NULL, cost_micro_usd, pricing"
+        " FROM llm_call ORDER BY id",
+    ) == [
+        ("req-page", run_id, 0, _PAGE_MICRO, "standard"),
+        ("req-chapter", run_id, 1, _CHAPTER_MICRO, "standard"),
+    ]
+
+
+def test_a_chapter_level_call_is_not_a_page_sample(project: Project, run_id: int) -> None:
+    """**AC-2**: with one page row of $0.03 and one chapter row of $0.50,
+    `chapter_call_costs` is `($0.03,)` - the guard's samples are pages only.
+    This is the assertion DV-1's mutation must turn red."""
+    _page_and_chapter_rows(project, run_id)
+
+    assert chapter_call_costs(project) == (Usd.from_micro(_PAGE_MICRO),)
+
+
+def test_the_chapter_total_counts_page_and_chapter_rows_alike(
+    project: Project, run_id: int
+) -> None:
+    """**AC-2**: `chapter_total` is `$0.53` - every row, the chapter one
+    included. Independent of the sample filter: DV-1's mutation leaves it
+    green."""
+    _page_and_chapter_rows(project, run_id)
+
+    assert chapter_total(project) == Usd.from_micro(_PAGE_MICRO + _CHAPTER_MICRO)
+    assert chapter_total(project).amount == Decimal("0.53")
+
+
+def test_the_run_total_counts_the_chapter_row_of_that_run_only(
+    project: Project, run_id: int
+) -> None:
+    """**AC-2**: `run_total` includes the chapter row of its own run, and a
+    chapter row of another run stays out of it."""
+    _page_and_chapter_rows(project, run_id)
+    other = _open_run(project, "2026-09-18T11:00:00+00:00")
+    record_call(project, other, None, "req-other-chapter", _priced(70_000))
+
+    assert run_total(project, run_id) == Usd.from_micro(_PAGE_MICRO + _CHAPTER_MICRO)
+    assert run_total(project, other) == Usd.from_micro(70_000)
+    assert chapter_total(project) == Usd.from_micro(_PAGE_MICRO + _CHAPTER_MICRO + 70_000)
+
+
+def test_page_samples_keep_their_order_around_a_chapter_row(project: Project, run_id: int) -> None:
+    """Many: page, chapter, page - the samples are the two page rows, oldest
+    first, so the filter drops a row rather than reordering or truncating."""
+    record_call(project, run_id, 2, "req-p2", _priced(11_000))
+    record_call(project, run_id, None, "req-glossary", _priced(_CHAPTER_MICRO))
+    record_call(project, run_id, 1, "req-p1", _priced(22_000))
+
+    assert chapter_call_costs(project) == (Usd.from_micro(11_000), Usd.from_micro(22_000))
+
+
+def test_a_ledger_of_only_chapter_rows_has_no_page_samples_but_a_total(
+    project: Project, run_id: int
+) -> None:
+    """The empty edge: a chapter whose only call so far is the pre-pass has
+    no samples - the projection stays on its estimate - and has spent $0.50."""
+    record_call(project, run_id, None, "req-glossary", _priced(_CHAPTER_MICRO))
+
+    assert chapter_call_costs(project) == ()
+    assert chapter_total(project) == Usd.from_micro(_CHAPTER_MICRO)
+
+
+# -- MT-103 AC-3: the pricing tier is on the row --------------------------------
+
+
+def test_a_batch_priced_call_is_stored_as_batch(
+    project: Project, db_path: Path, run_id: int
+) -> None:
+    """**AC-3**: `record.pricing` is stored verbatim, read by a plain reader."""
+    record_call(project, run_id, 0, "req-batch", _priced(_PAGE_MICRO, pricing="batch"))
+
+    assert _raw(db_path, "SELECT request_id, pricing FROM llm_call") == [("req-batch", "batch")]
+
+
+def test_a_standard_priced_call_is_stored_as_standard(
+    project: Project, db_path: Path, run_id: int
+) -> None:
+    """The control for the test above, in the same ledger: a writer that
+    stored `'batch'` for everything, or the column's DEFAULT for everything,
+    fails one of the two rows."""
+    record_call(project, run_id, 0, "req-batch", _priced(_PAGE_MICRO, pricing="batch"))
+    record_call(project, run_id, 1, "req-standard", _priced(_PAGE_MICRO))
+
+    assert _raw(db_path, "SELECT request_id, pricing FROM llm_call ORDER BY id") == [
+        ("req-batch", "batch"),
+        ("req-standard", "standard"),
+    ]
+
+
+def test_a_batch_row_still_refuses_update_and_delete(
+    project: Project, db_path: Path, run_id: int
+) -> None:
+    """**AC-3**: the append-only triggers cover the new column too - a tier
+    cannot be rewritten after the fact - and a `DELETE` is still refused.
+    `test_the_same_statements_against_another_table_still_succeed` above is
+    the negative control on a fresh file."""
+    record_call(project, run_id, 0, "req-batch", _priced(_PAGE_MICRO, pricing="batch"))
+
+    with pytest.raises(sqlite3.IntegrityError) as excinfo:
+        _raw(db_path, "UPDATE llm_call SET pricing = 'standard' WHERE request_id = 'req-batch'")
+    assert "append-only" in str(excinfo.value), str(excinfo.value)
+
+    with pytest.raises(sqlite3.IntegrityError) as excinfo:
+        _raw(db_path, "DELETE FROM llm_call WHERE request_id = 'req-batch'")
+    assert "append-only" in str(excinfo.value), str(excinfo.value)
+
+    assert _raw(db_path, "SELECT pricing FROM llm_call") == [("batch",)]

@@ -22,7 +22,15 @@ directions.
 is the page's identity for the whole product (MT-004) and is what a caller in
 `pipeline` has; `llm_call.page_id` is a foreign key to `page.id`. Storing one
 where the other belongs agrees with itself on any chapter whose first page id
-happens to be 0 and points at the wrong page everywhere else.
+happens to be 0 and points at the wrong page everywhere else. **`None` is a
+chapter-level call** (MT-103 AC-2): the glossary pre-pass and the consistency
+pass are about no page, and their row stores `page_id` NULL.
+
+**A chapter-level row is spend, not a page sample.** `chapter_total` and
+`run_total` count every row; `chapter_call_costs`, which feeds
+`Budget.project` as per-page samples, counts page rows only. A $0.50 glossary
+pass averaged into two priced pages of $0.03 would triple the projection
+(MT-103 `## Context`).
 
 **`at` is stamped here** and is not a parameter: `llm_call.at` is NOT NULL, and
 an aware ISO-8601 instant is the shape `create_project` and `pipeline/runner.py`
@@ -45,11 +53,13 @@ __all__ = ["chapter_call_costs", "chapter_total", "record_call", "run_total"]
 #: the factor-of-12.5 swap `domain/translation.py` warns about cannot happen.
 #: `rate_table_version` is supplied explicitly: the column's `DEFAULT ''` exists
 #: for rows that genuinely do not know, and a freshly priced call knows.
+#: `pricing` likewise (MT-103 AC-3): its `DEFAULT 'standard'` is the truth about
+#: a migrated row, and a batch-priced call left to it would be stored as a lie.
 _INSERT_CALL = (
     "INSERT INTO llm_call (run_id, page_id, request_id, model_id, input_tokens,"
     " output_tokens, cache_write_tokens, cache_read_tokens, cost_micro_usd,"
-    " rate_table_version, at)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    " rate_table_version, at, pricing)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 _SELECT_PAGE_ID = "SELECT id FROM page WHERE ordinal = ?"
@@ -74,29 +84,35 @@ _SELECT_RUN_TOTAL = f"{_SELECT_TOTAL} WHERE run_id = ?"
 #: `ORDER BY id` and not unordered, for `_SELECT_PAGES`' reason: `Budget.project`
 #: takes a mean and is order-insensitive *today*, and a SELECT without an ORDER
 #: BY is nondeterministic by contract even when it happens to come back sorted.
-_SELECT_CALL_COSTS = "SELECT cost_micro_usd FROM llm_call ORDER BY id"
+#:
+#: `page_id IS NOT NULL` is MT-103's guard decision (AC-2, DV-1): a sample is a
+#: page's cost, and a chapter-level call is not one.
+_SELECT_CALL_COSTS = "SELECT cost_micro_usd FROM llm_call WHERE page_id IS NOT NULL ORDER BY id"
 
 
 def record_call(
     project: Project,
     run_id: int,
-    ordinal: int,
+    ordinal: int | None,
     request_id: str,
     record: CostRecord,
 ) -> None:
-    """Append one priced call to the ledger, against a run and a page ordinal.
+    """Append one priced call to the ledger, against a run and a page ordinal
+    - or `None`, for a call about the whole chapter (MT-103 AC-2).
 
     The cost is stored as `record.cost.micro()` - a whole number of
-    micro-dollars - and the rate table that priced it travels with it, because
-    a ledger that cannot say which table priced a call cannot be reconciled
-    against the provider's bill.
+    micro-dollars - and the rate table and the tier that priced it travel with
+    it, because a ledger that cannot say which rate priced a call cannot be
+    reconciled against the provider's bill.
 
     Nothing here is idempotent and nothing deduplicates: the same page retried
     with the same model and the same counts is a **second bill**, not a
     duplicate row, and `llm_call` carries no UNIQUE key for that reason.
     """
     with project.transaction() as cursor:
-        page_id = cursor.execute(_SELECT_PAGE_ID, (ordinal,)).fetchone()[0]
+        page_id = (
+            None if ordinal is None else cursor.execute(_SELECT_PAGE_ID, (ordinal,)).fetchone()[0]
+        )
         cursor.execute(
             _INSERT_CALL,
             (
@@ -111,6 +127,7 @@ def record_call(
                 record.cost.micro(),
                 record.rate_table_version,
                 datetime.now(UTC).isoformat(),
+                record.pricing,
             ),
         )
 
@@ -119,14 +136,15 @@ def chapter_total(project: Project) -> Usd:
     """What this chapter has spent, across **every** run of it (AC-6).
 
     One project file is one chapter, so every ledger row in it belongs to that
-    chapter; the sum is deliberately unqualified.
+    chapter; the sum is deliberately unqualified, chapter-level rows included.
     """
     with project.transaction() as cursor:
         return Usd.from_micro(int(cursor.execute(_SELECT_TOTAL).fetchone()[0]))
 
 
 def chapter_call_costs(project: Project) -> tuple[Usd, ...]:
-    """Every priced call of this chapter, oldest first - the guard's samples.
+    """Every priced **page** call of this chapter, oldest first - the guard's
+    samples. Chapter-level rows are spend but not samples (MT-103 AC-2).
 
     The individual costs and not the total, because `Budget.project` needs a
     *sample count* as well as a sum: fewer than `MIN_SAMPLES_FOR_PROJECTION`
@@ -141,6 +159,7 @@ def chapter_call_costs(project: Project) -> tuple[Usd, ...]:
 
 
 def run_total(project: Project, run_id: int) -> Usd:
-    """What one run of this chapter spent. The per-run view, not the budget."""
+    """What one run of this chapter spent, chapter-level rows included. The
+    per-run view, not the budget."""
     with project.transaction() as cursor:
         return Usd.from_micro(int(cursor.execute(_SELECT_RUN_TOTAL, (run_id,)).fetchone()[0]))

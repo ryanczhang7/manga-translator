@@ -114,6 +114,11 @@ _CHAPTER_COLUMNS_V4: tuple[str, ...] = (
     "rate_table_version",
 )
 
+#: The `chapter` table at version 10 (MT-103 PO-3): version 4's columns in
+#: the same order, plus `glossary_proposed_at` appended by the v9 -> v10 step.
+#: What a fresh file, and a v3 file once opened, holds today.
+_CHAPTER_COLUMNS_V10: tuple[str, ...] = (*_CHAPTER_COLUMNS_V4, "glossary_proposed_at")
+
 #: The three tables that cascade off `chapter`. Named explicitly rather than
 #: discovered, because a migration that dropped one of them entirely would make
 #: a discovered list agree with the damage.
@@ -380,7 +385,7 @@ def _migrating(
             " no migration ran, and every metric below is vacuously satisfied by a"
             " file nobody rebuilt"
         )
-        assert _columns(db_path, "chapter") == _CHAPTER_COLUMNS_V4
+        assert _columns(db_path, "chapter") == _CHAPTER_COLUMNS_V10
         yield project, db_path, before
 
 
@@ -441,7 +446,8 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     # MT-065 C-2 takes it to 7: `cleaned_page`.
     # MT-118 C-2 takes it to 8: `region.excluded`.
     # MT-119 C-4 takes it to 9: `cleaned_page.erased`.
-    assert SCHEMA_VERSION == 9
+    # MT-103 PO-3 takes it to 10: chapter-level ledger rows, `pricing`, two tables.
+    assert SCHEMA_VERSION == 10
     assert _user_version(db_path) == SCHEMA_VERSION
     assert _raw(db_path, "SELECT schema_version FROM chapter") == [(SCHEMA_VERSION,)]
 
@@ -459,7 +465,7 @@ def test_a_freshly_created_chapter_table_has_the_ceiling_column_in_position_six(
     """
     db_path = project_dir_for(source_dir) / "project.db"
 
-    assert _columns(db_path, "chapter") == _CHAPTER_COLUMNS_V4
+    assert _columns(db_path, "chapter") == _CHAPTER_COLUMNS_V10
     assert _columns(db_path, "chapter")[5] == "budget_ceiling_micro_usd"
     assert "budget_ceiling_usd" not in _columns(db_path, "chapter")
     assert _raw(
@@ -514,7 +520,7 @@ def test_a_version_three_file_is_migrated_to_the_current_version_when_it_is_open
 
     assert _user_version(db_path) == SCHEMA_VERSION
     assert _raw(db_path, "SELECT schema_version FROM chapter") == [(SCHEMA_VERSION,)]
-    assert _columns(db_path, "chapter") == _CHAPTER_COLUMNS_V4
+    assert _columns(db_path, "chapter") == _CHAPTER_COLUMNS_V10
 
 
 def test_the_rebuild_preserves_the_project_on_all_four_counts(source_dir: Path) -> None:
@@ -728,7 +734,7 @@ def test_a_migrated_chapter_table_is_the_same_table_as_a_freshly_created_one(
 
     shape = "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('chapter')"
     assert _raw(migrated_db, shape) == _raw(fresh_db, shape)
-    assert _columns(migrated_db, "chapter") == _CHAPTER_COLUMNS_V4
+    assert _columns(migrated_db, "chapter") == _CHAPTER_COLUMNS_V10
 
 
 #: Every schema object the v3 -> v4 step has no business touching. `glossary` is
@@ -741,9 +747,14 @@ def test_a_migrated_chapter_table_is_the_same_table_as_a_freshly_created_one(
 #: purpose (C-2), and `tests/core/test_schema_v7.py` asserts what that step does.
 #: `region` is excluded since MT-118: the v7 -> v8 step ALTERs it on purpose (C-2),
 #: and `tests/core/test_schema_v8.py` asserts what that step does.
+#: `batch_job` and `correction` are excluded since MT-103: the v9 -> v10 step
+#: creates them on purpose, and the `llm_call` table too, which that step
+#: rebuilds to make `page_id` nullable; its two triggers are still compared, by
+#: name and text. `tests/core/test_schema_v10.py` asserts what that step does.
 _UNTOUCHED_BY_THE_V4_STEP = (
     "SELECT name, sql FROM sqlite_master"
-    " WHERE name NOT IN ('chapter', 'cleaned_page', 'glossary', 'line', 'region')"
+    " WHERE name NOT IN ('batch_job', 'chapter', 'cleaned_page', 'correction', 'glossary',"
+    " 'line', 'llm_call', 'region')"
 )
 
 
