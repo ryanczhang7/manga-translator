@@ -2,7 +2,7 @@
 id: EPIC-11
 title: Running the chapter again - a stopped or invalidated run resumes from the workspace
 status: todo
-stories: [MT-124, MT-125, MT-127]
+stories: [MT-124, MT-125, MT-127, MT-128, MT-129]
 ---
 
 *Added 2026-10-30 by lead-po on Claude Fable 5.1, from two things the user hit.
@@ -103,6 +103,13 @@ and nothing else.
   the confirm dialog built from MT-124's preview, the run on a worker with the
   progress panel in the workspace body, the body back and reloaded when it
   ends, and cancel-on-close. Depends on MT-124.
+- **MT-128** - (filed by the EPIC-11 mutation audit, 2026-11-01) tests only:
+  Run again and Render pages each refuse to start while the other is in
+  flight - four guards in `workspace.py` no test pins, one reachable by a
+  click during a bake. `docs/wiki/audits/EPIC-11-2026-11-01.md`.
+- **MT-129** - (same audit) tests only: the run hand-over parks focus before
+  hiding the body, a one-page chapter is announced singular, and a second
+  Run again leaves one dialog. Lower priority than MT-128.
 
 ## Deliberately not in this epic
 
