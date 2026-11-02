@@ -282,3 +282,47 @@ def test_a_real_run_drives_the_panels_cost_readout_page_by_page(qtbot, tmp_path:
     assert panel.cost_readout.state() == "normal"
     assert panel.cost_readout.budget_label.text() == "of $2.00"
     assert panel.cost_readout.projection_label.text() == "~$0.14 projected (from 3 pages)"
+
+
+# =============================================================================
+# MT-105: a chapter-level CallPriced (ordinal None) - the glossary pre-pass
+# =============================================================================
+
+#: The pre-pass's bill, announced before `PageStarted(0)`: no page names it.
+_CHAPTER_EVENT = CallPriced(
+    ordinal=None,  # type: ignore[arg-type]
+    spent=usd("0.14"),
+    ceiling=_EVENT_CEILING,
+    projection=_PROJECTION,
+)
+
+
+def test_a_chapter_level_call_priced_shows_its_spend_before_any_page_starts(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """**Green on arrival**, a regression guard: nothing in the panel reads
+    `CallPriced.ordinal` today. Earned by a probe recorded in MT-105's
+    `## Handoff` - a panel that read the ordinal (`event.ordinal + 1`) fails
+    here with a `TypeError`."""
+    panel = _panel(qtbot)
+    panel.on_event(RunStarted(run_id=1, page_count=20))
+    label_before = panel.overall_label.text()
+
+    panel.on_event(_CHAPTER_EVENT)
+
+    assert panel.cost_readout.figure.text() == "$0.14", (
+        "a chapter-level CallPriced did not reach the cost readout"
+    )
+    assert panel.cost_readout.budget_label.text() == "of $5.00"
+    assert panel.overall_label.text() == label_before, (
+        "a chapter-level call moved the page label; it names no page"
+    )
+
+
+def test_page_one_starts_normally_after_a_chapter_level_call_priced(qtbot) -> None:  # type: ignore[no-untyped-def]
+    panel = _panel(qtbot)
+    panel.on_event(RunStarted(run_id=1, page_count=20))
+    panel.on_event(_CHAPTER_EVENT)
+
+    panel.on_event(PageStarted(ordinal=0))
+
+    assert panel.overall_label.text() == "Page 1 of 20"
+    assert panel.cost_readout.figure.text() == "$0.14", "page 1's start reset the readout"

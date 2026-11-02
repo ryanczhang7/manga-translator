@@ -134,11 +134,15 @@ class PipelineRecorder:
         self.calls: list[tuple[Path, dict[str, Any]]] = []
         self.raise_after = raise_after
 
-    def __call__(self, models_dir: Path, **kwargs: Any) -> tuple[()]:
+    def __call__(self, models_dir: Path, **kwargs: Any) -> object:
         self.calls.append((models_dir, dict(kwargs)))
         if self.raise_after is not None:
             raise self.raise_after
-        return ()
+        # MT-105: `build_pipeline` returns `Pipeline(stages, prelude)`. Imported
+        # here so that its absence in RED fails only the tests that build.
+        from mangatl.pipeline.prelude import Pipeline  # type: ignore[import-not-found]
+
+        return Pipeline(stages=(), prelude=None)
 
 
 def _record_pipeline(

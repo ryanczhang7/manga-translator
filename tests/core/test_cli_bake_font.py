@@ -27,7 +27,7 @@ from _bake_world import Spec
 from _font_fixtures import BOXY
 
 from mangatl.cli import main
-from mangatl.pipeline.stage import PageContext, Stage
+from mangatl.pipeline.stage import PageContext
 from mangatl.store.project import PAGE_DONE
 
 _MODELS_ENV = "MANGATL_MODELS"
@@ -65,8 +65,12 @@ def _no_ambient_models_directory(monkeypatch: pytest.MonkeyPatch) -> None:
 def _seeding_root(monkeypatch: pytest.MonkeyPatch) -> None:
     def build(
         models_dir: Path, *, translate: bool | None = None, selection: object = None
-    ) -> tuple[Stage, ...]:
-        return (_SeedingStage(),)
+    ) -> object:
+        # MT-105: `build_pipeline` returns `Pipeline(stages, prelude)`; imported
+        # here so that its absence in RED fails these tests one at a time.
+        from mangatl.pipeline.prelude import Pipeline  # type: ignore[import-not-found]
+
+        return Pipeline(stages=(_SeedingStage(),), prelude=None)
 
     monkeypatch.setattr("mangatl.cli.build_pipeline", build)
 

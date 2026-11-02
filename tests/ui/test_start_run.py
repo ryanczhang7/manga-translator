@@ -1582,9 +1582,13 @@ def test_build_stages_is_build_pipeline_with_translation_on(
 
     def fake_build_pipeline(
         models_dir: Path, *, translate: bool, selection: object = unset
-    ) -> tuple[Stage, ...]:
+    ) -> object:
         seen.append((models_dir, translate, selection))
-        return (stage,)
+        # MT-105: `build_pipeline` returns `Pipeline(stages, prelude)`; the
+        # window's `build_stages` still hands back the stage tuple.
+        from mangatl.pipeline.prelude import Pipeline  # type: ignore[import-not-found]
+
+        return Pipeline(stages=(stage,), prelude=None)
 
     monkeypatch.setattr(compose_module, "build_pipeline", fake_build_pipeline)
 
