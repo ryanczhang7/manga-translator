@@ -204,12 +204,16 @@ def build_stages(models_dir: Path) -> tuple[Stage, ...]:
     provider selected from the environment plus the stored key.
 
     `select_provider` refuses (`NoApiKey`, ...) before `build_pipeline` is
-    called, so a refused Start loads no weight."""
+    called, so a refused Start loads no weight.
+
+    The stages only: the window's run does not carry the pipeline's chapter
+    step yet (MT-105 PO-5; MT-130 wires it), so a Gemini run started from the
+    window skips the glossary pre-pass."""
     from mangatl.compose import build_pipeline
 
     env = translation_env(os.environ, settings_path())
     selection = select_provider(os.environ.get(PROVIDER_VAR) or None, env)
-    return build_pipeline(models_dir, translate=True, selection=selection)
+    return build_pipeline(models_dir, translate=True, selection=selection).stages
 
 
 def selected_model() -> str:

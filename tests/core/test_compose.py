@@ -52,12 +52,12 @@ from __future__ import annotations
 import ast
 import inspect
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
@@ -537,7 +537,7 @@ def test_the_no_translate_flag_builds_detect_clean_and_ocr_and_constructs_no_cli
     weights still load, because the run still detects, cleans and transcribes
     (the inpainter's load under the flag is the parametrised test below).
     """
-    stages = build_pipeline(weights_dir, translate=False)
+    stages = build_pipeline(weights_dir, translate=False).stages
 
     assert [type(stage) for stage in stages] == [DetectStage, CleanStage, OcrStage], (
         f"--no-translate built {[type(stage).__name__ for stage in stages]};"
@@ -591,7 +591,7 @@ def test_the_unflagged_build_still_translates_and_constructs_exactly_one_client(
     refuses, so the provider is explicit - and AC-6's first half is exactly
     this: `selection=anthropic` binds one `Anthropic()`, as today.
     """
-    stages = build_pipeline(weights_dir, selection=_selection("anthropic"))
+    stages = build_pipeline(weights_dir, selection=_selection("anthropic")).stages
 
     assert [type(stage) for stage in stages] == [
         DetectStage,
@@ -633,7 +633,7 @@ def test_the_flagged_build_needs_no_api_key_in_the_environment(
     `tests/integration/test_pipeline_chapter.py`'s, on a machine with the
     weights.
     """
-    stages = build_pipeline(weights_dir, translate=False)
+    stages = build_pipeline(weights_dir, translate=False).stages
 
     assert len(stages) == 3
     assert _API_KEY_ENV not in os.environ, "the premise of this test was not established"
@@ -701,7 +701,7 @@ def test_an_anthropic_selection_binds_translate_page_to_one_bare_anthropic_clien
     out of the environment either: the selection is the only source, and it is
     ignored for Claude in this story.
     """
-    stages = build_pipeline(weights_dir, selection=_selection("anthropic", "sk-SECRET-ant"))
+    stages = build_pipeline(weights_dir, selection=_selection("anthropic", "sk-SECRET-ant")).stages
 
     assert [type(stage) for stage in stages] == [
         DetectStage,
@@ -739,7 +739,7 @@ def test_a_gemini_selection_binds_the_gemini_adapter_to_one_client_built_with_it
     `keyless` is in force, so the selection is the only place the key can come
     from.
     """
-    stages = build_pipeline(weights_dir, selection=_selection("gemini", "g-SECRET-key"))
+    stages = build_pipeline(weights_dir, selection=_selection("gemini", "g-SECRET-key")).stages
 
     from mangatl.translate import gemini
 
@@ -790,7 +790,7 @@ def test_the_translate_stage_is_built_with_the_selected_models_page_estimate(
     translate stage, so the guard a Gemini run consults projects $0.03 a page
     and a Claude run $0.06. A root that passed `BOOTSTRAP_PAGE_ESTIMATE` (or
     nothing, letting `Budget()` default) would show $0.06 for Gemini."""
-    stages = build_pipeline(weights_dir, selection=_selection(provider))
+    stages = build_pipeline(weights_dir, selection=_selection(provider)).stages
 
     (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
     assert translate_stage.page_estimate == Usd.from_micro(micro), (
@@ -811,7 +811,7 @@ def test_with_no_selection_a_lone_gemini_key_builds_the_stage_at_three_cents(
     filed for."""
     _provider_env(monkeypatch, GEMINI_API_KEY="g-SECRET-env")
 
-    stages = build_pipeline(weights_dir)
+    stages = build_pipeline(weights_dir).stages
 
     (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
     assert translate_stage.page_estimate == Usd.from_micro(_GEMINI_PAGE_MICRO)
@@ -845,7 +845,7 @@ def test_with_no_selection_a_lone_gemini_key_binds_gemini_with_that_key(
     reaches the constructor - by the selection, not by the SDK's own lookup."""
     _provider_env(monkeypatch, GEMINI_API_KEY="g-SECRET-env")
 
-    stages = build_pipeline(weights_dir)
+    stages = build_pipeline(weights_dir).stages
 
     from mangatl.translate import gemini
 
@@ -902,7 +902,7 @@ def test_an_explicit_selection_is_not_second_guessed_by_the_environment(
         MANGATL_PROVIDER="gemini",
     )
 
-    stages = build_pipeline(weights_dir, selection=_selection("anthropic"))
+    stages = build_pipeline(weights_dir, selection=_selection("anthropic")).stages
 
     assert len(stages) == 4
     assert len(client_spy.clients) == 1
@@ -919,7 +919,7 @@ def test_with_no_selection_the_one_key_in_the_environment_decides(
     explicit form of the lookup `Anthropic()` already did."""
     _provider_env(monkeypatch, ANTHROPIC_API_KEY="sk-SECRET-ant")
 
-    stages = build_pipeline(weights_dir)
+    stages = build_pipeline(weights_dir).stages
 
     assert [type(stage) for stage in stages][-1] is TranslateStage
     assert client_spy.calls == [((), {})]
@@ -991,7 +991,7 @@ def test_the_flagged_build_attempts_no_selection_at_all(
         MANGATL_PROVIDER="claude",
     )
 
-    stages = build_pipeline(weights_dir, translate=False)
+    stages = build_pipeline(weights_dir, translate=False).stages
 
     assert [type(stage) for stage in stages] == [DetectStage, CleanStage, OcrStage]
     assert client_spy.clients == []
@@ -1036,7 +1036,9 @@ def test_the_clean_stage_runs_the_loaded_inpainter_through_clean_page_image(
     page's size, and the session `load_inpainter` returned is the one that ran.
     A stage bound to anything else - a second session, a lambda, the identity -
     leaves the counter at zero."""
-    stages = build_pipeline(weights_dir, translate=translate, selection=_anthropic_if(translate))
+    stages = build_pipeline(
+        weights_dir, translate=translate, selection=_anthropic_if(translate)
+    ).stages
     (clean_stage,) = [stage for stage in stages if isinstance(stage, CleanStage)]
     (session,) = loaders.inpainters
     width, height = 64, 48
@@ -1437,3 +1439,203 @@ def test_resolving_the_bundled_directory_does_not_check_the_weights(tmp_path: Pa
 
     assert resolve_models_dir(None, {}, empty) == empty
     assert list(empty.iterdir()) == []
+
+
+# -- MT-105: the pipeline carries the glossary prelude ---------------------------
+#
+# `build_pipeline` returns `Pipeline(stages, prelude)` (`mangatl.pipeline.prelude`,
+# the Contract as amended in RED). A `gemini` selection binds
+# `glossary_prelude(partial(gemini.propose_glossary, client), model_id,
+# listing=glossary_pass_text, max_output_tokens=GLOSSARY_PASS_MAX_OUTPUT_TOKENS)`
+# around the **same** client the translator is bound to; `anthropic` and
+# `--no-translate` bind none.
+#
+# The binding is observed by behaviour, not by introspecting a closure: the
+# prelude is run over a real project with OCR stored, and the fake client's
+# `generate_content` records what it was sent and stops the call there. A
+# ceiling exactly at the pass's estimate (AC-5: `estimate_tokens` of the
+# listing in, 8,192 out, at $2 / $12 per million) reaches the client; one
+# micro-dollar below is refused before it. A root that bound the page cap
+# (4,096), another listing, or another model's rates fails one of the two.
+
+#: The rate row, read out (AC-5, settled): micro-dollars per token.
+_GEMINI_IN_MICRO = 2
+_GEMINI_OUT_MICRO = 12
+
+
+class _Reached(Exception):
+    """Raised by the fake client: the prelude got as far as the call."""
+
+
+class _FakeModels:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def generate_content(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        raise _Reached
+
+
+class _FakeGeminiClient:
+    def __init__(self) -> None:
+        self.models = _FakeModels()
+
+
+@pytest.fixture
+def gemini_client(monkeypatch: pytest.MonkeyPatch) -> list[_FakeGeminiClient]:
+    """`mangatl.compose.GeminiClient` replaced by a constructor of fakes that
+    can be called; the list is every client constructed."""
+    built: list[_FakeGeminiClient] = []
+
+    def construct(*args: object, **kwargs: object) -> _FakeGeminiClient:
+        client = _FakeGeminiClient()
+        built.append(client)
+        return client
+
+    monkeypatch.setattr("mangatl.compose.GeminiClient", construct)
+    return built
+
+
+@dataclass
+class _ReadProject:
+    project: Any
+    run_id: int
+
+    def set_ceiling(self, micro: int) -> None:
+        with self.project.transaction() as cursor:
+            cursor.execute("UPDATE chapter SET budget_ceiling_micro_usd = ?", (micro,))
+
+    def pages(self) -> list[Any]:
+        return [self.project.read_lines(page.ordinal) for page in self.project.pages()]
+
+
+@pytest.fixture
+def read_project(
+    tmp_path: Path, png_bytes: Callable[..., bytes], one_bit_png: Callable[..., bytes]
+) -> Iterator[_ReadProject]:
+    """Two pages with OCR stored on the first, and a `run` row."""
+    from mangatl.domain.line import OcrResult
+    from mangatl.store.intake import read_chapter
+    from mangatl.store.project import create_project, project_dir_for
+
+    source_dir = tmp_path / "scans"
+    source_dir.mkdir()
+    (source_dir / "p1.png").write_bytes(png_bytes(30, 20))
+    (source_dir / "p2.png").write_bytes(png_bytes(30, 20))
+    with create_project(read_chapter(source_dir), project_dir_for(source_dir)) as project:
+        ring = ((0, 0), (4, 0), (4, 4), (0, 4), (0, 0))
+        mask = one_bit_png(8, 8, [(0, 0, 4, 4)])
+        project.write_regions(
+            0, [RawRegion(polygon=ring, mask=mask, confidence=1.0, kind="bubble")]
+        )
+        project.write_lines(0, [OcrResult("ケンジ先輩、おはよう")])
+        with project.transaction() as cursor:
+            chapter_id = int(cursor.execute("SELECT id FROM chapter").fetchone()[0])
+            cursor.execute(
+                "INSERT INTO run (chapter_id, started_at) VALUES (?, ?)",
+                (chapter_id, "2026-11-02T09:00:00+00:00"),
+            )
+            run_id = int(cursor.execute("SELECT last_insert_rowid()").fetchone()[0])
+        yield _ReadProject(project, run_id)
+
+
+def _pass_estimate_micro(pages: Sequence[Any]) -> int:
+    from mangatl.domain.glossary import estimate_tokens
+    from mangatl.translate.glossary_pass import GLOSSARY_PASS_MAX_OUTPUT_TOKENS, glossary_pass_text
+
+    tokens_in = estimate_tokens(glossary_pass_text(pages))
+    return tokens_in * _GEMINI_IN_MICRO + GLOSSARY_PASS_MAX_OUTPUT_TOKENS * _GEMINI_OUT_MICRO
+
+
+def test_build_pipeline_returns_a_pipeline_of_stages_and_prelude(
+    weights_dir: Path, loaders: _Loaders, client_spy: _ClientSpy, keyless: None
+) -> None:
+    from mangatl.pipeline.prelude import Pipeline  # type: ignore[import-not-found]
+
+    pipeline = build_pipeline(weights_dir, translate=False)
+
+    assert isinstance(pipeline, Pipeline), f"build_pipeline returned {type(pipeline).__name__}"
+    assert isinstance(pipeline.stages, tuple)
+
+
+def test_a_gemini_selection_carries_a_glossary_prelude(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    gemini_client: list[_FakeGeminiClient],
+    keyless: None,
+) -> None:
+    pipeline = build_pipeline(weights_dir, selection=_selection("gemini", "g-SECRET-key"))
+
+    assert pipeline.prelude is not None, "a gemini pipeline carries no prelude"
+    assert callable(pipeline.prelude)
+    assert len(gemini_client) == 1, (
+        f"{len(gemini_client)} GeminiClients were built; the prelude and the"
+        " translator share the one client"
+    )
+
+
+@pytest.mark.parametrize(
+    ("translate", "provider"),
+    [(True, "anthropic"), (False, None)],
+    ids=["anthropic", "no-translate"],
+)
+def test_an_anthropic_or_untranslated_pipeline_carries_no_prelude(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    keyless: None,
+    translate: bool,
+    provider: str | None,
+) -> None:
+    """No Claude pass exists (v1 is Gemini-only), and `--no-translate` calls no
+    model at all."""
+    selection = _selection(provider) if provider is not None else None
+
+    pipeline = build_pipeline(weights_dir, translate=translate, selection=selection)
+
+    assert pipeline.prelude is None, f"a {provider or 'no-translate'} pipeline carries a prelude"
+
+
+def test_the_gemini_prelude_at_exactly_the_pass_estimate_reaches_the_client_with_the_listing(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    gemini_client: list[_FakeGeminiClient],
+    keyless: None,
+    read_project: _ReadProject,
+) -> None:
+    from mangatl.translate.glossary_pass import glossary_pass_text
+
+    pipeline = build_pipeline(weights_dir, selection=_selection("gemini", "g-SECRET-key"))
+    read_project.set_ceiling(_pass_estimate_micro(read_project.pages()))
+
+    with pytest.raises(_Reached):
+        pipeline.prelude(read_project.project, read_project.run_id, lambda event: None)
+
+    ((sent,),) = [client.models.calls for client in gemini_client]
+    assert sent["model"] == "gemini-3.1-pro-preview"
+    assert sent["contents"] == [glossary_pass_text(read_project.pages())], (
+        f"the pass sent {sent['contents']!r}"
+    )
+
+
+def test_the_gemini_prelude_one_micro_dollar_below_the_estimate_is_refused_before_the_client(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    gemini_client: list[_FakeGeminiClient],
+    keyless: None,
+    read_project: _ReadProject,
+) -> None:
+    from mangatl.pipeline.stage import BudgetRefused
+
+    pipeline = build_pipeline(weights_dir, selection=_selection("gemini", "g-SECRET-key"))
+    read_project.set_ceiling(_pass_estimate_micro(read_project.pages()) - 1)
+
+    with pytest.raises(BudgetRefused):
+        pipeline.prelude(read_project.project, read_project.run_id, lambda event: None)
+
+    assert [client.models.calls for client in gemini_client] == [[]], (
+        "the client was called although the guard refuses the pass"
+    )

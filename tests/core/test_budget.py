@@ -650,3 +650,65 @@ def test_a_budget_at_three_cents_puts_the_boundary_between_sixty_six_and_sixty_s
 
     assert budget.project((), 66).remaining_chapter == Usd(Decimal("1.98"))
     assert budget.project((), 67).remaining_chapter == Usd(Decimal("2.01"))
+
+
+# --- MT-105 AC-5: `call_estimate`, what one hypothetical call would cost ------
+#
+# **Settled** (the story's oracle partition): $0.298304 is read out of AC-5 -
+# 100,000 input x $2.00 + 8,192 output x $12.00, per million tokens, on the
+# gemini-3.1-pro-preview interactive row - and is not re-derived through
+# `price` here. The batch figure is the same arithmetic on the batch row
+# (`domain/rates.py`: $1.00 in, $6.00 out): 100,000 + 49,152 = 149,152 micro.
+#
+# `call_estimate` is looked up on the module inside each test rather than
+# imported at the top, so that in RED its absence fails these tests one by one
+# and leaves the rest of this file - MT-013's and MT-100's - running.
+
+_PASS_USAGE = TokenUsage(100_000, 8_192, 0, 0)
+
+
+def test_one_glossary_pass_sized_call_on_gemini_is_estimated_at_exactly_0_298304() -> None:
+    estimate = budget_module.call_estimate("gemini-3.1-pro-preview", _PASS_USAGE)  # type: ignore[attr-defined]
+
+    assert estimate == Usd(Decimal("0.298304")), (
+        f"100k in x $2 + 8,192 out x $12 per million is $0.298304; call_estimate said {estimate!r}"
+    )
+    assert estimate.micro() == 298_304
+
+
+def test_a_call_estimate_is_not_rounded_up_to_the_cent_as_a_page_estimate_is() -> None:
+    """`page_estimate` rounds up to the cent; `call_estimate` is `price`'s cost
+    and nothing more. $0.298304 rounded up would be $0.30."""
+    estimate = budget_module.call_estimate("gemini-3.1-pro-preview", _PASS_USAGE)  # type: ignore[attr-defined]
+
+    assert estimate != Usd(Decimal("0.30"))
+    assert estimate == price("gemini-3.1-pro-preview", _PASS_USAGE).cost
+
+
+def test_a_call_estimate_defaults_to_the_interactive_row_and_reads_the_batch_row_when_asked() -> (
+    None
+):
+    call_estimate = budget_module.call_estimate  # type: ignore[attr-defined]
+
+    assert call_estimate("gemini-3.1-pro-preview", _PASS_USAGE, pricing="standard").micro() == (
+        298_304
+    )
+    assert call_estimate("gemini-3.1-pro-preview", _PASS_USAGE, pricing="batch").micro() == (
+        149_152
+    )
+
+
+def test_call_estimates_pricing_is_keyword_only() -> None:
+    with pytest.raises(TypeError):
+        budget_module.call_estimate("gemini-3.1-pro-preview", _PASS_USAGE, "batch")  # type: ignore[attr-defined]
+
+
+def test_a_call_estimate_for_an_unlisted_model_is_refused_by_name() -> None:
+    with pytest.raises(UnknownModel):
+        budget_module.call_estimate("gemini-0-not-a-model", _PASS_USAGE)  # type: ignore[attr-defined]
+
+
+def test_a_call_estimate_of_no_tokens_is_zero() -> None:
+    estimate = budget_module.call_estimate("gemini-3.1-pro-preview", TokenUsage(0, 0, 0, 0))  # type: ignore[attr-defined]
+
+    assert estimate == Usd.from_micro(0)

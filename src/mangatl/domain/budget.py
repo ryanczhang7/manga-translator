@@ -58,7 +58,7 @@ from decimal import Decimal
 from typing import Literal
 
 from mangatl.domain.money import Usd
-from mangatl.domain.rates import RATES, price
+from mangatl.domain.rates import RATES, Pricing, price
 from mangatl.domain.translation import TokenUsage
 
 __all__ = [
@@ -69,6 +69,7 @@ __all__ = [
     "Budget",
     "Decision",
     "Projection",
+    "call_estimate",
     "page_estimate",
 ]
 
@@ -102,7 +103,19 @@ def page_estimate(model_id: str) -> Usd:
     return Usd.from_micro(-(-cost.micro() // _CENT_MICRO) * _CENT_MICRO)
 
 
-#: What `Budget()` projects when no model is named: the dearest listed model's
+def call_estimate(model_id: str, usage: TokenUsage, *, pricing: Pricing = "standard") -> Usd:
+    """What one hypothetical call of `usage` would cost on `model_id` (MT-105).
+
+    `price(model_id, usage, pricing=pricing).cost`, and nothing more: unlike
+    `page_estimate` it is **not** rounded up to the cent, because the usage it
+    prices is already an upper bound - the glossary pass's input is its exact
+    estimate and its output is the request's own limit. Raises
+    `domain.rates.UnknownModel` for an unlisted id, from `price`.
+    """
+    return price(model_id, usage, pricing=pricing).cost
+
+
+#: What `Budget()` projects when no model is named:the dearest listed model's
 #: `page_estimate`, so an unnamed model errs high. $0.06 today (claude-opus-5).
 BOOTSTRAP_PAGE_ESTIMATE: Usd = max(page_estimate(model_id) for model_id in RATES)
 

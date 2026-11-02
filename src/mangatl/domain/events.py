@@ -73,9 +73,13 @@ class CallPriced:
     The numbers are the ledger's, read after the call's row was written (MT-063):
     `spent` is the chapter's total across every run, `ceiling` the chapter's
     ceiling, and `projection` covers the pages *after* this one.
+
+    `ordinal` is `None` for a chapter-level call (MT-105): the glossary
+    pre-pass, billed before page 1 with no page of its own. Its `projection`
+    covers every page of the chapter, since all of them are still ahead of it.
     """
 
-    ordinal: int
+    ordinal: int | None
     spent: Usd
     ceiling: Usd
     projection: Projection

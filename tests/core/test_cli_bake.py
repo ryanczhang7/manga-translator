@@ -33,7 +33,7 @@ from _bake_world import Spec
 
 from mangatl.cli import main
 from mangatl.domain.line import effective_text
-from mangatl.pipeline.stage import PageContext, Stage
+from mangatl.pipeline.stage import PageContext
 from mangatl.store.lines import read_review_lines
 from mangatl.store.project import PAGE_DONE, open_project, project_dir_for
 from mangatl.typeset.fit import typeset
@@ -86,8 +86,12 @@ def models_dir(tmp_path: Path) -> Path:
 def seeding_root(monkeypatch: pytest.MonkeyPatch) -> None:
     def build(
         models_dir: Path, *, translate: bool | None = None, selection: object = None
-    ) -> tuple[Stage, ...]:
-        return (_SeedingStage(),)
+    ) -> object:
+        # MT-105: `build_pipeline` returns `Pipeline(stages, prelude)`; imported
+        # here so that its absence in RED fails these tests one at a time.
+        from mangatl.pipeline.prelude import Pipeline  # type: ignore[import-not-found]
+
+        return Pipeline(stages=(_SeedingStage(),), prelude=None)
 
     monkeypatch.setattr("mangatl.cli.build_pipeline", build)
 

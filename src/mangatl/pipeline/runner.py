@@ -48,6 +48,7 @@ from mangatl.domain.events import (
     RunStarted,
     StageFinished,
 )
+from mangatl.pipeline.prelude import ChapterStep
 from mangatl.pipeline.stage import BudgetRefused, PageContext, Stage
 from mangatl.store.project import PAGE_DONE, Project
 
@@ -104,6 +105,8 @@ def run_chapter(
     stages: Sequence[Stage],
     emit: Callable[[RunEvent], None],
     cancelled: Callable[[], bool],
+    *,
+    prelude: ChapterStep | None = None,
 ) -> RunOutcome:
     """Walk every page of `project`'s chapter through `stages`, in ordinal order.
 
@@ -111,13 +114,22 @@ def run_chapter(
     `RunAborted`, and a runner that let the exception through would leave
     MT-015's worker thread dead with the progress readout stuck on the page that
     failed.
+
+    `prelude` (MT-105) is the chapter step, run once after `RunStarted` and
+    before the first page, with the run's id and its own `emit`. It fails as a
+    stage fails - `BudgetRefused` as `reason="budget"`, anything else as its
+    type and message - except that it names no page (`ordinal=None`), and the
+    run then starts no page at all.
     """
     pages = project.pages()
     run_id = _start_run(project)
     emit(RunStarted(run_id=run_id, page_count=len(pages)))
 
     progress = _Progress()
-    for page in pages:
+    if prelude is not None:
+        _run_prelude(prelude, project, run_id, emit, progress)
+    # A failed prelude has already set `reason`: no page starts after it.
+    for page in pages if progress.reason is None else ():
         if cancelled():
             progress.reason = CANCELLED
             break
@@ -138,6 +150,26 @@ def run_chapter(
         pages_done=progress.pages_done,
         aborted_reason=progress.reason,
     )
+
+
+def _run_prelude(
+    prelude: ChapterStep,
+    project: Project,
+    run_id: int,
+    emit: Callable[[RunEvent], None],
+    progress: _Progress,
+) -> None:
+    """Run the chapter step, turning a failure into the run's abort reason.
+
+    `BudgetRefused` before the general arm, for `_run_page`'s reason: it *is*
+    an `Exception`. `progress.ordinal` stays `None` - the step is no page's.
+    """
+    try:
+        prelude(project, run_id, emit)
+    except BudgetRefused:
+        progress.reason = BUDGET
+    except Exception as error:
+        progress.reason = f"{type(error).__name__}: {error}"
 
 
 def _run_page(

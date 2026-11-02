@@ -146,7 +146,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # out loud, not one it leaves to whatever the builder's default happens to
     # be on the day someone changes it.
     try:
-        stages = build_pipeline(
+        pipeline = build_pipeline(
             models_dir, translate=not arguments.no_translate, selection=selection
         )
     except ProviderError as error:
@@ -162,7 +162,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     output_dir = source_dir.with_name(source_dir.name + _OUTPUT_SUFFIX)
     with project:
         filenames = {page.ordinal: page.filename for page in project.pages()}
-        outcome = run_chapter(project, stages, _reporter(filenames), _never)
+        outcome = run_chapter(
+            project, pipeline.stages, _reporter(filenames), _never, prelude=pipeline.prelude
+        )
         if outcome.outcome != RUN_FINISHED:
             return _fail(f"run aborted: {outcome.aborted_reason}")
         report = bake_chapter(project, output_dir)

@@ -136,6 +136,9 @@ class _CompositionRoot:
         #: MT-078 C-3: `selection=` as `main` passed it, or `None` where it passed none.
         self.selections: list[object] = []
         self.stage = _CountingStage()
+        #: MT-105: the chapter step the built pipeline carries; `None` unless a
+        #: test hands one in.
+        self.prelude: object = None
 
     def __call__(
         self,
@@ -143,11 +146,21 @@ class _CompositionRoot:
         *,
         translate: bool | None = None,
         selection: object = None,
-    ) -> tuple[Stage, ...]:
+    ) -> object:
         self.models_dirs.append(models_dir)
         self.translate_flags.append(translate)
         self.selections.append(selection)
-        return (self.stage,)
+        return _pipeline((self.stage,), self.prelude)
+
+
+def _pipeline(stages: tuple[Stage, ...], prelude: object = None) -> object:
+    """`Pipeline(stages, prelude)`, what `build_pipeline` returns from MT-105 on.
+
+    Imported at call time: `mangatl.pipeline.prelude` does not exist in RED, and a
+    top-level import would take every test in this file dark with it."""
+    from mangatl.pipeline.prelude import Pipeline  # type: ignore[import-not-found]
+
+    return Pipeline(stages=stages, prelude=prelude)
 
 
 def _bundle_at(monkeypatch: pytest.MonkeyPatch, directory: Path) -> None:
@@ -487,6 +500,32 @@ def test_the_cli_runs_the_stages_the_composition_root_built(
         "the stages the composition root built were not the stages the run walked;"
         f" the built stage ran on {composition_root.stage.ran}"
     )
+
+
+def test_the_cli_runs_the_pipelines_prelude_once_before_the_first_page(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**MT-105**: `mangatl-run` hands `run_chapter` the prelude the composition
+    root built, so a Gemini run proposes its glossary from the CLI too. The step
+    records what it was handed and what the stage had run by then."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    calls: list[tuple[object, int, list[int]]] = []
+
+    def prelude(project: object, run_id: int, emit: object) -> None:
+        calls.append((project, run_id, list(composition_root.stage.ran)))
+
+    composition_root.prelude = prelude
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    assert len(calls) == 1, f"the prelude ran {len(calls)} times; once per run"
+    ((_, run_id, ran_before),) = calls
+    assert ran_before == [], f"page stages ran before the prelude: {ran_before}"
+    assert isinstance(run_id, int)
+    assert composition_root.stage.ran == list(range(len(_SOURCE_PAGES)))
 
 
 def test_the_cli_no_longer_reaches_for_the_pass_through_stage() -> None:
@@ -1112,7 +1151,7 @@ def test_the_composition_root_is_asked_before_the_project_is_created(
     root = _CompositionRoot()
     seen: list[bool] = []
 
-    def build(models_dir: Path, **keywords: object) -> tuple[Stage, ...]:
+    def build(models_dir: Path, **keywords: object) -> object:
         seen.append(project_dir_for(source_dir).exists())
         return root(models_dir, **keywords)  # type: ignore[arg-type]
 

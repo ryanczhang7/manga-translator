@@ -71,11 +71,12 @@ from mangatl.domain.money import Usd
 from mangatl.models.providers import PROVIDER_PREFERENCE, select_providers
 from mangatl.ocr.page import transcribe_page_regions
 from mangatl.ocr.session import VOCAB_FILENAME, load_ocr, load_vocab
-from mangatl.pipeline.stage import Stage
+from mangatl.pipeline.prelude import ChapterStep, Pipeline, glossary_prelude
 from mangatl.pipeline.stages import build_stages
 from mangatl.pipeline.translate_stage import PageTranslator
 from mangatl.translate import gemini
 from mangatl.translate.client import translate_page
+from mangatl.translate.glossary_pass import GLOSSARY_PASS_MAX_OUTPUT_TOKENS, glossary_pass_text
 from mangatl.translate.provider import (
     PROVIDER_VAR,
     ProviderUnavailable,
@@ -189,7 +190,7 @@ def resolve_models_dir(
 
 def build_pipeline(
     models_dir: Path, *, translate: bool = True, selection: Selection | None = None
-) -> tuple[Stage, ...]:
+) -> Pipeline:
     """Load the weights out of `models_dir` and bind them into the stage list.
 
     The one function in the project that may construct an inference session or
@@ -237,13 +238,21 @@ def build_pipeline(
     passed explicitly, never the SDK's own two-variable lookup. Every other
     provider (`openai`) is `ProviderUnavailable` until its adapter story adds
     an arm to the `match` (PO-5).
+
+    **The return is a `Pipeline`** (MT-105 RED-A2): the stage tuple and the
+    chapter step to run before page 1. Gemini's step is the glossary pre-pass,
+    `glossary_prelude(partial(gemini.propose_glossary, client), model_id, ...)`
+    bound around the **same** `GeminiClient` the page translator holds - one
+    client, one key. Anthropic has no pass (v1 is Gemini-only) and
+    `translate=False` makes no call at all, so both carry `prelude=None`.
     """
     translator: PageTranslator | None = None
+    prelude: ChapterStep | None = None
     estimate: Usd | None = None
     if translate:
         if selection is None:
             selection = select_provider(os.environ.get(PROVIDER_VAR) or None, os.environ)
-        translator = _translator(selection)
+        translator, prelude = _translator(selection)
         # MT-100 C-4: the guard's per-page estimate is the selected model's,
         # computed once here - the figure the window's summary shows.
         estimate = page_estimate(model_for(selection.provider))
@@ -254,25 +263,34 @@ def build_pipeline(
     vocab = load_vocab(ocr_dir / VOCAB_FILENAME)
     inpainter = load_inpainter(models_dir / INPAINTER_FILENAME, providers)
     _log.info("inference provider: %s", selected_provider(detector))
-    return build_stages(
+    stages = build_stages(
         partial(detect_page_regions, detector),
         partial(clean_page_image, inpainter),
         partial(transcribe_page_regions, ocr, vocab),
         translator,
         estimate,
     )
+    return Pipeline(stages=stages, prelude=prelude)
 
 
-def _translator(selection: Selection) -> PageTranslator:
-    """The page translator for `selection`; a `ProviderError` when there is no
-    translator to bind (its `openai` sentence is `model_for`'s, word for word)."""
+def _translator(selection: Selection) -> tuple[PageTranslator, ChapterStep | None]:
+    """The page translator for `selection` and its chapter step, if it has
+    one; a `ProviderError` when there is no translator to bind (its `openai`
+    sentence is `model_for`'s, word for word)."""
     match selection.provider:
         case "anthropic":
-            return partial(translate_page, Anthropic())
+            return partial(translate_page, Anthropic()), None
         case "gemini":
             # The key is passed explicitly (MT-080 AC-6): the SDK's own lookup
             # reads GOOGLE_API_KEY as well as GEMINI_API_KEY, and PO-1 names one.
-            return partial(gemini.translate_page, GeminiClient(api_key=selection.api_key))
+            client = GeminiClient(api_key=selection.api_key)
+            prelude = glossary_prelude(
+                partial(gemini.propose_glossary, client),
+                model_for(selection.provider),
+                listing=glossary_pass_text,
+                max_output_tokens=GLOSSARY_PASS_MAX_OUTPUT_TOKENS,
+            )
+            return partial(gemini.translate_page, client), prelude
         case other:
             raise ProviderUnavailable(f"translation with {other} is not available yet")
 

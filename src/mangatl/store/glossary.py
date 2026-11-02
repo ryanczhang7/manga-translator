@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from difflib import SequenceMatcher
 
 from mangatl.domain.glossary import GlossaryEntry, Source
-from mangatl.store.project import Project
+from mangatl.store.project import _UPDATE_GLOSSARY_PROPOSED, Project
 
-__all__ = ["read_entries", "reconcile_from_edit", "upsert"]
+__all__ = ["read_entries", "reconcile_from_edit", "upsert", "write_proposed_glossary"]
 
 #: C-6 step 1. A word with internal hyphens or apostrophes is one token -
 #: "Sakura-chan" - and every other non-space character is a token of its own,
@@ -72,6 +74,25 @@ def upsert(project: Project, entry: GlossaryEntry) -> None:
     one."""
     with project.transaction() as cursor:
         _upsert(cursor, entry)
+
+
+def write_proposed_glossary(project: Project, entries: Sequence[GlossaryEntry]) -> None:
+    """Write the glossary pre-pass's result: every entry in `entries`, and the
+    chapter's `glossary_proposed_at` marker, in **one** transaction (MT-105
+    PO-6).
+
+    `upsert` and `Project.mark_glossary_proposed` each open their own
+    transaction and `Project.transaction()` does not nest, so the two cannot be
+    composed by a caller. Separately they leave two half-states behind a crash:
+    terms with no marker (the pass runs and bills again) or a marker with no
+    terms (the pass never runs again and the chapter has no glossary). Here a
+    refused write of either rolls back both. The marker's statement is
+    `store.project`'s own, so there is one spelling of it.
+    """
+    with project.transaction() as cursor:
+        for entry in entries:
+            _upsert(cursor, entry)
+        cursor.execute(_UPDATE_GLOSSARY_PROPOSED, (datetime.now(UTC).isoformat(),))
 
 
 def reconcile_from_edit(
