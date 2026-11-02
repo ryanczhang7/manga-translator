@@ -106,6 +106,8 @@ EM = "\N{EM DASH}"
 EN = "\N{EN DASH}"
 KEY = "ANTHROPIC_API_KEY"
 MODELS = "MANGATL_MODELS"
+#: MT-107's variable, spelled out: it is a promise to a person typing it.
+CONTEXT_VAR = "MANGATL_CONTEXT_MODE"
 
 # --- Liveness bounds (see the module docstring) ----------------------------------
 #: How long the GUI waits for a run of up to `PAGES_AT_BASE` pages to reach a
@@ -1575,15 +1577,22 @@ def test_build_stages_is_build_pipeline_with_translation_on(
 
     for name in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "MANGATL_PROVIDER"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv(CONTEXT_VAR, raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-not-a-key")
     unset = object()
-    seen: list[tuple[Path, bool, object]] = []
+    seen: list[tuple[Path, bool, object, object]] = []
     stage = PassThroughStage()
 
+    # MT-107 (amended in that story's RED): `context_mode=` is passed too, and
+    # with the variable unset it is "rolling", said out loud.
     def fake_build_pipeline(
-        models_dir: Path, *, translate: bool, selection: object = unset
+        models_dir: Path,
+        *,
+        translate: bool,
+        selection: object = unset,
+        context_mode: object = unset,
     ) -> object:
-        seen.append((models_dir, translate, selection))
+        seen.append((models_dir, translate, selection, context_mode))
         # MT-105: `build_pipeline` returns `Pipeline(stages, prelude)`; the
         # window's `build_stages` still hands back the stage tuple.
         from mangatl.pipeline.prelude import Pipeline  # type: ignore[import-not-found]
@@ -1594,7 +1603,7 @@ def test_build_stages_is_build_pipeline_with_translation_on(
 
     stages = app_module.build_stages(models_dir)
 
-    assert seen == [(models_dir, True, Selection("gemini", "gemini-test-not-a-key"))]
+    assert seen == [(models_dir, True, Selection("gemini", "gemini-test-not-a-key"), "rolling")]
     assert tuple(stages) == (stage,)
 
 
@@ -1864,3 +1873,122 @@ def test_control_an_error_that_is_not_a_provider_refusal_is_not_swallowed(
         f"{_project_dir(folder).name} was created although build_stages raised; amended"
         " C-4 (A-1) builds the stages before it creates the project"
     )
+
+
+# =============================================================================
+# MT-107 AC-5 / PO-2: the window reads the context mode, and refuses a bad one
+# =============================================================================
+#
+# `app.build_stages` resolves `context_mode(os.environ.get(CONTEXT_MODE_VAR))`
+# BEFORE `select_provider`, so a bad value raises `UnknownContextMode` before
+# any selection or any weight; `MainWindow._start` catches it beside
+# `ProviderError` and shows its message. `UnknownContextMode` is imported inside
+# each test: it does not exist in RED, and a top-level import would take this
+# whole file dark.
+
+
+class _Recorder:
+    """Stands in for `select_provider` / `build_pipeline`, recording each call."""
+
+    def __init__(self, answer: object) -> None:
+        self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        self.answer = answer
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self.calls.append((args, kwargs))
+        return self.answer
+
+
+def _record_build(monkeypatch: pytest.MonkeyPatch) -> tuple[_Recorder, _Recorder]:
+    from mangatl.pipeline.prelude import Pipeline
+    from mangatl.translate.provider import Selection
+
+    for name in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "MANGATL_PROVIDER"):
+        monkeypatch.delenv(name, raising=False)
+    selector = _Recorder(Selection("gemini", "gemini-test-not-a-key"))
+    builder = _Recorder(Pipeline(stages=(PassThroughStage(),), prelude=None))
+    monkeypatch.setattr(app_module, "select_provider", selector)
+    monkeypatch.setattr(compose_module, "build_pipeline", builder)
+    return selector, builder
+
+
+@pytest.mark.parametrize(
+    ("variable", "mode"),
+    [(None, "rolling"), ("", "rolling"), ("rolling", "rolling"), ("neighbours", "neighbours")],
+    ids=["unset", "empty", "rolling", "neighbours"],
+)
+def test_the_windows_build_reads_the_context_mode_from_the_variable(
+    monkeypatch: pytest.MonkeyPatch, models_dir: Path, variable: str | None, mode: str
+) -> None:
+    """**AC-5**: "The window reads the variable the same way" - the mode
+    `app.build_stages` hands `build_pipeline` is the variable's, `rolling` when
+    it is unset or empty."""
+    _selector, builder = _record_build(monkeypatch)
+    if variable is None:
+        monkeypatch.delenv(CONTEXT_VAR, raising=False)
+    else:
+        monkeypatch.setenv(CONTEXT_VAR, variable)
+
+    app_module.build_stages(models_dir)
+
+    assert len(builder.calls) == 1, f"build_pipeline was called {len(builder.calls)} times"
+    _, kwargs = builder.calls[0]
+    assert kwargs.get("context_mode") == mode, (
+        f"build_pipeline got {kwargs}; {CONTEXT_VAR}={variable!r} is context_mode={mode!r}"
+    )
+
+
+def test_a_bad_context_mode_refuses_the_windows_build_before_any_selection_or_weight(
+    monkeypatch: pytest.MonkeyPatch, models_dir: Path
+) -> None:
+    """**AC-5 / PO-2**: `app.build_stages` with `MANGATL_CONTEXT_MODE=batch`
+    raises `UnknownContextMode` naming the value, and neither `select_provider`
+    nor `build_pipeline` was called - so nothing is selected and no weight
+    loads."""
+    from mangatl.domain.glossary import UnknownContextMode
+
+    selector, builder = _record_build(monkeypatch)
+    monkeypatch.setenv(CONTEXT_VAR, "batch")
+
+    with pytest.raises(UnknownContextMode, match="batch"):
+        app_module.build_stages(models_dir)
+
+    assert selector.calls == [], "select_provider ran before the context mode was resolved"
+    assert builder.calls == [], "build_pipeline ran: weights would have loaded"
+
+
+def test_an_unknown_context_mode_at_start_is_shown_as_the_windows_error(
+    qtbot,  # type: ignore[no-untyped-def]
+    world: World,
+    tmp_path: Path,
+    page_png: bytes,
+) -> None:
+    """**PO-2**: an `UnknownContextMode` out of the builder is a Start refusal,
+    not a crash - shown through `show_error` exactly as a `ProviderError` is
+    (mirrors `test_a_provider_refusal_at_start_is_shown_as_the_windows_error`),
+    with no run started and no project created. pytest-qt fails the test if
+    the exception escapes into Qt's event loop; the `RuntimeError` control
+    above is that mechanism's control."""
+    from mangatl.domain.glossary import UnknownContextMode
+
+    message = "unknown context mode 'batch': choose rolling or neighbours"
+
+    def refuse() -> None:
+        raise UnknownContextMode(message)
+
+    builder = Builder(on_call=refuse)
+    folder = _pages_folder(tmp_path, "ch", 2, page_png)
+    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder, _claude))
+
+    _press_start(window)
+
+    assert builder.calls == [tmp_path], "precondition: Start reached the stage builder"
+    target = window.centralWidget()
+    assert isinstance(target, FolderDropTarget), (
+        f"after an UnknownContextMode at Start the central widget is {type(target).__name__},"
+        " not the drop target's error state (PO-2: shown through show_error)"
+    )
+    assert target.state == "error"
+    assert target.headline.text() == message
+    assert window.run is None and window.run_panel is None, "a run started after the refusal"
+    assert not _project_dir(folder).exists(), "a refused Start left a project beside the scans"

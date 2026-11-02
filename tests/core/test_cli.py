@@ -139,6 +139,9 @@ class _CompositionRoot:
         #: MT-105: the chapter step the built pipeline carries; `None` unless a
         #: test hands one in.
         self.prelude: object = None
+        #: MT-107: `context_mode=` as `main` passed it, or `None` where it passed
+        #: none - the sentinel C-14's reasoning asks for (see above).
+        self.context_modes: list[object] = []
 
     def __call__(
         self,
@@ -146,10 +149,12 @@ class _CompositionRoot:
         *,
         translate: bool | None = None,
         selection: object = None,
+        context_mode: object = None,
     ) -> object:
         self.models_dirs.append(models_dir)
         self.translate_flags.append(translate)
         self.selections.append(selection)
+        self.context_modes.append(context_mode)
         return _pipeline((self.stage,), self.prelude)
 
 
@@ -197,6 +202,17 @@ def _exactly_one_provider_key(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in _PROVIDER_VARS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", _DEFAULT_KEY)
+
+
+#: MT-107's variable, spelled out for the reason `_MODELS_ENV` is.
+_CONTEXT_VAR = "MANGATL_CONTEXT_MODE"
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_context_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MT-107: `MANGATL_CONTEXT_MODE` out of the environment for every test, so
+    a developer running MT-108's measurement in their shell sees CI's runs."""
+    monkeypatch.delenv(_CONTEXT_VAR, raising=False)
 
 
 @pytest.fixture
@@ -1164,3 +1180,167 @@ def test_the_composition_root_is_asked_before_the_project_is_created(
         " before it creates, so a refusal leaves nothing behind"
     )
     assert root.stage.ran == list(range(len(_SOURCE_PAGES))), "the run did not walk the chapter"
+
+
+# -- MT-107 AC-5: choosing the context mode -------------------------------------------
+#
+# `--context`, else `MANGATL_CONTEXT_MODE`, else `rolling`; the flag beats the
+# variable as `--provider` does. `main` passes `context_mode=` to the
+# composition root on every translating call - the recorder's `None` means it
+# passed nothing, which is not "rolling" (C-14's reasoning, applied here).
+#
+# RED: `main` has no `--context` and reads no variable, so the flag cases are
+# argparse's exit 2 and the variable cases record `None`.
+
+
+def test_the_context_flag_selects_neighbours(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**AC-5**: `mangatl-run FOLDER --context neighbours` reaches
+    `build_pipeline(..., context_mode="neighbours")`."""
+    source_dir = _build_source(tmp_path, png_bytes)
+
+    code = main([str(source_dir), "--models", str(models_dir), "--context", "neighbours"])
+
+    assert code == 0
+    assert composition_root.context_modes == ["neighbours"]
+
+
+def test_the_context_variable_selects_neighbours(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    monkeypatch: pytest.MonkeyPatch,
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**AC-5**: `MANGATL_CONTEXT_MODE=neighbours` with no flag selects it."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    monkeypatch.setenv(_CONTEXT_VAR, "neighbours")
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    assert code == 0
+    assert composition_root.context_modes == ["neighbours"]
+
+
+@pytest.mark.parametrize(
+    ("flag", "variable"), [("rolling", "neighbours"), ("neighbours", "rolling")]
+)
+def test_the_context_flag_beats_the_variable(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    monkeypatch: pytest.MonkeyPatch,
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    flag: str,
+    variable: str,
+) -> None:
+    """**AC-5**: "flag beats variable, as `--provider` does", both ways round -
+    a `main` that let the variable win hands over the other mode."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    monkeypatch.setenv(_CONTEXT_VAR, variable)
+
+    code = main([str(source_dir), "--models", str(models_dir), "--context", flag])
+
+    assert code == 0
+    assert composition_root.context_modes == [flag], (
+        f"--context {flag} with {_CONTEXT_VAR}={variable} gave {composition_root.context_modes}"
+    )
+
+
+@pytest.mark.parametrize("variable", [None, ""], ids=["unset", "empty"])
+def test_with_no_flag_and_no_variable_the_context_is_rolling(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    monkeypatch: pytest.MonkeyPatch,
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    variable: str | None,
+) -> None:
+    """**AC-5**: "unset means `rolling`" - and an empty variable is unset -
+    said out loud to the composition root, not left to its default."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    if variable is not None:
+        monkeypatch.setenv(_CONTEXT_VAR, variable)
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    assert code == 0
+    assert composition_root.context_modes == ["rolling"]
+
+
+@pytest.mark.parametrize("keyed", [True, False], ids=["with-a-key", "with-no-key"])
+def test_an_unknown_context_mode_in_the_variable_is_refused_in_one_line_before_anything(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    keyed: bool,
+) -> None:
+    """**AC-5**: any other value is refused in one line naming the two modes,
+    before any weight loads: exit 1 (`_FAILED`), one stderr line naming the
+    value, `rolling` and `neighbours`, the composition root never asked and no
+    `.mtproj` left beside the scans.
+
+    `with-no-key` pins the order (`## Contract`: resolved **before
+    `select_provider`**): with no key as well, the line is the context mode's
+    and not the no-key sentence."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    monkeypatch.setenv(_CONTEXT_VAR, "batch")
+    if not keyed:
+        monkeypatch.delenv("ANTHROPIC_API_KEY")
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 1, f"exit {code}; a refused context mode is _FAILED (1)"
+    assert "Traceback" not in captured.err + captured.out
+    lines = captured.err.splitlines()
+    assert len(lines) == 1, f"the refusal is not one line: {lines}"
+    (line,) = lines
+    assert line.startswith("mangatl-run: "), line
+    assert "batch" in line and "rolling" in line and "neighbours" in line, (
+        f"the refusal does not name the value and both modes: {line!r}"
+    )
+    assert "API key" not in line, f"the provider was selected before the mode: {line!r}"
+    assert composition_root.models_dirs == [], "the composition root was asked to build"
+    assert not project_dir_for(source_dir).exists(), "a project was created before the refusal"
+
+
+def test_an_unknown_context_flag_is_argparses_usage_error(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**AC-5 at the flag** (`choices=CONTEXT_MODES`): argparse's own refusal,
+    exit 2, naming the value and both choices; nothing built or created."""
+    source_dir = _build_source(tmp_path, png_bytes)
+
+    with pytest.raises(SystemExit) as raised:
+        main([str(source_dir), "--models", str(models_dir), "--context", "batch"])
+
+    assert raised.value.code == 2
+    err = capsys.readouterr().err
+    assert "--context" in err and "invalid choice" in err and "'batch'" in err, err
+    assert "'rolling'" in err and "'neighbours'" in err, f"the choices are not named: {err!r}"
+    assert composition_root.models_dirs == []
+    assert not project_dir_for(source_dir).exists()
+
+
+def test_the_context_flag_is_one_the_parser_tells_the_user_about(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--context` is in `--help`, with its two choices."""
+    with pytest.raises(SystemExit) as raised:
+        main(["--help"])
+
+    assert raised.value.code == 0
+    out = capsys.readouterr().out
+    assert "--context" in out and "{rolling,neighbours}" in out, out

@@ -1489,7 +1489,12 @@ def test_the_translate_stage_takes_its_estimate_second_with_no_default() -> None
     estimate positional, after the translator and before the defaulted name."""
     fields = dataclasses.fields(TranslateStage)
 
-    assert [field.name for field in fields] == ["translate", "page_estimate", "name"]
+    assert [field.name for field in fields] == [
+        "translate",
+        "page_estimate",
+        "context_mode",
+        "name",
+    ]
     estimate_field = next(field for field in fields if field.name == "page_estimate")
     assert estimate_field.default is dataclasses.MISSING
     assert estimate_field.default_factory is dataclasses.MISSING

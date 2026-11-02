@@ -265,9 +265,12 @@ def test_the_pipeline_builders_only_positional_argument_is_the_models_directory(
     """
     parameters = inspect.signature(build_pipeline).parameters
 
-    assert list(parameters) == ["models_dir", "translate", "selection"], (
-        f"build_pipeline takes {list(parameters)}; MT-078 C-2 makes it"
-        " (models_dir, *, translate, selection)"
+    # MT-107 `## Contract` appends `context_mode`, keyword-only and defaulted
+    # to "rolling" (asserted at the end): AMENDED IN RED for that story, as
+    # MT-078 amended it for `selection`.
+    assert list(parameters) == ["models_dir", "translate", "selection", "context_mode"], (
+        f"build_pipeline takes {list(parameters)}; MT-107 makes it"
+        " (models_dir, *, translate, selection, context_mode)"
     )
     assert parameters["models_dir"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD, (
         "the models directory stopped being positional; every caller in the"
@@ -293,6 +296,13 @@ def test_the_pipeline_builders_only_positional_argument_is_the_models_directory(
     assert parameters["selection"].default is None, (
         f"selection defaults to {parameters['selection'].default!r}; MT-078 C-2 is None,"
         " meaning build_pipeline selects from the environment itself"
+    )
+    assert parameters["context_mode"].kind is inspect.Parameter.KEYWORD_ONLY, (
+        f"context_mode is {parameters['context_mode'].kind}, not keyword-only (MT-107)"
+    )
+    assert parameters["context_mode"].default == "rolling", (
+        f"context_mode defaults to {parameters['context_mode'].default!r}; MT-107 keeps"
+        " rolling the default until MT-109 moves it"
     )
 
 
@@ -1639,3 +1649,33 @@ def test_the_gemini_prelude_one_micro_dollar_below_the_estimate_is_refused_befor
     assert [client.models.calls for client in gemini_client] == [[]], (
         "the client was called although the guard refuses the pass"
     )
+
+
+# -- MT-107: the context mode reaches the translate stage ----------------------------
+
+
+def test_the_translate_stage_is_built_with_the_context_mode_it_was_asked_for(
+    weights_dir: Path, loaders: _Loaders, client_spy: _ClientSpy, keyless: None
+) -> None:
+    """MT-107 `## Contract`: `build_pipeline(..., context_mode=...)` hands the
+    mode to `pipeline.stages.build_stages`, which hands it to `TranslateStage`
+    - so the run `mangatl-run --context neighbours` asked for is the run the
+    stage builds its requests for."""
+    stages = build_pipeline(
+        weights_dir, selection=_selection("anthropic"), context_mode="neighbours"
+    ).stages
+
+    (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
+    assert translate_stage.context_mode == "neighbours", (
+        f"the translate stage was built in {translate_stage.context_mode!r} mode"
+    )
+
+
+def test_with_no_context_mode_the_translate_stage_is_rolling(
+    weights_dir: Path, loaders: _Loaders, client_spy: _ClientSpy, keyless: None
+) -> None:
+    """MT-107 AC-3 at the composition root: the default is unchanged."""
+    stages = build_pipeline(weights_dir, selection=_selection("anthropic")).stages
+
+    (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
+    assert translate_stage.context_mode == "rolling"

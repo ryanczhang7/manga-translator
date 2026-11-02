@@ -1191,6 +1191,35 @@ def test_a_refusal_is_said_in_the_footer_and_announced_and_nothing_opens_or_runs
     assert _run_rows(chapter) == []
 
 
+def test_an_unknown_context_mode_is_said_in_the_footer_and_nothing_opens_or_runs(
+    qtbot,  # type: ignore[no-untyped-def]
+    world: World,
+    chapter: Path,
+) -> None:
+    """MT-107 PO-2: the re-run's `build_stages` can raise `UnknownContextMode`
+    (a bad `MANGATL_CONTEXT_MODE`), and the workspace says it exactly as it
+    says a `ProviderError` - footer and live region, no dialog, no run, no run
+    row - rather than letting it escape the slot. Mirrors the `build-refused`
+    case above; its log stops at "build". Imported here: the name does not
+    exist in RED, and a top-level import would take this file dark."""
+    from mangatl.domain.glossary import UnknownContextMode
+
+    message = "unknown context mode 'batch': choose rolling or neighbours"
+    calls = Calls()
+    setup = Setup(_quick(calls), build_error=UnknownContextMode(message))
+    window, _ = _workspace(qtbot, world, chapter, setup)
+
+    dialog = _press(window)
+
+    assert setup.log == ["resolve", "build"]
+    assert dialog is None, "a refused Run again opened a dialog"
+    assert window.render_status.text() == message
+    assert window.live_region.text() == message
+    assert window.run is None
+    assert calls.made == []
+    assert _run_rows(chapter) == []
+
+
 # =============================================================================
 # AC-9: the real stage list re-cleans the one invalidated page
 # =============================================================================

@@ -369,10 +369,18 @@ def test_the_cleaner_is_a_required_second_parameter_with_no_default() -> None:
     # MT-100 C-3 appends `page_estimate`, given with the translator or `None`
     # with it, and with no default for the translator's reason: a default would
     # let a stage list quietly price every model at Claude's figure.
-    assert list(parameters) == ["detect", "clean", "transcribe", "translate", "page_estimate"]
+    assert list(parameters) == [
+        "detect",
+        "clean",
+        "transcribe",
+        "translate",
+        "page_estimate",
+        "context_mode",
+    ]
     assert parameters["clean"].default is inspect.Parameter.empty
     assert parameters["translate"].default is inspect.Parameter.empty
     assert parameters["page_estimate"].default is inspect.Parameter.empty
+    assert parameters["context_mode"].default == "rolling"
 
 
 def test_the_module_exports_the_builder_and_nothing_else() -> None:
