@@ -19,7 +19,9 @@ Oracle partition (story `## Contract` C-5):
   `border-width.hairline` from `tokens_gen.TOKENS`; the HC mapping through
   `theme.compose_stylesheet`.
 - **Mechanical, pinned exactly:** every edge's colour set, the widget's own
-  `styleSheet() == ""`, and no `RerunDialog` selector in `theme_hc.qss.in`.
+  `styleSheet() == ""`, and `theme_hc.qss.in`'s `RerunDialog[overBudget="true"]`
+  rule restating only `border-width` (MT-131 replaced MT-127's "no
+  `RerunDialog` selector" here, by the user's decision of 2026-11-02).
 - **Oracle-free:** none.
 
 RED: the module exists, so nothing fails at import. The paint tests that need
@@ -306,12 +308,29 @@ def test_under_high_contrast_the_over_budget_edge_is_window_text(
     )
 
 
-def test_the_high_contrast_override_template_has_no_run_again_dialog_rule() -> None:
-    """AC-4, text half (§10.9): High Contrast is a value change through
-    [hc.map], not a rule change - theme_hc.qss.in names no RerunDialog."""
-    text = HC_IN.read_text(encoding="utf-8")
+def test_the_high_contrast_override_rule_for_the_run_again_dialog_restates_only_the_width() -> None:
+    """Replaces MT-127 AC-4's text half under MT-131 (the user's decision of
+    2026-11-02): the base hairline outranks the HC `QDialog` rule on
+    specificity, so theme_hc.qss.in widens the over-budget selector - and only
+    its width. The colour still resolves to WindowText through [hc.map]
+    (§10.9), which AC-4's paint half above pins."""
+    # `tokens._RULE` cannot see past a `{`: rewrite each `@{name}` as `@<name>`
+    # first, then compare against that rewritten spelling.
+    text = tokens._PLACEHOLDER.sub(lambda m: f"@<{m.group(1)}>", HC_IN.read_text(encoding="utf-8"))
+    rules = []
+    for match in tokens._RULE.finditer(tokens._COMMENT.sub("", text)):
+        if " ".join(match.group(1).split()) != 'RerunDialog[overBudget="true"]':
+            continue
+        body = match.group(0)[match.group(0).index("{") + 1 : -1]
+        rules.append(
+            {
+                prop.strip(): " ".join(value.split())
+                for prop, value in (part.split(":", 1) for part in body.split(";") if ":" in part)
+            }
+        )
 
-    assert "RerunDialog" not in text, (
-        "theme_hc.qss.in carries a RerunDialog rule; §10.9 resolves the border "
-        "through the base template's token, not an override"
+    assert rules == [{"border-width": "@<border-width.emphasis>px"}], (
+        'theme_hc.qss.in must carry one RerunDialog[overBudget="true"] rule whose only '
+        "declaration is border-width: @{border-width.emphasis}px - no border, no "
+        f"border-color, no @{{hc.*}} colour (MT-131 C-1). Found {rules}"
     )
