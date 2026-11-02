@@ -105,3 +105,22 @@ class TranslationResult:
     usage: TokenUsage
     call: CallInfo | None
     proposed_terms: tuple[ProposedTerm, ...]
+
+
+@dataclass(frozen=True)
+class GlossaryProposal:
+    """What the glossary pre-pass proposed for a volume, and what it cost.
+
+    MT-104. `terms` are the same `ProposedTerm`s a page's answer carries, in
+    response order, so MT-105's merge sees nothing new. `call` is required, not
+    optional: the pass is one call that was made, and a refused volume raises
+    rather than returning a proposal of nothing.
+
+    Branch-free for the same reason as `CallInfo` (coverage-core's 100%). Not
+    in `__all__`, which `tests/core/test_translation.py` pins to the three
+    per-page types; it is imported by name.
+    """
+
+    terms: tuple[ProposedTerm, ...]
+    usage: TokenUsage
+    call: CallInfo
