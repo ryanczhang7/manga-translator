@@ -61,7 +61,7 @@ batch.
   **Japanese OCR**, not the previous page's proposed English, so no request
   depends on another's result. This is the only context a batch can use.
   Whether it also becomes the **synchronous** default is decided by a
-  measurement (MT-107) that can come out either way; until then the
+  measurement (MT-108) that can come out either way; until then the
   synchronous default stays `rolling`.
 - **PO-4** - Batch calls are priced at Gemini's batch rate from a rate row of
   their own; `RATE_TABLE_VERSION` bumps; every ledger row says which tier
@@ -106,7 +106,7 @@ batch into the same project the per-page path writes, with one ledger row per
 page at the batch rate, and then runs the consistency pass, after which the
 review shows which lines it changed and why. `python -m mangatl.bench.cost`
 reports the volume's cost from those rows. The audit documents of MT-101 and
-MT-107 exist, each with a `## Decided` section the implementing stories cite.
+MT-108 exist, each with a `## Decided` section the implementing stories cite.
 
 ## Stories
 
