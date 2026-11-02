@@ -55,6 +55,11 @@ propagates to the stage, exactly as on Claude.
 Anthropic SDK's `Message` type at module level, so importing this module loads
 that SDK too - noted in MT-080's handoff, harmless, and not this story's to
 change.
+
+**The glossary pre-pass** (MT-104) is `propose_glossary`: one text-only call
+over the volume's listing, with `glossary_pass`'s prompt, schema and cap, the
+same model and thinking level as a page, and the same `_usage_of`. Its input
+limit is checked before the client is touched.
 """
 
 from __future__ import annotations
@@ -64,9 +69,23 @@ from typing import Any
 
 from google.genai import Client, types
 
-from mangatl.domain.glossary import PromptContext
+from mangatl.domain.glossary import PromptContext, estimate_tokens
 from mangatl.domain.line import OcrResult
-from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
+from mangatl.domain.translation import (
+    CallInfo,
+    GlossaryProposal,
+    TokenUsage,
+    TranslationResult,
+)
+from mangatl.translate.glossary_pass import (
+    GLOSSARY_PASS_MAX_INPUT_TOKENS,
+    GLOSSARY_PASS_MAX_OUTPUT_TOKENS,
+    GLOSSARY_PASS_PROMPT,
+    GLOSSARY_PASS_SCHEMA,
+    VolumeTooLarge,
+    glossary_pass_text,
+    parse_glossary_pass,
+)
 from mangatl.translate.page_prompt import (
     SYSTEM_PROMPT,
     context_text,
@@ -76,7 +95,7 @@ from mangatl.translate.page_prompt import (
 )
 from mangatl.translate.parse import parse_lines_text, parse_terms_text
 
-__all__ = ["MAX_OUTPUT_TOKENS", "MODEL_ID", "build_request", "translate_page"]
+__all__ = ["MAX_OUTPUT_TOKENS", "MODEL_ID", "build_request", "propose_glossary", "translate_page"]
 
 #: V-1: the API's only spelling of Gemini 3.1 Pro (PO-2's model).
 MODEL_ID: str = "gemini-3.1-pro-preview"
@@ -152,6 +171,46 @@ def translate_page(
             model_id=response.model_version or MODEL_ID,
         ),
         proposed_terms=parse_terms_text(text),
+    )
+
+
+def propose_glossary(client: Client, pages: Sequence[Sequence[OcrResult]]) -> GlossaryProposal:
+    """Propose the volume's glossary on Gemini: one text-only request.
+
+    `contents` is the listing alone - no page image, which would make a
+    volume-sized call cost a page image per page. Raises `VolumeTooLarge`,
+    naming the estimate and the limit, **before** `client` is touched when the
+    listing estimates over `GLOSSARY_PASS_MAX_INPUT_TOKENS`; at the limit is
+    sent. `call` is recorded as `translate_page` records it.
+    """
+    listing = glossary_pass_text(pages)
+    estimate = estimate_tokens(listing)
+    if estimate > GLOSSARY_PASS_MAX_INPUT_TOKENS:
+        raise VolumeTooLarge(
+            f"the volume's listing estimates to {estimate:,} tokens, over the"
+            f" glossary pass's limit of {GLOSSARY_PASS_MAX_INPUT_TOKENS:,}"
+        )
+
+    contents: list[types.PartUnionDict] = [listing]
+    response = client.models.generate_content(
+        model=MODEL_ID,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=GLOSSARY_PASS_PROMPT,
+            response_mime_type="application/json",
+            response_json_schema=GLOSSARY_PASS_SCHEMA,
+            thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.MEDIUM),
+            max_output_tokens=GLOSSARY_PASS_MAX_OUTPUT_TOKENS,
+        ),
+    )
+
+    return GlossaryProposal(
+        terms=parse_glossary_pass(response.text or ""),
+        usage=_usage_of(response.usage_metadata),
+        call=CallInfo(
+            request_id=response.response_id or "",
+            model_id=response.model_version or MODEL_ID,
+        ),
     )
 
 
