@@ -1371,9 +1371,14 @@ distinguished by glyph and wording. It still never carries the only copy of
 anything and never carries the only action, which is what makes the collapse
 safe.
 
-`BakeConfirmDialog`, `RerunDialog`, `ShortcutSheet`: `Window` + 2px `WindowText`.
-Focus trap and focus return unchanged. `RerunDialog`'s over-budget border
-collapses to `WindowText` like every other; the sentence already carries it.
+`BakeConfirmDialog`, `RerunDialog`, `ApiKeyDialog`, the settings warning
+`QMessageBox`, `ShortcutSheet` - every dialog the sheet styles: `Window` + 2px
+`WindowText` on all four edges, one `QDialog` rule in `theme_hc.qss.in`
+(MT-131). `QFileDialog` is native and not styled. Focus trap and focus return
+unchanged. `RerunDialog`'s over-budget border collapses to `WindowText` like
+every other, and a second override widens its hairline to the same 2px so it is
+not the one thinner dialog (the user's decision, 2026-11-02, MT-131); the
+sentence already carries the state.
 
 ### 10.8 A live change loses nothing
 
