@@ -187,6 +187,9 @@ BREAKPOINT_WIDTH = 1440
 STRIP_WIDTH = 96
 #: The rail of page indices, below the breakpoint.
 STRIP_RAIL_WIDTH = 28
+#: The rail row's left contents margin (MT-134): the current row's leading bar
+#: is `border-width.bar` wide, and the glyph and index start clear of it.
+_RAIL_BAR_MARGIN = int(tokens_gen.TOKENS["border-width.bar"])
 #: Strip thumbnails decoded per event-loop tick (MT-087 PO-2): opening a chapter
 #: never waits on them, and no tick holds the loop for long.
 THUMBNAIL_BATCH = 4
@@ -336,6 +339,10 @@ class _PageRow(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("pageRow")
+        # MT-134: the row paints its own QSS box, so the current row's ground
+        # and leading bar (theme.qss `#pageRow[current="true"]`) show.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setProperty("current", False)
         self._rail = False
         self.thumb = QLabel()
         self.thumb.setObjectName("pageThumbnail")
@@ -359,9 +366,14 @@ class _PageRow(QWidget):
 
     def set_rail(self, rail: bool) -> None:
         self._rail = rail
-        margin = 0 if rail else tokens_gen.SPACE_S3
-        vertical = 0 if rail else tokens_gen.SPACE_S1
-        self.outer.setContentsMargins(margin, vertical, margin, vertical)
+        if rail:
+            # MT-134: a constant left margin of the bar's width, so the glyph
+            # and index never sit under the current row's leading bar.
+            self.outer.setContentsMargins(_RAIL_BAR_MARGIN, 0, 0, 0)
+        else:
+            margin = tokens_gen.SPACE_S3
+            vertical = tokens_gen.SPACE_S1
+            self.outer.setContentsMargins(margin, vertical, margin, vertical)
         self.thumb.setVisible(not rail)
         self.box.setDirection(
             QBoxLayout.Direction.TopToBottom if rail else QBoxLayout.Direction.LeftToRight
@@ -374,9 +386,10 @@ class _PageRow(QWidget):
         self.fit_index()
 
     def index_fits(self) -> bool:
-        """Whether the index fits the rail: the rail row has zero contents
-        margins, so the label's own hint is the whole horizontal cost."""
-        return self.label.sizeHint().width() <= STRIP_RAIL_WIDTH
+        """Whether the index fits the rail: the rail row's only horizontal
+        contents margin is the bar's width on the left (MT-134), so the label's
+        own hint plus that margin is the whole horizontal cost."""
+        return self.label.sizeHint().width() <= STRIP_RAIL_WIDTH - _RAIL_BAR_MARGIN
 
     def index_drawn(self) -> bool:
         """Whether the index is drawn: always in the full strip, and in the
@@ -427,6 +440,18 @@ class _PageRow(QWidget):
         self.glyph.style().unpolish(self.glyph)
         self.glyph.style().polish(self.glyph)
 
+    def set_current(self, current: bool) -> None:
+        """Mark this row current or not (MT-134). theme.qss keys the row's
+        ground and bar on the `current` property, and the HC override keys
+        its glyph and index ink on it through descendant selectors, which
+        re-match only when the labels themselves are re-polished."""
+        if self.property("current") == current:
+            return
+        self.setProperty("current", current)
+        for widget in (self, self.glyph, self.label):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+
 
 class PageStrip(QListWidget):
     """The chapter's pages, one item per page in ordinal order.
@@ -460,6 +485,7 @@ class PageStrip(QListWidget):
         self._timer.setSingleShot(False)
         self._timer.timeout.connect(self._decode_batch)
         self.setFixedWidth(STRIP_WIDTH)
+        self.currentRowChanged.connect(self._show_current)
 
     @property
     def is_rail(self) -> bool:
@@ -490,6 +516,14 @@ class PageStrip(QListWidget):
         for index in range(len(self._filenames)):
             self._show_progress(index)
         self._relabel()
+        # The rebuild ran with no row current, and a caller's signal blocker
+        # may hide the change that follows, so the rows are told now.
+        self._show_current(self.currentRow())
+
+    def _show_current(self, row: int) -> None:
+        """Mark row `row` current and every other row not (MT-134)."""
+        for index, page_row in enumerate(self._rows):
+            page_row.set_current(index == row)
 
     def set_thumbnails(self, source_dir: Path, sizes: Sequence[tuple[int, int]]) -> None:
         """Queue every page's thumbnail, `sizes` being each page's stored
@@ -606,6 +640,10 @@ class PageStrip(QListWidget):
 
     def _resize_items(self) -> None:
         for index, row in enumerate(self._rows):
+            # An unactivated layout reports a stale hint; the first re-polish
+            # (set_current) would then re-size the item and move every row
+            # below it (MT-134 AC-3).
+            row.outer.activate()
             self.item(index).setSizeHint(row.sizeHint())
 
 
