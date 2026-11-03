@@ -69,6 +69,9 @@ batch.
 - **PO-5** - The budget guard runs **once on the whole batch's projection
   before submission**; a refused batch submits nothing and spends nothing.
   Collected pages are ledgered one row per page, exactly as per-page calls are.
+  *Amended 2026-11-03 (the user, MT-110 PO-1):* a volume over Gemini's 20 MB
+  inline limit (MT-101 D-9) is submitted as several inline jobs; the guard
+  still runs once, on the whole volume, before the first is submitted (MT-111).
 - **PO-6** - The consistency pass is text-only, one request per chapter
   (prompts stay under the 200k-token tier), and its schema returns only
   `{page, reading_index, corrected_en, reason}` for lines it changes - never
