@@ -342,7 +342,8 @@ def test_this_build_writes_and_reads_the_current_schema_version() -> None:
     # MT-118 C-2 takes it to 8: `region.excluded`.
     # MT-119 C-4 takes it to 9: `cleaned_page.erased`.
     # MT-103 PO-3 takes it to 10: chapter-level ledger rows, `pricing`, two tables.
-    assert SCHEMA_VERSION == 10
+    # MT-137 takes it to 11: `batch_job` holds its pages (`first_ordinal`, `last_ordinal`).
+    assert SCHEMA_VERSION == 11
 
 
 def test_a_freshly_created_project_is_a_current_version_file_with_the_new_column(
@@ -360,8 +361,8 @@ def test_a_freshly_created_project_is_a_current_version_file_with_the_new_column
         pass
     db_path = project_dir_for(source_dir) / "project.db"
 
-    assert _user_version(db_path) == 10
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(10,)]
+    assert _user_version(db_path) == 11
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(11,)]
     columns = {str(row[1]) for row in _raw(db_path, "PRAGMA table_info(line)")}
     assert "ocr_empty" in columns, f"the line table has {sorted(columns)}"
 
@@ -541,8 +542,8 @@ def test_a_version_one_file_is_migrated_in_place_when_it_is_opened(
     # at 2, and `test_schema_v4.py` the v3 -> v4 step on one that starts at 3.
     # MT-017's v5 -> v6 step runs too, MT-065's v6 -> v7 step, MT-118's
     # v7 -> v8 step, MT-119's v8 -> v9 step and MT-103's v9 -> v10 step, so the
-    # literal is 10.
-    assert _user_version(db_path) == 10
+    # literal is 11 (MT-137's v10 -> v11 step runs too).
+    assert _user_version(db_path) == 11
     after = {str(row[1]) for row in _raw(db_path, "PRAGMA table_info(line)")}
     assert "ocr_empty" in after
     assert before <= after, f"the migration dropped {sorted(before - after)} from the line table"
@@ -708,7 +709,7 @@ def test_a_version_one_file_arrives_at_v5_with_the_same_glossary_table_as_a_fres
         pass
 
     shape = "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('glossary')"
-    assert _user_version(db_path) == 10  # MT-119 C-4, MT-103 PO-3: the walk now ends at 10
+    assert _user_version(db_path) == 11  # MT-119 C-4, MT-103 PO-3, MT-137: ends at 11
     assert _raw(db_path, shape) == _raw(fresh_db, shape)
     assert _raw(
         db_path, "SELECT term_ja, first_seen_page, last_seen_page, source FROM glossary"

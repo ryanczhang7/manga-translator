@@ -163,7 +163,8 @@ def test_storing_a_proposal_needs_no_schema_version_bump() -> None:
     # MT-118 C-2 takes it to 8: `region.excluded`.
     # MT-119 C-4 takes it to 9: `cleaned_page.erased`.
     # MT-103 PO-3 takes it to 10: chapter-level ledger rows, `pricing`, two tables.
-    assert SCHEMA_VERSION == 10
+    # MT-137 takes it to 11: `batch_job` holds its pages (`first_ordinal`, `last_ordinal`).
+    assert SCHEMA_VERSION == 11
 
 
 def test_the_two_methods_are_named_on_the_project_beside_their_line_siblings() -> None:
