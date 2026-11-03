@@ -144,12 +144,14 @@ def _without(role: str, palette: Mapping[str, str] = DESIGNER_PALETTE) -> dict[s
 
 
 def test_the_shipped_data_has_the_shape_the_story_was_written_against() -> None:
-    assert len(TOKENS) == 126
+    # MT-132 added `border-width.bar` (a width token: neither role-mapped nor
+    # overridden): TOKENS 126 -> 127, UNMAPPED_TOKENS 85 -> 86.
+    assert len(TOKENS) == 127
     assert all(isinstance(v, str) for v in TOKENS.values())
     assert len(HC_PALETTE_ROLE) == 40
     assert set(HC_PALETTE_ROLE) <= set(TOKENS)
     assert set(HC_OVERRIDE) <= set(TOKENS)
-    assert len(UNMAPPED_TOKENS) == 85
+    assert len(UNMAPPED_TOKENS) == 86
     assert len(STATIC_TOKENS) == 10
     assert len(ROLE_MAPPED_TOKENS) == 30
 
