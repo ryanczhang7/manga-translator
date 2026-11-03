@@ -460,6 +460,32 @@ QLabel#pageGlyph[status="failed"] { color: @{color.status.danger}; }
 QLabel#pageGlyph[status="skipped"] { color: @{color.text.disabled}; }
 
 /* ====================================================================== */
+/* components.md section 4 - PageStrip current row (MT-134)               */
+/* ====================================================================== */
+/* PageStrip sets the bool property current on each _PageRow and          */
+/* re-polishes the row, its glyph and its label. The row has              */
+/* WA_StyledBackground, so it paints its own box over the item ground.    */
+/* The bar is border-width.bar inside the row's rect: no row moves. The   */
+/* descendant rules declare only the labels' ground, never color, which   */
+/* would outrank the status rules above (theme_hc.qss.in restates them).  */
+
+#pageRow {
+    background-color: transparent;
+    border: none;
+}
+
+#pageRow[current="true"] {
+    background-color: @{color.surface.selected};
+    border-left: @{border-width.bar}px solid @{color.accent.base};
+    color: @{color.text.primary};
+}
+
+#pageRow[current="true"] QLabel#pageGlyph,
+#pageRow[current="true"] QLabel#pageLabel {
+    background-color: transparent;
+}
+
+/* ====================================================================== */
 /* components.md section 8 - run progress and CostReadout (MT-018)        */
 /* ====================================================================== */
 /* Colour only. The type that section 8 names - type.numeric and     */

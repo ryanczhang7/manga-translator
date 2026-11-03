@@ -477,6 +477,8 @@ def test_under_high_contrast_the_rendered_override_is_appended_after_the_whole_b
 
 
 EMPHASIS = f"{T['border-width.emphasis']}px"
+#: MT-134 C-3: the page strip's current-row leading bar width.
+BAR = f"{T['border-width.bar']}px"
 
 #: AC-5, from `theme_hc.qss.in` / `components.md` section 10.1: selector ->
 #: the declarations its effective (last-wins) rule must carry, as palette roles.
@@ -491,6 +493,14 @@ OVERRIDES: dict[str, dict[str, str]] = {
     "QLineEdit:disabled, QPlainTextEdit:disabled": {"border-color": "{DisabledText}"},
     "QToolTip": {"border": EMPHASIS + " solid {WindowText}"},
     "QMenu": {"border": EMPHASIS + " solid {WindowText}"},
+    # MT-134 C-3 / components.md section 10.2: the current page row's bar and
+    # text, and its glyph and index, are the Highlight pair's foreground.
+    '#pageRow[current="true"]': {
+        "border-left": BAR + " solid {HighlightedText}",
+        "color": "{HighlightedText}",
+    },
+    '#pageRow[current="true"] QLabel#pageGlyph': {"color": "{HighlightedText}"},
+    '#pageRow[current="true"] QLabel#pageLabel': {"color": "{HighlightedText}"},
 }
 
 

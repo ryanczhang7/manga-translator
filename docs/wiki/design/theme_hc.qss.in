@@ -97,3 +97,21 @@ QFrame#error-banner {
     border: @{border-width.emphasis}px solid @{hc.WindowText};
     border-left: @{border-width.bar}px solid @{hc.WindowText};
 }
+
+/* components.md 10.2: the current page row is the Highlight pair. The base
+   bar resolves Highlight on Highlight through the token map, so the bar and
+   the row's text are restated as the pair's foreground. The glyph rule
+   outranks the seven status-colour rules (2,1,1 over 1,1,1) only on the
+   current row, so silhouette carries status there (A-15.7, MT-134). */
+#pageRow[current="true"] {
+    border-left: @{border-width.bar}px solid @{hc.HighlightedText};
+    color: @{hc.HighlightedText};
+}
+
+#pageRow[current="true"] QLabel#pageGlyph {
+    color: @{hc.HighlightedText};
+}
+
+#pageRow[current="true"] QLabel#pageLabel {
+    color: @{hc.HighlightedText};
+}
