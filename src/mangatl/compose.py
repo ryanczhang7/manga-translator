@@ -67,6 +67,7 @@ from mangatl.clean.session import load_inpainter
 from mangatl.detect.page import detect_page_regions
 from mangatl.detect.session import load_detector, selected_provider
 from mangatl.domain.budget import page_estimate
+from mangatl.domain.glossary import ContextMode
 from mangatl.domain.money import Usd
 from mangatl.models.providers import PROVIDER_PREFERENCE, select_providers
 from mangatl.ocr.page import transcribe_page_regions
@@ -189,7 +190,11 @@ def resolve_models_dir(
 
 
 def build_pipeline(
-    models_dir: Path, *, translate: bool = True, selection: Selection | None = None
+    models_dir: Path,
+    *,
+    translate: bool = True,
+    selection: Selection | None = None,
+    context_mode: ContextMode = "rolling",
 ) -> Pipeline:
     """Load the weights out of `models_dir` and bind them into the stage list.
 
@@ -245,6 +250,10 @@ def build_pipeline(
     bound around the **same** `GeminiClient` the page translator holds - one
     client, one key. Anthropic has no pass (v1 is Gemini-only) and
     `translate=False` makes no call at all, so both carry `prelude=None`.
+
+    **`context_mode`** (MT-107) is keyword-only, defaults to `"rolling"`, and is
+    passed through to `build_stages` for the translate stage; the entry points
+    resolve it and say it out loud (R-A1).
     """
     translator: PageTranslator | None = None
     prelude: ChapterStep | None = None
@@ -269,6 +278,7 @@ def build_pipeline(
         partial(transcribe_page_regions, ocr, vocab),
         translator,
         estimate,
+        context_mode,
     )
     return Pipeline(stages=stages, prelude=prelude)
 

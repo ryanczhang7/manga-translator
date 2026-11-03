@@ -594,3 +594,60 @@ def test_is_done_reads_the_page_it_is_given_and_not_the_first_one(
 
     assert stage.is_done(fixture.page_context(0)) is True
     assert stage.is_done(fixture.context) is False
+
+
+# -- MT-107: the context mode the stage builds its requests with -------------------
+
+
+def test_the_stage_carries_a_context_mode_defaulting_to_rolling_before_its_name() -> None:
+    """MT-107 `## Contract`: `TranslateStage(translate, page_estimate,
+    context_mode="rolling", name="translate")`. Defaulted, so no existing
+    construction site changes (AC-3: the default is today's behaviour), and
+    before `name` so the stage name stays the last field."""
+    import dataclasses
+
+    fields = dataclasses.fields(TranslateStage)
+
+    assert [field.name for field in fields] == [
+        "translate",
+        "page_estimate",
+        "context_mode",
+        "name",
+    ]
+    mode_field = next(field for field in fields if field.name == "context_mode")
+    assert mode_field.default == "rolling"
+    stage = TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_FakeTranslator())
+    assert stage.context_mode == "rolling"
+
+
+def test_a_neighbours_stage_does_not_hand_the_first_page_the_empty_context(
+    fixture: _Fixture,
+) -> None:
+    """The stage passes its mode on (`mode=self.context_mode`): with a next page
+    transcribed, page 0 of a `neighbours` stage carries that page's Japanese,
+    where the default stage hands over `EMPTY_CONTEXT` (MT-014 AC-5). Control:
+    the same page through a default stage."""
+    from mangatl.domain.glossary import EMPTY_CONTEXT
+
+    fixture.seed(ordinal=0)
+    fixture.seed(ordinal=1)
+    neighbours = _FakeTranslator()
+    rolling = _FakeTranslator()
+
+    TranslateStage(
+        translate=neighbours,
+        page_estimate=BOOTSTRAP_PAGE_ESTIMATE,
+        context_mode="neighbours",
+    ).run(fixture.page_context(0))
+    TranslateStage(translate=rolling, page_estimate=BOOTSTRAP_PAGE_ESTIMATE).run(
+        fixture.page_context(0)
+    )
+
+    assert rolling.contexts == [EMPTY_CONTEXT], "control: the default stage changed"
+    assert len(neighbours.contexts) == 1
+    assert neighbours.contexts[0].rolling_block.startswith("Next page, Japanese:\n"), (
+        f"a neighbours stage handed page 0 {neighbours.contexts[0]!r}"
+    )
+    assert neighbours.contexts[0].rolling_block.split("\n")[1:] == [
+        line.text for line in _LINES if not line.ocr_empty
+    ]

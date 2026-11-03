@@ -37,6 +37,7 @@ from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QLabel, QMainWindow, QWidget
 
+from mangatl.domain.glossary import UnknownContextMode
 from mangatl.domain.page import Chapter
 from mangatl.pipeline.runner import RUN_FINISHED, RunOutcome
 from mangatl.store.project import create_project, project_dir_for
@@ -132,7 +133,8 @@ class MainWindow(QMainWindow):
         """The Start sequence: models, then build, then create, then run -
         "read" is `chapter`, already read. Nothing is created without a models
         folder (AC-7), nor when the stages cannot be built: a `ProviderError`
-        (no key, several keys, no adapter yet) is shown as the window's error
+        (no key, several keys, no adapter yet) or an `UnknownContextMode`
+        (MT-107 PO-2) is shown as the window's error
         and leaves no project behind, matching `mangatl-run` (MT-078 C-4, A-1).
         Any other exception from the builder propagates."""
         setup = self._run_setup
@@ -142,7 +144,7 @@ class MainWindow(QMainWindow):
             return
         try:
             stages = setup.build_stages(models)
-        except ProviderError as error:
+        except (ProviderError, UnknownContextMode) as error:
             self.show_error(str(error))
             return
         project_dir = project_dir_for(chapter.source_dir)

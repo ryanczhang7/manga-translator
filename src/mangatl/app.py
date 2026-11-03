@@ -57,6 +57,7 @@ from mangatl.app_paths import (
     settings_path,
     workspace_state_path,
 )
+from mangatl.domain.glossary import CONTEXT_MODE_VAR, context_mode
 from mangatl.domain.page import Chapter
 from mangatl.models.manifest import ModelHashMismatch, load_manifest, verify_bundled_models
 from mangatl.models.providers import select_providers
@@ -208,12 +209,17 @@ def build_stages(models_dir: Path) -> tuple[Stage, ...]:
 
     The stages only: the window's run does not carry the pipeline's chapter
     step yet (MT-105 PO-5; MT-130 wires it), so a Gemini run started from the
-    window skips the glossary pre-pass."""
+    window skips the glossary pre-pass.
+
+    The context mode is `MANGATL_CONTEXT_MODE`'s (MT-107 AC-5), resolved
+    before `select_provider`, so an unknown one raises `UnknownContextMode`
+    before any selection or weight; it is passed out loud, `rolling` included."""
     from mangatl.compose import build_pipeline
 
+    mode = context_mode(os.environ.get(CONTEXT_MODE_VAR))
     env = translation_env(os.environ, settings_path())
     selection = select_provider(os.environ.get(PROVIDER_VAR) or None, env)
-    return build_pipeline(models_dir, translate=True, selection=selection).stages
+    return build_pipeline(models_dir, translate=True, selection=selection, context_mode=mode).stages
 
 
 def selected_model() -> str:

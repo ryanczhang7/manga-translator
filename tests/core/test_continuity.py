@@ -494,3 +494,262 @@ def test_re_running_a_page_leaves_one_entry_per_term(chapter: _Chapter) -> None:
     assert read_entries(chapter.project) == [
         GlossaryEntry("さくら", "Sakura", "name", 0, 0, "model")
     ]
+
+
+# -- MT-107: the `neighbours` mode, and `rolling` unchanged ---------------------------
+#
+# `mode=` and `context_mode=` are new in MT-107; until GREEN every test below is a
+# `TypeError` on that keyword (or a wrong context), one test at a time, and every
+# MT-014 test above keeps running. They are the AC-3 oracle and are not touched.
+#
+# The expected strings are spelled out from `_OCR` and the two settled headers,
+# never rendered by the module under test.
+
+_PREVIOUS_JA = "Previous page, Japanese:"
+_NEXT_JA = "Next page, Japanese:"
+
+#: English proposed for every page, so "no proposed English appears" (AC-2) has
+#: something to leak. None of these strings occurs in `_OCR` or in the glossary.
+_PROPOSED: tuple[dict[int, str], ...] = (
+    {0: "Wait up, Sakura!", 1: "Where are you going?"},
+    {0: "Where is Sakura?", 1: "Home."},
+    {0: "It's Tokyo Tower", 1: "Sakura!!"},
+)
+
+
+def _propose_everywhere(chapter: _Chapter) -> None:
+    for ordinal, lines in enumerate(_PROPOSED):
+        chapter.project.write_proposed(ordinal, lines)
+
+
+def _sakura(chapter: _Chapter) -> str:
+    """Store one glossary entry and return the block it renders as."""
+    upsert(chapter.project, GlossaryEntry("さくら", "Sakura", "name", 0, 2, "model"))
+    return f"{_GLOSSARY_HEADER}\nさくら = Sakura (name)"
+
+
+def _english_leaks(context: PromptContext) -> list[str]:
+    return [
+        english
+        for lines in _PROPOSED
+        for english in lines.values()
+        if english in context.glossary_block or english in context.rolling_block
+    ]
+
+
+def test_neighbours_on_the_first_page_is_the_glossary_and_the_next_pages_japanese(
+    chapter: _Chapter,
+) -> None:
+    """**AC-2, ordinal 0**: page 1 is no longer `EMPTY_CONTEXT` in this mode -
+    it has a next page. The glossary block is rendered on page 0 too (`##
+    Contract`), and there is no previous header."""
+    glossary = _sakura(chapter)
+    _propose_everywhere(chapter)
+
+    context = build_prompt_context(chapter.project, 0, mode="neighbours")
+
+    assert context == PromptContext(
+        glossary_block=glossary,
+        rolling_block=f"{_NEXT_JA}\nさくらはどこ?\n家へ。",
+    )
+    assert _english_leaks(context) == []
+
+
+def test_neighbours_on_a_middle_page_is_the_page_before_and_the_page_after(
+    chapter: _Chapter,
+) -> None:
+    """**AC-2, ordinal 1**: pages 1 and 3's Japanese, previous first, and not
+    page 1's proposed English - which `rolling` would have carried."""
+    glossary = _sakura(chapter)
+    _propose_everywhere(chapter)
+
+    context = build_prompt_context(chapter.project, 1, mode="neighbours")
+
+    assert context == PromptContext(
+        glossary_block=glossary,
+        rolling_block=(
+            f"{_PREVIOUS_JA}\nさくら、待って!\nどこへ行くの?\n\n{_NEXT_JA}\n東京タワーだ\nさくら!"
+        ),
+    )
+    assert _english_leaks(context) == [], "proposed English reached a neighbours context"
+
+
+def test_neighbours_on_the_last_page_is_the_previous_page_only(chapter: _Chapter) -> None:
+    """**AC-2, ordinal 2** (the last, `len(project.pages()) - 1`): page 2's
+    Japanese and no next header."""
+    glossary = _sakura(chapter)
+    _propose_everywhere(chapter)
+
+    context = build_prompt_context(chapter.project, 2, mode="neighbours")
+
+    assert context == PromptContext(
+        glossary_block=glossary,
+        rolling_block=f"{_PREVIOUS_JA}\nさくらはどこ?\n家へ。",
+    )
+    assert _english_leaks(context) == []
+
+
+def test_no_proposed_english_reaches_any_neighbours_context(chapter: _Chapter) -> None:
+    """**AC-2**'s "no proposed English appears in any of them, even when every
+    page has a proposal stored", as one collected check over every ordinal -
+    the assertion DV-1 must turn red by reading `read_proposed(ordinal - 1)`.
+    Control: the same store in `rolling` mode does carry English, so the
+    needle can find it."""
+    _propose_everywhere(chapter)
+
+    leaks = {
+        ordinal: _english_leaks(build_prompt_context(chapter.project, ordinal, mode="neighbours"))
+        for ordinal in range(len(_PROPOSED))
+    }
+    rolling_leaks = _english_leaks(build_prompt_context(chapter.project, 1, mode="rolling"))
+
+    assert leaks == {0: [], 1: [], 2: []}, f"proposed English in a neighbours context: {leaks}"
+    assert rolling_leaks == ["Wait up, Sakura!", "Where are you going?"], (
+        f"control: rolling mode should carry page 0's English, found {rolling_leaks}"
+    )
+
+
+def test_a_region_ocr_read_as_empty_is_left_out_of_the_neighbours(chapter: _Chapter) -> None:
+    """`## Contract`: `[r.text for r in project.read_lines(k) if not
+    r.ocr_empty]`. An `ocr_empty` line on either neighbour is dropped, so no
+    blank line appears inside a section. Without the filter page 0's block
+    would read `...Japanese:\\n\\nどこへ行くの?`."""
+    chapter.project.write_lines(0, [OcrResult(text="", ocr_empty=True), OcrResult("どこへ行くの?")])
+    chapter.project.write_lines(2, [OcrResult("東京タワーだ"), OcrResult(text="", ocr_empty=True)])
+
+    context = build_prompt_context(chapter.project, 1, mode="neighbours")
+
+    assert context.rolling_block == (f"{_PREVIOUS_JA}\nどこへ行くの?\n\n{_NEXT_JA}\n東京タワーだ")
+
+
+def test_a_neighbour_that_read_as_entirely_empty_has_no_header(chapter: _Chapter) -> None:
+    """A wordless next page is an empty list once filtered, so its header is
+    omitted (AC-1 through AC-2) - not `Next page, Japanese:` over nothing."""
+    chapter.project.write_lines(
+        2, [OcrResult(text="", ocr_empty=True), OcrResult(text="", ocr_empty=True)]
+    )
+
+    context = build_prompt_context(chapter.project, 1, mode="neighbours")
+
+    assert context == PromptContext("", f"{_PREVIOUS_JA}\nさくら、待って!\nどこへ行くの?")
+
+
+def test_neighbours_holds_the_glossary_to_its_cap_and_the_japanese_to_the_rolling_cap(
+    chapter: _Chapter,
+) -> None:
+    """`## Contract`: `render_block(glossary, MAX_GLOSSARY_TOKENS)` and
+    `render_neighbours(..., MAX_ROLLING_TOKENS)`. Both sides are sized between
+    400 and 500 tokens, as the rolling caps test above is, so the two caps
+    swapped is caught from both directions: the next page's 461-token block
+    must come back whole, and the 40-entry glossary must be cut to 400."""
+    for index in range(40):
+        upsert(
+            chapter.project,
+            GlossaryEntry(
+                f"名前{index:02d}", f"Name Number {index:02d}", "name", index, index, "model"
+            ),
+        )
+    long_line = "あ" * 450
+    chapter.project.write_lines(1, [OcrResult(long_line), OcrResult("家へ。")])
+    whole_next = f"{_NEXT_JA}\n{long_line}\n家へ。"
+    whole_glossary = estimate_tokens(
+        "\n".join(
+            [_GLOSSARY_HEADER]
+            + [f"名前{index:02d} = Name Number {index:02d} (name)" for index in range(40)]
+        )
+    )
+    assert estimate_tokens(whole_next) == 461
+    assert MAX_GLOSSARY_TOKENS < whole_glossary <= MAX_ROLLING_TOKENS, whole_glossary
+
+    context = build_prompt_context(chapter.project, 0, mode="neighbours")
+
+    assert context.rolling_block == whole_next, "the next page was cut below MAX_ROLLING_TOKENS"
+    assert estimate_tokens(context.glossary_block) <= MAX_GLOSSARY_TOKENS
+    assert context.glossary_block.startswith(_GLOSSARY_HEADER)
+
+
+@pytest.mark.parametrize("ordinal", [0, 1, 2])
+def test_rolling_by_name_is_the_rolling_context_byte_for_byte(
+    chapter: _Chapter, ordinal: int
+) -> None:
+    """**AC-3**, the explicit half: `mode="rolling"` is today's output for every
+    ordinal - page 0 `EMPTY_CONTEXT` whatever the store holds, later pages the
+    glossary and the previous page's PROPOSED English - and equal to the call
+    with no mode. The no-mode half is every MT-014 test above, unchanged."""
+    glossary = _sakura(chapter)
+    _propose_everywhere(chapter)
+    expected = (
+        EMPTY_CONTEXT,
+        PromptContext(glossary, f"{_ROLLING_HEADER}\nWait up, Sakura!\nWhere are you going?"),
+        PromptContext(glossary, f"{_ROLLING_HEADER}\nWhere is Sakura?\nHome."),
+    )[ordinal]
+
+    assert build_prompt_context(chapter.project, ordinal, mode="rolling") == expected
+    assert build_prompt_context(chapter.project, ordinal) == expected
+
+
+def _neighbours_middle() -> PromptContext:
+    return PromptContext(
+        "",
+        f"{_PREVIOUS_JA}\nさくら、待って!\nどこへ行くの?\n\n{_NEXT_JA}\n東京タワーだ\nさくら!",
+    )
+
+
+def _run_page_one_twice(chapter: _Chapter, mode: str) -> _Scripted:
+    """Run page 1 through the stage in `mode`, rewrite page 0's proposal, and
+    run page 1 again: the two contexts the translator was handed are AC-4's."""
+    translator = _Scripted(_result({0: "Where's Sakura?"}), _result({0: "Where's Sakura?"}))
+    stage = TranslateStage(
+        translate=translator, page_estimate=BOOTSTRAP_PAGE_ESTIMATE, context_mode=mode
+    )
+    chapter.project.write_proposed(0, {0: "Wait up, Sakura!", 1: "Where are you going?"})
+    stage.run(chapter.context(1))
+    chapter.project.write_proposed(0, {0: "REWRITTEN between runs", 1: "and this too"})
+    stage.run(chapter.context(1))
+    return translator
+
+
+def test_in_neighbours_mode_rewriting_the_previous_proposal_does_not_change_the_request(
+    chapter: _Chapter,
+) -> None:
+    """**AC-4**: `TranslateStage(..., context_mode="neighbours")` builds page
+    1's request from a context that page 0's proposal does not reach - the two
+    runs hand the translator the same context, and it is the neighbours'
+    Japanese (so the equality is not two empty contexts agreeing). The
+    independence assertion DV-1 must turn red."""
+    translator = _run_page_one_twice(chapter, "neighbours")
+
+    assert translator.contexts[0] == _neighbours_middle(), (
+        f"the stage did not build a neighbours context: {translator.contexts[0]!r}"
+    )
+    assert translator.contexts[1] == translator.contexts[0], (
+        "page 0's rewritten proposal changed page 1's neighbours context:"
+        f" {translator.contexts[0]!r} -> {translator.contexts[1]!r}"
+    )
+
+
+def test_in_rolling_mode_rewriting_the_previous_proposal_does_change_the_request(
+    chapter: _Chapter,
+) -> None:
+    """**AC-4**'s other half, and the control on the one above: the same two
+    runs in `rolling` mode hand over page 0's English, before and after."""
+    translator = _run_page_one_twice(chapter, "rolling")
+
+    assert [context.rolling_block for context in translator.contexts] == [
+        f"{_ROLLING_HEADER}\nWait up, Sakura!\nWhere are you going?",
+        f"{_ROLLING_HEADER}\nREWRITTEN between runs\nand this too",
+    ]
+
+
+def test_a_neighbours_stage_hands_the_first_page_the_next_pages_japanese(
+    chapter: _Chapter,
+) -> None:
+    """`TranslateStage.run` passes `mode=self.context_mode` for every page,
+    page 0 included: in this mode page 1's call is not `EMPTY_CONTEXT`."""
+    translator = _Scripted(_result({0: "Wait, Sakura!"}))
+
+    TranslateStage(
+        translate=translator, page_estimate=BOOTSTRAP_PAGE_ESTIMATE, context_mode="neighbours"
+    ).run(chapter.context(0))
+
+    assert translator.contexts == [PromptContext("", f"{_NEXT_JA}\nさくらはどこ?\n家へ。")]

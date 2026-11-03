@@ -54,7 +54,7 @@ from dataclasses import dataclass
 
 from mangatl.domain.budget import Budget
 from mangatl.domain.events import CallPriced
-from mangatl.domain.glossary import PromptContext, mark_seen, merge
+from mangatl.domain.glossary import ContextMode, PromptContext, mark_seen, merge
 from mangatl.domain.line import OcrResult
 from mangatl.domain.money import Usd
 from mangatl.domain.rates import price
@@ -176,6 +176,9 @@ class TranslateStage:
     #: The selected model's per-page estimate (MT-100 C-3), handed to
     #: `budget_for` so the guard and the pre-run summary share one number.
     page_estimate: Usd
+    #: How the request's context is built (MT-107): `rolling` is the previous
+    #: page's proposed English, `neighbours` the adjacent pages' Japanese.
+    context_mode: ContextMode = "rolling"
     name: str = "translate"
 
     def run(self, ctx: PageContext) -> None:
@@ -235,8 +238,9 @@ class TranslateStage:
            because no bill was recorded.
 
         The request's context is built from the store before the call (C-8):
-        page 1 gets `EMPTY_CONTEXT`, every later page the glossary and the
-        previous page's proposed English.
+        in `rolling` mode page 1 gets `EMPTY_CONTEXT`, every later page the
+        glossary and the previous page's proposed English; in `neighbours`
+        mode every page gets the glossary and its neighbours' Japanese (MT-107).
 
         `chapter_call_costs` is read **per page and is deliberately not cached**
         (F-4): a cached sample set is a guard reading a stale spend, which is
@@ -250,7 +254,7 @@ class TranslateStage:
             raise BudgetRefused(decision)
 
         image_bytes = (ctx.project.chapter.source_dir / ctx.page.filename).read_bytes()
-        context = build_prompt_context(ctx.project, ctx.page.ordinal)
+        context = build_prompt_context(ctx.project, ctx.page.ordinal, mode=self.context_mode)
         # MT-118 C-4: only the included regions cross the seam, as a contiguous
         # listing, and the answer's indices are mapped back to reading indices.
         # A page with none included hands over `()`, and the translator's own

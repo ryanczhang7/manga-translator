@@ -85,7 +85,11 @@ def models_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def seeding_root(monkeypatch: pytest.MonkeyPatch) -> None:
     def build(
-        models_dir: Path, *, translate: bool | None = None, selection: object = None
+        models_dir: Path,
+        *,
+        translate: bool | None = None,
+        selection: object = None,
+        context_mode: object = None,
     ) -> object:
         # MT-105: `build_pipeline` returns `Pipeline(stages, prelude)`; imported
         # here so that its absence in RED fails these tests one at a time.

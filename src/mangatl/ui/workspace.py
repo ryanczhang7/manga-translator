@@ -117,6 +117,7 @@ from PySide6.QtWidgets import (
 )
 
 from mangatl.domain.budget import DEFAULT_CEILING, page_estimate
+from mangatl.domain.glossary import UnknownContextMode
 from mangatl.domain.line import Line, LineStatus, effective_text, failure_reason
 from mangatl.domain.page import Chapter
 from mangatl.domain.page_status import PageProgress, PageStatus, page_progress
@@ -1430,7 +1431,7 @@ class Workspace(QMainWindow):
         try:
             stages = setup.build_stages(models)
             estimate = page_estimate(setup.select_model())
-        except ProviderError as error:
+        except (ProviderError, UnknownContextMode) as error:
             self._say(str(error))
             return
         # Reads only, one pass, on this thread: nothing is running.

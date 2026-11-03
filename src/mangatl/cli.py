@@ -34,6 +34,11 @@ selects a provider before it reads or creates anything - `--provider`, else
 `MANGATL_PROVIDER`, else the one key set - and a machine with no key, or with
 several and no choice, gets one line and exit 1 with nothing loaded and nothing
 left behind.
+
+**MT-107: the context mode.** `--context`, else `MANGATL_CONTEXT_MODE`, else
+`rolling`; the flag beats the variable as `--provider` does. A bad flag is
+argparse's usage error; a bad variable is one line and exit 1, decided before
+the provider is selected, so nothing is loaded or left behind.
 """
 
 from __future__ import annotations
@@ -47,6 +52,13 @@ from pathlib import Path
 from mangatl.app_paths import bundled_models_dir
 from mangatl.compose import MODELS_ENV, ModelsNotFound, build_pipeline, resolve_models_dir
 from mangatl.domain.events import PageSkipped, PageStarted, RunEvent
+from mangatl.domain.glossary import (
+    CONTEXT_MODE_VAR,
+    CONTEXT_MODES,
+    ContextMode,
+    UnknownContextMode,
+    context_mode,
+)
 from mangatl.pipeline.bake import bake_chapter
 from mangatl.pipeline.runner import RUN_FINISHED, run_chapter
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
@@ -98,6 +110,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help=f"the translation provider, when more than one API key is set (or set {PROVIDER_VAR})",
     )
+    parser.add_argument(
+        "--context",
+        choices=CONTEXT_MODES,
+        default=None,
+        help=(
+            "what each page's request is given from its neighbours: the previous"
+            " page's English (rolling, the default) or the adjacent pages' Japanese"
+            f" (or set {CONTEXT_MODE_VAR})"
+        ),
+    )
     arguments = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     source_dir: Path = arguments.folder
 
@@ -115,8 +137,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     # or created, so a keyless or ambiguous run fails in one line and leaves
     # nothing behind. The flag beats the variable; an empty variable is no
     # choice (PO-7). `--no-translate` makes no selection at all.
+    # MT-107: the context mode, decided first of the two, so a bad variable is
+    # its own one line whether or not a key is set. The flag beats the
+    # variable; unset or empty is `rolling`. `--no-translate` resolves nothing.
+    mode: ContextMode = "rolling"
     selection: Selection | None = None
     if not arguments.no_translate:
+        try:
+            mode = context_mode(arguments.context or os.environ.get(CONTEXT_MODE_VAR))
+        except UnknownContextMode as error:
+            return _fail(str(error))
         try:
             selection = select_provider(
                 arguments.provider or os.environ.get(PROVIDER_VAR) or None, os.environ
@@ -144,10 +174,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     # `translate=` is passed on every call, flagged or not (MT-044 C-14): what
     # the tool does with a user's money is a decision this entry point makes
     # out loud, not one it leaves to whatever the builder's default happens to
-    # be on the day someone changes it.
+    # be on the day someone changes it. `context_mode=` likewise (MT-107 R-A1).
     try:
         pipeline = build_pipeline(
-            models_dir, translate=not arguments.no_translate, selection=selection
+            models_dir,
+            translate=not arguments.no_translate,
+            selection=selection,
+            context_mode=mode,
         )
     except ProviderError as error:
         return _fail(str(error))

@@ -610,3 +610,259 @@ def test_the_real_rolling_cap_holds_on_a_long_previous_page() -> None:
 
     assert estimate_tokens(rendered) <= MAX_ROLLING_TOKENS
     assert rendered == "\n".join([_ROLLING_HEADER, *lines[34:]])
+
+
+# -- MT-107: the neighbour-Japanese block and the context mode ---------------------
+#
+# Every name below is new in MT-107 and is reached through the module object
+# rather than imported at the top of this file: a missing name is then one red
+# test each, and the MT-014 tests above keep running in RED.
+#
+# MEASURED IN RED, outside pytest, with a 10-line reference renderer in a plain
+# `uv run python` (the function under test does not exist yet, so none of these
+# assertions has executed): the full two-section block below is 40 tokens;
+# previous section alone 23; previous + first next line 36; header + first
+# previous line 16. The whole cap table is in the story's `## Handoff`.
+
+_PREVIOUS_HEADER = "Previous page, Japanese:"
+_NEXT_HEADER = "Next page, Japanese:"
+_PREVIOUS_JA = ["さくら、待って!", "どこへ行くの?"]
+_NEXT_JA = ["東京タワーだ", "さくら!"]
+_BOTH = (
+    "Previous page, Japanese:\nさくら、待って!\nどこへ行くの?"
+    "\n\n"
+    "Next page, Japanese:\n東京タワーだ\nさくら!"
+)
+_PREVIOUS_ONLY = "Previous page, Japanese:\nさくら、待って!\nどこへ行くの?"
+
+
+def _neighbours(previous: Sequence[str], next_lines: Sequence[str], cap: int) -> str:
+    import mangatl.domain.glossary as module
+
+    rendered: str = module.render_neighbours(previous, next_lines, cap)
+    return rendered
+
+
+def test_the_mt107_names_are_exported_from_the_glossary_module() -> None:
+    """MT-107 `## Contract`: the six new names join `__all__`, beside every
+    name MT-014 exported. Exact, as a set: a name missing from the list is
+    unreachable by `from ... import *` and invisible to the next reader."""
+    import mangatl.domain.glossary as module
+
+    assert set(module.__all__) == {
+        "EMPTY_CONTEXT",
+        "MAX_GLOSSARY_TOKENS",
+        "MAX_ROLLING_TOKENS",
+        "GlossaryEntry",
+        "Note",
+        "PromptContext",
+        "ProposedTerm",
+        "Source",
+        "estimate_tokens",
+        "mark_seen",
+        "merge",
+        "render_block",
+        "render_rolling",
+        "CONTEXT_MODES",
+        "CONTEXT_MODE_VAR",
+        "ContextMode",
+        "UnknownContextMode",
+        "context_mode",
+        "render_neighbours",
+    }
+    assert len(module.__all__) == len(set(module.__all__)), "a name is exported twice"
+
+
+def test_the_two_context_modes_are_rolling_then_neighbours_and_the_variable_is_named() -> None:
+    """Settled strings (MT-107 `## Contract`): the modes, in that order, and
+    the variable MT-108 sets to run the measurement."""
+    import typing
+
+    import mangatl.domain.glossary as module
+
+    assert module.CONTEXT_MODES == ("rolling", "neighbours")
+    assert module.CONTEXT_MODE_VAR == "MANGATL_CONTEXT_MODE"
+    assert typing.get_args(module.ContextMode) == ("rolling", "neighbours")
+
+
+@pytest.mark.parametrize("value", [None, ""], ids=["unset", "empty"])
+def test_no_mode_given_means_rolling(value: str | None) -> None:
+    """AC-5's "unset means `rolling`", and an empty variable is no choice -
+    as an empty `MANGATL_PROVIDER` is (MT-078 PO-7)."""
+    import mangatl.domain.glossary as module
+
+    assert module.context_mode(value) == "rolling"
+
+
+@pytest.mark.parametrize("value", ["rolling", "neighbours"])
+def test_each_named_mode_is_itself(value: str) -> None:
+    import mangatl.domain.glossary as module
+
+    assert module.context_mode(value) == value
+
+
+@pytest.mark.parametrize("value", ["batch", "Neighbours", " rolling", "neighbors"])
+def test_any_other_mode_is_refused_naming_the_value_and_both_modes(value: str) -> None:
+    """AC-5's refusal, at its source: an `UnknownContextMode`, which is a
+    `ValueError` (it stays in `domain`, and is not a `ProviderError`), whose
+    message names the value it was given and both valid modes, on one line.
+    Case and whitespace are not forgiven: `Neighbours` is not a mode.
+
+    Each mode name must occur more often than it does in the value, so
+    `" rolling"` cannot satisfy "names rolling" by being quoted back."""
+    import mangatl.domain.glossary as module
+
+    assert issubclass(module.UnknownContextMode, ValueError)
+    with pytest.raises(module.UnknownContextMode) as raised:
+        module.context_mode(value)
+
+    message = str(raised.value)
+    assert value in message, f"{message!r} does not name {value!r}"
+    for mode in ("rolling", "neighbours"):
+        assert message.count(mode) > value.count(mode), f"{message!r} does not name {mode}"
+    assert "\n" not in message, f"the refusal is more than one line: {message!r}"
+
+
+def test_both_neighbours_render_previous_then_next_with_a_blank_line_between() -> None:
+    """**AC-1**, byte for byte: `Previous page, Japanese:` over the previous
+    page's lines, a blank line, `Next page, Japanese:` over the next page's. No
+    reading-index numbers. A cap equal to its own size (40) keeps everything -
+    the first of the two truncation controls."""
+    assert estimate_tokens(_BOTH) == 40
+
+    assert _neighbours(_PREVIOUS_JA, _NEXT_JA, MAX_ROLLING_TOKENS) == _BOTH
+    assert _neighbours(_PREVIOUS_JA, _NEXT_JA, 40) == _BOTH
+
+
+def test_only_a_previous_page_renders_without_a_next_header() -> None:
+    """AC-1: a header whose list is empty is omitted - the last page of a
+    chapter, which has no next page."""
+    assert _neighbours(_PREVIOUS_JA, [], MAX_ROLLING_TOKENS) == _PREVIOUS_ONLY
+
+
+def test_only_a_next_page_renders_without_a_previous_header() -> None:
+    """AC-1: page 1 of a chapter has no previous page, so its block opens on
+    the next page's header - no blank line before it."""
+    assert _neighbours([], _NEXT_JA, MAX_ROLLING_TOKENS) == (
+        "Next page, Japanese:\n東京タワーだ\nさくら!"
+    )
+
+
+def test_no_neighbours_render_as_nothing() -> None:
+    """AC-1: `""` when both are empty - never a header alone, never a bare
+    blank line."""
+    assert _neighbours([], [], MAX_ROLLING_TOKENS) == ""
+
+
+def test_one_token_under_the_whole_drops_exactly_the_last_next_page_line() -> None:
+    """**AC-1**'s order, the second truncation control: at 39 the last line of
+    the NEXT page goes, and nothing else. A renderer that dropped from the
+    start of next would lose 東京タワーだ instead; one that cut the previous
+    page first would keep both next lines. 36 is the smallest cap that still
+    holds it."""
+    one_next_line = f"{_PREVIOUS_ONLY}\n\nNext page, Japanese:\n東京タワーだ"
+    assert estimate_tokens(one_next_line) == 36
+
+    assert _neighbours(_PREVIOUS_JA, _NEXT_JA, 39) == one_next_line
+    assert _neighbours(_PREVIOUS_JA, _NEXT_JA, 36) == one_next_line
+
+
+def test_the_next_page_is_emptied_before_the_previous_page_loses_a_line() -> None:
+    """AC-1: next first, until it is empty - and with it its header and the
+    blank line, which the cap counts (35 cannot hold the 36-token
+    previous + one next line; the 23-token previous section fits)."""
+    assert estimate_tokens(_PREVIOUS_ONLY) == 23
+
+    assert _neighbours(_PREVIOUS_JA, _NEXT_JA, 35) == _PREVIOUS_ONLY
+    assert _neighbours(_PREVIOUS_JA, _NEXT_JA, 23) == _PREVIOUS_ONLY
+
+
+def test_then_the_previous_page_loses_lines_from_its_end() -> None:
+    """AC-1: "then the end of the previous page". At 22 the second previous
+    line goes and the first stays; a drop from the start of previous would
+    keep どこへ行くの? instead."""
+    assert _neighbours(_PREVIOUS_JA, _NEXT_JA, 22) == "Previous page, Japanese:\nさくら、待って!"
+    assert _neighbours(_PREVIOUS_JA, _NEXT_JA, 16) == "Previous page, Japanese:\nさくら、待って!"
+
+
+def test_a_cap_nothing_fits_renders_nothing_and_not_a_header() -> None:
+    """AC-1 / `## Contract`: the header and the first previous line together are
+    16 tokens, so 15 fits nothing - `""`, never `Previous page, Japanese:`
+    alone (8 tokens, which would fit)."""
+    assert estimate_tokens(_PREVIOUS_HEADER) == 8
+
+    assert _neighbours(_PREVIOUS_JA, _NEXT_JA, 15) == ""
+    assert _neighbours(_PREVIOUS_JA, _NEXT_JA, 0) == ""
+    assert _neighbours([], _NEXT_JA, 7) == ""
+
+
+def _sections(rendered: str) -> tuple[list[str], list[str]]:
+    """The previous and next lines a rendered block carries, read by header."""
+    previous: list[str] = []
+    next_lines: list[str] = []
+    for section in rendered.split("\n\n") if rendered else []:
+        header, *lines = section.split("\n")
+        if header == _PREVIOUS_HEADER:
+            previous = lines
+        elif header == _NEXT_HEADER:
+            next_lines = lines
+        else:
+            raise AssertionError(f"unknown section header {header!r} in {rendered!r}")
+    return previous, next_lines
+
+
+def _joined(previous: Sequence[str], next_lines: Sequence[str]) -> str:
+    """The block `## Contract` describes, for the maximality check only."""
+    return "\n\n".join(
+        "\n".join([header, *lines])
+        for header, lines in ((_PREVIOUS_HEADER, previous), (_NEXT_HEADER, next_lines))
+        if lines
+    )
+
+
+def test_the_neighbour_block_never_exceeds_its_cap_and_truncates_in_order_at_every_cap() -> None:
+    """**AC-1** as an invariant over every cap 0..45, collected and asserted
+    once: never over the cap (headers counted); never a bare header; each
+    side a PREFIX of its page (lines drop from the end, never mid-line); the
+    previous page short only once the next page is empty; and never shorter
+    than it had to be - the next line in drop order would not have fitted."""
+    violations: list[str] = []
+    for cap in range(46):
+        rendered = _neighbours(_PREVIOUS_JA, _NEXT_JA, cap)
+        if estimate_tokens(rendered) > cap:
+            violations.append(f"cap {cap}: {estimate_tokens(rendered)} tokens")
+        previous, next_lines = _sections(rendered)
+        if rendered and not (previous or next_lines):
+            violations.append(f"cap {cap}: a bare header {rendered!r}")
+        if previous != _PREVIOUS_JA[: len(previous)]:
+            violations.append(f"cap {cap}: previous kept {previous}, not a prefix")
+        if next_lines != _NEXT_JA[: len(next_lines)]:
+            violations.append(f"cap {cap}: next kept {next_lines}, not a prefix")
+        if next_lines and len(previous) < len(_PREVIOUS_JA):
+            violations.append(f"cap {cap}: previous cut while next kept {next_lines}")
+        if len(previous) < len(_PREVIOUS_JA):
+            candidate = _joined(_PREVIOUS_JA[: len(previous) + 1], [])
+        elif len(next_lines) < len(_NEXT_JA):
+            candidate = _joined(_PREVIOUS_JA, _NEXT_JA[: len(next_lines) + 1])
+        else:
+            continue
+        if estimate_tokens(candidate) <= cap:
+            violations.append(f"cap {cap}: dropped a line that fitted ({candidate!r})")
+
+    assert violations == []
+
+
+def test_the_real_rolling_cap_holds_on_two_long_neighbour_pages() -> None:
+    """AC-1 at `MAX_ROLLING_TOKENS` itself, the cap `build_prompt_context`
+    passes: a long previous page is kept whole and a longer next page is cut
+    from its end, under 500 tokens."""
+    previous = [f"前のページの{index:02d}行目です。" for index in range(20)]
+    next_lines = [f"次のページの{index:02d}行目です、まだ続きます。" for index in range(40)]
+
+    rendered = _neighbours(previous, next_lines, MAX_ROLLING_TOKENS)
+
+    assert estimate_tokens(rendered) <= MAX_ROLLING_TOKENS
+    kept_previous, kept_next = _sections(rendered)
+    assert kept_previous == previous
+    assert 0 < len(kept_next) < len(next_lines)
+    assert kept_next == next_lines[: len(kept_next)]

@@ -64,7 +64,11 @@ def _no_ambient_models_directory(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _seeding_root(monkeypatch: pytest.MonkeyPatch) -> None:
     def build(
-        models_dir: Path, *, translate: bool | None = None, selection: object = None
+        models_dir: Path,
+        *,
+        translate: bool | None = None,
+        selection: object = None,
+        context_mode: object = None,
     ) -> object:
         # MT-105: `build_pipeline` returns `Pipeline(stages, prelude)`; imported
         # here so that its absence in RED fails these tests one at a time.
