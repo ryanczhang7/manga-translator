@@ -97,6 +97,7 @@ RADIUS_MD = 6
 RADIUS_PILL = 999
 BORDER_WIDTH_HAIRLINE = 1
 BORDER_WIDTH_EMPHASIS = 2
+BORDER_WIDTH_BAR = 3
 ELEVATION_E0_SURFACE = "color.surface.base"
 ELEVATION_E0_BORDER = "none"
 ELEVATION_E1_SURFACE = "color.surface.raised"
@@ -225,6 +226,7 @@ TOKENS: dict[str, str] = {
     "radius.pill": "999",
     "border-width.hairline": "1",
     "border-width.emphasis": "2",
+    "border-width.bar": "3",
     "elevation.e0.surface": "color.surface.base",
     "elevation.e0.border": "none",
     "elevation.e1.surface": "color.surface.raised",

@@ -56,7 +56,9 @@ DATA_NAMES = ("TOKENS", "HC_PALETTE_ROLE", "HC_OVERRIDE")
 
 # C-9, measured by lead-po on 2026-09-28 and re-measured in RED with a separate
 # parser. Read out, not re-derived.
-TOKEN_COUNT = 126
+# MT-132 RED: `border-width.bar = 3` joins `[border-width]` (126 -> 127); orphans and
+# base-referenced unchanged because only the HC template references it.
+TOKEN_COUNT = 127
 COLOUR_TOKEN_COUNT = 40
 # MT-061 RED: the Lead Designer's components.md section 2 and section 5 rules in
 # theme.qss.in reference 14 more tokens (25 -> 39), so 13 fewer are orphans

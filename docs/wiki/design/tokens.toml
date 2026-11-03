@@ -204,6 +204,7 @@ pill = 999
 [border-width]
 hairline = 1
 emphasis = 2
+bar      = 3          # the error banner's leading bar, components.md §9 and §10.7 (MT-132)
 
 # ---------------------------------------------------------------------------
 # Elevation. QSS has no box-shadow and QGraphicsDropShadowEffect is a real cost
