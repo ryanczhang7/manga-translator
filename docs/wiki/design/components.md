@@ -570,7 +570,7 @@ carries its index and a status glyph:
 | Page status | Glyph | Colour |
 |---|---|---|
 | pending | hollow circle `○` U+25CB | `color.text.muted` |
-| running | half-filled circle `◐` U+25D0, and the row is `color.accent.base` bordered | `color.accent.base` |
+| running | half-filled circle `◐` U+25D0, and the row is `color.accent.base` bordered at `border-width.emphasis` (2px; a note, not a story — nothing sets `running` today. User decision 2026-11-03) | `color.accent.base` |
 | translated, none reviewed | hollow diamond `◇` U+25C7 | `color.text.secondary` |
 | partly reviewed | half-filled diamond `◈` U+25C8 | `color.status.success` |
 | fully reviewed | filled diamond `◆` U+25C6 | `color.status.success` |
@@ -603,6 +603,52 @@ carries its index and a status glyph:
 States per row: default / hover (`color.surface.hover`) / focus-visible (ring) /
 current (3px `color.accent.base` leading bar + `color.surface.selected`) /
 disabled (during a run, non-current rows are not activatable but stay focusable).
+
+**How the current row is rendered (user decision 2026-11-03, Lead Designer's
+check of 2026-11-03).** The row is a widget set with `setItemWidget`, so
+anything `QListWidget::item` paints lies *under* it; the row therefore carries
+its own state as a dynamic property, exactly as its glyph carries `status`:
+`_PageRow` (`#pageRow`) takes `current` (`"true"` / `"false"`), set and
+re-polished by `PageStrip` on every current-row change, and paints its own
+ground and border box (`WA_StyledBackground`, as `RunThumbnail` does). The
+rule is `#pageRow[current="true"] { background-color: @{color.surface.selected};
+border-left: @{border-width.bar}px solid @{color.accent.base}; }`, after the
+`#pageRow` rest rule (no ground, no border). Qt's own item highlight stays
+beneath it, hidden; a non-current row paints nothing and stays transparent
+over the list ground. The bar occupies the row's leftmost 3px and nothing
+moves when it appears: in the 28 px rail every row, current or not, takes a
+constant left contents margin of `border-width.bar` so the glyph and index
+never sit on the bar. `::item:selected` styling was rejected because it cannot
+reach the row's labels (the HC text below) and would be a second border box on
+the same row; a delegate was rejected because the colours would leave the
+sheet (`[hc.map]` must still carry them).
+
+**One border box, in precedence order** (QSS gives a widget one border; later
+rules win at equal specificity, so `theme.qss.in` authors them in this order,
+each restating only the side it owns):
+
+1. `#pageRow` — rest: no ground, no border.
+2. `#pageRow[hovered="true"]` — ground `color.surface.hover` **only**, never a
+   border. *Not built*: the strip has no hover plumbing (an item-widget row
+   takes the pointer, so `itemEntered` never fires); a later story.
+3. `#pageRow[status="running"]` — `border-width.emphasis` `color.accent.base`
+   on all four sides (the table above). *Not built*: nothing sets `running`.
+4. `#pageRow[current="true"]` — ground `color.surface.selected` and the 3px
+   `color.accent.base` leading bar. Current + running is one accent box with
+   a heavier leading edge: 3px left, 2px elsewhere.
+5. focus-visible (*not built*; the list owns focus today) — `focus.width`
+   `color.focus.ring` on top, right and bottom, **never the left side**: the
+   left belongs to the bar, which is the current row's contrast carrier.
+
+What a test asserts: with the application sheet set and row *k* current, the
+row's columns 0, 1 and 2 are every pixel `color.accent.base` and column 3 is
+`color.surface.selected`; every non-current row's columns 0–3 are
+`color.surface.raised`; the row's geometry and the glyph's position are
+identical before and after `setCurrentRow(k)`; making *k+1* current moves the
+bar (the re-polish is what this pins); and, by fixture table, `accent.base`
+clears 3:1 on both `surface.selected` (5.31) and `surface.raised` (7.54) while
+`surface.selected` on `surface.raised` does not (1.42) — which is why the bar
+exists. The High Contrast form of the rule is §10.2.
 
 **Row anatomy (MT-087, PO-1, the user's decision 2026-10-21).** At 96 px each
 row is a **72 px-wide thumbnail** of the page (height from the page's stored
@@ -884,7 +930,7 @@ against (`tokens.md` §6).
 | `reverted` | per selection | none | outlined pencil with a return arrow | `color.text.secondary` |
 | `failed` | per selection + 1px `color.status.danger` border | none | filled warning triangle | `color.status.danger` |
 | `overflow` (text will not fit the bubble at `typeset.size-min`) | per selection | none | filled "shrink" glyph | `color.status.warning` |
-| disabled / locked | `color.surface.disabled`, text `color.text.secondary` | none | unchanged, dimmed | `color.text.disabled` |
+| disabled / locked | `color.surface.disabled`, text `color.text.secondary` | per selection — the selected row keeps its 3px bar under lock (user decision 2026-11-03; A-03 is a property of the selected row in every state, and the locked column still has a current row) | unchanged, dimmed | `color.text.disabled` |
 | `excluded` (the bubble is removed from translation, MT-120) | per selection; text `color.text.secondary` | none (an `edited` line's 2px bar is not shown while excluded; selection's 3px bar still is) | circle with a slash, `\N{CIRCLED DIVISION SLASH}` U+2298 ⊘ | `color.text.muted` |
 
 **`excluded` is a status, not a disabled row** *(added 2026-10-29, MT-120)*.
@@ -924,6 +970,77 @@ the gutter after changing `status` or the selector does not re-match.
 
 `failed` rows additionally show the error text in `type.caption`
 `color.status.danger` and a `secondary` "Retry line".
+
+**How the row's ground and bars are rendered (user decision 2026-11-03, Lead
+Designer's check of 2026-11-03).** The row is a widget set with
+`setItemWidget`, so Qt's `::item` highlight paints *under* it; today it shows
+through only because the row is transparent. The row therefore carries every
+state it paints as a dynamic property, each set and re-polished exactly as
+`hovered` already is (and as the gutter's `status`), and paints its own ground
+and border box (`WA_StyledBackground`, as `RunThumbnail` does):
+
+- `hovered` — already set from the link state; the rule that paints it is
+  new.
+- `selected` — set by `TranslationColumn` from the list's current row.
+- `status` — the row's own copy of the editor's status, set in `_render`
+  beside the gutter's and the editor's.
+
+The selected bar is the row's **only** selection carrier that clears 3:1
+(A-03; `accent.base` is 5.31:1 on `surface.selected`, 7.54:1 on
+`surface.raised`; the ground is 1.42:1), so it is a stylesheet rule and never
+painted, so `[hc.map]` carries it (§10.4). `::item:selected` styling was
+rejected: it cannot reach the gutter and badge (which must turn
+`HighlightedText` on the HC selected row) and the `edited` and `failed`
+borders are row borders anyway, so it would put two border boxes on one row.
+
+**One border box, in precedence order.** QSS gives a widget one border, so
+every rule below restates only the side it owns, and `theme.qss.in` authors
+them in this order (later wins at equal specificity):
+
+1. `#translationRow` — rest: no ground (the list's `color.surface.raised`
+   shows), no border.
+2. `#translationRow[hovered="true"]` — ground `color.surface.hover` **only**;
+   hover never sets a border (the sheet's standing rule, so focus stays
+   additive).
+3. `#translationRow[status="failed"]` — 1px `color.status.danger` on all four
+   sides.
+4. `#translationRow[status="edited"]` — `border-left` 2px
+   (`border-width.emphasis`, deliberately, never `bar`) `color.accent.base`.
+5. `#translationRow[status="excluded"]` — `border-left: none`. (`excluded`
+   replaces the stored status for display, so a row never matches both 4 and
+   5; the rule is belt and braces.)
+6. `#translationRow[selected="true"]` — ground `color.surface.selected` and
+   `border-left` 3px (`border-width.bar`) `color.accent.base`. Wins the ground
+   over hover and the left side over everything above it.
+7. focus-visible (*not built*; the list owns focus today) — `focus.width`
+   `color.focus.ring` on top, right and bottom, **never the left side**.
+
+How they combine: selected + `edited` = one 3px accent bar (6 after 4, same
+colour). selected + `excluded` = the 3px bar, no 2px bar. unselected `edited`
+= the 2px bar alone. selected + `failed` = 3px accent on the left, 1px danger
+on the other three sides — the frame loses only its left edge, and failure is
+still carried by the ⚠ glyph and the caption (A-10). hovered + selected = the
+selected ground (6 after 2). Focus (when built) + selected + `failed` = the
+ring on three sides and the bar on the left, the danger frame fully covered:
+the one place focus is not purely additive on a row, for the same reason as
+§2's drop target (one border box), and the status stays carried by glyph and
+caption. Locked: the bar persists (the table above).
+
+Nothing moves: the bars are painted over the row's leftmost pixels and no
+state change alters the row's geometry or the gutter's position. If a
+measurement shows a reflow, the fix is the one the primary button and the
+summary scroll area already use — author a constant transparent border at rest
+and let states change `border-color` only — never a per-state margin.
+
+What a test asserts, under the application sheet (never `styleSheet()` on the
+widget): with row *k* selected, its columns 0, 1 and 2 are every pixel
+`color.accent.base` and column 3 is `color.surface.selected`; every unselected
+row's columns 0–3 are `color.surface.raised`; selecting *k+1* moves the bar;
+the row's geometry and the gutter's position are unchanged across selection;
+the hovered row's ground is `color.surface.hover` and the selected-and-hovered
+row's is `color.surface.selected`; each combination above is one parametrised
+case over the same sampler; and, by fixture table, the three contrast ratios
+above. The High Contrast form is §10.4.
 
 **Accessible name** (one string, in this order):
 
@@ -1260,7 +1377,27 @@ are unchanged. High Contrast is not a layout change.
 
 `PageStrip` rows: current → `Highlight` ground, `HighlightedText` text, leading
 bar `HighlightedText`; hover → 1px `WindowText` outline; the seven page-status
-glyphs all become `WindowText` and are distinguished by silhouette (A-15.7).
+glyphs all become `WindowText` and are distinguished by silhouette (A-15.7) —
+**except on the current row, where the glyph and the index are
+`HighlightedText`** (user decision 2026-11-03): `WindowText` on `Highlight` is
+not a pair Windows guarantees (A-15.2), the pair rule outranks "every glyph is
+`WindowText`", and silhouette still carries the status.
+
+**Why an override rule is needed** (Lead Designer's check 2026-11-03). The base
+rule of §`PageStrip` resolves through `[hc.map]` to `background-color:
+Highlight; border-left: 3px solid Highlight` — `color.accent.base` maps to
+`Highlight` — so under HC the bar vanishes into its own ground. The override
+template restates, under the same selector verbatim, `border-left:
+@{border-width.bar}px solid @{hc.HighlightedText}` and `color:
+@{hc.HighlightedText}`, plus `#pageRow[current="true"] QLabel#pageGlyph {
+color: @{hc.HighlightedText}; }` (the glyph's own per-status rules are more
+specific than the row rule and would otherwise keep `WindowText`); both
+selectors must also exist in the base. The test's control: the base alone
+composed under HC paints the current row's columns 0–3 all `Highlight`; with
+the override, columns 0–2 are `HighlightedText` and column 3 `Highlight`. The
+hover outline above is not built (the strip has no hover plumbing) and, when it
+is, must be reconciled with the override template's rule that hover rules set
+no border — it is a later story's question, not this one's.
 
 ### 10.3 `PageCanvas` and `BubbleMarker` (§3, §4)
 
@@ -1308,13 +1445,33 @@ gap, not one HC introduced, and raised separately.
 | default (`proposed`) | ground `Window`, text `WindowText` |
 | hover | **1px `WindowText` outline**, no ground change |
 | focus-visible | 2px ring in the foreground of the ground it sits on — `WindowText` on `Window`, **`HighlightedText` on `Highlight`** (A-15.8) |
-| selected | ground `Highlight`, text `HighlightedText`, 3px leading bar `HighlightedText` |
+| selected | ground `Highlight`, text `HighlightedText`, 3px leading bar `HighlightedText`; **the gutter glyph and the ordinal badge are `HighlightedText` too** (user decision 2026-11-03: the guaranteed pair outranks "every glyph is `WindowText`"; silhouette still carries the status, A-15.7) |
+| `edited` | the 2px leading bar becomes `WindowText` on `Window`; on the selected row the selected bar (3px, `HighlightedText`) replaces it, as in §5 |
 | `failed` | the 1px danger border becomes 2px `WindowText`; the error caption is `WindowText` |
-| disabled / locked | text and glyph `DisabledText` |
+| disabled / locked | text and glyph `DisabledText`; the selected row keeps its bar (§5, user decision 2026-11-03) |
 
-Every gutter glyph becomes `WindowText`, so **the silhouette is the only carrier
-of status**. Five of the six are already distinct in one colour. The sixth is
-not:
+**Why override rules are needed** (Lead Designer's check 2026-11-03). The
+base `#translationRow[selected="true"]` rule of §5 resolves through `[hc.map]`
+to `background-color: Highlight; border-left: 3px solid Highlight`, because
+`color.accent.base` maps to `Highlight` — the bar vanishes into its own
+ground. The override template restates, under the selectors verbatim,
+`border-left: @{border-width.bar}px solid @{hc.HighlightedText}` and `color:
+@{hc.HighlightedText}` on the selected row, and `#translationRow[selected="true"]
+QLabel#rowGutter { color: @{hc.HighlightedText}; }` (the gutter's per-status
+rules are more specific than the row rule and would otherwise keep
+`WindowText`); the `failed` row's `border-width` is restated as
+`@{border-width.emphasis}`, as `RerunDialog[overBudget]`'s already is. Each
+selector must also exist in the base. The test's control: the base alone
+composed under HC paints the selected row's columns 0–3 all `Highlight`; with
+the override, columns 0–2 are `HighlightedText` and column 3 `Highlight`. The
+§5 hover ground, `color.surface.hover`, maps to `Window`, so under HC hover
+paints no change until the 1px outline above is built; that outline must then
+be reconciled with the override template's rule that hover rules set no
+border — a later story's question.
+
+Every gutter glyph becomes `WindowText` (on the selected row, `HighlightedText`,
+as above), so **the silhouette is the only carrier of status**. Five of the six
+are already distinct in one colour. The sixth is not:
 
 > **`edited` (filled pencil) and `reverted` (outlined pencil with a return arrow)
 > differ by fill and by a small appended arrow.** At 16px in one colour that is

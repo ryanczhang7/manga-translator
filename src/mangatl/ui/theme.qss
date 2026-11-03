@@ -568,12 +568,12 @@ QLabel#stage-step[stepState="done"] {
 /* components.md section 9 - ErrorBanner (MT-018)                         */
 /* ====================================================================== */
 /* The danger variant, the only one built so far. The leading bar is      */
-/* border-width.emphasis: section 9 says 3px and no token holds 3.        */
+/* border-width.bar, the 3px bar section 9 specifies (MT-133).            */
 
 QFrame#error-banner {
     background-color: #262626;
     border: 1px solid #FF7A7A;
-    border-left: 2px solid #FF7A7A;
+    border-left: 3px solid #FF7A7A;
     border-radius: 4px;
 }
 
