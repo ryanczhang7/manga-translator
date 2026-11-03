@@ -39,6 +39,23 @@ QMenu {
     border: @{border-width.emphasis}px solid @{hc.WindowText};
 }
 
+/* e2 under HC for every dialog the sheet styles: Window plus a 2px WindowText
+   boundary, no shadow (components.md 10.2, 10.7). A type selector, so every
+   QDialog subclass - RerunDialog, BakeConfirmDialog, ApiKeyDialog, QMessageBox -
+   takes it. The base sets no dialog border, so this is a rule change (tokens.md
+   12.1), not a value change (MT-131). */
+QDialog {
+    border: @{border-width.emphasis}px solid @{hc.WindowText};
+}
+
+/* The over-budget Run again dialog's base hairline (theme.qss.in, MT-127) has
+   specificity (0,1,1) over QDialog's (0,0,1) and would stay 1px here. Widen it
+   to the same boundary; its colour already resolves to WindowText through the
+   token map (components.md 10.9), so only the width is restated (MT-131). */
+RerunDialog[overBudget="true"] {
+    border-width: @{border-width.emphasis}px;
+}
+
 /* The current menu item is the guaranteed pair, inverted. */
 QMenu::item:selected {
     background-color: @{hc.Highlight};

@@ -372,7 +372,8 @@ QScrollBar::add-page, QScrollBar::sub-page {
 /* names a subclass's metaobject after the class. Specificity (0,1,1) over  */
 /* the QDialog ground rule's (0,0,1), so order does not matter. Colour is   */
 /* emphasis only: the budget sentence carries the state (A-10). Under HC    */
-/* the token resolves to WindowText; no override rule (components.md 10.9). */
+/* the token resolves to WindowText, and theme_hc.qss.in widens the width   */
+/* to emphasis (MT-131).                                                    */
 
 RerunDialog[overBudget="true"] {
     border: @{border-width.hairline}px solid @{color.status.warning};
