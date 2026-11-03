@@ -11,6 +11,12 @@ and page 1 still sends MT-011's request. Every later page gets the whole
 glossary rendered under `MAX_GLOSSARY_TOKENS` and the previous page's
 **proposed** English - not the user's `final_en`, which reaches the next page
 through the glossary (AC-2) - under `MAX_ROLLING_TOKENS`.
+
+That is the `rolling` mode, and it is the default. MT-107 adds `neighbours`:
+every page, page 1 included, gets the glossary block and the previous and next
+pages' **Japanese** OCR, which exists before any call - so no page's request
+depends on another page's translation. The Japanese travels in `rolling_block`
+(a historical name), under the same `MAX_ROLLING_TOKENS`.
 """
 
 from __future__ import annotations
@@ -19,8 +25,10 @@ from mangatl.domain.glossary import (
     EMPTY_CONTEXT,
     MAX_GLOSSARY_TOKENS,
     MAX_ROLLING_TOKENS,
+    ContextMode,
     PromptContext,
     render_block,
+    render_neighbours,
     render_rolling,
 )
 from mangatl.store.glossary import read_entries
@@ -29,13 +37,29 @@ from mangatl.store.project import Project
 __all__ = ["build_prompt_context"]
 
 
-def build_prompt_context(project: Project, ordinal: int) -> PromptContext:
+def build_prompt_context(
+    project: Project, ordinal: int, mode: ContextMode = "rolling"
+) -> PromptContext:
     """The glossary and rolling blocks for page `ordinal`'s request.
 
     Untranslated regions of the previous page (`None`) are left out; a region
     proposed as `""` is kept as an empty line, so the model reads the page's
     lines in their real count (PO-7).
+
+    In `neighbours` mode the second block is the previous and next pages'
+    Japanese instead, regions read as empty left out; the first page has no
+    previous page and the last no next one.
     """
+    if mode == "neighbours":
+        last = len(project.pages()) - 1
+        return PromptContext(
+            render_block(read_entries(project), MAX_GLOSSARY_TOKENS),
+            render_neighbours(
+                _japanese(project, ordinal - 1) if ordinal > 0 else [],
+                _japanese(project, ordinal + 1) if ordinal < last else [],
+                MAX_ROLLING_TOKENS,
+            ),
+        )
     if ordinal == 0:
         return EMPTY_CONTEXT
     return PromptContext(
@@ -45,3 +69,7 @@ def build_prompt_context(project: Project, ordinal: int) -> PromptContext:
             MAX_ROLLING_TOKENS,
         ),
     )
+
+
+def _japanese(project: Project, ordinal: int) -> list[str]:
+    return [line.text for line in project.read_lines(ordinal) if not line.ocr_empty]

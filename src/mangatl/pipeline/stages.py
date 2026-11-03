@@ -36,6 +36,7 @@ assertable in `tests/core` with no client, no key, no network and no model.
 
 from __future__ import annotations
 
+from mangatl.domain.glossary import ContextMode
 from mangatl.domain.money import Usd
 from mangatl.pipeline.clean_stage import CleanStage, PageCleaner
 from mangatl.pipeline.detect_stage import DetectStage, PageDetector
@@ -52,6 +53,7 @@ def build_stages(
     transcribe: PageTranscriber,
     translate: PageTranslator | None,
     page_estimate: Usd | None,
+    context_mode: ContextMode = "rolling",
 ) -> tuple[Stage, ...]:
     """The pipeline's stage list: detect, clean, OCR, and translate unless asked not to.
 
@@ -77,6 +79,9 @@ def build_stages(
     with it; under `None` it is unused. A translator handed with no estimate is
     a `TypeError` rather than a stage that silently prices at Claude's figure -
     the one check here, which `mypy` needs to narrow the type in any case.
+
+    `context_mode` (MT-107) is handed to the translate stage as given; it is
+    unused under `translate=None`.
     """
     stages: tuple[Stage, ...] = (
         DetectStage(detect=detect),
@@ -87,4 +92,7 @@ def build_stages(
         return stages
     if page_estimate is None:
         raise TypeError("build_stages: a translator needs its page_estimate (MT-100 C-3)")
-    return (*stages, TranslateStage(translate=translate, page_estimate=page_estimate))
+    return (
+        *stages,
+        TranslateStage(translate=translate, page_estimate=page_estimate, context_mode=context_mode),
+    )

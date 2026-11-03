@@ -31,18 +31,24 @@ from math import ceil
 from typing import Literal
 
 __all__ = [
+    "CONTEXT_MODES",
+    "CONTEXT_MODE_VAR",
     "EMPTY_CONTEXT",
     "MAX_GLOSSARY_TOKENS",
     "MAX_ROLLING_TOKENS",
+    "ContextMode",
     "GlossaryEntry",
     "Note",
     "PromptContext",
     "ProposedTerm",
     "Source",
+    "UnknownContextMode",
+    "context_mode",
     "estimate_tokens",
     "mark_seen",
     "merge",
     "render_block",
+    "render_neighbours",
     "render_rolling",
 ]
 
@@ -54,10 +60,25 @@ MAX_GLOSSARY_TOKENS: int = 400
 MAX_ROLLING_TOKENS: int = 500
 
 Note = Literal["name", "honorific", "place", ""]
+
+#: How a page's request is given its neighbours (MT-107). `rolling` is the
+#: previous page's proposed English (MT-014); `neighbours` is the previous and
+#: next pages' Japanese OCR, which depends on no other page's translation.
+ContextMode = Literal["rolling", "neighbours"]
+CONTEXT_MODES: tuple[ContextMode, ...] = ("rolling", "neighbours")
+
+#: The environment variable both entry points read the mode from.
+CONTEXT_MODE_VAR: str = "MANGATL_CONTEXT_MODE"
 Source = Literal["model", "user"]
 
 _GLOSSARY_HEADER = "Glossary - use these renderings exactly:"
 _ROLLING_HEADER = "Previous page, in reading order:"
+_PREVIOUS_JA_HEADER = "Previous page, Japanese:"
+_NEXT_JA_HEADER = "Next page, Japanese:"
+
+
+class UnknownContextMode(ValueError):
+    """A context mode that is not one of `CONTEXT_MODES`, named in one line."""
 
 
 @dataclass(frozen=True)
@@ -162,6 +183,42 @@ def render_rolling(lines: Sequence[str], max_tokens: int) -> str:
     while estimate_tokens(block := _with_header(_ROLLING_HEADER, kept)) > max_tokens:
         kept.pop(0)
     return block
+
+
+def context_mode(value: str | None) -> ContextMode:
+    """The mode `value` names; unset or empty is `"rolling"` (MT-107 AC-5).
+
+    Anything else raises `UnknownContextMode` naming the value and both modes.
+    """
+    if not value:
+        return "rolling"
+    for mode in CONTEXT_MODES:
+        if value == mode:
+            return mode
+    raise UnknownContextMode(f"unknown context mode {value!r}: use {' or '.join(CONTEXT_MODES)}")
+
+
+def render_neighbours(previous: Sequence[str], next: Sequence[str], max_tokens: int) -> str:
+    """The previous then the next page's Japanese, each under its own header and
+    joined by a blank line; a header over an empty list is omitted (MT-107 AC-1).
+
+    Capped like `render_rolling`, on the whole rendered text: lines go from the
+    **end** of the next page until it is empty, then from the end of the
+    previous page, never mid-line. `""` when nothing fits or there is nothing.
+    """
+    kept_previous = list(previous)
+    kept_next = list(next)
+    while estimate_tokens(block := _neighbours(kept_previous, kept_next)) > max_tokens:
+        (kept_next or kept_previous).pop()
+    return block
+
+
+def _neighbours(previous: Sequence[str], next: Sequence[str]) -> str:
+    sections = [
+        _with_header(_PREVIOUS_JA_HEADER, previous),
+        _with_header(_NEXT_JA_HEADER, next),
+    ]
+    return "\n\n".join(section for section in sections if section)
 
 
 def _seen(entry: GlossaryEntry, page: int) -> GlossaryEntry:
