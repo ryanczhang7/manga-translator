@@ -2,7 +2,7 @@
 id: EPIC-09
 title: A whole volume as one Gemini batch, then a consistency pass that returns only corrections
 status: todo
-stories: [MT-101, MT-102, MT-103, MT-104, MT-105, MT-106, MT-107, MT-108, MT-109, MT-110, MT-111, MT-112, MT-113, MT-114, MT-115, MT-116, MT-130]
+stories: [MT-101, MT-102, MT-103, MT-104, MT-105, MT-106, MT-107, MT-108, MT-109, MT-110, MT-111, MT-112, MT-113, MT-114, MT-115, MT-116, MT-130, MT-137]
 ---
 
 *Added 2026-10-28 by lead-po on Claude Fable 5.1, from the user's request:
@@ -144,6 +144,8 @@ MT-108 exist, each with a `## Decided` section the implementing stories cite.
 - **MT-111** - a volume is guarded as a whole and submitted once: the batch
   projection, the refusal that spends nothing, the persisted job id, the
   `BatchSubmitted` event.
+- **MT-137** - a `batch_job` row holds its page range and a volume may have
+  several pending (cut from MT-111 under PO-5 as amended, 2026-11-03).
 - **MT-112** - collecting a finished batch, resumable: results into the same
   proposals path, one batch-priced ledger row per page, collection resumed
   when a project with a pending job is reopened.
