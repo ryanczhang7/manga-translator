@@ -2,7 +2,7 @@
 id: EPIC-05
 title: The review workspace — the one place a human can catch an error
 status: todo
-stories: [MT-025, MT-015, MT-048, MT-086, MT-087, MT-088, MT-090, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-054, MT-055, MT-056, MT-018, MT-062, MT-063, MT-057, MT-061, MT-058, MT-059, MT-060, MT-026, MT-028, MT-073, MT-074, MT-096, MT-097, MT-098, MT-099, MT-100, MT-131, MT-132]
+stories: [MT-025, MT-015, MT-048, MT-086, MT-087, MT-088, MT-090, MT-016, MT-049, MT-050, MT-051, MT-052, MT-017, MT-054, MT-055, MT-056, MT-018, MT-062, MT-063, MT-057, MT-061, MT-058, MT-059, MT-060, MT-026, MT-028, MT-073, MT-074, MT-096, MT-097, MT-098, MT-099, MT-100, MT-131, MT-132, MT-133, MT-134, MT-135, MT-136]
 ---
 
 ## Goal
@@ -140,3 +140,21 @@ or resizing typeset boxes, no per-bubble font or size control, no manual
 line-break control. If auto-placement is wrong, the human fixes it in their image
 editor. No reader or viewer — this screen is for judging translations, not for
 reading the chapter.
+
+MT-133 to MT-136 were filed on 2026-11-03 after the Lead Designer's read-only
+check of the theme against `components.md` §4, §5, §9, §10.2 and §10.4:
+
+- **MT-133** — fix: the base error banner's leading bar is the 3px `bar`
+  token, not MT-018's 2px compromise (§9).
+- **MT-134** — the page strip's current row carries the 3px accent bar (§4,
+  §10.2): the `current` property + `WA_StyledBackground` mechanism, the HC
+  override, the rail's constant 3px margin. The mechanism proof.
+- **MT-135** — the selected translation row carries the 3px accent bar and
+  the hovered row its ground (§5, A-03, §10.4); the bar persists under lock
+  and the HC selected row's glyph and badge are `HighlightedText` (user
+  decisions 2026-11-03).
+- **MT-136** — the `failed`, `edited` and `excluded` row borders and their
+  combinations with the selected bar; depends on MT-135.
+
+They share the theme templates and `workspace.py`, so they run one at a time
+in that order; only MT-136's dependency is a real one.

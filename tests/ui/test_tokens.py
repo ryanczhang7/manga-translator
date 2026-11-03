@@ -58,6 +58,8 @@ DATA_NAMES = ("TOKENS", "HC_PALETTE_ROLE", "HC_OVERRIDE")
 # parser. Read out, not re-derived.
 # MT-132 RED: `border-width.bar = 3` joins `[border-width]` (126 -> 127); orphans and
 # base-referenced unchanged because only the HC template references it.
+# MT-133 RED: the base template references `border-width.bar` (42 -> 43); orphans
+# unchanged - the HC template already referenced it.
 TOKEN_COUNT = 127
 COLOUR_TOKEN_COUNT = 40
 # MT-061 RED: the Lead Designer's components.md section 2 and section 5 rules in
@@ -72,7 +74,7 @@ COLOUR_TOKEN_COUNT = 40
 # over theme.qss.in and theme_hc.qss.in gives 39/87 today and 42/84 with D-1's
 # four rules appended (accent.base, focus.width, focus.ring already counted).
 ORPHAN_COUNT = 84
-BASE_REFERENCED_COUNT = 42
+BASE_REFERENCED_COUNT = 43
 
 PLACEHOLDER = re.compile(r"@\{([^}]+)\}")
 

@@ -1,14 +1,15 @@
-"""MT-132: the error banner takes a 2px WindowText frame and a 3px bar under HC.
+"""MT-132 and MT-133: the error banner's frame and leading bar, as paint.
 
-`components.md` §10.7: under High Contrast `ErrorBanner` is ground `Window`, a
-**2px `WindowText` border all round** plus the **3px `WindowText` leading
-bar**. The base rule (`theme.qss.in`, `QFrame#error-banner`) draws a hairline
-frame and an emphasis-wide bar in `color.status.danger`; `theme_hc.qss.in` had
-no banner rule, so under HC the colours collapse to `WindowText` through the
-token map but the widths stay 1px all round and 2px on the left. This file pins
-the HC frame as **paint**, through the real theme path - the sheet composed for
+`components.md` §9: the base `ErrorBanner` is ground `color.surface.raised`, a
+**1px** `color.status.danger` frame and a **3px leading bar** in the same
+colour. §10.7: under High Contrast it is ground `Window`, a **2px `WindowText`
+border all round** plus the **3px `WindowText` leading bar**. The base rule
+(`theme.qss.in`, `QFrame#error-banner`) draws a hairline frame and, since
+MT-133, a `bar`-wide leading bar (MT-018 had drawn it emphasis-wide, 2px, for
+want of a token); `theme_hc.qss.in` restates both widths for HC (MT-132). This
+file pins both as **paint**, through the real theme path - the sheet composed for
 High Contrast (or the packaged `theme.qss`) set as the *application* sheet,
-never `styleSheet()` on the widget.
+never `styleSheet()` on the widget - and pins both rules as written.
 
 "Line n" of an edge is the line n pixels in from that edge, sampled with
 `radius.sm + border-width.bar` pixels skipped at each end (the banner keeps its
@@ -19,22 +20,19 @@ Helpers are copied from `tests/ui/test_rerun_dialog_border.py` and
 `tests/ui/test_hc_dialog_border.py` (`tests` is not a package); `PALETTE` keeps
 their values so runs can be compared.
 
-Oracle partition (story `## Contract` C-4):
+Oracle partition (MT-132 `## Contract` C-4, MT-133 `## Contract` C-8):
 
 - **Settled, read out:** `border-width.emphasis`, `border-width.hairline`,
   `border-width.bar`, `radius.sm`, `color.status.danger`,
   `color.surface.raised` from `tokens_gen.TOKENS`; the HC mapping through
   `theme.compose_stylesheet`; the selector `QFrame#error-banner`.
-- **Mechanical, pinned exactly:** every line colour set (AC-1 to AC-3); the
-  banner's own `styleSheet() == ""`; AC-4's parsed declarations, in order.
+- **Mechanical, pinned exactly:** every line colour set; the banner's own
+  `styleSheet() == ""`; both rules' parsed declarations, and the rendered
+  base line.
 - **Oracle-free:** none.
 
-RED: every module exists, so nothing fails at import. `border-width.bar` does
-not exist until GREEN adds it (C-1), and every width is read from
-`tokens_gen.TOKENS` strictly, never typed and never defaulted - so every test
-that samples an edge stops first on the missing-token precondition. The story's
-handoff records the paint each one measured with the token supplied by a
-`scripts/mutate.sh` probe: AC-1 red on line 1, AC-2 red on line 2, AC-3 green.
+AC labels in a test's docstring name their story: a bare "AC-n" is MT-132's,
+"MT-133 AC-n" is MT-133's.
 """
 
 from __future__ import annotations
@@ -54,6 +52,7 @@ from mangatl.ui.stylesheet import base_template, hc_template
 
 REPO = Path(__file__).resolve().parents[2]
 DESIGN = REPO / "docs" / "wiki" / "design"
+BASE_IN = DESIGN / "theme.qss.in"
 HC_IN = DESIGN / "theme_hc.qss.in"
 
 SELECTOR = "QFrame#error-banner"
@@ -371,12 +370,14 @@ def test_control_under_the_packaged_sheet_the_banner_frame_is_a_danger_hairline(
     )
 
 
-def test_control_under_the_packaged_sheet_the_banner_leading_bar_is_two_pixels_of_danger(
+def test_the_packaged_sheet_draws_the_banner_leading_bar_three_pixels_of_danger(
     qtbot,  # type: ignore[no-untyped-def]
     application_sheet: Callable[[str], None],
 ) -> None:
-    """AC-3: the packaged theme.qss; on the left lines 0 and 1 are
-    color.status.danger and line 2 is color.surface.raised."""
+    """MT-133 AC-1 (replaces MT-132's 2px control, which pinned MT-018's
+    compromise): the packaged theme.qss; on the left lines 0, 1 and 2 are
+    color.status.danger and line 3 is color.surface.raised - components.md §9's
+    3px bar. A bar still at emphasis fails on line 2."""
     application_sheet(_packaged("theme.qss"))
 
     banner, image = _shown(qtbot)
@@ -388,13 +389,15 @@ def test_control_under_the_packaged_sheet_the_banner_leading_bar_is_two_pixels_o
         [
             (DANGER, _token_colour(DANGER)),
             (DANGER, _token_colour(DANGER)),
+            (DANGER, _token_colour(DANGER)),
             (GROUND, _token_colour(GROUND)),
         ],
         "the packaged sheet",
         [
             "the base banner lost its danger bar",
-            f"the base bar is narrower than {FRAME}",
-            f"the base bar is wider than {FRAME}: the HC bar leaked into the base",
+            "the base bar is under 2px",
+            f"the base bar is narrower than {BAR} (still {FRAME}, MT-018's 2px)",
+            f"the base bar is wider than {BAR}, or a child reaches line 3",
         ],
     )
 
@@ -435,3 +438,87 @@ def test_the_high_contrast_error_banner_rule_carries_no_literal_pixel_number() -
         (prop, value) for decls in rules for prop, value in decls if LITERAL_PX.search(value)
     ]
     assert literal == [], f"the HC {SELECTOR} rule types a pixel width: {literal}"
+
+
+# --- MT-133 AC-4: the base rule says `bar`, and renders to it -------------------
+
+#: The two copies of the base template: the design input and the packaged copy
+#: the generator writes beside the sheet (byte-identical, test_tokens.py).
+BASE_TEMPLATES = ("design input", "packaged copy")
+
+
+def _base_template_text(which: str) -> str:
+    if which == "design input":
+        return BASE_IN.read_text(encoding="utf-8")
+    return _packaged("theme.qss.tmpl")
+
+
+def _base_banner_rules(text: str) -> list[list[tuple[str, str]]]:
+    return [decls for found, decls in _template_rules(text) if found == SELECTOR]
+
+
+@pytest.mark.parametrize("which", BASE_TEMPLATES)
+def test_the_base_template_has_exactly_one_error_banner_rule(which: str) -> None:
+    """MT-133 AC-4: the base template carries exactly one rule whose selector is
+    `QFrame#error-banner` (the `QFrame#error-banner QLabel#...` rules are
+    descendants, not this one)."""
+    rules = _base_banner_rules(_base_template_text(which))
+
+    assert len(rules) == 1, (
+        f"the base template ({which}) has {len(rules)} rules whose selector is "
+        f"{SELECTOR}, not 1: {rules}"
+    )
+
+
+@pytest.mark.parametrize("which", BASE_TEMPLATES)
+def test_the_base_error_banner_rule_draws_its_leading_bar_from_the_bar_token(
+    which: str,
+) -> None:
+    """MT-133 AC-4: the base rule's one `border-left` reads
+    `@{border-width.bar}px solid @{color.status.danger}`, its `border` is still
+    the hairline frame, and the shorthand still comes first - a `border` after
+    `border-left` would reset the bar."""
+    rules = _base_banner_rules(_base_template_text(which))
+    assert len(rules) == 1, f"the base template ({which}) has {len(rules)} {SELECTOR} rules"
+    decls = rules[0]
+    props = [prop for prop, _ in decls]
+
+    lefts = [value for prop, value in decls if prop == "border-left"]
+    assert lefts == [f"@{{{BAR}}}px solid @{{{DANGER}}}"], (
+        f"the base {SELECTOR} rule ({which}) does not draw its leading bar as "
+        f"{BAR} in {DANGER} (components.md section 9's 3px bar): border-left is {lefts}"
+    )
+    frames = [value for prop, value in decls if prop == "border"]
+    assert len(frames) == 1 and frames[0].startswith(f"@{{{HAIRLINE}}}px "), (
+        f"the base {SELECTOR} rule ({which}) frame is not one {HAIRLINE} border: {frames}"
+    )
+    assert props.index("border") < props.index("border-left"), (
+        f"the base {SELECTOR} rule ({which}) puts the `border` shorthand after "
+        f"`border-left`, which resets the bar: {props}"
+    )
+
+
+@pytest.mark.parametrize("which", BASE_TEMPLATES)
+def test_the_base_error_banner_rule_carries_no_literal_pixel_number(which: str) -> None:
+    """MT-133 AC-4: every width in the base rule comes from a token placeholder."""
+    rules = _base_banner_rules(_base_template_text(which))
+
+    assert rules, f"the base template ({which}) has no {SELECTOR} rule"
+    literal = [
+        (prop, value) for decls in rules for prop, value in decls if LITERAL_PX.search(value)
+    ]
+    assert literal == [], f"the base {SELECTOR} rule ({which}) types a pixel width: {literal}"
+
+
+def test_the_packaged_sheet_renders_the_banner_leading_bar_at_the_bar_token_width() -> None:
+    """MT-133 AC-4: the rendered theme.qss's one `QFrame#error-banner` rule
+    carries `border-left: <bar>px solid <danger>` - both read out of
+    tokens_gen.TOKENS, never typed."""
+    rules = _base_banner_rules(_packaged("theme.qss"))
+    assert len(rules) == 1, f"the packaged theme.qss has {len(rules)} {SELECTOR} rules"
+
+    expected = ("border-left", f"{_width(BAR)}px solid {tokens_gen.TOKENS[DANGER]}")
+    assert expected in rules[0], (
+        f"the packaged theme.qss does not render the {SELECTOR} leading bar at {BAR} "
+        f"({expected[0]}: {expected[1]}); its declarations are {rules[0]}"
+    )
