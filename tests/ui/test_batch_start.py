@@ -641,7 +641,12 @@ def test_a_volume_over_the_stored_ceiling_is_refused_after_the_local_stages(
 
     banner = panel.banner
     assert isinstance(banner, ErrorBanner)
-    assert banner.headline.text() == f"Batch not submitted {EM} the $0.05 budget would be exceeded."
+    # AM-1: the refusal names what the batch would have cost. That is
+    # submit_volume's own projection of the whole volume: 3 pages x $0.02 (the
+    # batch estimate), $0.06, against the stored $0.05.
+    assert banner.headline.text() == (
+        f"Batch not submitted {EM} projected $0.06 exceeds the $0.05 budget."
+    )
     assert banner.body.text() == "No pages were translated."
     assert banner.actions == (), "a refused batch offers an action"
     readout = panel.cost_readout

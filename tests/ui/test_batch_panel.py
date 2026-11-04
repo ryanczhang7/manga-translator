@@ -363,20 +363,37 @@ def test_a_batch_run_panel_steps_through_detecting_reading_done(qtbot: Any) -> N
     assert _steps(panel.stepper) == ["Detecting: done", "Reading: done", "Done: done"]
 
 
-def test_a_batch_budget_refusal_names_the_ceiling_offers_nothing_and_claims_no_page(
+def test_a_batch_budget_refusal_names_the_projection_and_ceiling_offers_nothing_and_claims_no_page(
     qtbot: Any,
 ) -> None:
-    """AC-4 and PO-6: after three pages of local stages the per-page banner
-    would offer "Review pages 1-2"; a batch translated none of them."""
+    """AC-4 as amended (AM-1) and PO-6: the headline names the refused
+    `CallPriced`'s `projection.next_call` and its `ceiling`. `next_call` and
+    `remaining_chapter` differ here, so a headline built from the wrong field
+    fails. And after three pages of local stages the per-page banner would
+    offer "Review pages 1-2", but a batch translated none of them."""
     panel = _run_panel(qtbot)
     _local_stages(panel)
-    panel.on_event(_priced(usd("0.05")))
+    panel.on_event(
+        CallPriced(
+            ordinal=None,
+            spent=usd("0.00"),
+            ceiling=usd("0.05"),
+            projection=Projection(
+                next_call=usd("0.06"),
+                remaining_chapter=usd("0.09"),
+                basis="estimate",
+                sample_count=0,
+            ),
+        )
+    )
 
     panel.on_event(RunAborted(reason=BUDGET, ordinal=None))
 
     banner = panel.banner
     assert banner is not None, "no banner after a batch budget refusal"
-    assert banner.headline.text() == f"Batch not submitted {EM} the $0.05 budget would be exceeded."
+    assert banner.headline.text() == (
+        f"Batch not submitted {EM} projected $0.06 exceeds the $0.05 budget."
+    )
     assert banner.body.text() == "No pages were translated."
     assert banner.actions == (), "a batch refusal offers an action: no page was translated"
 
