@@ -336,7 +336,15 @@ def test_the_world_makes_neighbours_context_distinguishable(world: _World) -> No
 def test_the_batch_pipeline_module_exports_exactly_its_contract() -> None:
     import mangatl.pipeline.batch as module  # type: ignore[import-not-found]
 
-    assert module.__all__ == ["BatchSubmitter", "RequestSize", "submit_volume"]
+    # MT-112 adds the collector, its refusal and `collect_volume`, in RUF022's order.
+    assert module.__all__ == [
+        "AlreadyCollected",
+        "BatchCollector",
+        "BatchSubmitter",
+        "RequestSize",
+        "collect_volume",
+        "submit_volume",
+    ]
 
 
 def test_batch_submitted_is_a_run_event_and_is_exported() -> None:
@@ -364,10 +372,15 @@ def test_batch_submitted_carries_the_run_its_jobs_its_page_count_and_its_project
 def test_the_domain_batch_module_exports_the_page_input_the_limit_and_the_planner() -> None:
     from mangatl.domain import batch
 
+    # MT-112 adds the collector's answer types, in RUF022's order.
     assert batch.__all__ == [
         "INLINE_REQUEST_LIMIT_BYTES",
+        "BatchAnswer",
+        "BatchItemFailure",
         "BatchJob",
+        "BatchJobState",
         "BatchPageInput",
+        "BatchResults",
         "BatchState",
         "plan_batches",
     ]

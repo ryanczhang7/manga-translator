@@ -22,7 +22,10 @@ from mangatl.domain.budget import Projection
 from mangatl.domain.money import Usd
 
 __all__ = [
+    "BatchCollected",
+    "BatchFailed",
     "BatchSubmitted",
+    "BatchWaiting",
     "CallPriced",
     "PageSkipped",
     "PageStarted",
@@ -137,6 +140,39 @@ class BatchSubmitted:
     projection: Projection
 
 
+@dataclass(frozen=True)
+class BatchWaiting:
+    """A pending batch job was asked for its results and is still running
+    (MT-112 AC-1): nothing was written, and the job stays pending."""
+
+    job_id: int
+    state: str
+
+
+@dataclass(frozen=True)
+class BatchCollected:
+    """A batch job's results are in the store and the ledger (MT-112 AC-2, AC-3).
+
+    `pages_done` pages were written and billed; `pages_failed` were answered
+    with an item error, written as nothing and billed nothing. `failures` is
+    `(ordinal, message)` per failed page, in page order - the item's message
+    rides here because the line has nowhere to keep it (PO-1)."""
+
+    job_id: int
+    pages_done: int
+    pages_failed: int
+    failures: tuple[tuple[int, str], ...]
+
+
+@dataclass(frozen=True)
+class BatchFailed:
+    """A batch job will never be collected (MT-112 AC-4): the provider reports
+    it `failed`, `cancelled` or `expired`, and `state` is that word."""
+
+    job_id: int
+    state: str
+
+
 #: Every event a run can emit. A plain union alias: a `TYPE_CHECKING` guard or a
 #: `sys.version_info` branch here would be an uncovered branch in a module that
 #: carries a 100% line-and-branch bar.
@@ -150,4 +186,7 @@ RunEvent = (
     | RunAborted
     | RunFinished
     | BatchSubmitted
+    | BatchWaiting
+    | BatchCollected
+    | BatchFailed
 )

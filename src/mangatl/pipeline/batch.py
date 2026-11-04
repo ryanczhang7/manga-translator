@@ -30,29 +30,93 @@ and returns before the next step runs:
    volume there, naming `job k of m`, and the jobs already recorded stand.
    Nothing is retried.
 7. `BatchSubmitted` with every row's id, in page order.
+
+**Collection** (MT-112) writes a job's answer into the **same** store path the
+per-page call writes, and guards nothing: the volume was judged whole before it
+was submitted and the bill is already incurred (EPIC-09 PO-5), so collection
+records what it cost. `collect_volume`:
+
+1. **Refuses a job that is not `submitted`** with `AlreadyCollected`, before
+   the collector is called (AC-5): a second collection of one job can never
+   write a second bill.
+2. Hands the collector the job's pages as `BatchPageInput(n, b"",
+   read_lines(n), EMPTY_CONTEXT)` - no image is re-read (PO-3).
+3. A `"pending"` state emits `BatchWaiting` and writes nothing (AC-1);
+   `"failed"`, `"cancelled"` or `"expired"` marks the job failed with that word
+   and emits `BatchFailed` (AC-4).
+4. Results, page by page in **the job's** ordinal order (AC-2): one ledger row
+   against the job's `run_id`, request id `f"{provider_job_id}#{n}"` (MT-110),
+   priced at the batch tier; its `CallPriced`; the glossary folded as the
+   translate stage folds it; the proposals by reading index (PO-2); the page
+   marked done. A page whose item failed is marked done with nothing written or
+   billed, so its lines read `failed` (AC-3), and its message rides
+   `BatchCollected.failures` (PO-1).
+5. The job marked collected, then `BatchCollected`.
+
+MT-137 records a volume as several jobs over consecutive page ranges, so one
+collection fills exactly its own job's pages.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
-from mangatl.domain.batch import INLINE_REQUEST_LIMIT_BYTES, BatchPageInput, plan_batches
-from mangatl.domain.events import BatchSubmitted, CallPriced, RunAborted, RunEvent
+from mangatl.domain.batch import (
+    INLINE_REQUEST_LIMIT_BYTES,
+    BatchAnswer,
+    BatchItemFailure,
+    BatchJob,
+    BatchJobState,
+    BatchPageInput,
+    plan_batches,
+)
+from mangatl.domain.events import (
+    BatchCollected,
+    BatchFailed,
+    BatchSubmitted,
+    BatchWaiting,
+    CallPriced,
+    RunAborted,
+    RunEvent,
+)
+from mangatl.domain.glossary import EMPTY_CONTEXT, mark_seen, merge
 from mangatl.domain.money import Usd
+from mangatl.domain.rates import price
+from mangatl.domain.translation import TranslationResult
 from mangatl.pipeline.continuity import build_prompt_context
 from mangatl.pipeline.runner import BUDGET
 from mangatl.pipeline.translate_stage import budget_for
-from mangatl.store.batch import pending_jobs, record_submission
-from mangatl.store.ledger import chapter_total
-from mangatl.store.project import Project
+from mangatl.store.batch import mark_collected, mark_failed, pending_jobs, record_submission
+from mangatl.store.glossary import read_entries, upsert
+from mangatl.store.ledger import chapter_call_costs, chapter_total, record_call
+from mangatl.store.project import PAGE_DONE, Project
 
-__all__ = ["BatchSubmitter", "RequestSize", "submit_volume"]
+__all__ = [
+    "AlreadyCollected",
+    "BatchCollector",
+    "BatchSubmitter",
+    "RequestSize",
+    "collect_volume",
+    "submit_volume",
+]
 
 #: One job: the pages it holds, in ordinal order, to the provider's job name.
 BatchSubmitter = Callable[[Sequence[BatchPageInput]], str]
 
 #: The bytes one page's request would occupy in an inline job.
 RequestSize = Callable[[BatchPageInput], int]
+
+#: One job's answer (MT-112): the provider's job name and the job's pages, in
+#: ordinal order, to the job's state or its results. Bound by
+#: `compose.build_batch_collector`, because this module may not import
+#: `translate`.
+BatchCollector = Callable[[str, Sequence[BatchPageInput]], BatchAnswer]
+
+
+class AlreadyCollected(Exception):
+    """`collect_volume` was handed a job that is no longer `submitted` (MT-112
+    AC-5): it was collected or it failed, and collecting it again would write a
+    second bill for one job."""
 
 
 def submit_volume(
@@ -143,3 +207,121 @@ def submit_volume(
 
     emit(BatchSubmitted(run_id, tuple(ids), len(inputs), projection))
     return tuple(ids)
+
+
+def collect_volume(
+    project: Project,
+    job: BatchJob,
+    collect: BatchCollector,
+    page_estimate: Usd,
+    emit: Callable[[RunEvent], None],
+) -> BatchAnswer:
+    """Ask for one submitted job's answer and write it where the per-page call
+    would have (MT-112, module docstring "Collection"); return the answer.
+
+    `page_estimate` is the batch-tier figure (`page_estimate(model_id,
+    pricing="batch")`), read only by the `CallPriced` projections. Raises
+    `AlreadyCollected` for a job that is not `submitted`, before `collect` is
+    called (AC-5), and `KeyError` for an answer missing one of the job's pages,
+    with the job left pending.
+    """
+    if job.state != "submitted":
+        raise AlreadyCollected(
+            f"batch job {job.id} ({job.provider_job_id}) is already {job.state}:"
+            " collecting it again would bill it twice"
+        )
+
+    pages = [BatchPageInput(n, b"", project.read_lines(n), EMPTY_CONTEXT) for n in job.ordinals]
+    answer = collect(job.provider_job_id, pages)
+
+    if isinstance(answer, BatchJobState):
+        if answer.state == "pending":
+            emit(BatchWaiting(job.id, answer.state))
+        else:
+            mark_failed(project, job.id, answer.state)
+            emit(BatchFailed(job.id, answer.state))
+        return answer
+
+    page_count = len(project.pages())
+    failures: list[tuple[int, str]] = []
+    done = 0
+    # The job's ordinals, never the answer's keys: the order of the events and
+    # the writes is page order whatever order the mapping holds, and a page the
+    # answer lacks is a `KeyError` here, before the job is marked collected.
+    for n in job.ordinals:
+        item = answer.results[n]
+        if isinstance(item, BatchItemFailure):
+            failures.append((n, item.message))
+        else:
+            _write_page(project, job, n, item, page_estimate, page_count, emit)
+            done += 1
+        _mark_done(project, n)
+
+    mark_collected(project, job.id)
+    emit(BatchCollected(job.id, done, len(failures), tuple(failures)))
+    return answer
+
+
+def _write_page(
+    project: Project,
+    job: BatchJob,
+    n: int,
+    result: TranslationResult,
+    page_estimate: Usd,
+    page_count: int,
+    emit: Callable[[RunEvent], None],
+) -> None:
+    """One answered page, in the translate stage's order: the bill, its
+    `CallPriced`, the glossary, the proposals.
+
+    The ledger row is the **job's** run (`job.run_id`, the run that submitted
+    it, not the latest), the request id MT-110's `f"{job}#{ordinal}"` - never
+    the item's own id - and the usage priced at the **batch** tier. The
+    projection covers the pages after this one, as the stage's does (R-C1).
+    `result.lines` are keyed by reading index already (PO-2).
+    """
+    model_id = result.call.model_id if result.call is not None else job.model_id
+    record_call(
+        project,
+        job.run_id,
+        n,
+        f"{job.provider_job_id}#{n}",
+        price(model_id, result.usage, pricing="batch"),
+    )
+    budget = budget_for(project, page_estimate)
+    emit(
+        CallPriced(
+            ordinal=n,
+            spent=chapter_total(project),
+            ceiling=budget.ceiling,
+            projection=budget.project(chapter_call_costs(project), page_count - n - 1),
+        )
+    )
+    _update_glossary(project, n, result)
+    project.write_proposed(n, result.lines)
+
+
+def _update_glossary(project: Project, n: int, result: TranslationResult) -> None:
+    """`translate_stage._update_glossary`, exactly: `merge` the page's proposals,
+    `mark_seen` its stored lines, and `upsert` only the entries that changed.
+    The lines are every stored line of the page, because a batch sends every
+    one (PO-2)."""
+    before = read_entries(project)
+    after = mark_seen(
+        merge(before, result.proposed_terms, n),
+        [line.text for line in project.read_lines(n)],
+        n,
+    )
+    unchanged = set(before)
+    for entry in after:
+        if entry not in unchanged:
+            upsert(project, entry)
+
+
+def _mark_done(project: Project, ordinal: int) -> None:
+    """The runner's `_mark_done`, copied (R-C2: it is private, and
+    `store/project.py` is not this story's to change). A page whose item failed
+    is marked done too, with no proposal, so its lines read `failed` with the
+    existing untranslated reason (PO-1) rather than waiting for a run."""
+    with project.transaction() as cursor:
+        cursor.execute("UPDATE page SET status = ? WHERE ordinal = ?", (PAGE_DONE, ordinal))

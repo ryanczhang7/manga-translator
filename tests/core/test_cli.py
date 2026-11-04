@@ -1344,3 +1344,430 @@ def test_the_context_flag_is_one_the_parser_tells_the_user_about(
     assert raised.value.code == 0
     out = capsys.readouterr().out
     assert "--context" in out and "{rolling,neighbours}" in out, out
+
+
+# -- MT-112 AC-6: a project with pending batch jobs is collected, not run -----------
+#
+# `mangatl-run FOLDER` on a project holding `submitted` batch jobs collects each,
+# in page order, through ONE collector built by `build_batch_collector(selection)`,
+# prints one line and exits 0 - and builds no stage: `build_pipeline` (the
+# `composition_root` seam) is called zero times. `--sync` is the per-page run:
+# with a pending job it refuses in one line naming the first pending job's
+# provider id; with none it is today's run.
+#
+# **The seams are `mangatl.cli.build_batch_collector` and
+# `mangatl.cli.collect_volume`**, the module attributes, exactly as
+# `mangatl.cli.build_pipeline` is MT-036's: `cli.py` imports both names and
+# calls them by those names. `build_batch_collector` is replaced by
+# `_CollectorRoot`, which records the selection and hands back a collector that
+# answers per provider job id. `collect_volume` is the REAL one, wrapped by a
+# recorder only where the page estimate it was handed is asserted - so the
+# store, the ledger and the stdout line are the real consequences of a real
+# collection.
+#
+# The projects are built here through the store, as `test_batch_collect.py`
+# builds its world: one region and one OCR line per page, a `run` row, and the
+# jobs recorded with `record_submission`. Every collecting test sets exactly
+# `GEMINI_API_KEY` (the file's autouse fixture sets an Anthropic key; it is
+# deleted here), because a pending batch needs the key that submitted it.
+
+_GEMINI_KEY = "gm-SECRET-collect-key-42"
+_BATCH_MODEL = "gemini-3.1-pro-preview"
+
+
+def _gemini_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", _GEMINI_KEY)
+
+
+def _answer_for(ordinals: Sequence[int], failed: Sequence[int] = ()) -> object:
+    """`BatchResults` for `ordinals`: one line per page, `TokenUsage(1000, 500,
+    0, 0)` each; an ordinal in `failed` is `BatchItemFailure(n, "quota")`."""
+    from mangatl.domain.batch import (  # type: ignore[attr-defined]
+        BatchItemFailure,
+        BatchResults,
+    )
+    from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
+
+    return BatchResults(
+        {
+            n: BatchItemFailure(n, "quota")
+            if n in failed
+            else TranslationResult(
+                lines={0: f"page {n}"},
+                usage=TokenUsage(1000, 500, 0, 0),
+                call=CallInfo(f"item-{n}", _BATCH_MODEL),
+                proposed_terms=(),
+            )
+            for n in ordinals
+        }
+    )
+
+
+def _still_pending() -> object:
+    from mangatl.domain.batch import BatchJobState  # type: ignore[attr-defined]
+
+    return BatchJobState("pending")
+
+
+class _CollectorRoot:
+    """A stand-in for `mangatl.compose.build_batch_collector`, at the seam.
+
+    Records every selection it was built with, and hands back a collector that
+    records `(provider_job_id, ordinals)` per call and answers `answers[id]`."""
+
+    def __init__(self, answers: dict[str, object]) -> None:
+        self.answers = answers
+        self.selections: list[object] = []
+        self.calls: list[tuple[str, list[int]]] = []
+
+    def __call__(self, selection: object) -> Callable[[str, Sequence[object]], object]:
+        self.selections.append(selection)
+
+        def collect(provider_job_id: str, pages: Sequence[object]) -> object:
+            self.calls.append((provider_job_id, [page.ordinal for page in pages]))  # type: ignore[attr-defined]
+            return self.answers[provider_job_id]
+
+        return collect
+
+
+def _collector_root(monkeypatch: pytest.MonkeyPatch, answers: dict[str, object]) -> _CollectorRoot:
+    root = _CollectorRoot(answers)
+    monkeypatch.setattr("mangatl.cli.build_batch_collector", root)
+    return root
+
+
+def _ring_at(x: int) -> tuple[tuple[int, int], ...]:
+    return ((x, 0), (x + 4, 0), (x + 4, 4), (x, 4), (x, 0))
+
+
+def _project_with_jobs(
+    source_dir: Path,
+    one_bit_png: Callable[..., bytes],
+    jobs: Sequence[tuple[str, int, int]],
+    *,
+    collected: Sequence[str] = (),
+) -> None:
+    """Create the project for `source_dir` with one region and one OCR line per
+    page and a `run` row, and record `jobs` (provider id, first, last) in the
+    order given; the ids in `collected` are then marked collected."""
+    from mangatl.domain.line import OcrResult
+    from mangatl.domain.region import RawRegion
+    from mangatl.store.batch import mark_collected, record_submission
+    from mangatl.store.intake import read_chapter
+    from mangatl.store.project import create_project
+
+    with create_project(read_chapter(source_dir), project_dir_for(source_dir)) as project:
+        mask = one_bit_png(8, 8, [(0, 0, 4, 4)])
+        for page in project.pages():
+            project.write_regions(
+                page.ordinal,
+                [RawRegion(polygon=_ring_at(0), mask=mask, confidence=1.0, kind="bubble")],
+            )
+            project.write_lines(page.ordinal, [OcrResult(f"ページ{page.ordinal}")])
+        with project.transaction() as cursor:
+            chapter_id = int(cursor.execute("SELECT id FROM chapter").fetchone()[0])
+            cursor.execute(
+                "INSERT INTO run (chapter_id, started_at) VALUES (?, ?)",
+                (chapter_id, "2026-11-03T09:00:00+00:00"),
+            )
+            run_id = int(cursor.execute("SELECT last_insert_rowid()").fetchone()[0])
+        for name, first, last in jobs:
+            job_id = record_submission(project, run_id, name, _BATCH_MODEL, first, last)
+            if name in collected:
+                mark_collected(project, job_id)
+
+
+def _job_states(source_dir: Path) -> list[tuple[object, ...]]:
+    return _raw(
+        project_dir_for(source_dir) / "project.db",
+        "SELECT provider_job_id, state FROM batch_job ORDER BY first_ordinal, id",
+    )
+
+
+def _page_statuses(source_dir: Path) -> list[object]:
+    rows = _raw(
+        project_dir_for(source_dir) / "project.db", "SELECT status FROM page ORDER BY ordinal"
+    )
+    return [status for (status,) in rows]
+
+
+def _ledger_rows(source_dir: Path) -> list[tuple[object, ...]]:
+    return _raw(
+        project_dir_for(source_dir) / "project.db",
+        "SELECT request_id, pricing FROM llm_call ORDER BY id",
+    )
+
+
+_THREE_PAGES: tuple[tuple[str, int, int], ...] = (
+    ("p1.png", 7, 3),
+    ("p2.png", 13, 29),
+    ("p3.png", 5, 11),
+)
+
+
+def test_a_project_with_a_pending_job_is_collected_in_one_line_and_builds_no_stage(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-6: three pages under one pending job. Exit 0, exactly one stdout line
+    `batch: 3 pages collected, 0 failed, 0 jobs still pending`, nothing on
+    stderr, `build_pipeline` called zero times, the job collected through the
+    seam once with its three pages, and the store holding the result."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes, _THREE_PAGES)
+    _project_with_jobs(source_dir, one_bit_png, [("batches/only", 0, 2)])
+    collector_root = _collector_root(monkeypatch, {"batches/only": _answer_for([0, 1, 2])})
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 0, f"exit {code}; stderr {captured.err!r}"
+    assert _lines(captured.out) == ["batch: 3 pages collected, 0 failed, 0 jobs still pending"]
+    assert captured.err == ""
+    assert composition_root.models_dirs == [], "a collect run asked for the stage list"
+    assert collector_root.calls == [("batches/only", [0, 1, 2])]
+    assert _job_states(source_dir) == [("batches/only", "collected")]
+    assert _page_statuses(source_dir) == [PAGE_DONE] * 3
+    assert _ledger_rows(source_dir) == [
+        ("batches/only#0", "batch"),
+        ("batches/only#1", "batch"),
+        ("batches/only#2", "batch"),
+    ]
+    assert not _output_dir_for(source_dir).exists(), "a collect run baked the chapter"
+
+
+def test_the_collector_is_built_once_from_the_gemini_selection(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-6: `build_batch_collector(selection)` once, with the Gemini selection
+    `main` made, however many jobs are pending."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes)
+    _project_with_jobs(source_dir, one_bit_png, [("batches/a", 0, 1), ("batches/b", 2, 3)])
+    collector_root = _collector_root(
+        monkeypatch, {"batches/a": _answer_for([0, 1]), "batches/b": _answer_for([2, 3])}
+    )
+
+    main([str(source_dir), "--models", str(models_dir)])
+
+    assert [_pair(s) for s in collector_root.selections] == [("gemini", _GEMINI_KEY)]
+
+
+def test_several_pending_jobs_are_collected_in_page_order_and_summed(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-6: the job over pages 2..3 is recorded FIRST, so page order is not
+    insertion order; it is collected second. Page 1's item fails: 3 collected,
+    1 failed, 0 still pending."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes)
+    _project_with_jobs(source_dir, one_bit_png, [("batches/later", 2, 3), ("batches/early", 0, 1)])
+    collector_root = _collector_root(
+        monkeypatch,
+        {"batches/early": _answer_for([0, 1], failed=[1]), "batches/later": _answer_for([2, 3])},
+    )
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 0, f"exit {code}; stderr {captured.err!r}"
+    assert collector_root.calls == [("batches/early", [0, 1]), ("batches/later", [2, 3])]
+    assert _lines(captured.out) == ["batch: 3 pages collected, 1 failed, 0 jobs still pending"]
+    assert composition_root.models_dirs == []
+
+
+def test_a_job_still_running_is_counted_as_still_pending(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-6: the first job is collected, the second answers `pending` and stays
+    pending - `2 pages collected, 0 failed, 1 jobs still pending`, exit 0."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes)
+    _project_with_jobs(source_dir, one_bit_png, [("batches/a", 0, 1), ("batches/b", 2, 3)])
+    _collector_root(monkeypatch, {"batches/a": _answer_for([0, 1]), "batches/b": _still_pending()})
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 0, f"exit {code}; stderr {captured.err!r}"
+    assert _lines(captured.out) == ["batch: 2 pages collected, 0 failed, 1 jobs still pending"]
+    assert _job_states(source_dir) == [("batches/a", "collected"), ("batches/b", "submitted")]
+    assert composition_root.models_dirs == []
+
+
+def test_a_collect_run_hands_collect_volume_the_batch_tier_page_estimate(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Contract: `collect_volume(project, job, collector, page_estimate(
+    model_for("gemini"), pricing="batch"), reporter)` - $0.02, written out -
+    reached through `mangatl.cli.collect_volume`, the real one underneath."""
+    from mangatl.domain.money import Usd
+    from mangatl.pipeline.batch import collect_volume  # type: ignore[attr-defined]
+
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes, _THREE_PAGES)
+    _project_with_jobs(source_dir, one_bit_png, [("batches/only", 0, 2)])
+    _collector_root(monkeypatch, {"batches/only": _answer_for([0, 1, 2])})
+    seen: list[tuple[str, object]] = []
+
+    def recording(
+        project: object, job: object, collect: object, page_estimate: object, emit: object
+    ) -> object:
+        seen.append((job.provider_job_id, page_estimate))  # type: ignore[attr-defined]
+        return collect_volume(project, job, collect, page_estimate, emit)
+
+    monkeypatch.setattr("mangatl.cli.collect_volume", recording)
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    assert code == 0
+    assert seen == [("batches/only", Usd.from_micro(20_000))]
+
+
+def test_sync_with_a_pending_job_refuses_in_one_line_naming_the_first_pending_job(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-6: `--sync` with pending jobs - exit 1, one stderr line naming the
+    FIRST pending job in page order (recorded second here), nothing built,
+    nothing collected, every job still pending."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes)
+    _project_with_jobs(
+        source_dir, one_bit_png, [("batches/last-pages", 2, 3), ("batches/first-pages", 0, 1)]
+    )
+    collector_root = _collector_root(monkeypatch, {})
+
+    code = main([str(source_dir), "--models", str(models_dir), "--sync"])
+
+    captured = capsys.readouterr()
+    assert code == 1, f"exit {code}"
+    errors = _lines(captured.err)
+    assert len(errors) == 1, f"expected one line on stderr: {errors}"
+    assert "batches/first-pages" in errors[0], errors[0]
+    assert errors[0].startswith("mangatl-run: "), errors[0]
+    assert "Traceback" not in captured.err + captured.out
+    assert captured.out == ""
+    assert composition_root.models_dirs == [], "--sync built the stage list over a pending batch"
+    assert collector_root.selections == [] and collector_root.calls == []
+    assert _job_states(source_dir) == [
+        ("batches/first-pages", "submitted"),
+        ("batches/last-pages", "submitted"),
+    ]
+
+
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "no-flag"])
+def test_with_nothing_pending_the_run_is_todays_run(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+    sync: bool,
+) -> None:
+    """AC-6: a project whose only job is already collected has nothing pending,
+    so with or without `--sync` it is today's run: the stage list is built
+    once, every page runs, the output is baked - and no collector is built."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes)
+    _project_with_jobs(
+        source_dir, one_bit_png, [("batches/done", 0, 3)], collected=["batches/done"]
+    )
+    collector_root = _collector_root(monkeypatch, {})
+
+    code = main([str(source_dir), "--models", str(models_dir), *(["--sync"] if sync else [])])
+
+    assert code == 0
+    assert composition_root.models_dirs == [models_dir]
+    assert composition_root.stage.ran == [0, 1, 2, 3]
+    assert _output_dir_for(source_dir).is_dir()
+    assert collector_root.selections == [], "a collector was built with nothing pending"
+
+
+def test_sync_on_a_folder_with_no_project_yet_is_todays_first_run(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """AC-6: `--sync` with no `.mtproj` at all creates the project and runs it."""
+    source_dir = _build_source(tmp_path, png_bytes)
+
+    code = main([str(source_dir), "--models", str(models_dir), "--sync"])
+
+    assert code == 0
+    assert composition_root.stage.ran == [0, 1, 2, 3]
+    assert project_dir_for(source_dir).is_dir()
+
+
+def test_a_pending_job_with_no_gemini_selection_is_refused_in_one_line(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-6: only the Anthropic key is set (the file's default), so there is no
+    collector: exit 1, one stderr line, nothing built, the job still pending
+    and nothing billed. The REAL `build_batch_collector` answers `None` here."""
+    source_dir = _build_source(tmp_path, png_bytes)
+    _project_with_jobs(source_dir, one_bit_png, [("batches/a", 0, 3)])
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 1, f"exit {code}"
+    errors = _lines(captured.err)
+    assert len(errors) == 1, f"expected one line on stderr: {errors}"
+    assert errors[0].startswith("mangatl-run: "), errors[0]
+    assert "Traceback" not in captured.err + captured.out
+    assert captured.out == ""
+    assert composition_root.models_dirs == []
+    assert _job_states(source_dir) == [("batches/a", "submitted")]
+    assert _ledger_rows(source_dir) == []
+
+
+def test_the_sync_flag_is_one_the_parser_tells_the_user_about(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-6: `--sync` is declared, so it is in `--help`."""
+    with pytest.raises(SystemExit) as exited:
+        main(["--help"])
+
+    assert exited.value.code == 0
+    assert "--sync" in capsys.readouterr().out, "mangatl-run --help does not mention --sync"

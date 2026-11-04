@@ -14,6 +14,14 @@ into consecutive runs that fit `INLINE_REQUEST_LIMIT_BYTES`, and
 because `pipeline` builds it and may not import `translate` - `compose`
 converts it to `translate.gemini_batch.BatchPage`.
 
+**What collecting a job answers** (MT-112). `BatchAnswer` is either a
+`BatchJobState` - the job is still running, or it failed, was cancelled or
+expired - or the `BatchResults` of a succeeded job, one `TranslationResult` or
+`BatchItemFailure` per page. They live here for the same reason
+`BatchPageInput` does: `pipeline.batch.collect_volume` reads them and may not
+import `translate`, so `compose.build_batch_collector` converts MT-110's
+`gemini_batch` answers into these.
+
 **Branch-free apart from `plan_batches`.** `domain` sits under
 `coverage-core`'s 100 % line-and-branch floor, so every branch below is one a
 test reaches.
@@ -21,17 +29,22 @@ test reaches.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 from mangatl.domain.glossary import PromptContext
 from mangatl.domain.line import OcrResult
+from mangatl.domain.translation import TranslationResult
 
 __all__ = [
     "INLINE_REQUEST_LIMIT_BYTES",
+    "BatchAnswer",
+    "BatchItemFailure",
     "BatchJob",
+    "BatchJobState",
     "BatchPageInput",
+    "BatchResults",
     "BatchState",
     "plan_batches",
 ]
@@ -83,6 +96,46 @@ class BatchPageInput:
     page_image: bytes
     ocr_results: tuple[OcrResult, ...]
     context: PromptContext
+
+
+@dataclass(frozen=True)
+class BatchItemFailure:
+    """One page a collected job did not answer usably (MT-112 AC-3).
+
+    The domain's copy of `translate.gemini_batch.BatchItemError` (MT-110 D-8),
+    because `pipeline` may not import `translate`: `compose` converts one to the
+    other. `message` is the item's own text, verbatim; it rides
+    `events.BatchCollected.failures` rather than the line, which has no column
+    for it (PO-1)."""
+
+    ordinal: int
+    message: str
+
+
+@dataclass(frozen=True)
+class BatchJobState:
+    """A collector's answer for a job that has not succeeded (MT-112 AC-1, AC-4).
+
+    `"pending"` is still running - try again later; the other three are settled
+    and the job will never be collected. Never `"succeeded"`: a succeeded job
+    answers `BatchResults` instead. A value, not `store.batch.BatchPending`
+    (which is an exception)."""
+
+    state: Literal["pending", "failed", "cancelled", "expired"]
+
+
+@dataclass(frozen=True)
+class BatchResults:
+    """A succeeded job's answer, every page of it keyed by ordinal (MT-112
+    AC-2, AC-3): a `TranslationResult` whose `lines` are keyed by reading index
+    (PO-2), or a `BatchItemFailure`."""
+
+    results: Mapping[int, TranslationResult | BatchItemFailure]
+
+
+#: What a `pipeline.batch.BatchCollector` answers for one job. A plain union
+#: alias, as `events.RunEvent` is: no branch in a 100 %-branch module.
+BatchAnswer = BatchJobState | BatchResults
 
 
 def plan_batches(sizes: Sequence[int], limit: int) -> list[tuple[int, int]]:
