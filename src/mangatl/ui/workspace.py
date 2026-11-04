@@ -705,7 +705,10 @@ class TranslationRow(QWidget):
         super().__init__(parent)
         self.setObjectName("translationRow")
         self.region_id = region_id
+        # theme.qss paints the row's own ground and selection bar (MT-135).
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setProperty("hovered", False)
+        self.setProperty("selected", False)
         self._save_error: str | None = None
 
         self.gutter = QLabel()
@@ -827,6 +830,18 @@ class TranslationRow(QWidget):
         self.style().unpolish(self)
         self.style().polish(self)
 
+    def set_selected(self, selected: bool) -> None:
+        """Mark this row selected or not (MT-135). theme.qss keys the row's
+        ground and bar on the `selected` property, and the HC override keys
+        its gutter and badge ink on it through descendant selectors, which
+        re-match only when the labels themselves are re-polished."""
+        if self.property("selected") == selected:
+            return
+        self.setProperty("selected", selected)
+        for widget in (self, self.gutter, self.badge):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+
     def enterEvent(self, event: QEnterEvent) -> None:
         self.entered.emit(self.region_id)
         super().enterEvent(event)
@@ -867,6 +882,7 @@ class TranslationColumn(QWidget):
         layout.addWidget(self.header)
         layout.addWidget(self.list)
         self._rows: list[TranslationRow] = []
+        self.list.currentRowChanged.connect(self._show_selected)
         # §4.7 / A-07: Ctrl+E toggles the focused row's exclusion. The shortcut
         # reaches a focused editor too (measured in RED), so the slot checks.
         self._exclusion_shortcut = QShortcut(QKeySequence("Ctrl+E"), self)
@@ -926,6 +942,13 @@ class TranslationColumn(QWidget):
                         item, row, ordinal, total, ja
                     )
                 )
+        # The rebuild ran under the blocker, so the rows are told now.
+        self._show_selected(self.list.currentRow())
+
+    def _show_selected(self, row: int) -> None:
+        """Mark row `row` selected and every other row not (MT-135)."""
+        for index, translation_row in enumerate(self._rows):
+            translation_row.set_selected(index == row)
 
     def _on_rendered(
         self, item: QListWidgetItem, row: TranslationRow, ordinal: int, total: int, ja: str | None
@@ -964,9 +987,12 @@ class TranslationColumn(QWidget):
         """Make `region_id`'s row current and scroll it into view (None clears)."""
         if region_id is None:
             self.list.setCurrentRow(-1)
-            return
-        self.list.setCurrentRow(region_id)
-        self.list.scrollToItem(self.list.item(region_id))
+        else:
+            self.list.setCurrentRow(region_id)
+            self.list.scrollToItem(self.list.item(region_id))
+        # The workspace calls this under a signal blocker on the list, so
+        # currentRowChanged may not reach _show_selected (MT-135 C-4).
+        self._show_selected(self.list.currentRow())
 
     def set_hovered(self, region_id: int | None) -> None:
         """Give only `region_id`'s row its hover ground. Never scrolls."""
