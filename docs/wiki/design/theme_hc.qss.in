@@ -115,3 +115,24 @@ QFrame#error-banner {
 #pageRow[current="true"] QLabel#pageLabel {
     color: @{hc.HighlightedText};
 }
+
+/* components.md 10.4: the selected translation row is the Highlight pair.
+   The base bar resolves Highlight on Highlight through the token map, so the
+   bar and the row's text are restated as the pair's foreground, and so are
+   the gutter glyph and the ordinal badge (user decision 2026-11-03): the
+   glyph rule outranks the six status-colour rules (2,1,1 over 1,1,1) only on
+   the selected row, so silhouette carries status there (A-15.7). No hover
+   rule: color.surface.hover maps to Window, so hover changes no ground
+   (MT-135). */
+#translationRow[selected="true"] {
+    border-left: @{border-width.bar}px solid @{hc.HighlightedText};
+    color: @{hc.HighlightedText};
+}
+
+#translationRow[selected="true"] QLabel#rowGutter {
+    color: @{hc.HighlightedText};
+}
+
+#translationRow[selected="true"] QLabel#rowBadge {
+    color: @{hc.HighlightedText};
+}

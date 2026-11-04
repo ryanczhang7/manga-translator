@@ -408,8 +408,8 @@ RerunDialog[overBudget="true"] {
 /* Only because the QWidget rule's color would otherwise replace the      */
 /* gutter's setPalette colour (a stylesheet wins over a palette). Keyed   */
 /* on the existing status property; workspace.py re-polishes the gutter   */
-/* after setting it. Tokens are workspace.STATUS_COLOR_TOKENS. Not a      */
-/* section 5 redesign: the rest of the row is a later story.             */
+/* after setting it. Tokens are workspace.STATUS_COLOR_TOKENS. The row's  */
+/* ground and selection bar are MT-135's block below.                     */
 
 QLabel#rowGutter[status="proposed"] {
     color: @{color.text.muted};
@@ -442,6 +442,41 @@ QLabel#rowGutter[status="excluded"] {
 /* on the editor's status property, re-polished as the gutter is.         */
 QLineEdit#rowEditor[status="excluded"] {
     color: @{color.text.secondary};
+}
+
+/* ====================================================================== */
+/* components.md section 5 - TranslationRow ground and bar (MT-135)       */
+/* ====================================================================== */
+/* TranslationColumn sets the bool property selected on each row from the */
+/* list's current row and re-polishes the row, its gutter and its badge;  */
+/* set_hovered does the same for hovered. The row has WA_StyledBackground */
+/* so it paints its own box over the item ground. Precedence slots 1, 2   */
+/* and 6 of section 5, later winning: selected beats hovered. The bar is  */
+/* border-width.bar inside the row's rect, so no row moves, and it is the */
+/* selection's contrast carrier (accessibility.md A-03). The descendant   */
+/* rules declare only the labels' ground, never color, which would        */
+/* outrank the gutter status rules above (theme_hc.qss.in restates them). */
+
+#translationRow {
+    background-color: transparent;
+    border: none;
+}
+
+#translationRow[hovered="true"] {
+    background-color: @{color.surface.hover};
+}
+
+/* MT-136 authors [status="failed"], [status="edited"], [status="excluded"] here. */
+
+#translationRow[selected="true"] {
+    background-color: @{color.surface.selected};
+    border-left: @{border-width.bar}px solid @{color.accent.base};
+    color: @{color.text.primary};
+}
+
+#translationRow[selected="true"] QLabel#rowGutter,
+#translationRow[selected="true"] QLabel#rowBadge {
+    background-color: transparent;
 }
 
 /* ====================================================================== */
