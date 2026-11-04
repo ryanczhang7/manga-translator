@@ -139,7 +139,8 @@ def test_the_composition_root_exports_exactly_what_the_contract_names() -> None:
     import mangatl.compose as module
 
     # MT-065 C-7 adds `INPAINTER_FILENAME`, in RUF022's order; MT-111 adds
-    # `BatchBinding` and `build_batch_binding`, in the same order.
+    # `BatchBinding` and `build_batch_binding`, in the same order; MT-112 adds
+    # `build_batch_collector`.
     assert module.__all__ == [
         "DETECTOR_FILENAME",
         "INPAINTER_FILENAME",
@@ -149,6 +150,7 @@ def test_the_composition_root_exports_exactly_what_the_contract_names() -> None:
         "BatchBinding",
         "ModelsNotFound",
         "build_batch_binding",
+        "build_batch_collector",
         "build_pipeline",
         "resolve_models_dir",
     ]
@@ -1889,3 +1891,234 @@ def test_a_batch_binding_is_a_frozen_submit_request_size_and_page_estimate() -> 
         "page_estimate",
     ]
     assert BatchBinding.__dataclass_params__.frozen
+
+
+# -- MT-112 AC-6: `build_batch_collector`, the collection half --------------------
+#
+# `pipeline.batch.collect_volume` takes a `BatchCollector`, `(provider_job_id,
+# pages) -> BatchAnswer`; `compose.build_batch_collector(selection)` binds it for
+# a Gemini selection around ONE `GeminiClient(api_key=...)` and returns `None`
+# for Anthropic (no batch). The collector asks `gemini_batch.batch_state` and,
+# only on `succeeded`, `gemini_batch.collect_batch`, converting `translate`'s
+# `BatchItemError` to `domain`'s `BatchItemFailure`.
+#
+# **Observed at the client**, as MT-111's binding is: the fake client's
+# `batches.get` answers a real `types.BatchJob` built the way
+# `test_gemini_batch.py` builds them and records every call, so the test pins
+# what reaches the provider and what comes back, not which module function the
+# collector calls by which name. The expected `TranslationResult`s are written
+# out by hand (usage is `input = P - C`, `output = K + T`, MT-101 D-7).
+#
+# Names MT-112 adds are imported inside the tests, so in RED each fails alone.
+
+_COLLECT_JOB = "batches/collect-me"
+
+
+class _FakeCollectBatches:
+    """`client.batches` for collection: `get` answers `job` and records each
+    call's kwargs; `create` must never be reached."""
+
+    def __init__(self, job: object) -> None:
+        self.job = job
+        self.got: list[dict[str, Any]] = []
+
+    def get(self, **kwargs: Any) -> object:
+        self.got.append(kwargs)
+        return self.job
+
+    def create(self, **kwargs: Any) -> object:
+        raise AssertionError("the collector submitted a batch job")
+
+
+class _FakeCollectClient:
+    def __init__(self, job: object, *args: object, **kwargs: object) -> None:
+        self.args = args
+        self.kwargs = dict(kwargs)
+        self.batches = _FakeCollectBatches(job)
+
+
+@dataclass
+class _CollectClients:
+    """Every client constructed, and the job the next one's `get` answers."""
+
+    job: object = None
+    built: list[_FakeCollectClient] = dataclasses.field(default_factory=list)
+
+
+@pytest.fixture
+def collect_client(monkeypatch: pytest.MonkeyPatch) -> _CollectClients:
+    clients = _CollectClients()
+
+    def construct(*args: object, **kwargs: object) -> _FakeCollectClient:
+        client = _FakeCollectClient(clients.job, *args, **kwargs)
+        clients.built.append(client)
+        return client
+
+    monkeypatch.setattr("mangatl.compose.GeminiClient", construct)
+    return clients
+
+
+def _build_batch_collector(selection: Selection) -> Any:
+    from mangatl.compose import build_batch_collector  # type: ignore[attr-defined]
+
+    return build_batch_collector(selection)
+
+
+def _collect_pages() -> list[Any]:
+    """Three pages as `collect_volume` hands them over (PO-3): no image, no
+    context. Page 1 has two regions."""
+    from mangatl.domain.batch import BatchPageInput
+    from mangatl.domain.glossary import EMPTY_CONTEXT
+    from mangatl.domain.line import OcrResult
+
+    return [
+        BatchPageInput(0, b"", (OcrResult("ケンジ"),), EMPTY_CONTEXT),
+        BatchPageInput(1, b"", (OcrResult("先輩"), OcrResult("待って")), EMPTY_CONTEXT),
+        BatchPageInput(2, b"", (OcrResult("走れ"),), EMPTY_CONTEXT),
+    ]
+
+
+def _batch_job(state_name: str, items: Sequence[Any] | None = None) -> Any:
+    from google.genai import types
+
+    return types.BatchJob(
+        name=_COLLECT_JOB,
+        state=getattr(types.JobState, state_name),
+        dest=None if items is None else types.BatchJobDestination(inlined_responses=list(items)),
+    )
+
+
+def _inlined(key: str, text: str, usage: tuple[Any, ...], model_version: str | None) -> Any:
+    from google.genai import types
+
+    prompt, cached, candidates, thoughts = usage
+    return types.InlinedResponse(
+        response=types.GenerateContentResponse(
+            candidates=[
+                types.Candidate(content=types.Content(role="model", parts=[types.Part(text=text)]))
+            ],
+            usage_metadata=types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=prompt,
+                cached_content_token_count=cached,
+                candidates_token_count=candidates,
+                thoughts_token_count=thoughts,
+            ),
+            model_version=model_version,
+        ),
+        metadata={"key": key},
+    )
+
+
+def _succeeded_items() -> list[Any]:
+    """Pages 2, 0, 1 - out of order, paired by key. Page 1's item is an error."""
+    from google.genai import types
+
+    return [
+        _inlined("2", '{"0": "Run!"}', (700, 0, 90, 10), None),
+        _inlined("0", '{"0": "Kenji"}', (1000, None, 500, None), "gemini-3.1-pro-preview"),
+        types.InlinedResponse(error=types.JobError(code=3, message="quota"), metadata={"key": "1"}),
+    ]
+
+
+def test_a_gemini_collector_is_built_around_one_client_with_the_selections_key(
+    collect_client: _CollectClients,
+) -> None:
+    """AC-6 / Contract: exactly one `GeminiClient(api_key=selection.api_key)`,
+    and two collections through it construct no second one."""
+    collect_client.job = _batch_job("JOB_STATE_RUNNING")
+    collector = _build_batch_collector(_selection("gemini", "gemini-key-2"))
+
+    collector(_COLLECT_JOB, _collect_pages())
+    collector(_COLLECT_JOB, _collect_pages())
+
+    assert len(collect_client.built) == 1, (
+        f"{len(collect_client.built)} GeminiClients were built; the collector holds one"
+    )
+    (client,) = collect_client.built
+    assert (client.args, client.kwargs) == ((), {"api_key": "gemini-key-2"})
+
+
+@pytest.mark.parametrize(
+    ("state_name", "answered"),
+    [
+        pytest.param("JOB_STATE_PENDING", "pending", id="pending"),
+        pytest.param("JOB_STATE_RUNNING", "pending", id="running-is-pending"),
+        pytest.param("JOB_STATE_FAILED", "failed", id="failed"),
+        pytest.param("JOB_STATE_CANCELLED", "cancelled", id="cancelled"),
+        pytest.param("JOB_STATE_EXPIRED", "expired", id="expired"),
+    ],
+)
+def test_a_gemini_collector_answers_an_unfinished_job_with_its_state(
+    collect_client: _CollectClients, state_name: str, answered: str
+) -> None:
+    """Contract: a job not `succeeded` answers `BatchJobState(state)`, read
+    with `batches.get(name=job)` and nothing else."""
+    from mangatl.domain.batch import BatchJobState  # type: ignore[attr-defined]
+
+    collect_client.job = _batch_job(state_name)
+    collector = _build_batch_collector(_selection("gemini"))
+
+    answer = collector(_COLLECT_JOB, _collect_pages())
+
+    assert answer == BatchJobState(answered)
+    (client,) = collect_client.built
+    assert client.batches.got, "the collector never asked for the job"
+    assert all(call == {"name": _COLLECT_JOB} for call in client.batches.got), client.batches.got
+
+
+def test_a_gemini_collector_answers_a_succeeded_job_with_every_pages_result_by_ordinal(
+    collect_client: _CollectClients,
+) -> None:
+    """Contract: a `succeeded` job answers `BatchResults` keyed by ordinal - a
+    `TranslationResult` per answered page, and the item error as `domain`'s
+    `BatchItemFailure(1, "quota")`, never `translate`'s `BatchItemError`."""
+    from mangatl.domain.batch import (  # type: ignore[attr-defined]
+        BatchItemFailure,
+        BatchResults,
+    )
+    from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
+    from mangatl.translate.gemini import MODEL_ID
+
+    collect_client.job = _batch_job("JOB_STATE_SUCCEEDED", _succeeded_items())
+    collector = _build_batch_collector(_selection("gemini"))
+
+    answer = collector(_COLLECT_JOB, _collect_pages())
+
+    assert isinstance(answer, BatchResults), f"answered {answer!r}"
+    assert dict(answer.results) == {
+        0: TranslationResult(
+            lines={0: "Kenji"},
+            usage=TokenUsage(1000, 500, 0, 0),
+            call=CallInfo(f"{_COLLECT_JOB}#0", "gemini-3.1-pro-preview"),
+            proposed_terms=(),
+        ),
+        1: BatchItemFailure(1, "quota"),
+        2: TranslationResult(
+            lines={0: "Run!"},
+            usage=TokenUsage(700, 100, 0, 0),
+            call=CallInfo(f"{_COLLECT_JOB}#2", MODEL_ID),
+            proposed_terms=(),
+        ),
+    }
+    assert type(answer.results[1]) is BatchItemFailure
+    (client,) = collect_client.built
+    assert all(call == {"name": _COLLECT_JOB} for call in client.batches.got), client.batches.got
+
+
+def test_an_anthropic_selection_has_no_collector_and_builds_no_client(
+    collect_client: _CollectClients, client_spy: _ClientSpy
+) -> None:
+    """Contract: no batch for Anthropic - `None`, and no client of either kind."""
+    assert _build_batch_collector(_selection("anthropic")) is None
+    assert collect_client.built == [], "an Anthropic selection constructed a GeminiClient"
+    assert client_spy.clients == [], "an Anthropic collector constructed a client"
+
+
+def test_a_provider_with_no_adapter_has_no_collector_either(
+    collect_client: _CollectClients,
+) -> None:
+    from mangatl.translate.provider import ProviderUnavailable
+
+    with pytest.raises(ProviderUnavailable):
+        _build_batch_collector(_selection("openai"))
+    assert collect_client.built == []
