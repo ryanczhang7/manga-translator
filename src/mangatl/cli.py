@@ -39,6 +39,16 @@ left behind.
 `rolling`; the flag beats the variable as `--provider` does. A bad flag is
 argparse's usage error; a bad variable is one line and exit 1, decided before
 the provider is selected, so nothing is loaded or left behind.
+
+**MT-112: a pending batch is collected, not run.** When the folder's project
+holds batch jobs still `submitted`, the run builds no stage, loads no weights
+and submits nothing: it collects each job in page order through one
+`build_batch_collector(selection)` and `collect_volume` (both called by the
+names imported here, the seams the tests replace, as `build_pipeline` is), and
+prints one line. A pending batch needs the Gemini key that submitted it, so
+without a Gemini selection it is one line and exit 1. `--sync` is the per-page
+run (PO-4): with a job pending it refuses, naming the first, rather than
+translate those pages twice; with none it is today's run, unchanged.
 """
 
 from __future__ import annotations
@@ -50,8 +60,16 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from mangatl.app_paths import bundled_models_dir
-from mangatl.compose import MODELS_ENV, ModelsNotFound, build_pipeline, resolve_models_dir
-from mangatl.domain.events import PageSkipped, PageStarted, RunEvent
+from mangatl.compose import (
+    MODELS_ENV,
+    ModelsNotFound,
+    build_batch_collector,
+    build_pipeline,
+    resolve_models_dir,
+)
+from mangatl.domain.batch import BatchJob
+from mangatl.domain.budget import page_estimate
+from mangatl.domain.events import BatchCollected, PageSkipped, PageStarted, RunEvent
 from mangatl.domain.glossary import (
     CONTEXT_MODE_VAR,
     CONTEXT_MODES,
@@ -60,14 +78,24 @@ from mangatl.domain.glossary import (
     context_mode,
 )
 from mangatl.pipeline.bake import bake_chapter
+from mangatl.pipeline.batch import collect_volume
 from mangatl.pipeline.runner import RUN_FINISHED, run_chapter
+from mangatl.store.batch import pending_jobs
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
-from mangatl.store.project import ProjectExists, create_project, open_project, project_dir_for
+from mangatl.store.project import (
+    Project,
+    ProjectExists,
+    create_project,
+    open_project,
+    project_dir_for,
+)
 from mangatl.translate.provider import (
+    KEY_VARS,
     PROVIDER_VAR,
     PROVIDERS,
     ProviderError,
     Selection,
+    model_for,
     select_provider,
 )
 
@@ -109,6 +137,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=PROVIDERS,
         default=None,
         help=f"the translation provider, when more than one API key is set (or set {PROVIDER_VAR})",
+    )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        help=(
+            "run page by page, never a batch; refused while a batch job for the"
+            " folder is still pending"
+        ),
     )
     parser.add_argument(
         "--context",
@@ -163,6 +199,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         # thing the user can act on.
         return _fail(str(error))
 
+    # MT-112 AC-6: a project left with pending batch jobs is collected, not
+    # run - before the stage list is asked for, because a collection loads no
+    # weights - and `--sync` refuses rather than translate those pages twice.
+    # A project with nothing pending falls through to today's run, unchanged.
+    try:
+        existing = open_project(project_dir_for(source_dir))
+    except FileNotFoundError:
+        pass  # a first run: nothing can be pending
+    else:
+        with existing:
+            pending = pending_jobs(existing)
+            if pending:
+                return _collect_pending(existing, pending, selection, sync=arguments.sync)
+
     # The stage list is the composition root's, asked for after the chapter is
     # read - a folder with nothing to translate should not pay for the ONNX
     # sessions - and before the project is created (MT-078 C-3, A-2): the
@@ -213,6 +263,60 @@ def main(argv: Sequence[str] | None = None) -> int:
     # once, last, on stdout - the bake itself still succeeded.
     if report.font_fallback != "none":
         print(f"font override not used: {report.font_detail}; lettered in {report.font_family}")
+    return _OK
+
+
+def _collect_pending(
+    project: Project, pending: Sequence[BatchJob], selection: Selection | None, *, sync: bool
+) -> int:
+    """MT-112 AC-6: collect every pending job, in page order, and say so in one
+    line; or refuse in one.
+
+    `--sync` with a job pending is refused, naming the first one, because the
+    per-page run would translate - and bill - pages the batch already holds. A
+    pending batch needs the key that submitted it, so a run with no Gemini
+    selection (another provider's key, or `--no-translate`, which selects
+    nothing) is refused too, with every job left pending. Otherwise ONE
+    collector is built and each job goes through `collect_volume` at the
+    batch-tier page estimate. Nothing is baked: the pages are proposals now,
+    and the next plain run writes the output.
+
+    The line counts pages off each `BatchCollected` and `{still}` is the jobs
+    left `submitted` afterwards; a job that answered `failed`, `cancelled` or
+    `expired` is in none of the three numbers - its pages were never written
+    and are not pending any more.
+    """
+    if sync:
+        return _fail(
+            f"batch job {pending[0].provider_job_id} is still pending; collect it first"
+            " (run without --sync)"
+        )
+    unkeyed = (
+        f"batch job {pending[0].provider_job_id} is still pending, and collecting it"
+        f" needs the Gemini key that submitted it: set {KEY_VARS['gemini']} and select gemini"
+    )
+    if selection is None:
+        return _fail(f"{unkeyed} (--no-translate selects no provider)")
+    try:
+        collector = build_batch_collector(selection)
+    except ProviderError:
+        collector = None  # a provider with no adapter has no batch either
+    if collector is None:
+        return _fail(unkeyed)
+
+    collected: list[BatchCollected] = []
+
+    def tally(event: RunEvent) -> None:
+        if isinstance(event, BatchCollected):
+            collected.append(event)
+
+    estimate = page_estimate(model_for(selection.provider), pricing="batch")
+    for job in pending:
+        collect_volume(project, job, collector, estimate, tally)
+    done = sum(event.pages_done for event in collected)
+    failed = sum(event.pages_failed for event in collected)
+    still = len(pending_jobs(project))
+    print(f"batch: {done} pages collected, {failed} failed, {still} jobs still pending")
     return _OK
 
 

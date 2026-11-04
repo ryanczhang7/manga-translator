@@ -67,14 +67,20 @@ from mangatl.clean.page import clean_page_image
 from mangatl.clean.session import load_inpainter
 from mangatl.detect.page import detect_page_regions
 from mangatl.detect.session import load_detector, selected_provider
-from mangatl.domain.batch import BatchPageInput
+from mangatl.domain.batch import (
+    BatchAnswer,
+    BatchItemFailure,
+    BatchJobState,
+    BatchPageInput,
+    BatchResults,
+)
 from mangatl.domain.budget import page_estimate
 from mangatl.domain.glossary import ContextMode
 from mangatl.domain.money import Usd
 from mangatl.models.providers import PROVIDER_PREFERENCE, select_providers
 from mangatl.ocr.page import transcribe_page_regions
 from mangatl.ocr.session import VOCAB_FILENAME, load_ocr, load_vocab
-from mangatl.pipeline.batch import BatchSubmitter, RequestSize
+from mangatl.pipeline.batch import BatchCollector, BatchSubmitter, RequestSize
 from mangatl.pipeline.prelude import ChapterStep, Pipeline, glossary_prelude
 from mangatl.pipeline.stages import build_stages
 from mangatl.pipeline.translate_stage import PageTranslator
@@ -98,6 +104,7 @@ __all__ = [
     "BatchBinding",
     "ModelsNotFound",
     "build_batch_binding",
+    "build_batch_collector",
     "build_pipeline",
     "resolve_models_dir",
 ]
@@ -356,6 +363,48 @@ def build_batch_binding(selection: Selection, *, display_name: str) -> BatchBind
                 request_size=request_size,
                 page_estimate=page_estimate(model_for(selection.provider), pricing="batch"),
             )
+        case other:
+            raise ProviderUnavailable(f"translation with {other} is not available yet")
+
+
+def build_batch_collector(selection: Selection) -> BatchCollector | None:
+    """The collection half of the batch binding (MT-112 AC-6; MT-110).
+
+    For `gemini`: one `GeminiClient(api_key=selection.api_key)`, held across
+    every collection, and around it a collector that asks
+    `gemini_batch.batch_state` first. A job that has not succeeded answers
+    `BatchJobState(state)` - `"pending"` (running counts as pending, MT-110
+    AC-3), `"failed"`, `"cancelled"` or `"expired"` - with no results read; a
+    succeeded one answers `BatchResults` of `gemini_batch.collect_batch`, keyed
+    by ordinal, each `translate`'s `BatchItemError` converted to `domain`'s
+    `BatchItemFailure` (`pipeline` may not import `translate`). The pages are
+    `collect_volume`'s, image-less (PO-3); `collect_batch` reads only their
+    ordinals and OCR lines. `anthropic` has no batch and binds `None` without
+    constructing any client; every other provider is `ProviderUnavailable`.
+    `BatchBinding` (MT-111) is pinned to its three fields, so this is its own
+    function rather than a fourth one.
+    """
+    match selection.provider:
+        case "anthropic":
+            return None
+        case "gemini":
+            client = GeminiClient(api_key=selection.api_key)
+
+            def collect(job_name: str, pages: Sequence[BatchPageInput]) -> BatchAnswer:
+                state = gemini_batch.batch_state(client, job_name)
+                if state != "succeeded":
+                    return BatchJobState(state)
+                raw = gemini_batch.collect_batch(client, job_name, _batch_pages(pages))
+                return BatchResults(
+                    {
+                        n: BatchItemFailure(v.ordinal, v.message)
+                        if isinstance(v, gemini_batch.BatchItemError)
+                        else v
+                        for n, v in raw.items()
+                    }
+                )
+
+            return collect
         case other:
             raise ProviderUnavailable(f"translation with {other} is not available yet")
 
