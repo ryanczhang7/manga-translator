@@ -712,3 +712,140 @@ def test_a_call_estimate_of_no_tokens_is_zero() -> None:
     estimate = budget_module.call_estimate("gemini-3.1-pro-preview", TokenUsage(0, 0, 0, 0))  # type: ignore[attr-defined]
 
     assert estimate == Usd.from_micro(0)
+
+
+# --- MT-111 AC-1: `page_estimate(model_id, pricing="batch")` ------------------
+#
+# **Settled** (the story's oracle partition): the figure is read off the batch
+# row, not tuned. Design A (3,696 in, 1,500 out, 1,500 cache read, 0 write) at
+# `domain/rates.py`'s gemini-3.1-pro-preview batch row ($1.00 in, $6.00 out,
+# $0.20 cache read, $1.00 cache write, per million):
+#
+#     3,696 x 1 + 1,500 x 6 + 1,500 x 0.20 + 0 x 1 = 3,696 + 9,000 + 300
+#                                                  = 12,996 micro = $0.012996
+#
+# rounded UP to the cent: **$0.02** (20,000 micro). Rounded to nearest it would
+# be $0.01, which is why the exact cost is pinned beside it.
+#
+# `page_estimate` is read off the module inside each test (`_page_estimate`'s
+# convention above), so in RED each fails on its own `TypeError` for the
+# unexpected keyword and the MT-013/MT-100 tests above still run.
+
+_GEMINI = "gemini-3.1-pro-preview"
+
+#: Worked by hand above, from the batch row - not read out of `price`.
+_BATCH_PAGE_EXACT_MICRO = 12_996
+_BATCH_PAGE_ESTIMATE_MICRO = 20_000
+
+
+def _batch_page_estimate(model_id: str) -> Usd:
+    estimate: Usd = budget_module.page_estimate(model_id, pricing="batch")  # type: ignore[call-arg]
+    return estimate
+
+
+def test_a_gemini_batch_page_is_estimated_at_two_cents_rounded_up_from_0_012996() -> None:
+    """MT-111 AC-1: the design-A page at the batch row is $0.012996, and the
+    estimate is that rounded **up** to the cent - $0.02, not nearest's $0.01."""
+    exact = price(_GEMINI, _design_a(), pricing="batch").cost
+
+    assert exact.micro() == _BATCH_PAGE_EXACT_MICRO, "precondition: the batch row as read"
+    estimate = _batch_page_estimate(_GEMINI)
+    assert estimate == Usd(Decimal("0.02")), (
+        f"page_estimate({_GEMINI!r}, pricing='batch') is {estimate!r}; the batch row prices"
+        f" the design-A page at $0.012996, which rounds up to $0.02"
+    )
+    assert estimate.micro() == _BATCH_PAGE_ESTIMATE_MICRO
+
+
+def test_the_batch_page_estimate_is_not_the_interactive_three_cents() -> None:
+    """MT-111 AC-1: `pricing` is read, not accepted and ignored - the
+    interactive figure for the same model is $0.03."""
+    assert _batch_page_estimate(_GEMINI) != _page_estimate(_GEMINI)
+    assert _page_estimate(_GEMINI) == Usd(Decimal("0.03")), "precondition: MT-100's figure"
+
+
+@pytest.mark.parametrize("model_id", list(_PAGE_FIGURES))
+def test_pricing_defaults_to_standard_so_every_mt100_figure_is_unchanged(model_id: str) -> None:
+    """MT-111 AC-1: `page_estimate(m)` == `page_estimate(m, pricing="standard")`
+    == MT-100's pinned figure, for every model in the rate table."""
+    _, estimate_micro = _PAGE_FIGURES[model_id]
+    standard = budget_module.page_estimate(model_id, pricing="standard")  # type: ignore[call-arg]
+
+    assert standard.micro() == estimate_micro
+    assert _page_estimate(model_id) == standard
+
+
+def test_page_estimates_pricing_is_keyword_only() -> None:
+    """MT-111 Contract: `page_estimate(model_id, *, pricing=...)`. The keyword
+    form works and the positional form does not, so `page_estimate(m, "batch")`
+    can never be read as something else."""
+    assert _batch_page_estimate(_GEMINI).micro() == _BATCH_PAGE_ESTIMATE_MICRO
+    with pytest.raises(TypeError):
+        budget_module.page_estimate(_GEMINI, "batch")  # type: ignore[misc]
+
+
+def test_a_model_with_no_batch_row_cannot_be_batch_estimated() -> None:
+    """MT-111 AC-1: claude-opus-5 has an interactive row and no batch row, so a
+    batch estimate for it raises `UnknownModel` naming it - never the
+    interactive figure, never zero."""
+    assert "claude-opus-5" in RATES, "precondition: the interactive row exists"
+    assert "claude-opus-5" not in rates_module.BATCH_RATES, "precondition: no batch row"
+
+    with pytest.raises(UnknownModel) as caught:
+        _batch_page_estimate("claude-opus-5")
+
+    assert "'claude-opus-5'" in str(caught.value), f"the refusal does not name it: {caught.value}"
+
+
+# --- MT-111 AC-2: `Budget.project_batch(pages, page_estimate)` -----------------
+#
+# A batch is one decision about every page in it: `next_call` is the whole
+# batch, and so is the remainder. 3 pages at $0.02 = $0.06, written out.
+
+
+def _project_batch(budget: Budget, pages: int, estimate: Usd) -> Projection:
+    projection: Projection = budget.project_batch(pages, estimate)  # type: ignore[attr-defined]
+    return projection
+
+
+def test_three_batch_pages_at_two_cents_project_six_cents_as_one_call() -> None:
+    projection = _project_batch(Budget(), 3, Usd.from_micro(20_000))
+
+    assert projection == Projection(
+        next_call=Usd(Decimal("0.06")),
+        remaining_chapter=Usd(Decimal("0.06")),
+        basis="estimate",
+        sample_count=0,
+    ), f"3 x $0.02 is one $0.06 decision; project_batch said {projection!r}"
+
+
+def test_a_batch_of_no_pages_projects_nothing() -> None:
+    projection = _project_batch(Budget(), 0, Usd.from_micro(20_000))
+
+    assert projection == Projection(
+        next_call=Usd.from_micro(0),
+        remaining_chapter=Usd.from_micro(0),
+        basis="estimate",
+        sample_count=0,
+    )
+
+
+def test_a_batch_projection_uses_the_estimate_it_is_given_not_the_budgets_own() -> None:
+    """AC-2 multiplies the `page_estimate` *argument*: a budget built at $0.03
+    a page still projects a batch handed $0.02 at $0.02, and its ceiling plays
+    no part in the projection."""
+    budget = Budget(Usd(Decimal("0.01")), page_estimate=Usd.from_micro(30_000))
+
+    projection = _project_batch(budget, 200, Usd.from_micro(20_000))
+
+    assert projection.next_call == Usd(Decimal("4.00"))
+    assert projection.remaining_chapter == Usd(Decimal("4.00"))
+
+
+def test_a_batch_projection_is_judged_inclusively_like_any_other() -> None:
+    """The existing `check` against a batch projection: $0.06 on $0.00 spent
+    lands exactly on a $0.06 ceiling (permitted) and over a $0.05 one."""
+    projection = _project_batch(Budget(), 3, Usd.from_micro(20_000))
+
+    assert Budget(Usd(Decimal("0.06"))).check(Usd.from_micro(0), projection).permitted
+    assert not Budget(Usd(Decimal("0.05"))).check(Usd.from_micro(0), projection).permitted

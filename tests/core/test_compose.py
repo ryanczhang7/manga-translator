@@ -50,6 +50,7 @@ one branch PO-4 made a user decision about.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 import os
 from collections.abc import Callable, Iterator, Sequence
@@ -137,14 +138,17 @@ def test_the_composition_root_exports_exactly_what_the_contract_names() -> None:
     # test and the linter agree rather than compete. Do not re-add `sorted(`.
     import mangatl.compose as module
 
-    # MT-065 C-7 adds `INPAINTER_FILENAME`, in RUF022's order.
+    # MT-065 C-7 adds `INPAINTER_FILENAME`, in RUF022's order; MT-111 adds
+    # `BatchBinding` and `build_batch_binding`, in the same order.
     assert module.__all__ == [
         "DETECTOR_FILENAME",
         "INPAINTER_FILENAME",
         "MODELS_ENV",
         "OCR_SUBDIR",
         "PROVIDER_PREFERENCE",
+        "BatchBinding",
         "ModelsNotFound",
+        "build_batch_binding",
         "build_pipeline",
         "resolve_models_dir",
     ]
@@ -1679,3 +1683,209 @@ def test_with_no_context_mode_the_translate_stage_is_rolling(
 
     (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
     assert translate_stage.context_mode == "rolling"
+
+
+# -- MT-111 AC-10: `build_batch_binding`, the batch half of the composition root --
+#
+# `pipeline.batch.submit_volume` takes a submitter, a request-size function and
+# a page estimate; `compose.build_batch_binding(selection, display_name=...)`
+# binds the three for a Gemini selection around ONE `GeminiClient(api_key=...)`
+# and returns `None` for Anthropic (no batch). A separate function, because
+# `Pipeline`'s fields are pinned exactly (`test_glossary_prelude.py`).
+#
+# **The submit is observed at the client**, not by spying `submit_batch` at an
+# import site: the fake client's `batches.create` records what it was handed,
+# and the test compares that against `build_batch_requests` of the same pages
+# built here, independently. That pins what reaches the provider - the model,
+# the requests and the display name - whether `compose` calls
+# `gemini_batch.submit_batch` through the module or through a name it imported.
+#
+# **The request size is computed here, independently**: `len(model_dump_json(
+# exclude_none=True).encode())` of the page's one built request, checked stable
+# across two builds of the same page in RED (3,182 bytes for a 40x30 page,
+# twice).
+#
+# Names MT-111 adds are imported inside the tests, so in RED each fails alone.
+
+
+class _FakeBatchJob:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeBatches:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> _FakeBatchJob:
+        self.calls.append(kwargs)
+        return _FakeBatchJob(f"batches/job-{len(self.calls)}")
+
+
+class _FakeBatchClient:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.args = args
+        self.kwargs = dict(kwargs)
+        self.batches = _FakeBatches()
+
+
+@pytest.fixture
+def batch_client(monkeypatch: pytest.MonkeyPatch) -> list[_FakeBatchClient]:
+    """`mangatl.compose.GeminiClient` replaced by a constructor of fakes with a
+    recording `batches.create`; the list is every client constructed."""
+    built: list[_FakeBatchClient] = []
+
+    def construct(*args: object, **kwargs: object) -> _FakeBatchClient:
+        client = _FakeBatchClient(*args, **kwargs)
+        built.append(client)
+        return client
+
+    monkeypatch.setattr("mangatl.compose.GeminiClient", construct)
+    return built
+
+
+def _build_batch_binding(selection: Selection, display_name: str = "volume-1") -> Any:
+    from mangatl.compose import build_batch_binding  # type: ignore[attr-defined]
+
+    return build_batch_binding(selection, display_name=display_name)
+
+
+def _page_inputs(png_bytes: Callable[..., bytes]) -> list[Any]:
+    from mangatl.domain.batch import BatchPageInput  # type: ignore[attr-defined]
+    from mangatl.domain.glossary import PromptContext
+    from mangatl.domain.line import OcrResult
+
+    return [
+        BatchPageInput(
+            ordinal=0,
+            page_image=png_bytes(40, 30),
+            ocr_results=(OcrResult("ケンジ"),),
+            context=PromptContext("glossary", "next page"),
+        ),
+        BatchPageInput(
+            ordinal=1,
+            page_image=png_bytes(30, 20),
+            ocr_results=(OcrResult("先輩"), OcrResult("", ocr_empty=True)),
+            context=PromptContext("glossary", "previous page"),
+        ),
+    ]
+
+
+def _expected_requests(inputs: Sequence[Any]) -> list[Any]:
+    """What `build_batch_requests` builds for these inputs, as `BatchPage`s."""
+    from mangatl.translate.gemini_batch import BatchPage, build_batch_requests
+
+    return list(
+        build_batch_requests(
+            [BatchPage(i.ordinal, i.page_image, i.ocr_results, i.context) for i in inputs]
+        )
+    )
+
+
+def test_a_gemini_batch_binding_is_built_around_one_client_with_the_selections_key(
+    batch_client: list[_FakeBatchClient], png_bytes: Callable[..., bytes]
+) -> None:
+    """AC-10: exactly one `GeminiClient(api_key=selection.api_key)`, and
+    submitting twice through the binding constructs no second one."""
+    binding = _build_batch_binding(_selection("gemini", "gemini-key-1"))
+    inputs = _page_inputs(png_bytes)
+    binding.submit(inputs[:1])
+    binding.submit(inputs[1:])
+
+    assert len(batch_client) == 1, f"{len(batch_client)} GeminiClients were built; AC-10 is one"
+    (client,) = batch_client
+    assert (client.args, client.kwargs) == ((), {"api_key": "gemini-key-1"})
+    assert len(client.batches.calls) == 2, "both submits did not reach the one client"
+
+
+def test_a_gemini_batch_submit_sends_the_built_requests_under_the_display_name(
+    batch_client: list[_FakeBatchClient], png_bytes: Callable[..., bytes]
+) -> None:
+    """AC-10: `submit(inputs)` turns the inputs into `BatchPage`s, builds them
+    with `build_batch_requests` and submits them with `submit_batch(client,
+    requests, display_name)` - one `batches.create` of the Gemini model, the
+    built requests and the display name - and returns the job's name."""
+    from mangatl.translate.gemini import MODEL_ID
+
+    binding = _build_batch_binding(_selection("gemini"), display_name="volume-7")
+    inputs = _page_inputs(png_bytes)
+
+    name = binding.submit(inputs)
+
+    assert name == "batches/job-1"
+    (client,) = batch_client
+    (call,) = client.batches.calls
+    assert call["model"] == MODEL_ID
+    assert call["src"] == _expected_requests(inputs), "the requests sent are not the built ones"
+    assert call["config"].display_name == "volume-7"
+
+
+def test_a_gemini_request_size_is_the_built_requests_json_length_in_bytes(
+    batch_client: list[_FakeBatchClient], png_bytes: Callable[..., bytes]
+) -> None:
+    """AC-10: `request_size(i)` == `len(InlinedRequest.model_dump_json(
+    exclude_none=True).encode())` of the page's one built request, and
+    measuring submits nothing."""
+    binding = _build_batch_binding(_selection("gemini"))
+    inputs = _page_inputs(png_bytes)
+
+    for page_input in inputs:
+        (request,) = _expected_requests([page_input])
+        expected = len(request.model_dump_json(exclude_none=True).encode())
+        measured = binding.request_size(page_input)
+        assert measured == expected, (
+            f"page {page_input.ordinal}: request_size said {measured};"
+            f" the built request is {expected} bytes"
+        )
+    assert binding.request_size(inputs[0]) != binding.request_size(inputs[1]), (
+        "precondition: the two pages' requests differ in size"
+    )
+    assert batch_client[0].batches.calls == [], "measuring a request submitted it"
+
+
+def test_a_gemini_batch_binding_estimates_pages_at_the_batch_tier(
+    batch_client: list[_FakeBatchClient],
+) -> None:
+    """AC-10: `page_estimate(model_id, pricing="batch")` - $0.02 for
+    gemini-3.1-pro-preview (AC-1), not the interactive $0.03."""
+    from mangatl.domain import budget
+
+    binding = _build_batch_binding(_selection("gemini"))
+
+    assert binding.page_estimate == Usd.from_micro(20_000)
+    assert binding.page_estimate == budget.page_estimate(
+        "gemini-3.1-pro-preview",
+        pricing="batch",  # type: ignore[call-arg]
+    )
+
+
+def test_an_anthropic_selection_has_no_batch_binding_and_builds_no_client(
+    batch_client: list[_FakeBatchClient], client_spy: _ClientSpy
+) -> None:
+    """AC-10: no batch for Anthropic - `None`, and no client of either kind."""
+    assert _build_batch_binding(_selection("anthropic")) is None
+    assert batch_client == [], "an Anthropic selection constructed a GeminiClient"
+    assert client_spy.clients == [], "an Anthropic batch binding constructed a client"
+
+
+def test_a_provider_with_no_adapter_has_no_batch_binding_either(
+    batch_client: list[_FakeBatchClient],
+) -> None:
+    """Contract: any provider but the two is `ProviderUnavailable`, as
+    `_translator` does."""
+    from mangatl.translate.provider import ProviderUnavailable
+
+    with pytest.raises(ProviderUnavailable):
+        _build_batch_binding(_selection("openai"))
+    assert batch_client == []
+
+
+def test_a_batch_binding_is_a_frozen_submit_request_size_and_page_estimate() -> None:
+    from mangatl.compose import BatchBinding  # type: ignore[attr-defined]
+
+    assert [f.name for f in dataclasses.fields(BatchBinding)] == [
+        "submit",
+        "request_size",
+        "page_estimate",
+    ]
+    assert BatchBinding.__dataclass_params__.frozen

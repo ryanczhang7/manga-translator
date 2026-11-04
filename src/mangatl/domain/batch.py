@@ -1,21 +1,48 @@
-"""A provider Batch API job, as the store records it (MT-103 AC-4).
+"""A provider Batch API job, as the store records it (MT-103 AC-4), and the
+shape of a volume about to become several of them (MT-111).
 
 A batch job outlives the process that submitted it - the provider holds the
 requests for up to a day - so a closed app has to find the job it left running
 and resume collecting it (MT-111, MT-112). `store.batch` keeps one row per job;
-this is that row as a value.
+`BatchJob` is that row as a value.
+
+**One volume, several jobs** (EPIC-09 PO-1, MT-111 AC-3). MT-101 D-9: 200
+capped pages are ~24 MB of base64 against Gemini's 20 MB inline limit, so one
+inline job cannot hold a volume. `plan_batches` splits the pages' request sizes
+into consecutive runs that fit `INLINE_REQUEST_LIMIT_BYTES`, and
+`BatchPageInput` is one page of such a run: it lives here, not in `translate`,
+because `pipeline` builds it and may not import `translate` - `compose`
+converts it to `translate.gemini_batch.BatchPage`.
+
+**Branch-free apart from `plan_batches`.** `domain` sits under
+`coverage-core`'s 100 % line-and-branch floor, so every branch below is one a
+test reaches.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-__all__ = ["BatchJob", "BatchState"]
+from mangatl.domain.glossary import PromptContext
+from mangatl.domain.line import OcrResult
+
+__all__ = [
+    "INLINE_REQUEST_LIMIT_BYTES",
+    "BatchJob",
+    "BatchPageInput",
+    "BatchState",
+    "plan_batches",
+]
 
 #: A job is `submitted` until it is settled, one way or the other. The same
 #: three words as `store.schema.BATCH_JOB_DDL`'s CHECK.
 BatchState = Literal["submitted", "collected", "failed"]
+
+#: Gemini's inline batch request limit, MT-101 D-9's "20 MB" at its smaller,
+#: decimal reading (not 20 MiB): a plan that fits this fits either reading.
+INLINE_REQUEST_LIMIT_BYTES: int = 20_000_000
 
 
 @dataclass(frozen=True)
@@ -43,3 +70,43 @@ class BatchJob:
     def ordinals(self) -> range:
         """The page ordinals this job holds, in order."""
         return range(self.first_ordinal, self.last_ordinal + 1)
+
+
+@dataclass(frozen=True)
+class BatchPageInput:
+    """One page of a batch as `pipeline` builds it (MT-111 AC-4): its ordinal,
+    its source image bytes, its stored OCR lines and its `neighbours` prompt
+    context (MT-107). The same four fields as `translate.gemini_batch.BatchPage`,
+    deliberately: `pipeline` may not import `translate`."""
+
+    ordinal: int
+    page_image: bytes
+    ocr_results: tuple[OcrResult, ...]
+    context: PromptContext
+
+
+def plan_batches(sizes: Sequence[int], limit: int) -> list[tuple[int, int]]:
+    """Split page request sizes (bytes, in ordinal order) into jobs (AC-3).
+
+    Consecutive inclusive `(first, last)` ranges whose sizes sum to `<= limit`,
+    **greedily from the first page**: a job takes every page that still fits
+    before the next job starts. `[]` plans no jobs. A page bigger than `limit`
+    fits no job at all, so the whole plan is refused with a `ValueError` naming
+    its ordinal, its size and the limit - no partial plan is returned.
+    """
+    ranges: list[tuple[int, int]] = []
+    first = 0
+    total = 0
+    for ordinal, size in enumerate(sizes):
+        if size > limit:
+            raise ValueError(
+                f"page {ordinal}'s request is {size} bytes, over the {limit}-byte"
+                " limit of one batch job: no job can hold it"
+            )
+        if total + size > limit:
+            ranges.append((first, ordinal - 1))
+            first, total = ordinal, 0
+        total += size
+    if sizes:
+        ranges.append((first, len(sizes) - 1))
+    return ranges
