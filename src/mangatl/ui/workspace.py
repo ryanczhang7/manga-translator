@@ -811,6 +811,11 @@ class TranslationRow(QWidget):
         self.editor.setProperty("status", status)
         self.editor.style().unpolish(self.editor)
         self.editor.style().polish(self.editor)
+        # Row-level status borders in theme.qss key on this (MT-136); without
+        # the re-polish a status change keeps the old border (AC-7).
+        self.setProperty("status", status)
+        self.style().unpolish(self)
+        self.style().polish(self)
         self.editor.setReadOnly(excluded)
         self.revert_button.setVisible(status == "edited")
         self.accept_button.setVisible(status == "proposed")
