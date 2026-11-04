@@ -22,6 +22,7 @@ from mangatl.domain.budget import Projection
 from mangatl.domain.money import Usd
 
 __all__ = [
+    "BatchSubmitted",
     "CallPriced",
     "PageSkipped",
     "PageStarted",
@@ -120,6 +121,22 @@ class RunFinished:
     pages_done: int
 
 
+@dataclass(frozen=True)
+class BatchSubmitted:
+    """A volume was guarded once and submitted as batch jobs (MT-111 AC-4, AC-5).
+
+    `job_ids` are the `batch_job` rows recorded, one per job, in page order;
+    `page_count` is every page of the volume; `projection` is the one
+    decision the guard judged - the whole volume at the batch-tier estimate
+    (EPIC-09 PO-5 as amended, D6), never one job's share of it.
+    """
+
+    run_id: int
+    job_ids: tuple[int, ...]
+    page_count: int
+    projection: Projection
+
+
 #: Every event a run can emit. A plain union alias: a `TYPE_CHECKING` guard or a
 #: `sys.version_info` branch here would be an uncovered branch in a module that
 #: carries a 100% line-and-branch bar.
@@ -132,4 +149,5 @@ RunEvent = (
     | PageSkipped
     | RunAborted
     | RunFinished
+    | BatchSubmitted
 )

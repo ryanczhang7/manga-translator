@@ -88,18 +88,23 @@ DESIGN_A_PAGE_TOKENS: TokenUsage = TokenUsage(
 _CENT_MICRO: int = 10_000
 
 
-def page_estimate(model_id: str) -> Usd:
+def page_estimate(model_id: str, *, pricing: Pricing = "standard") -> Usd:
     """What one page is assumed to cost on `model_id` before any call is priced.
 
-    `price(model_id, DESIGN_A_PAGE_TOKENS).cost` rounded **up** to the cent,
-    with exact integer ceiling division. Priced at call time against
-    `domain.rates.RATES`, so it always reads the table `price` reads. Raises
+    `price(model_id, DESIGN_A_PAGE_TOKENS, pricing=pricing).cost` rounded **up**
+    to the cent, with exact integer ceiling division. Priced at call time
+    against `domain.rates`, so it always reads the table `price` reads. Raises
     `domain.rates.UnknownModel` (from `price`, unchanged) for an id the table
     does not list. Strictly positive for every listed model, which is what
     makes a $0.00 ceiling refuse its very first consultation (MT-013 AC-7)
     without a special case for zero.
+
+    `pricing` (MT-111 AC-1) is keyword-only and defaults to the interactive
+    row, so every MT-100 figure is unchanged; `pricing="batch"` reads MT-102's
+    batch row - $0.02 for gemini-3.1-pro-preview ($0.012996, rounded up) - and
+    a model with no batch row raises `UnknownModel` rather than falling back.
     """
-    cost = price(model_id, DESIGN_A_PAGE_TOKENS).cost
+    cost = price(model_id, DESIGN_A_PAGE_TOKENS, pricing=pricing).cost
     return Usd.from_micro(-(-cost.micro() // _CENT_MICRO) * _CENT_MICRO)
 
 
@@ -203,6 +208,20 @@ class Budget:
             remaining_chapter=Usd.from_micro(next_call.micro() * pages_remaining),
             basis=basis,
             sample_count=sample_count,
+        )
+
+    def project_batch(self, pages: int, page_estimate: Usd) -> Projection:
+        """Project a batch of `pages` pages as **one** decision (MT-111 AC-2).
+
+        EPIC-09 PO-5 (as amended) and D6: a batch is guarded as a whole before
+        it is submitted, so `next_call` is every page of it at `page_estimate`
+        - the batch-tier figure the caller passes, not this budget's own - and
+        nothing remains after it, so the remainder is the same figure. `check`
+        then judges it with the usual inclusive comparison.
+        """
+        total = Usd.from_micro(page_estimate.micro() * pages)
+        return Projection(
+            next_call=total, remaining_chapter=total, basis="estimate", sample_count=0
         )
 
     def check(self, spent: Usd, projection: Projection) -> Decision:

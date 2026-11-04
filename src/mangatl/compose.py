@@ -54,7 +54,8 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
@@ -66,16 +67,18 @@ from mangatl.clean.page import clean_page_image
 from mangatl.clean.session import load_inpainter
 from mangatl.detect.page import detect_page_regions
 from mangatl.detect.session import load_detector, selected_provider
+from mangatl.domain.batch import BatchPageInput
 from mangatl.domain.budget import page_estimate
 from mangatl.domain.glossary import ContextMode
 from mangatl.domain.money import Usd
 from mangatl.models.providers import PROVIDER_PREFERENCE, select_providers
 from mangatl.ocr.page import transcribe_page_regions
 from mangatl.ocr.session import VOCAB_FILENAME, load_ocr, load_vocab
+from mangatl.pipeline.batch import BatchSubmitter, RequestSize
 from mangatl.pipeline.prelude import ChapterStep, Pipeline, glossary_prelude
 from mangatl.pipeline.stages import build_stages
 from mangatl.pipeline.translate_stage import PageTranslator
-from mangatl.translate import gemini
+from mangatl.translate import gemini, gemini_batch
 from mangatl.translate.client import translate_page
 from mangatl.translate.glossary_pass import GLOSSARY_PASS_MAX_OUTPUT_TOKENS, glossary_pass_text
 from mangatl.translate.provider import (
@@ -92,7 +95,9 @@ __all__ = [
     "MODELS_ENV",
     "OCR_SUBDIR",
     "PROVIDER_PREFERENCE",
+    "BatchBinding",
     "ModelsNotFound",
+    "build_batch_binding",
     "build_pipeline",
     "resolve_models_dir",
 ]
@@ -303,6 +308,63 @@ def _translator(selection: Selection) -> tuple[PageTranslator, ChapterStep | Non
             return partial(gemini.translate_page, client), prelude
         case other:
             raise ProviderUnavailable(f"translation with {other} is not available yet")
+
+
+@dataclass(frozen=True)
+class BatchBinding:
+    """What `pipeline.batch.submit_volume` needs from a provider (MT-111 AC-10):
+    the submitter of one job, the size of one page's request, and the
+    batch-tier page estimate. A separate value rather than a `Pipeline` field,
+    because `Pipeline`'s fields are pinned exactly."""
+
+    submit: BatchSubmitter
+    request_size: RequestSize
+    page_estimate: Usd
+
+
+def build_batch_binding(selection: Selection, *, display_name: str) -> BatchBinding | None:
+    """The batch half of the composition root (MT-111 AC-10; MT-110).
+
+    For `gemini`: one `GeminiClient(api_key=selection.api_key)` - the key passed
+    explicitly, as `_translator` does - and around it a submitter that converts
+    each `domain.batch.BatchPageInput` to a `gemini_batch.BatchPage`, builds the
+    requests with `build_batch_requests` and creates the job with
+    `submit_batch(client, requests, display_name)`; a request size that is the
+    page's built `InlinedRequest` as `model_dump_json(exclude_none=True)`, in
+    UTF-8 bytes (R-A4: stable across builds); and `page_estimate(model_id,
+    pricing="batch")`. `anthropic` has no batch (EPIC-09 is Gemini-only) and
+    binds `None` without constructing any client; every other provider is
+    `ProviderUnavailable`, as `_translator` says it.
+    """
+    match selection.provider:
+        case "anthropic":
+            return None
+        case "gemini":
+            client = GeminiClient(api_key=selection.api_key)
+
+            def submit(inputs: Sequence[BatchPageInput]) -> str:
+                return gemini_batch.submit_batch(
+                    client, gemini_batch.build_batch_requests(_batch_pages(inputs)), display_name
+                )
+
+            def request_size(page_input: BatchPageInput) -> int:
+                (request,) = gemini_batch.build_batch_requests(_batch_pages([page_input]))
+                return len(request.model_dump_json(exclude_none=True).encode())
+
+            return BatchBinding(
+                submit=submit,
+                request_size=request_size,
+                page_estimate=page_estimate(model_for(selection.provider), pricing="batch"),
+            )
+        case other:
+            raise ProviderUnavailable(f"translation with {other} is not available yet")
+
+
+def _batch_pages(inputs: Sequence[BatchPageInput]) -> list[gemini_batch.BatchPage]:
+    """`domain`'s page inputs as `translate`'s pages: the same four fields."""
+    return [
+        gemini_batch.BatchPage(i.ordinal, i.page_image, i.ocr_results, i.context) for i in inputs
+    ]
 
 
 def _directory(path: Path) -> Path:

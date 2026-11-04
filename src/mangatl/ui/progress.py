@@ -316,10 +316,14 @@ class RunProgressPanel(QWidget):
             self.overall.setValue(self._page_count)
         elif isinstance(event, CallPriced):
             self.cost_readout.set_state(event.spent, event.ceiling, event.projection)
-        elif event.reason == BUDGET:
-            self._budget_abort(event)
-        elif event.reason != CANCELLED:
-            self._failed(event)
+        elif isinstance(event, RunAborted):
+            # Narrowed rather than a bare fall-through since MT-111 added
+            # `BatchSubmitted` to the union; what the panel shows for it is
+            # MT-113's, so here it is inert.
+            if event.reason == BUDGET:
+                self._budget_abort(event)
+            elif event.reason != CANCELLED:
+                self._failed(event)
         self._show_times()
 
     def _show_page(self, ordinal: int) -> None:
