@@ -466,7 +466,21 @@ QLineEdit#rowEditor[status="excluded"] {
     background-color: @{color.surface.hover};
 }
 
-/* MT-136 authors [status="failed"], [status="edited"], [status="excluded"] here. */
+/* Status borders (MT-136). Order is the mechanism: every #translationRow */
+/* rule is (1,1,0), so [selected] below restates border-left and wins the */
+/* left side; the failed frame keeps its other three sides.               */
+
+#translationRow[status="failed"] {
+    border: @{border-width.hairline}px solid @{color.status.danger};
+}
+
+#translationRow[status="edited"] {
+    border-left: @{border-width.emphasis}px solid @{color.accent.base};
+}
+
+#translationRow[status="excluded"] {
+    border-left: none;
+}
 
 #translationRow[selected="true"] {
     background-color: @{color.surface.selected};

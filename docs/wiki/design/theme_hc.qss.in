@@ -123,7 +123,19 @@ QFrame#error-banner {
    glyph rule outranks the six status-colour rules (2,1,1 over 1,1,1) only on
    the selected row, so silhouette carries status there (A-15.7). No hover
    rule: color.surface.hover maps to Window, so hover changes no ground
-   (MT-135). */
+   (MT-135).
+   The two status rules come first (MT-136): equal specificity, so the
+   selected override after them wins the left side. The failed frame's
+   colour already maps to WindowText; only its width is restated. The edited
+   bar is the Window ground's foreground, not Highlight (10.4). */
+#translationRow[status="failed"] {
+    border-width: @{border-width.emphasis}px;
+}
+
+#translationRow[status="edited"] {
+    border-left-color: @{hc.WindowText};
+}
+
 #translationRow[selected="true"] {
     border-left: @{border-width.bar}px solid @{hc.HighlightedText};
     color: @{hc.HighlightedText};

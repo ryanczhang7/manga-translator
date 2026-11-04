@@ -501,6 +501,11 @@ OVERRIDES: dict[str, dict[str, str]] = {
     },
     '#pageRow[current="true"] QLabel#pageGlyph': {"color": "{HighlightedText}"},
     '#pageRow[current="true"] QLabel#pageLabel': {"color": "{HighlightedText}"},
+    # MT-136 C-3 / components.md section 10.4: the failed row's frame is
+    # restated at the emphasis width (its colour already maps to WindowText),
+    # and the edited row's bar is the Window ground's foreground.
+    '#translationRow[status="failed"]': {"border-width": EMPHASIS},
+    '#translationRow[status="edited"]': {"border-left-color": "{WindowText}"},
     # MT-135 C-3 / components.md section 10.4: the selected translation row's
     # bar and text, and its gutter glyph and ordinal badge, are the Highlight
     # pair's foreground.
