@@ -214,12 +214,24 @@ CHAPTER_GLOSSARY_PROPOSED_DDL: str = "ALTER TABLE chapter ADD COLUMN glossary_pr
 #: One provider Batch API job (MT-103 AC-4; MT-111, MT-112), so a closed app can
 #: find the job it left running and resume collecting it. `provider_job_id` is
 #: the provider's name for the job (`batches/...`). `collected_at` and
-#: `failure` are nullable because a submitted job has neither. The CHECK is the
-#: vocabulary of `domain.batch.BatchState`; "at most one `submitted`" is
-#: `store.batch.BatchPending`'s refusal, not a constraint, because a partial
-#: unique index would answer a second submission with an `IntegrityError` that
-#: cannot name the job in the way. Shared with `store.project._MIGRATE_TO_V10`,
-#: and outside `__all__` for `CHAPTER_GLOSSARY_PROPOSED_DDL`'s reason.
+#: `failure` are nullable because a submitted job has neither. The state CHECK
+#: is the vocabulary of `domain.batch.BatchState`.
+#:
+#: **Version 11 (MT-137): a row holds its pages.** A volume is now submitted as
+#: several inline jobs (MT-111 PO-1: 200 capped pages exceed the 20 MB inline
+#: limit), so a row says which pages it holds: `first_ordinal .. last_ordinal`,
+#: inclusive. A **range**, not a join table, because MT-111 splits a volume
+#: into consecutive runs, and the second (unnamed, so SQLite's message quotes
+#: its text) CHECK says a range is all a row can be. "No two `submitted` jobs
+#: share a page" is `store.batch.BatchPending`'s refusal, not a constraint: an
+#: overlap is not expressible as an index, and a refusal can name the job in
+#: the way.
+#:
+#: Shared with `store.project._MIGRATE_TO_V10` **and** `_MIGRATE_TO_V11`: one
+#: definition, so `sqlite_master.sql` agrees between a fresh file and a migrated
+#: one. A file older than v10 therefore gets this shape in its v10 step and has
+#: it rebuilt (empty) by its v11 step, which is harmless. Outside `__all__` for
+#: `CHAPTER_GLOSSARY_PROPOSED_DDL`'s reason.
 BATCH_JOB_DDL: str = """
 CREATE TABLE batch_job (
     id              INTEGER PRIMARY KEY,
@@ -229,7 +241,10 @@ CREATE TABLE batch_job (
     state           TEXT    NOT NULL CHECK (state IN ('submitted', 'collected', 'failed')),
     submitted_at    TEXT    NOT NULL,
     collected_at    TEXT,
-    failure         TEXT
+    failure         TEXT,
+    first_ordinal   INTEGER NOT NULL,
+    last_ordinal    INTEGER NOT NULL,
+    CHECK (first_ordinal >= 0 AND first_ordinal <= last_ordinal)
 );
 """
 

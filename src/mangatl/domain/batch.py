@@ -22,7 +22,11 @@ BatchState = Literal["submitted", "collected", "failed"]
 class BatchJob:
     """One submitted job. `provider_job_id` is the provider's name for it
     (`batches/...`); `collected_at` is set once it is collected and `failure`
-    once it has failed, so a `submitted` job has neither."""
+    once it has failed, so a `submitted` job has neither.
+
+    `first_ordinal .. last_ordinal` (inclusive) are the pages the job holds
+    (MT-137): a volume is submitted as several jobs over consecutive runs of
+    pages, so collecting one fills exactly those."""
 
     id: int
     run_id: int
@@ -32,3 +36,10 @@ class BatchJob:
     submitted_at: str
     collected_at: str | None
     failure: str | None
+    first_ordinal: int
+    last_ordinal: int
+
+    @property
+    def ordinals(self) -> range:
+        """The page ordinals this job holds, in order."""
+        return range(self.first_ordinal, self.last_ordinal + 1)

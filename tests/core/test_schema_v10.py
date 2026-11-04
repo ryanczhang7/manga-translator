@@ -117,6 +117,16 @@ _BATCH_JOB_SHAPE: dict[str, tuple[str, int, int]] = {
     "collected_at": ("TEXT", 0, 0),
     "failure": ("TEXT", 0, 0),
 }
+#: MT-137: a fresh or fully migrated file is at version 11 now, where
+#: `batch_job` keeps the eight version-10 columns above, first and in order, and
+#: appends the two ordinals. The tests below assert both: the v10 columns as a
+#: prefix (what this step made) and the exact current set (no column lost, none
+#: extra). `test_schema_v11.py` owns the v10 -> v11 step and the CHECK.
+_BATCH_JOB_SHAPE_V11: dict[str, tuple[str, int, int]] = {
+    **_BATCH_JOB_SHAPE,
+    "first_ordinal": ("INTEGER", 1, 0),
+    "last_ordinal": ("INTEGER", 1, 0),
+}
 _CORRECTION_SHAPE: dict[str, tuple[str, int, int]] = {
     "id": ("INTEGER", 0, 1),
     "run_id": ("INTEGER", 1, 0),
@@ -412,7 +422,8 @@ def _migrated(source_dir: Path) -> Path:
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 10, (
+    # 11 since MT-137: opening a v9 file runs the v10 -> v11 step as well.
+    assert _user_version(db_path) == 11, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -433,15 +444,17 @@ def _chapter_call(micro: int) -> CostRecord:
 # -- the version, and the fresh tables -----------------------------------------------
 
 
-def test_this_build_writes_and_reads_schema_version_ten(
+def test_this_build_writes_and_reads_the_current_schema_version(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
-    """MT-103's bump (PO-1), in both records of it (MT-005 PO-7)."""
+    """MT-103's bump (PO-1), in both records of it (MT-005 PO-7) - and, since
+    MT-137, the next one; `test_schema_v11.py` owns that step."""
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"))
 
-    assert SCHEMA_VERSION == 10
-    assert _user_version(db_path) == 10
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(10,)]
+    # MT-137 takes it to 11: `batch_job` holds its pages (`first_ordinal`, `last_ordinal`).
+    assert SCHEMA_VERSION == 11
+    assert _user_version(db_path) == 11
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(11,)]
 
 
 def test_a_fresh_ledger_has_a_nullable_page_and_a_not_null_standard_pricing_column(
@@ -468,10 +481,14 @@ def test_a_fresh_file_has_the_batch_job_and_correction_tables_as_contracted(
 ) -> None:
     """`## Contract`'s two CREATE TABLEs, column for column: type, NOT NULL and
     primary key. `collected_at` and `failure` are the only nullable columns a
-    job has - a submitted job has neither."""
+    job has - a submitted job has neither. Since MT-137 the fresh `batch_job`
+    is the version-11 table: these eight columns first, in order, then the two
+    ordinals (`_BATCH_JOB_SHAPE_V11`)."""
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"))
 
-    assert _shape(db_path, "batch_job") == _BATCH_JOB_SHAPE
+    batch_job = _shape(db_path, "batch_job")
+    assert list(batch_job.items())[: len(_BATCH_JOB_SHAPE)] == list(_BATCH_JOB_SHAPE.items())
+    assert batch_job == _BATCH_JOB_SHAPE_V11
     assert _shape(db_path, "correction") == _CORRECTION_SHAPE
 
 
@@ -490,10 +507,11 @@ def test_a_fresh_chapter_has_a_nullable_glossary_proposed_at_column(
 def test_a_version_nine_file_is_migrated_to_ten_when_it_is_opened(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
-    """**AC-1**: "its `schema_version` is 10" - in both records of it."""
+    """**AC-1**: "its `schema_version` is 10" - in both records of it; 11 since
+    MT-137, whose v10 -> v11 step runs in the same open."""
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"))
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(10,)]
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(11,)]  # MT-137
 
 
 def test_both_calls_a_version_nine_file_held_read_back_standard_on_their_page_at_their_cost(
@@ -607,9 +625,13 @@ def test_a_migrated_chapter_has_glossary_proposed_at_null(
 def test_a_migrated_file_has_empty_batch_job_and_correction_tables_as_contracted(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
+    """Since MT-137 a migrated v9 file walks on to 11, so its `batch_job` is
+    the version-11 table: the eight v10 columns first, then the two ordinals."""
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"))
 
-    assert _shape(db_path, "batch_job") == _BATCH_JOB_SHAPE
+    batch_job = _shape(db_path, "batch_job")
+    assert list(batch_job.items())[: len(_BATCH_JOB_SHAPE)] == list(_BATCH_JOB_SHAPE.items())
+    assert batch_job == _BATCH_JOB_SHAPE_V11
     assert _shape(db_path, "correction") == _CORRECTION_SHAPE
     assert _raw(db_path, "SELECT COUNT(*) FROM batch_job") == [(0,)]
     assert _raw(db_path, "SELECT COUNT(*) FROM correction") == [(0,)]
@@ -663,21 +685,23 @@ def test_the_v10_step_changes_nothing_outside_the_objects_it_owns(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 10
+    assert _user_version(db_path) == 11  # MT-137: the v10 -> v11 step runs too
     assert _raw(db_path, schema) == before[0]
     assert rows() == before[1]
     assert _raw(db_path, v9_ledger) == before[2]
     assert _raw(db_path, v9_chapter) == before[3]
 
 
-def test_a_version_two_file_migrates_all_the_way_to_ten(
+def test_a_version_two_file_migrates_all_the_way_to_the_current_version(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
     """The shared-string trap: a v2 file runs the v2 -> v3 step (which runs
     `LLM_CALL_DDL`) and the v3 -> v4 step (which runs `CHAPTER_DDL`) before
     the v10 step. With `pricing` or `glossary_proposed_at` written into either
-    string, this open dies on `duplicate column name`. It arrives at 10 with
-    the fresh file's declarations and the v2 ledger's costs, now `standard`."""
+    string, this open dies on `duplicate column name`. It arrives at the
+    current version - 11 since MT-137, whose step runs `BATCH_JOB_DDL` a second
+    time after the v10 step ran it once - with the fresh file's declarations
+    and the v2 ledger's costs, now `standard`."""
     pages = tuple((name, 40, 30) for name in _PAGE_FILENAMES)
     source_dir = _sources(tmp_path, png_bytes, "v2", pages)
     db_path = _build_v2_file(source_dir)
@@ -686,7 +710,7 @@ def test_a_version_two_file_migrates_all_the_way_to_ten(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 10
+    assert _user_version(db_path) == 11  # MT-137
     fresh = _fresh(_sources(tmp_path, png_bytes, "fresh", pages))
     for name in _V10_OBJECTS:
         assert _declaration(db_path, name) == _declaration(fresh, name), name
@@ -695,38 +719,40 @@ def test_a_version_two_file_migrates_all_the_way_to_ten(
     ) == [(request_id, micro, "standard") for request_id, _cost, micro in _V2_LEDGER_ROWS]
 
 
-# -- AC-1: a version-11 file ---------------------------------------------------------
+# -- AC-1: a file one version newer than this build ----------------------------------
 
 
-def test_a_file_one_version_newer_than_ten_is_refused(
+def test_a_file_one_version_newer_than_eleven_is_refused(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
-    """**AC-1**: a file at version 11 raises `SchemaTooNew` naming both
-    numbers, and is left at 11 - the refusal migrates nothing."""
+    """**AC-1** (MT-103), re-pinned by MT-137: a file one version newer than
+    this build - 12 now, 11 when MT-103 wrote it - raises `SchemaTooNew`
+    naming both numbers, and is left at 12 - the refusal migrates nothing."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _fresh(source_dir)
-    _raw(db_path, "PRAGMA user_version = 11")
-    assert _user_version(db_path) == 11
+    _raw(db_path, "PRAGMA user_version = 12")
+    assert _user_version(db_path) == 12
 
     with pytest.raises(SchemaTooNew) as excinfo:
         open_project(project_dir_for(source_dir))
 
     # Anchored to the words around each number: the message also carries the
-    # file's path, and a bare `10` or `11` can match a pytest temp dir.
+    # file's path, and a bare `11` or `12` can match a pytest temp dir.
     message = str(excinfo.value)
-    assert re.search(r"\bversion 11\b", message), message
-    assert re.search(r"\bsupports 10\b", message), message
-    assert _user_version(db_path) == 11
+    assert re.search(r"\bversion 12\b", message), message
+    assert re.search(r"\bsupports 11\b", message), message
+    assert _user_version(db_path) == 12
 
 
-def test_the_same_file_at_version_ten_opens(
+def test_the_same_file_at_the_current_version_opens(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
     """The control for the refusal above: a store that raised `SchemaTooNew`
-    for every file - or for every file at 10 - would pass it."""
+    for every file - or for every file at the current version, 11 since
+    MT-137 - would pass it."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _fresh(source_dir)
-    assert _user_version(db_path) == 10
+    assert _user_version(db_path) == 11
 
     with open_project(project_dir_for(source_dir)) as project:
         assert len(project.pages()) == len(_SOURCE_PAGES)

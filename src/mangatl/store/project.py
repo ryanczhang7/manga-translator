@@ -136,7 +136,7 @@ __all__ = [
 #: `chapter.glossary_proposed_at`. Every migrated call reads `'standard'`, every
 #: migrated chapter has not run the glossary pre-pass, and both tables are empty:
 #: each is the truth about a file no earlier version could write otherwise.
-SCHEMA_VERSION: int = 10
+SCHEMA_VERSION: int = 11
 
 #: `page.status` as `create_project` writes it: read, hashed, nothing done yet.
 PAGE_PENDING: str = "pending"
@@ -524,6 +524,33 @@ DROP TABLE llm_call_v9;
     + CORRECTION_DDL
 )
 
+#: Version 10 to version 11 (MT-137): a `batch_job` row holds its pages. The
+#: table is rebuilt, `_MIGRATE_TO_V10`'s recipe for `llm_call` - renamed aside,
+#: recreated under its real name from `schema.BATCH_JOB_DDL` (the string a fresh
+#: file runs, so the two store the same declaration), copied, dropped. No
+#: triggers to carry and no pragmas: nothing references `batch_job`.
+#:
+#: A version 10 job was submitted for the whole chapter - one job per volume was
+#: the only shape there was - so every copied row is given `0 .. page_count - 1`.
+#: No chapter has zero pages, so the range is never empty.
+_MIGRATE_TO_V11 = (
+    """
+ALTER TABLE batch_job RENAME TO batch_job_v10;
+"""
+    + BATCH_JOB_DDL
+    + """
+INSERT INTO batch_job (
+    id, run_id, provider_job_id, model_id, state, submitted_at, collected_at, failure,
+    first_ordinal, last_ordinal
+)
+SELECT id, run_id, provider_job_id, model_id, state, submitted_at, collected_at, failure,
+       0, (SELECT COUNT(*) - 1 FROM page)
+FROM batch_job_v10;
+
+DROP TABLE batch_job_v10;
+"""
+)
+
 #: The migration chain, in order, each step keyed on the version it *produces*.
 #: A step runs when the file found on disk is older than that.
 #:
@@ -543,6 +570,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (8, _MIGRATE_TO_V8),
     (9, _MIGRATE_TO_V9),
     (10, _MIGRATE_TO_V10),
+    (11, _MIGRATE_TO_V11),
 )
 
 
