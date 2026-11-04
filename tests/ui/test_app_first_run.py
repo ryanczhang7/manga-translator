@@ -984,3 +984,219 @@ def _closing_main_window(qtbot, run: _Run) -> type[MainWindow]:  # type: ignore[
             run.windows.append(self)
 
     return _Made
+
+
+# =============================================================================
+# MT-113 C-6: app.build_batch - the batch setup for the provider Start would use
+# =============================================================================
+#
+# The same selection `build_stages` makes (the environment plus the stored key,
+# `MANGATL_PROVIDER` choosing between two), handed to
+# `compose.build_batch_submit`; `None` from it is `None` here. The collect half
+# is `collect_volume` bound to `compose.build_batch_collector(selection)` at the
+# batch-tier estimate, and the ceiling is the stored one the guard uses. Both
+# compose builders are replaced at their module names, so no client is built.
+
+#: MT-111 AC-1's batch-tier page estimate for gemini-3.1-pro-preview, written out.
+BATCH_ESTIMATE_MICRO = 20_000
+
+BatchSeams = tuple["BatchSubmitSpy", list[object], "FakeCollector"]
+
+
+class BatchSubmitSpy:
+    """`compose.build_batch_submit`: records each selection; `None` for
+    anthropic, as the real one answers, else a closure sentinel."""
+
+    def __init__(self) -> None:
+        self.selections: list[object] = []
+        self.closure = object()
+
+    def __call__(self, selection: Any) -> object:
+        self.selections.append(selection)
+        return None if selection.provider == "anthropic" else self.closure
+
+
+class FakeCollector:
+    """`compose.build_batch_collector`'s collector: `(job name, pages) -> answer`.
+
+    Answers every page with an empty, zero-usage result, so `collect_volume`
+    writes and prices it - and its first `CallPriced` projects from the page
+    estimate it was bound with (one priced call is under
+    `MIN_SAMPLES_FOR_PROJECTION`, so the projection IS the estimate)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[int]]] = []
+
+    def __call__(self, job_name: str, pages: Sequence[Any]) -> Any:
+        from mangatl.domain.batch import BatchResults
+        from mangatl.domain.translation import TokenUsage, TranslationResult
+
+        self.calls.append((job_name, [page.ordinal for page in pages]))
+        empty = TranslationResult(
+            lines={}, usage=TokenUsage(0, 0, 0, 0), call=None, proposed_terms=()
+        )
+        return BatchResults({page.ordinal: empty for page in pages})
+
+
+@pytest.fixture
+def batch_seams(monkeypatch: pytest.MonkeyPatch) -> BatchSeams:
+    submit = BatchSubmitSpy()
+    collector_selections: list[object] = []
+    collector = FakeCollector()
+
+    def build_batch_collector(selection: Any) -> FakeCollector:
+        collector_selections.append(selection)
+        return collector
+
+    # raising=False: `build_batch_submit` does not exist before GREEN.
+    monkeypatch.setattr(compose_module, "build_batch_submit", submit, raising=False)
+    monkeypatch.setattr(compose_module, "build_batch_collector", build_batch_collector)
+    return submit, collector_selections, collector
+
+
+def _build_batch() -> Any:
+    return app_module.build_batch()  # type: ignore[attr-defined]
+
+
+def test_build_batch_binds_the_gemini_selection_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, batch_seams: BatchSeams
+) -> None:
+    submit, collector_selections, _collector = batch_seams
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv(GEMINI, ENV_KEY)
+
+    setup = _build_batch()
+
+    assert setup is not None, "a Gemini key alone has a batch"
+    assert submit.selections == [Selection("gemini", ENV_KEY)]
+    assert setup.submit is submit.closure
+    assert collector_selections == [Selection("gemini", ENV_KEY)]
+
+
+def test_build_batch_selects_the_stored_key_as_build_stages_does(
+    monkeypatch: pytest.MonkeyPatch, batch_seams: BatchSeams
+) -> None:
+    submit, _selections, _collector = batch_seams
+    _clear_provider_env(monkeypatch)
+    _store(settings_path(), {"gemini_api_key": STORED_KEY})
+
+    _build_batch()
+
+    assert submit.selections == [Selection("gemini", STORED_KEY)]
+
+
+def test_build_batch_is_none_for_a_provider_with_no_batch(
+    monkeypatch: pytest.MonkeyPatch, batch_seams: BatchSeams
+) -> None:
+    submit, _selections, _collector = batch_seams
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    assert _build_batch() is None
+    assert [getattr(s, "provider", None) for s in submit.selections] == ["anthropic"]
+
+
+def test_build_batch_refuses_a_keyless_start_before_binding_anything(
+    monkeypatch: pytest.MonkeyPatch, batch_seams: BatchSeams
+) -> None:
+    submit, collector_selections, _collector = batch_seams
+    _clear_provider_env(monkeypatch)
+
+    with pytest.raises(NoApiKey):
+        _build_batch()
+    assert submit.selections == []
+    assert collector_selections == []
+
+
+def _project_with_a_job(tmp_path: Path) -> tuple[Any, Any]:
+    from mangatl.store.batch import pending_jobs, record_submission
+    from mangatl.store.intake import read_chapter
+    from mangatl.store.project import create_project
+
+    folder = _chapter_folder(tmp_path)
+    project = create_project(read_chapter(folder), project_dir_for(folder))
+    with project.transaction() as cursor:
+        chapter_id = int(cursor.execute("SELECT id FROM chapter").fetchone()[0])
+        cursor.execute(
+            "INSERT INTO run (chapter_id, started_at) VALUES (?, ?)",
+            (chapter_id, "2026-11-04T08:00:00+00:00"),
+        )
+        run_id = int(cursor.execute("SELECT last_insert_rowid()").fetchone()[0])
+    record_submission(project, run_id, "batches/abc", "gemini-3.1-pro-preview", 0, 1)
+    (job,) = pending_jobs(project)
+    return project, job
+
+
+def test_build_batch_collects_one_job_through_collect_volume_at_the_batch_estimate(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    batch_seams: BatchSeams,
+) -> None:
+    from mangatl.domain.events import BatchCollected, CallPriced
+    from mangatl.domain.money import Usd
+    from mangatl.store.batch import pending_jobs
+
+    _submit, _selections, collector = batch_seams
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv(GEMINI, ENV_KEY)
+    setup = _build_batch()
+    project, job = _project_with_a_job(tmp_path)
+    events: list[object] = []
+    try:
+        # C-3's call shape, positionally, exactly as the controller makes it.
+        setup.collect(project, job, events.append)
+        left = pending_jobs(project)
+    finally:
+        project.__exit__(None, None, None)
+
+    assert collector.calls == [("batches/abc", [0, 1])], (
+        "the collect half did not ask the selection's collector for the job's pages"
+    )
+    assert left == (), "collect_volume did not collect the job"
+    priced = [e for e in events if isinstance(e, CallPriced)]
+    assert [e.ordinal for e in priced] == [0, 1]
+    assert priced[0].projection.next_call == Usd.from_micro(BATCH_ESTIMATE_MICRO), (
+        f"the collection projected {priced[0].projection.next_call}; C-6 binds the BATCH-tier"
+        " estimate, $0.02 (the standard tier is $0.03)"
+    )
+    assert events[-1] == BatchCollected(job.id, 2, 0, ())
+
+
+def test_build_batch_ceiling_is_the_stored_one_else_the_default(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    batch_seams: BatchSeams,
+) -> None:
+    from mangatl.domain.money import Usd
+
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv(GEMINI, ENV_KEY)
+    setup = _build_batch()
+    project, _job = _project_with_a_job(tmp_path)
+    try:
+        default = setup.ceiling(project)
+        with project.transaction() as cursor:
+            cursor.execute("UPDATE chapter SET budget_ceiling_micro_usd = ?", (750_000,))
+        stored = setup.ceiling(project)
+    finally:
+        project.__exit__(None, None, None)
+
+    assert default == Usd.from_micro(2_000_000), "with nothing stored the ceiling is $2.00"
+    assert stored == Usd.from_micro(750_000)
+
+
+def test_the_default_window_setup_carries_build_batch(
+    qtbot,  # type: ignore[no-untyped-def]
+) -> None:
+    """MT-113 PO-1, at the app: `build_window`'s default `RunSetup` passes
+    `app.build_batch`, so a window built with no setup of its own submits."""
+    window = app_module.build_window([])
+    qtbot.addWidget(window)
+    setup = getattr(window, "_run_setup", None)
+
+    assert isinstance(setup, RunSetup)
+    missing = "app.build_batch is missing"
+    assert setup.build_batch is getattr(app_module, "build_batch", missing)  # type: ignore[attr-defined]
+    window.close()
