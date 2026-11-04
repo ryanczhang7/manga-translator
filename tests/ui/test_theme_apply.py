@@ -501,6 +501,15 @@ OVERRIDES: dict[str, dict[str, str]] = {
     },
     '#pageRow[current="true"] QLabel#pageGlyph': {"color": "{HighlightedText}"},
     '#pageRow[current="true"] QLabel#pageLabel': {"color": "{HighlightedText}"},
+    # MT-135 C-3 / components.md section 10.4: the selected translation row's
+    # bar and text, and its gutter glyph and ordinal badge, are the Highlight
+    # pair's foreground.
+    '#translationRow[selected="true"]': {
+        "border-left": BAR + " solid {HighlightedText}",
+        "color": "{HighlightedText}",
+    },
+    '#translationRow[selected="true"] QLabel#rowGutter': {"color": "{HighlightedText}"},
+    '#translationRow[selected="true"] QLabel#rowBadge': {"color": "{HighlightedText}"},
 }
 
 
