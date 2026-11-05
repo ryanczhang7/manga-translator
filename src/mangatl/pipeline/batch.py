@@ -287,6 +287,8 @@ def collect_volume(
     collect: BatchCollector,
     page_estimate: Usd,
     emit: Callable[[RunEvent], None],
+    *,
+    postlude: ChapterStep | None = None,
 ) -> BatchAnswer:
     """Ask for one submitted job's answer and write it where the per-page call
     would have (MT-112, module docstring "Collection"); return the answer.
@@ -296,6 +298,12 @@ def collect_volume(
     `AlreadyCollected` for a job that is not `submitted`, before `collect` is
     called (AC-5), and `KeyError` for an answer missing one of the job's pages,
     with the job left pending.
+
+    `postlude` (MT-115 AC-6) is the chapter step run after `BatchCollected`
+    when no job of the volume is still `submitted` - the volume's last job -
+    with the job's run id. It never escapes: `BudgetRefused` is reported as
+    `RunAborted(BUDGET)`, anything else as its type and message, both naming
+    no page, and the answer is returned either way with the job collected.
     """
     if job.state != "submitted":
         raise AlreadyCollected(
@@ -331,7 +339,22 @@ def collect_volume(
 
     mark_collected(project, job.id)
     emit(BatchCollected(job.id, done, len(failures), tuple(failures)))
+    if postlude is not None and pending_jobs(project) == ():
+        _run_postlude(postlude, project, job.run_id, emit)
     return answer
+
+
+def _run_postlude(
+    postlude: ChapterStep, project: Project, run_id: int, emit: Callable[[RunEvent], None]
+) -> None:
+    """Run the step after a collection, its failure reported and never raised:
+    `submit_chapter`'s spelling for a failed prelude."""
+    try:
+        postlude(project, run_id, emit)
+    except BudgetRefused:
+        emit(RunAborted(reason=BUDGET, ordinal=None))
+    except Exception as error:  # the runner's own wording for a failed chapter step
+        emit(RunAborted(reason=f"{type(error).__name__}: {error}", ordinal=None))
 
 
 def _write_page(

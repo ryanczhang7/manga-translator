@@ -88,12 +88,19 @@ from mangatl.pipeline.batch import (
     RequestSize,
     submit_chapter,
 )
+from mangatl.pipeline.consistency import ConsistencyTools, consistency_step
 from mangatl.pipeline.prelude import ChapterStep, Pipeline, glossary_prelude
 from mangatl.pipeline.stages import build_stages
 from mangatl.pipeline.translate_stage import PageTranslator
 from mangatl.store.project import Project
 from mangatl.translate import gemini, gemini_batch
 from mangatl.translate.client import translate_page
+from mangatl.translate.consistency import (
+    CONSISTENCY_MAX_OUTPUT_TOKENS,
+    chunk_pages,
+    consistency_text,
+    parse_corrections,
+)
 from mangatl.translate.glossary_pass import GLOSSARY_PASS_MAX_OUTPUT_TOKENS, glossary_pass_text
 from mangatl.translate.provider import (
     PROVIDER_VAR,
@@ -115,6 +122,7 @@ __all__ = [
     "ModelsNotFound",
     "build_batch_binding",
     "build_batch_collector",
+    "build_consistency",
     "build_pipeline",
     "resolve_models_dir",
 ]
@@ -415,6 +423,36 @@ def build_batch_collector(selection: Selection) -> BatchCollector | None:
                 )
 
             return collect
+        case other:
+            raise ProviderUnavailable(f"translation with {other} is not available yet")
+
+
+def build_consistency(selection: Selection) -> ChapterStep | None:
+    """The consistency pass as a `ChapterStep` (MT-115), for `collect_volume`
+    and `run_chapter`'s `postlude`.
+
+    For `gemini`: `consistency_step` around `partial(gemini.run_consistency,
+    client)` with one `GeminiClient(api_key=selection.api_key)`, the four
+    `translate.consistency` tools, and `model_for("gemini")` pricing the
+    guard. `anthropic` has no pass and binds `None` without constructing any
+    client; every other provider is `ProviderUnavailable`, as `_translator`
+    says it. Not yet handed to any caller (MT-115 PO-2).
+    """
+    match selection.provider:
+        case "anthropic":
+            return None
+        case "gemini":
+            client = GeminiClient(api_key=selection.api_key)
+            return consistency_step(
+                partial(gemini.run_consistency, client),
+                ConsistencyTools(
+                    text=consistency_text,
+                    chunk=chunk_pages,
+                    parse=parse_corrections,
+                    max_output_tokens=CONSISTENCY_MAX_OUTPUT_TOKENS,
+                ),
+                model_for(selection.provider),
+            )
         case other:
             raise ProviderUnavailable(f"translation with {other} is not available yet")
 

@@ -35,10 +35,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any
 
-from mangatl.domain.correction import ParsedCorrections, ProposedCorrection
+# `PageLines` lives in `domain.correction` since MT-115 and is re-exported here.
+from mangatl.domain.correction import PageLines, ParsedCorrections, ProposedCorrection
 from mangatl.domain.glossary import estimate_tokens
 
 __all__ = [
@@ -106,15 +106,6 @@ CORRECTIONS_SCHEMA: dict[str, Any] = {
     "required": [CORRECTIONS_KEY],
     "additionalProperties": False,
 }
-
-
-@dataclass(frozen=True)
-class PageLines:
-    """One page's lines as the pass sees them: `(reading_index, ja, en)`, in
-    reading order (the caller's), `en` `None` for a line with no English."""
-
-    ordinal: int
-    lines: tuple[tuple[int, str, str | None], ...]
 
 
 class UnknownLine(Exception):

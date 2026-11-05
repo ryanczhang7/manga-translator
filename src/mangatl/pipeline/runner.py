@@ -107,6 +107,7 @@ def run_chapter(
     cancelled: Callable[[], bool],
     *,
     prelude: ChapterStep | None = None,
+    postlude: ChapterStep | None = None,
 ) -> RunOutcome:
     """Walk every page of `project`'s chapter through `stages`, in ordinal order.
 
@@ -120,6 +121,13 @@ def run_chapter(
     stage fails - `BudgetRefused` as `reason="budget"`, anything else as its
     type and message - except that it names no page (`ordinal=None`), and the
     run then starts no page at all.
+
+    `postlude` (MT-115) is the chapter step run once after the last page and
+    before the run ends - only when every page completed, so never after a
+    failed prelude, a failed page or a cancel. It fails as the prelude fails,
+    naming no page, and the run then ends `RunAborted` with every page done
+    and no `RunFinished`: `RunFinished` means the pages **and** the step are
+    done (AC-6, PO-3).
     """
     pages = project.pages()
     run_id = _start_run(project)
@@ -137,6 +145,8 @@ def run_chapter(
         if not _run_page(project, ctx, stages, emit, cancelled, progress):
             break
         progress.pages_done += 1
+    if progress.reason is None and postlude is not None:
+        _run_prelude(postlude, project, run_id, emit, progress)
 
     outcome = RUN_FINISHED if progress.reason is None else RUN_ABORTED
     _end_run(project, run_id, outcome, progress.reason)

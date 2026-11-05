@@ -211,6 +211,17 @@ CLEANED_ERASED_DDL: str = "ALTER TABLE cleaned_page ADD COLUMN erased TEXT NOT N
 #: suites pin (MT-103 F-2); `store.project` imports it by name.
 CHAPTER_GLOSSARY_PROPOSED_DDL: str = "ALTER TABLE chapter ADD COLUMN glossary_proposed_at TEXT;\n"
 
+#: `chapter.consistency_run_id` (MT-115, schema version 12): the `run` whose
+#: consistency pass completed for this chapter, NULL until one has. Stored so
+#: the pass runs once per chapter (AC-6) and a run refused part-way runs it
+#: again. A separate `ALTER`, for `CHAPTER_GLOSSARY_PROPOSED_DDL`'s reason,
+#: appended directly after it in `DDL` and run by `store.project._MIGRATE_TO_V12`,
+#: so a fresh file and a migrated one store the same `chapter` declaration.
+#: Outside `__all__` for the same reason.
+CHAPTER_CONSISTENCY_RUN_DDL: str = (
+    "ALTER TABLE chapter ADD COLUMN consistency_run_id INTEGER REFERENCES run(id);\n"
+)
+
 #: One provider Batch API job (MT-103 AC-4; MT-111, MT-112), so a closed app can
 #: find the job it left running and resume collecting it. `provider_job_id` is
 #: the provider's name for the job (`batches/...`). `collected_at` and
@@ -283,6 +294,7 @@ CREATE TABLE correction (
 DDL: str = (
     CHAPTER_DDL
     + CHAPTER_GLOSSARY_PROPOSED_DDL
+    + CHAPTER_CONSISTENCY_RUN_DDL
     + """
 -- `ordinal` is filename order at intake and never changes: it is the page's
 -- identity for the rest of the product (MT-004), which is why it is unique

@@ -11,6 +11,10 @@ answer and how many items it restated unchanged), and `ConsistencyResult` (one
 chunk's raw answer, usage and call identity). Like every domain value they are
 branch-free frozen dataclasses - `coverage-core` holds `domain/**` at 100% with
 branch coverage, so validation lives in the parse, not here.
+
+MT-115 moves `PageLines` here from `translate.consistency` (which re-exports
+the same class), so `pipeline.consistency` can build the pass's pages without
+importing `translate`.
 """
 
 from __future__ import annotations
@@ -19,7 +23,13 @@ from dataclasses import dataclass
 
 from mangatl.domain.translation import CallInfo, TokenUsage
 
-__all__ = ["ConsistencyResult", "Correction", "ParsedCorrections", "ProposedCorrection"]
+__all__ = [
+    "ConsistencyResult",
+    "Correction",
+    "PageLines",
+    "ParsedCorrections",
+    "ProposedCorrection",
+]
 
 
 @dataclass(frozen=True)
@@ -67,3 +77,12 @@ class ConsistencyResult:
     text: str
     usage: TokenUsage
     call: CallInfo
+
+
+@dataclass(frozen=True)
+class PageLines:
+    """One page's lines as the pass sees them: `(reading_index, ja, en)`, in
+    reading order (the caller's), `en` `None` for a line with no English."""
+
+    ordinal: int
+    lines: tuple[tuple[int, str, str | None], ...]
