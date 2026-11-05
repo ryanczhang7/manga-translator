@@ -36,6 +36,8 @@ assertable in `tests/core` with no client, no key, no network and no model.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from mangatl.domain.glossary import ContextMode
 from mangatl.domain.money import Usd
 from mangatl.pipeline.clean_stage import CleanStage, PageCleaner
@@ -44,7 +46,7 @@ from mangatl.pipeline.ocr_stage import OcrStage, PageTranscriber
 from mangatl.pipeline.stage import Stage
 from mangatl.pipeline.translate_stage import PageTranslator, TranslateStage
 
-__all__ = ["build_stages"]
+__all__ = ["build_stages", "split_passes"]
 
 
 def build_stages(
@@ -96,3 +98,14 @@ def build_stages(
         *stages,
         TranslateStage(translate=translate, page_estimate=page_estimate, context_mode=context_mode),
     )
+
+
+def split_passes(stages: Sequence[Stage]) -> tuple[tuple[Stage, ...], tuple[Stage, ...]]:
+    """`stages` as the reading pass and the translating pass: everything
+    before the first `TranslateStage`, and it with whatever follows (MT-130
+    C-3). The list is a pipeline fact (MT-036 C-1), so the split lives beside
+    it. With no `TranslateStage` the translating pass is `()`."""
+    for index, stage in enumerate(stages):
+        if isinstance(stage, TranslateStage):
+            return tuple(stages[:index]), tuple(stages[index:])
+    return tuple(stages), ()

@@ -227,9 +227,10 @@ def build_stages(models_dir: Path) -> tuple[Stage, ...]:
     `select_provider` refuses (`NoApiKey`, ...) before `build_pipeline` is
     called, so a refused Start loads no weight.
 
-    The stages only: the window's run does not carry the pipeline's chapter
-    step yet (MT-105 PO-5; MT-130 wires it), so a Gemini run started from the
-    window skips the glossary pre-pass.
+    The stages only, both passes in run order (`Pipeline.page_stages`, MT-130
+    C-6): the window's run does not carry the pipeline's chapter step yet
+    (MT-105 PO-5; MT-139 wires it), so a Gemini run started from the window
+    is one pass and skips the glossary pre-pass.
 
     The context mode is `MANGATL_CONTEXT_MODE`'s (MT-107 AC-5), resolved
     before `select_provider`, so an unknown one raises `UnknownContextMode`
@@ -239,7 +240,9 @@ def build_stages(models_dir: Path) -> tuple[Stage, ...]:
     mode = context_mode(os.environ.get(CONTEXT_MODE_VAR))
     env = translation_env(os.environ, settings_path())
     selection = select_provider(os.environ.get(PROVIDER_VAR) or None, env)
-    return build_pipeline(models_dir, translate=True, selection=selection, context_mode=mode).stages
+    return build_pipeline(
+        models_dir, translate=True, selection=selection, context_mode=mode
+    ).page_stages
 
 
 def build_batch() -> BatchSetup | None:
