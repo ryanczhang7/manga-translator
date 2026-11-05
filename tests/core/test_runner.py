@@ -263,3 +263,185 @@ def test_a_prelude_failure_does_not_escape_the_runner(world: _World) -> None:
         world.run(_Step(world.log, raises=RuntimeError("boom")))
     except RuntimeError as error:  # pragma: no cover - the failure being pinned
         pytest.fail(f"the prelude's exception escaped run_chapter: {error!r}")
+
+
+# =============================================================================
+# MT-115 AC-6 (synchronous half): the `postlude` keyword - the chapter step run
+# once AFTER the last page and BEFORE the run ends (PO-3). The step here is the
+# same recording `_Step`, so these tests say nothing about corrections; the
+# consistency pass through this hook is `test_consistency_apply.py`'s.
+#
+# RED: `run_chapter` has no `postlude` keyword, so every call that passes one is
+# `TypeError: run_chapter() got an unexpected keyword argument 'postlude'`.
+# =============================================================================
+
+
+def _run_post(
+    world: _World, step: Any, *, prelude: Any = None
+) -> tuple[list[RunEvent], RunOutcome]:
+    events: list[RunEvent] = []
+    stages = (_Stage(world.log),)
+    outcome = run_chapter(  # type: ignore[call-arg]
+        world.project, stages, events.append, _never, prelude=prelude, postlude=step
+    )
+    return events, outcome
+
+
+def test_run_chapter_takes_postlude_as_a_keyword_only_argument_defaulting_to_none() -> None:
+    parameter = inspect.signature(run_chapter).parameters.get("postlude")
+
+    assert parameter is not None, "run_chapter has no postlude parameter"
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is None
+
+
+def test_an_explicit_none_postlude_runs_exactly_as_no_keyword_at_all(world: _World) -> None:
+    events_none, outcome_none = _run_post(world, None)
+    log_none = list(world.log)
+    world.log.clear()
+    with world.project.transaction() as cursor:
+        cursor.execute("UPDATE page SET status = ?", (PAGE_PENDING,))
+
+    events_bare, outcome_bare = world.run(pass_keyword=False)
+
+    assert _shape(events_none) == _shape(events_bare)
+    assert log_none == world.log == [("stage", 0), ("stage", 1), ("stage", 2)]
+    assert outcome_none.outcome == outcome_bare.outcome == RUN_FINISHED
+    assert outcome_none.pages_done == outcome_bare.pages_done == 3
+
+
+def test_the_postlude_runs_once_after_the_last_page_stage(world: _World) -> None:
+    step = _Step(world.log)
+
+    _run_post(world, step)
+
+    assert world.log == [("stage", 0), ("stage", 1), ("stage", 2), "prelude"], (
+        f"the run's order was {world.log}; the postlude runs once, after the last page"
+    )
+
+
+def test_the_postlude_runs_after_the_last_pages_events_and_before_run_finished(
+    world: _World,
+) -> None:
+    events, outcome = _run_post(world, _Step(world.log))
+
+    assert _shape(events)[-3:] == [
+        ("StageFinished", 2),
+        ("CallPriced", None),
+        ("RunFinished", None),
+    ], f"the stream closed {_shape(events)[-3:]}"
+    finished = events[-1]
+    assert isinstance(finished, RunFinished) and finished.pages_done == 3
+    assert outcome.outcome == RUN_FINISHED
+
+
+def test_the_postlude_is_handed_the_project_the_runs_id_and_the_runs_own_emit(
+    world: _World,
+) -> None:
+    step = _Step(world.log)
+
+    events, outcome = _run_post(world, step)
+
+    ((project, run_id, emit),) = step.calls
+    (started,) = [e for e in events if isinstance(e, RunStarted)]
+    assert project is world.project
+    assert run_id == started.run_id == outcome.run_id
+    assert _STEP_EVENT in events, "what the postlude emitted did not reach the run's stream"
+    assert callable(emit)
+
+
+def test_a_prelude_and_a_postlude_each_run_once_on_either_side_of_the_pages(
+    world: _World,
+) -> None:
+    before = _Step(world.log)
+    after = _Step([])
+
+    _run_post(world, after, prelude=before)
+
+    assert len(before.calls) == 1 and len(after.calls) == 1
+    assert world.log == ["prelude", ("stage", 0), ("stage", 1), ("stage", 2)]
+
+
+def test_a_budget_refusal_in_the_postlude_aborts_naming_no_page_with_every_page_done(
+    world: _World,
+) -> None:
+    """PO-3: a refused pass ends the run as a refused glossary pre-pass does -
+    `RunAborted(BUDGET, None)` - over a chapter whose pages are all done."""
+    events, outcome = _run_post(world, _Step(world.log, raises=_refusal()))
+
+    assert events[-1] == RunAborted(reason=BUDGET, ordinal=None), (
+        f"the run ended with {events[-1]!r}; a refused postlude is"
+        " RunAborted(reason='budget', ordinal=None)"
+    )
+    assert outcome.outcome == RUN_ABORTED and outcome.aborted_reason == BUDGET
+    assert outcome.pages_done == 3, f"pages_done is {outcome.pages_done}; every page was done"
+    assert not [e for e in events if isinstance(e, RunFinished)], (
+        "a refused postlude still emitted RunFinished"
+    )
+    assert world.run_rows() == [(RUN_ABORTED, BUDGET)]
+    assert [world.project.page_status(n) for n in range(3)] == [PAGE_DONE] * 3
+
+
+def test_any_other_postlude_failure_aborts_with_its_type_and_message_naming_no_page(
+    world: _World,
+) -> None:
+    events, outcome = _run_post(world, _Step(world.log, raises=ValueError("no corrections key")))
+
+    assert events[-1] == RunAborted(reason="ValueError: no corrections key", ordinal=None)
+    assert outcome.aborted_reason == "ValueError: no corrections key"
+    assert outcome.pages_done == 3
+    assert not [e for e in events if isinstance(e, RunFinished)]
+    assert world.run_rows() == [(RUN_ABORTED, "ValueError: no corrections key")]
+
+
+def test_a_postlude_failure_does_not_escape_the_runner(world: _World) -> None:
+    try:
+        _run_post(world, _Step(world.log, raises=RuntimeError("boom")))
+    except RuntimeError as error:  # pragma: no cover - the failure being pinned
+        pytest.fail(f"the postlude's exception escaped run_chapter: {error!r}")
+
+
+def test_a_refused_prelude_does_not_run_the_postlude(world: _World) -> None:
+    """The postlude runs only when `progress.reason is None` after the pages."""
+    after = _Step([])
+
+    events, _ = _run_post(world, after, prelude=_Step(world.log, raises=_refusal()))
+
+    assert after.calls == []
+    assert events[-1] == RunAborted(reason=BUDGET, ordinal=None)
+
+
+def test_a_failed_page_does_not_run_the_postlude(world: _World) -> None:
+    @dataclass
+    class _Failing:
+        name: str = "failing"
+
+        def run(self, ctx: PageContext) -> None:
+            if ctx.page.ordinal == 1:
+                raise RuntimeError("page one broke")
+
+        def is_done(self, ctx: PageContext) -> bool:
+            return False
+
+    after = _Step([])
+    events: list[RunEvent] = []
+
+    outcome = run_chapter(  # type: ignore[call-arg]
+        world.project, (_Failing(),), events.append, _never, postlude=after
+    )
+
+    assert after.calls == []
+    assert outcome.outcome == RUN_ABORTED
+    assert events[-1] == RunAborted(reason="RuntimeError: page one broke", ordinal=1)
+
+
+def test_a_cancelled_run_does_not_run_the_postlude(world: _World) -> None:
+    after = _Step([])
+    events: list[RunEvent] = []
+
+    outcome = run_chapter(  # type: ignore[call-arg]
+        world.project, (_Stage(world.log),), events.append, lambda: True, postlude=after
+    )
+
+    assert after.calls == []
+    assert outcome.outcome == RUN_ABORTED

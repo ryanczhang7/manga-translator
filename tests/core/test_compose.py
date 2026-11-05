@@ -140,7 +140,7 @@ def test_the_composition_root_exports_exactly_what_the_contract_names() -> None:
 
     # MT-065 C-7 adds `INPAINTER_FILENAME`, in RUF022's order; MT-111 adds
     # `BatchBinding` and `build_batch_binding`, in the same order; MT-112 adds
-    # `build_batch_collector`.
+    # `build_batch_collector`; MT-115 adds `build_consistency` (RED-A2).
     assert module.__all__ == [
         "DETECTOR_FILENAME",
         "INPAINTER_FILENAME",
@@ -151,6 +151,7 @@ def test_the_composition_root_exports_exactly_what_the_contract_names() -> None:
         "ModelsNotFound",
         "build_batch_binding",
         "build_batch_collector",
+        "build_consistency",
         "build_pipeline",
         "resolve_models_dir",
     ]
@@ -2122,3 +2123,208 @@ def test_a_provider_with_no_adapter_has_no_collector_either(
     with pytest.raises(ProviderUnavailable):
         _build_batch_collector(_selection("openai"))
     assert collect_client.built == []
+
+
+# -- MT-115: `build_consistency`, the consistency pass as a `ChapterStep` ---------
+#
+# `compose.build_consistency(selection)` (the story's pinned `## Contract`): for
+# `gemini`, `consistency_step(partial(gemini.run_consistency, GeminiClient(
+# api_key=selection.api_key)), ConsistencyTools(consistency_text, chunk_pages,
+# parse_corrections, CONSISTENCY_MAX_OUTPUT_TOKENS), model_for("gemini"))`;
+# `anthropic` -> `None` with nothing constructed; any other -> `ProviderUnavailable`.
+#
+# **Observed by behaviour**, as the prelude's binding is above: the step is run
+# over a real project whose one line has a proposal, and the fake client's
+# `generate_content` records what it was sent and answers a real
+# `types.GenerateContentResponse` carrying one correction. The text it was sent
+# pins `consistency_text`; the correction landing pins `parse_corrections` and
+# `gemini.run_consistency`; the ledger row's request id pins the adapter's
+# `CallInfo`; and a ceiling exactly at `estimate_tokens(text)` in plus 8,192 out
+# at $2 / $12 per million permits, one micro-dollar below refuses before the
+# client - which a root binding the page cap (4,096), another text or another
+# model's rates fails. `chunk_pages`' default limit is not reachable from a
+# one-line volume, and is not constrained here.
+#
+# Names MT-115 adds are imported inside the tests, so in RED each fails alone.
+
+_CONSISTENCY_EN = "Kenji-sempai, good morning"
+_CONSISTENCY_FIX = "Kenji-senpai, good morning"
+
+
+class _FakeConsistencyModels:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def generate_content(self, **kwargs: Any) -> object:
+        import json
+
+        from google.genai import types
+
+        self.calls.append(kwargs)
+        answer = json.dumps(
+            {
+                "corrections": [
+                    {
+                        "page": 1,
+                        "reading_index": 0,
+                        "corrected_en": _CONSISTENCY_FIX,
+                        "reason": "the volume spells it senpai",
+                    }
+                ]
+            }
+        )
+        return types.GenerateContentResponse(
+            candidates=[
+                types.Candidate(
+                    content=types.Content(role="model", parts=[types.Part(text=answer)])
+                )
+            ],
+            usage_metadata=types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=900, candidates_token_count=60, thoughts_token_count=40
+            ),
+            model_version="gemini-3.1-pro-preview",
+            response_id="resp-consistency-1",
+        )
+
+
+class _FakeConsistencyClient:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.args = args
+        self.kwargs = dict(kwargs)
+        self.models = _FakeConsistencyModels()
+
+
+@pytest.fixture
+def consistency_client(monkeypatch: pytest.MonkeyPatch) -> list[_FakeConsistencyClient]:
+    built: list[_FakeConsistencyClient] = []
+
+    def construct(*args: object, **kwargs: object) -> _FakeConsistencyClient:
+        client = _FakeConsistencyClient(*args, **kwargs)
+        built.append(client)
+        return client
+
+    monkeypatch.setattr("mangatl.compose.GeminiClient", construct)
+    return built
+
+
+def _build_consistency(selection: Selection) -> Any:
+    from mangatl.compose import build_consistency  # type: ignore[attr-defined]
+
+    return build_consistency(selection)
+
+
+def _proposed_read_project(read_project: _ReadProject) -> str:
+    """Give `read_project`'s one line a proposal; return the text the pass is
+    expected to be sent (no glossary, so no block; page 1 has no English)."""
+    from mangatl.translate.consistency import PageLines, consistency_text
+
+    read_project.project.write_proposed(0, {0: _CONSISTENCY_EN})
+    return consistency_text([PageLines(0, ((0, "ケンジ先輩、おはよう", _CONSISTENCY_EN),))], "")
+
+
+def _consistency_estimate_micro(text: str) -> int:
+    from mangatl.domain.glossary import estimate_tokens
+    from mangatl.translate.consistency import CONSISTENCY_MAX_OUTPUT_TOKENS
+
+    tokens_in = estimate_tokens(text)
+    return tokens_in * _GEMINI_IN_MICRO + CONSISTENCY_MAX_OUTPUT_TOKENS * _GEMINI_OUT_MICRO
+
+
+def test_an_anthropic_selection_has_no_consistency_pass_and_builds_no_client(
+    consistency_client: list[_FakeConsistencyClient], client_spy: _ClientSpy
+) -> None:
+    assert _build_consistency(_selection("anthropic")) is None
+    assert consistency_client == [], "an Anthropic selection constructed a GeminiClient"
+    assert client_spy.clients == [], "an Anthropic selection constructed a client"
+
+
+def test_a_provider_with_no_adapter_has_no_consistency_pass_either(
+    consistency_client: list[_FakeConsistencyClient],
+) -> None:
+    from mangatl.translate.provider import ProviderUnavailable
+
+    with pytest.raises(ProviderUnavailable):
+        _build_consistency(_selection("openai"))
+    assert consistency_client == []
+
+
+def test_a_gemini_consistency_pass_is_built_around_one_client_with_the_selections_key(
+    consistency_client: list[_FakeConsistencyClient],
+) -> None:
+    step = _build_consistency(_selection("gemini", "g-consistency-key"))
+
+    assert callable(step)
+    assert len(consistency_client) == 1, f"{len(consistency_client)} GeminiClients were built"
+    (client,) = consistency_client
+    assert (client.args, client.kwargs) == ((), {"api_key": "g-consistency-key"})
+
+
+def test_the_gemini_consistency_pass_sends_the_volumes_text_and_applies_the_answer(
+    consistency_client: list[_FakeConsistencyClient], read_project: _ReadProject
+) -> None:
+    from mangatl.store.corrections import corrections_for
+
+    expected = _proposed_read_project(read_project)
+    step = _build_consistency(_selection("gemini"))
+
+    step(read_project.project, read_project.run_id, lambda event: None)
+
+    ((sent,),) = [client.models.calls for client in consistency_client]
+    assert sent["model"] == "gemini-3.1-pro-preview"
+    assert sent["contents"] == [expected], f"the pass sent {sent['contents']!r}"
+    assert read_project.project.read_proposed(0) == (_CONSISTENCY_FIX,)
+    assert [c.after_en for c in corrections_for(read_project.project, 0)] == [_CONSISTENCY_FIX]
+    marker = read_project.project.consistency_run_id()  # type: ignore[attr-defined]
+    assert marker == read_project.run_id
+
+
+def test_the_gemini_consistency_pass_bills_the_answers_request_id_at_the_chapter_level(
+    consistency_client: list[_FakeConsistencyClient], read_project: _ReadProject
+) -> None:
+    import sqlite3
+
+    from mangatl.store.project import project_dir_for
+
+    _proposed_read_project(read_project)
+    step = _build_consistency(_selection("gemini"))
+
+    step(read_project.project, read_project.run_id, lambda event: None)
+
+    db_path = project_dir_for(read_project.project.chapter.source_dir) / "project.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        rows = connection.execute(
+            "SELECT page_id, pricing, request_id, model_id FROM llm_call"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert rows == [(None, "standard", "resp-consistency-1", "gemini-3.1-pro-preview")]
+
+
+def test_the_gemini_consistency_pass_at_exactly_its_estimate_reaches_the_client(
+    consistency_client: list[_FakeConsistencyClient], read_project: _ReadProject
+) -> None:
+    text = _proposed_read_project(read_project)
+    step = _build_consistency(_selection("gemini"))
+    read_project.set_ceiling(_consistency_estimate_micro(text))
+
+    step(read_project.project, read_project.run_id, lambda event: None)
+
+    assert [len(client.models.calls) for client in consistency_client] == [1]
+
+
+def test_the_gemini_consistency_pass_one_micro_dollar_below_its_estimate_is_refused(
+    consistency_client: list[_FakeConsistencyClient], read_project: _ReadProject
+) -> None:
+    from mangatl.pipeline.stage import BudgetRefused
+
+    text = _proposed_read_project(read_project)
+    step = _build_consistency(_selection("gemini"))
+    read_project.set_ceiling(_consistency_estimate_micro(text) - 1)
+
+    with pytest.raises(BudgetRefused):
+        step(read_project.project, read_project.run_id, lambda event: None)
+
+    assert [client.models.calls for client in consistency_client] == [[]], (
+        "the client was called although the guard refuses the pass"
+    )
