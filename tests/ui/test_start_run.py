@@ -1658,6 +1658,13 @@ def test_every_window_build_window_makes_gets_the_real_setup(
     calls = Calls()
     builder = Builder(_quick_stages(calls))
     monkeypatch.setattr(app_module, "build_stages", builder)
+    # MT-113 PO-1: the default setup now carries `app.build_batch`, which on a
+    # machine with a Gemini key would take Start down the batch path (real
+    # weights, on the worker) and on a keyless one refuse with NoApiKey. This
+    # test is about the per-page path's setup, so its batch builder answers
+    # "no batch" - AC-5's path, the one this test has always exercised.
+    # raising=False: `build_batch` does not exist before MT-113's GREEN.
+    monkeypatch.setattr(app_module, "build_batch", lambda: None, raising=False)
 
     window = app_module.build_window([str(folder)] if arguments == "folder" else [])
     _press_start_on_summary_of(qtbot, world, window, folder)

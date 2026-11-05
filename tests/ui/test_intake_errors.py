@@ -58,9 +58,15 @@ def _assert_opens_with_open_folder_bound_to_its_setup(window: MainWindow) -> Non
         f"the intake's opener is {opener!r}, not mangatl.app.open_folder bound with a run setup"
     )
     assert getattr(opener, "args", None) == ()
+    # MT-113 PO-1: the default setup carries `app.build_batch` too - the field
+    # is defaulted to `None`, so this comparison is what catches app.py
+    # forgetting to pass it.
     assert getattr(opener, "keywords", None) == {
-        "run_setup": RunSetup(
-            app_module.resolve_models, app_module.build_stages, app_module.selected_model
+        "run_setup": RunSetup(  # type: ignore[call-arg]
+            app_module.resolve_models,
+            app_module.build_stages,
+            app_module.selected_model,
+            build_batch=app_module.build_batch,  # type: ignore[attr-defined]
         )
     }
 
