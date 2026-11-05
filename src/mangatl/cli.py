@@ -69,7 +69,13 @@ from mangatl.compose import (
 )
 from mangatl.domain.batch import BatchJob
 from mangatl.domain.budget import page_estimate
-from mangatl.domain.events import BatchCollected, PageSkipped, PageStarted, RunEvent
+from mangatl.domain.events import (
+    BatchCollected,
+    PageSkipped,
+    PageStarted,
+    PassStarted,
+    RunEvent,
+)
 from mangatl.domain.glossary import (
     CONTEXT_MODE_VAR,
     CONTEXT_MODES,
@@ -79,7 +85,7 @@ from mangatl.domain.glossary import (
 )
 from mangatl.pipeline.bake import bake_chapter
 from mangatl.pipeline.batch import collect_volume
-from mangatl.pipeline.runner import RUN_FINISHED, run_chapter
+from mangatl.pipeline.runner import READING, RUN_FINISHED, TRANSLATING, run_chapter
 from mangatl.store.batch import pending_jobs
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
 from mangatl.store.project import (
@@ -246,7 +252,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     with project:
         filenames = {page.ordinal: page.filename for page in project.pages()}
         outcome = run_chapter(
-            project, pipeline.stages, _reporter(filenames), _never, prelude=pipeline.prelude
+            project,
+            pipeline.stages,
+            _reporter(filenames),
+            _never,
+            prelude=pipeline.prelude,
+            after_prelude=pipeline.after_prelude,
         )
         if outcome.outcome != RUN_FINISHED:
             return _fail(f"run aborted: {outcome.aborted_reason}")
@@ -325,12 +336,16 @@ def _reporter(filenames: dict[int, str]) -> Callable[[RunEvent], None]:
 
     A page the run skipped because it was already done is progress too - it is
     what "resumes rather than restarts" looks like from the outside - so it gets
-    a line of its own and says why.
+    a line of its own and says why. A two-pass run (MT-130 C-5) announces each
+    pass once, and its page lines then appear once per pass.
     """
     total = len(filenames)
+    passes = {READING: f"Reading {total} pages", TRANSLATING: f"Translating {total} pages"}
 
     def report(event: RunEvent) -> None:
-        if isinstance(event, PageStarted):
+        if isinstance(event, PassStarted):
+            print(passes[event.name])
+        elif isinstance(event, PageStarted):
             print(f"[{event.ordinal + 1}/{total}] {filenames[event.ordinal]}")
         elif isinstance(event, PageSkipped):
             print(f"[{event.ordinal + 1}/{total}] {filenames[event.ordinal]} ({event.reason})")

@@ -383,10 +383,62 @@ def test_the_cleaner_is_a_required_second_parameter_with_no_default() -> None:
     assert parameters["context_mode"].default == "rolling"
 
 
-def test_the_module_exports_the_builder_and_nothing_else() -> None:
+def test_the_module_exports_the_builder_and_the_pass_split_and_nothing_else() -> None:
+    """MT-130 AC-12: `split_passes` joins `build_stages` (C-3)."""
     import mangatl.pipeline.stages as module
 
-    assert module.__all__ == ["build_stages"]
+    assert module.__all__ == ["build_stages", "split_passes"]
+
+
+# -- MT-130 AC-12: the list split into the reading and the translating pass -----
+#
+# `split_passes` is imported inside each test, so that while it does not exist
+# only these tests fail and the rest of the file still runs.
+
+
+def test_split_passes_puts_detect_clean_ocr_in_the_reading_pass_and_translate_after_it(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """MT-130 AC-12, by type, in order, and by identity: the split hands back
+    the very stages `build_stages` bound, not rebuilt ones."""
+    from mangatl.pipeline.stages import split_passes  # type: ignore[attr-defined]
+
+    stages = build_stages(
+        _Detector(_mask(one_bit_png)), _Cleaner(), _Transcriber(), _Translator(), _ESTIMATE
+    )
+
+    reading, translating = split_passes(stages)
+
+    assert [type(stage) for stage in reading] == [DetectStage, CleanStage, OcrStage], (
+        f"the reading pass is {[type(stage).__name__ for stage in reading]}"
+    )
+    assert [type(stage) for stage in translating] == [TranslateStage], (
+        f"the translating pass is {[type(stage).__name__ for stage in translating]}"
+    )
+    assert all(a is b for a, b in zip((*reading, *translating), stages, strict=True)), (
+        "split_passes did not hand back the stages build_stages bound, in their order"
+    )
+    assert type(reading) is tuple and type(translating) is tuple
+
+
+def test_split_passes_without_a_translator_leaves_the_translating_pass_empty(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    from mangatl.pipeline.stages import split_passes  # type: ignore[attr-defined]
+
+    stages = build_stages(_Detector(_mask(one_bit_png)), _Cleaner(), _Transcriber(), None, None)
+
+    reading, translating = split_passes(stages)
+
+    assert [type(stage) for stage in reading] == [DetectStage, CleanStage, OcrStage]
+    assert all(a is b for a, b in zip(reading, stages, strict=True))
+    assert translating == ()
+
+
+def test_split_passes_of_no_stages_is_two_empty_passes() -> None:
+    from mangatl.pipeline.stages import split_passes  # type: ignore[attr-defined]
+
+    assert split_passes(()) == ((), ())
 
 
 # -- AC-2: "without loading a model", as a property of the module's imports -----

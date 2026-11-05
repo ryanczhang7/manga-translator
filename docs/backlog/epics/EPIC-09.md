@@ -2,7 +2,7 @@
 id: EPIC-09
 title: A whole volume as one Gemini batch, then a consistency pass that returns only corrections
 status: todo
-stories: [MT-101, MT-102, MT-103, MT-104, MT-105, MT-106, MT-107, MT-108, MT-109, MT-110, MT-111, MT-112, MT-113, MT-114, MT-115, MT-116, MT-130, MT-137]
+stories: [MT-101, MT-102, MT-103, MT-104, MT-105, MT-106, MT-107, MT-108, MT-109, MT-110, MT-111, MT-112, MT-113, MT-114, MT-115, MT-116, MT-130, MT-139, MT-137]
 ---
 
 *Added 2026-10-28 by lead-po on Claude Fable 5.1, from the user's request:
@@ -131,7 +131,13 @@ MT-108 exist, each with a `## Decided` section the implementing stories cite.
   MT-130.
 - **MT-130** - a run reads every page before it translates any: detect,
   clean and OCR for the whole chapter, then the pre-pass, then translation
-  page by page (filed from MT-105 PO-1, 2026-11-02).
+  page by page (filed from MT-105 PO-1, 2026-11-02). The runner, the
+  pipeline shape and the CLI; the window half is MT-139 (MT-130 PO-1, the
+  user, 2026-11-05).
+- **MT-139** - the window's run reads every page, then proposes, then
+  translates: `Pipeline.prelude` carried down `app.build_stages -> RunSetup
+  -> RunController`, the progress panel reading two passes (cut from MT-130
+  at its PLANNED; MT-106 waits on it too).
 - **MT-107** - the neighbour-Japanese context mode, selectable per run, the
   default unchanged.
 - **MT-108** (spike) - rolling vs neighbour context measured on the benchmark

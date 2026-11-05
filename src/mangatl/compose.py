@@ -89,7 +89,7 @@ from mangatl.pipeline.batch import (
     submit_chapter,
 )
 from mangatl.pipeline.prelude import ChapterStep, Pipeline, glossary_prelude
-from mangatl.pipeline.stages import build_stages
+from mangatl.pipeline.stages import build_stages, split_passes
 from mangatl.pipeline.translate_stage import PageTranslator
 from mangatl.store.project import Project
 from mangatl.translate import gemini, gemini_batch
@@ -266,8 +266,10 @@ def build_pipeline(
     provider (`openai`) is `ProviderUnavailable` until its adapter story adds
     an arm to the `match` (PO-5).
 
-    **The return is a `Pipeline`** (MT-105 RED-A2): the stage tuple and the
-    chapter step to run before page 1. Gemini's step is the glossary pre-pass,
+    **The return is a `Pipeline`** (MT-105 RED-A2, MT-130 C-4): the reading
+    pass, the chapter step to run after it, and the translating pass -
+    `build_stages`' list cut by `split_passes`, so `page_stages` is exactly
+    that list. Gemini's step is the glossary pre-pass,
     `glossary_prelude(partial(gemini.propose_glossary, client), model_id, ...)`
     bound around the **same** `GeminiClient` the page translator holds - one
     client, one key. Anthropic has no pass (v1 is Gemini-only) and
@@ -302,7 +304,9 @@ def build_pipeline(
         estimate,
         context_mode,
     )
-    return Pipeline(stages=stages, prelude=prelude)
+    # MT-130 C-4: the reading pass, the prelude between, the translating pass.
+    reading, translating = split_passes(stages)
+    return Pipeline(stages=reading, prelude=prelude, after_prelude=translating)
 
 
 def _translator(selection: Selection) -> tuple[PageTranslator, ChapterStep | None]:

@@ -527,7 +527,8 @@ def test_the_three_collection_events_are_frozen_run_events_with_the_contracts_fi
     assert cls in typing.get_args(RunEvent), f"{name} is not in the RunEvent union"
 
 
-def test_the_domain_events_module_exports_exactly_its_thirteen_names() -> None:
+def test_the_domain_events_module_exports_exactly_its_fourteen_names() -> None:
+    """MT-130 C-2 adds `PassStarted`, alphabetically after `PageStarted`."""
     from mangatl.domain import events
 
     assert events.__all__ == [
@@ -538,6 +539,7 @@ def test_the_domain_events_module_exports_exactly_its_thirteen_names() -> None:
         "CallPriced",
         "PageSkipped",
         "PageStarted",
+        "PassStarted",
         "RegionsDetected",
         "RunAborted",
         "RunEvent",

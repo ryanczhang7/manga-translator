@@ -1,8 +1,9 @@
-"""The chapter step: work the run does once, before page 1 (MT-105).
+"""The chapter step: work the run does once, before the first page is translated (MT-105).
 
 `run_chapter` walks pages through per-page stages; a `ChapterStep` is the one
-thing it runs for the chapter as a whole, after `RunStarted` and before the
-first `PageStarted`. The only step today is the glossary pre-pass
+thing it runs for the chapter as a whole - since MT-130, after the reading
+pass has read every page and before the translating pass starts, so it sees
+the whole chapter's OCR. The only step today is the glossary pre-pass
 (EPIC-09 PO-2): one call that proposes the volume's terms up front so every
 page is translated against the same glossary.
 
@@ -71,10 +72,11 @@ ChapterStep = Callable[[Project, int, Callable[[RunEvent], None]], None]
 
 @dataclass(frozen=True)
 class Pipeline:
-    """What `compose.build_pipeline` hands a caller: the page stages and the
-    chapter step to run before them (`None` when there is none).
+    """What `compose.build_pipeline` hands a caller: the reading pass, the
+    chapter step to run after it (`None` when there is none), and the
+    translating pass (MT-130 C-3; `()` when nothing is translated).
 
-    A dataclass rather than a pair so that a caller still treating the return
+    A dataclass rather than a tuple so that a caller still treating the return
     as the stage tuple fails loudly - `Pipeline` is not iterable - instead of
     iterating `(stages, prelude)` as two stages (RED-A2). It lives here and not
     in `compose` so `ui` and `cli` can name it without the composition root.
@@ -82,6 +84,13 @@ class Pipeline:
 
     stages: tuple[Stage, ...]
     prelude: ChapterStep | None
+    after_prelude: tuple[Stage, ...] = ()
+
+    @property
+    def page_stages(self) -> tuple[Stage, ...]:
+        """Every page stage in run order, `(*stages, *after_prelude)` - what
+        `rerun_preview` and the window's single-pass run need."""
+        return (*self.stages, *self.after_prelude)
 
 
 def glossary_prelude(
