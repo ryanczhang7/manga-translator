@@ -14,8 +14,10 @@ here creates a project or writes anything.
 **The composition root for the window (MT-059, PO-3).** Every intake window is
 given a `RunSetup`: `resolve_models` (`$MANGATL_MODELS`, read when Start is
 pressed) and `build_stages` (`mangatl.compose.build_pipeline`, translation
-on), and since MT-100 `selected_model` (the model a Start would call, which
-the summary's estimate is priced on). The first two import `mangatl.compose`
+on), since MT-100 `selected_model` (the model a Start would call, which
+the summary's estimate is priced on), and since MT-113 `build_batch` (the
+batch a Start on Gemini submits instead; `None` for a provider with no batch).
+`resolve_models`, `build_stages` and `build_batch` import `mangatl.compose`
 inside their bodies, so a launch that only
 reviews never loads `onnxruntime` or `anthropic`; import-linter counts those
 imports all the same, which is why this module is exempt from the two
@@ -57,13 +59,19 @@ from mangatl.app_paths import (
     settings_path,
     workspace_state_path,
 )
+from mangatl.domain.batch import BatchAnswer, BatchJob
+from mangatl.domain.budget import page_estimate
+from mangatl.domain.events import RunEvent
 from mangatl.domain.glossary import CONTEXT_MODE_VAR, context_mode
 from mangatl.domain.page import Chapter
 from mangatl.models.manifest import ModelHashMismatch, load_manifest, verify_bundled_models
 from mangatl.models.providers import select_providers
+from mangatl.pipeline.batch import collect_volume
 from mangatl.pipeline.stage import Stage
+from mangatl.pipeline.translate_stage import budget_for
+from mangatl.store.batch import pending_jobs
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
-from mangatl.store.project import SchemaTooNew, open_project, project_dir_for
+from mangatl.store.project import Project, SchemaTooNew, open_project, project_dir_for
 from mangatl.store.settings import (
     API_KEY_SETTING,
     SettingsUnreadable,
@@ -73,9 +81,10 @@ from mangatl.store.settings import (
 )
 from mangatl.translate.provider import KEY_VARS, PROVIDER_VAR, model_for, select_provider
 from mangatl.ui.api_key_dialog import ask_api_key
+from mangatl.ui.batch_panel import PendingBatch
 from mangatl.ui.contrast import SystemContrastSource
 from mangatl.ui.main_window import MainWindow
-from mangatl.ui.run import RunSetup
+from mangatl.ui.run import BatchSetup, RunSetup
 from mangatl.ui.stylesheet import BASE_TEMPLATE_RESOURCE, HC_TEMPLATE_RESOURCE, THEME_RESOURCE
 from mangatl.ui.theme import ThemeController, apply_theme
 from mangatl.ui.workspace import Workspace
@@ -83,6 +92,7 @@ from mangatl.ui.workspace import Workspace
 __all__ = [
     "IntakeError",
     "ask_api_key",
+    "build_batch",
     "build_stages",
     "build_window",
     "check_bundled_models",
@@ -128,12 +138,18 @@ class IntakeError(str):
     __slots__ = ()
 
 
-def open_folder(folder: Path, run_setup: RunSetup | None = None) -> QMainWindow | Chapter | str:
+def open_folder(
+    folder: Path, run_setup: RunSetup | None = None
+) -> QMainWindow | Chapter | PendingBatch | str:
     """What `folder` opens as: its project's `Workspace` NOT shown, the
     `Chapter` a run would read when it has no project, or the reason it is
     neither - an `IntakeError` when the folder itself cannot be read as a
     chapter, a plain notice otherwise. The `Workspace` gets `run_setup`, so
-    it can run the chapter again; without one it has no such action."""
+    it can run the chapter again; without one it has no such action.
+
+    A project with a pending batch job (MT-113 C-6) is closed again and
+    returned as a `PendingBatch`, before any `Workspace` is built: its pages
+    have no translation yet, and the window waits for them instead."""
     folder = folder.resolve()
     if not folder.is_dir():
         return NO_FOLDER_NOTICE.format(folder=folder)
@@ -145,6 +161,10 @@ def open_folder(folder: Path, run_setup: RunSetup | None = None) -> QMainWindow 
         return _read(folder)
     except SchemaTooNew as error:
         return str(error)
+    jobs = pending_jobs(project)
+    if jobs:
+        project.__exit__(None, None, None)
+        return PendingBatch(folder, project_dir_for(folder), jobs)
     window = Workspace(run_setup=run_setup)
     if _theme is not None:
         # The canvas follows the running contrast theme (MT-073 AC-6).
@@ -222,6 +242,34 @@ def build_stages(models_dir: Path) -> tuple[Stage, ...]:
     return build_pipeline(models_dir, translate=True, selection=selection, context_mode=mode).stages
 
 
+def build_batch() -> BatchSetup | None:
+    """The batch setup for the provider a Start would use now (MT-113 C-6), by
+    `build_stages`' selection - the environment plus the stored key,
+    `MANGATL_PROVIDER` choosing between two - so a keyless Start is refused
+    (`NoApiKey`, ...) before anything is bound. `None` when the provider has no
+    batch (`compose.build_batch_submit` answers `None`).
+
+    The collect half is `collect_volume` over one collector built once, at the
+    batch-tier estimate - a closure rather than a `partial`, because the
+    controller calls it `(project, job, emit)` (A-R3). The ceiling is the
+    stored one the guard judges against, else the default."""
+    from mangatl.compose import build_batch_collector, build_batch_submit
+
+    env = translation_env(os.environ, settings_path())
+    selection = select_provider(os.environ.get(PROVIDER_VAR) or None, env)
+    submit = build_batch_submit(selection)
+    if submit is None:
+        return None
+    collector = build_batch_collector(selection)
+    assert collector is not None  # a provider with a batch submit has a collector
+    estimate = page_estimate(model_for(selection.provider), pricing="batch")
+
+    def collect(project: Project, job: BatchJob, emit: Callable[[RunEvent], None]) -> BatchAnswer:
+        return collect_volume(project, job, collector, estimate, emit)
+
+    return BatchSetup(submit, collect, lambda project: budget_for(project, estimate).ceiling)
+
+
 def selected_model() -> str:
     """The model a Start would translate with, by the resolution `build_stages`
     makes - the environment plus the stored key, `MANGATL_PROVIDER` choosing
@@ -269,7 +317,7 @@ def build_window(arguments: Sequence[str], *, run_setup: RunSetup | None = None)
     the command line or from an intake window: each window's opener is
     `open_folder` bound with it (MT-125 C-3)."""
     if run_setup is None:
-        run_setup = RunSetup(resolve_models, build_stages, selected_model)
+        run_setup = RunSetup(resolve_models, build_stages, selected_model, build_batch=build_batch)
     opener = partial(open_folder, run_setup=run_setup)
     if not arguments:
         return MainWindow(open_folder=opener, run_setup=run_setup)
@@ -279,6 +327,11 @@ def build_window(arguments: Sequence[str], *, run_setup: RunSetup | None = None)
     if isinstance(outcome, Chapter):
         intake = MainWindow(open_folder=opener, run_setup=run_setup)
         intake.show_summary(outcome)
+        return intake
+    if isinstance(outcome, PendingBatch):
+        # MT-113 AC-3: the waiting panel, not the summary nor the review.
+        intake = MainWindow(open_folder=opener, run_setup=run_setup)
+        intake.show_waiting(outcome)
         return intake
     if isinstance(outcome, IntakeError):
         intake = MainWindow(open_folder=opener, run_setup=run_setup)

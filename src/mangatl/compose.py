@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -75,15 +75,23 @@ from mangatl.domain.batch import (
     BatchResults,
 )
 from mangatl.domain.budget import page_estimate
+from mangatl.domain.events import RunEvent
 from mangatl.domain.glossary import ContextMode
 from mangatl.domain.money import Usd
 from mangatl.models.providers import PROVIDER_PREFERENCE, select_providers
 from mangatl.ocr.page import transcribe_page_regions
 from mangatl.ocr.session import VOCAB_FILENAME, load_ocr, load_vocab
-from mangatl.pipeline.batch import BatchCollector, BatchSubmitter, RequestSize
+from mangatl.pipeline.batch import (
+    BatchCollector,
+    BatchSubmitter,
+    ChapterSubmit,
+    RequestSize,
+    submit_chapter,
+)
 from mangatl.pipeline.prelude import ChapterStep, Pipeline, glossary_prelude
 from mangatl.pipeline.stages import build_stages
 from mangatl.pipeline.translate_stage import PageTranslator
+from mangatl.store.project import Project
 from mangatl.translate import gemini, gemini_batch
 from mangatl.translate.client import translate_page
 from mangatl.translate.glossary_pass import GLOSSARY_PASS_MAX_OUTPUT_TOKENS, glossary_pass_text
@@ -95,6 +103,8 @@ from mangatl.translate.provider import (
     select_provider,
 )
 
+# MT-113's `build_batch_submit` is public by name but not listed:
+# `tests/core/test_compose.py` pins this list exactly, and changing it is RED's.
 __all__ = [
     "DETECTOR_FILENAME",
     "INPAINTER_FILENAME",
@@ -407,6 +417,51 @@ def build_batch_collector(selection: Selection) -> BatchCollector | None:
             return collect
         case other:
             raise ProviderUnavailable(f"translation with {other} is not available yet")
+
+
+def build_batch_submit(selection: Selection) -> ChapterSubmit | None:
+    """The provider half of the batch run's Start (MT-113 C-2).
+
+    `None` for a provider with no batch - whatever `build_batch_binding`
+    answers `None` for (`anthropic`) - decided without constructing anything.
+    Otherwise a `ChapterSubmit` that does nothing until it is **called**: the
+    window builds it on the GUI thread at Start and calls it on the worker, so
+    no weight loads on the GUI thread. When called it loads
+    `build_pipeline(models_dir, translate=False)` - the LOCAL stages - takes the
+    glossary prelude `_translator` binds around one
+    `GeminiClient(api_key=selection.api_key)`, the batch binding named for the
+    chapter folder (`project.chapter.source_dir.name`), and hands them to
+    `submit_chapter` with the selection's model at the batch-tier estimate.
+    Every one of those names is looked up as this module's global when the
+    closure runs.
+    """
+    if selection.provider == "anthropic":
+        return None
+    model_id = model_for(selection.provider)
+
+    def submit(
+        project: Project,
+        models_dir: Path,
+        emit: Callable[[RunEvent], None],
+        cancelled: Callable[[], bool],
+    ) -> tuple[int, ...]:
+        stages = build_pipeline(models_dir, translate=False).stages
+        _page, prelude = _translator(selection)
+        binding = build_batch_binding(selection, display_name=project.chapter.source_dir.name)
+        assert binding is not None  # `anthropic`, the one `None`, is refused above
+        return submit_chapter(
+            project,
+            stages=stages,
+            prelude=prelude,
+            submit=binding.submit,
+            request_size=binding.request_size,
+            model_id=model_id,
+            page_estimate=page_estimate(model_id, pricing="batch"),
+            emit=emit,
+            cancelled=cancelled,
+        )
+
+    return submit
 
 
 def _batch_pages(inputs: Sequence[BatchPageInput]) -> list[gemini_batch.BatchPage]:

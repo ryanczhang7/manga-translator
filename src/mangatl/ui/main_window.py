@@ -22,6 +22,17 @@ after an abort - goes down the same folder path to the `Workspace`. Closing
 the window mid-run cancels the run and waits for the worker first. The window
 never imports the composition root: `mangatl.app` injects the stage builder.
 
+**A batch Start** (MT-113 C-6): after the models folder the window asks
+`RunSetup.build_batch()`. A `BatchSetup` back is the batch path - the project,
+a `RunProgressPanel(batch=True)` for the local stages, and a `BatchController`
+held on `batch_run`; when the wait begins the content becomes a
+`BatchWaitingPanel`, and a collected batch opens the review down the same
+folder path. `None` back is the per-page run above, untouched (AC-5). A folder
+whose project has a pending job comes back from `open_folder` as a
+`PendingBatch`, and `show_waiting` opens the waiting panel straight away and
+polls - or, with no batch to collect it with, says which job needs the Gemini
+key (AC-3). Closing the window stops the wait and leaves the job pending (AC-6).
+
 With a `notice` (MT-054 C-5) the window says one thing instead: why no chapter
 could be opened, and what to do about it. The notice is the whole content of
 the window, so it is its accessible name, plain text (a folder name holding
@@ -37,15 +48,25 @@ from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QLabel, QMainWindow, QWidget
 
+from mangatl.domain.events import RunEvent
 from mangatl.domain.glossary import UnknownContextMode
 from mangatl.domain.page import Chapter
 from mangatl.pipeline.runner import RUN_FINISHED, RunOutcome
 from mangatl.store.project import create_project, project_dir_for
 from mangatl.translate.provider import ProviderError
+from mangatl.ui.batch_panel import BatchWaitingPanel, PendingBatch
 from mangatl.ui.cost_estimate import NoProvider
 from mangatl.ui.intake import FolderDropTarget, choose_folder_dialog
 from mangatl.ui.progress import RunProgressPanel
-from mangatl.ui.run import NO_MODELS, RunController, RunSetup
+from mangatl.ui.run import (
+    NO_MODELS,
+    BatchController,
+    BatchEnd,
+    BatchSetup,
+    RunController,
+    RunSetup,
+    WaitingState,
+)
 from mangatl.ui.summary import ChapterSummary
 
 __all__ = [
@@ -59,9 +80,15 @@ __all__ = [
 WINDOW_TITLE = "mangatl"
 NOTICE_OBJECT_NAME = "notice"
 
-#: A folder to the window that opened it, the chapter it would become, or the
-#: reason it is neither.
-FolderOpener = Callable[[Path], QMainWindow | Chapter | str]
+#: AC-3's sentence: a pending job, and no Gemini selection to collect it with.
+NO_BATCH_TO_COLLECT = (
+    "Batch job {provider_job_id} is still pending, and collecting it needs the"
+    " Gemini key that submitted it."
+)
+
+#: A folder to the window that opened it, the chapter it would become, its
+#: pending batch (MT-113), or the reason it is none of those.
+FolderOpener = Callable[[Path], QMainWindow | Chapter | PendingBatch | str]
 #: The chosen folder, or `None` when the choice was dismissed.
 FolderChooser = Callable[[QWidget], Path | None]
 
@@ -90,6 +117,8 @@ class MainWindow(QMainWindow):
         self._run_folder: Path | None = None
         self.run: RunController | None = None
         self.run_panel: RunProgressPanel | None = None
+        #: The batch run, from a batch Start or a pending reopen (C-6, A-R2).
+        self.batch_run: BatchController | None = None
         self._closed = False
         if notice is not None:
             self.setCentralWidget(_notice_label(notice, self))
@@ -122,11 +151,15 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """A run in progress is cancelled and waited for before the window
-        goes, so its worker has closed its project (C-4, AC-6)."""
+        goes, so its worker has closed its project (C-4, AC-6). A batch run is
+        stopped - its timer, and a poll in flight waited for - and nothing is
+        cancelled at the provider (MT-113 AC-6)."""
         self._closed = True
         if self.run is not None and self.run.is_running():
             self.run.cancel()
             self.run.wait()
+        if self.batch_run is not None and self.batch_run.is_running():
+            self.batch_run.stop()
         super().closeEvent(event)
 
     def _start(self, chapter: Chapter) -> None:
@@ -141,6 +174,14 @@ class MainWindow(QMainWindow):
         models = setup.resolve_models() if setup is not None else None
         if setup is None or models is None:
             self.show_error(NO_MODELS)
+            return
+        try:
+            batch = setup.build_batch() if setup.build_batch is not None else None
+        except ProviderError as error:
+            self.show_error(str(error))
+            return
+        if batch is not None:
+            self._start_batch(chapter, batch, models)
             return
         try:
             stages = setup.build_stages(models)
@@ -166,6 +207,76 @@ class MainWindow(QMainWindow):
         self.run.ended.connect(self._run_ended)
         panel.review_requested.connect(self._review)
         self.run.start()
+
+    def _start_batch(self, chapter: Chapter, batch: BatchSetup, models: Path) -> None:
+        """MT-113 C-6: the project, the local stages' panel under the batch
+        stepper, and the controller that submits and then waits."""
+        project_dir = project_dir_for(chapter.source_dir)
+        with create_project(chapter, project_dir):
+            pass
+
+        panel = RunProgressPanel(chapter=chapter, batch=True)
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.setCentralWidget(panel)
+        self.run_panel = panel
+        self._run_folder = chapter.source_dir
+        self._watch(BatchController(project_dir, batch, models, self)).start()
+
+    def show_waiting(self, pending: PendingBatch) -> None:
+        """A folder with a pending batch job (AC-3): the waiting panel and the
+        first poll at once - or, with no batch setup to collect it with, the
+        sentence naming the job."""
+        setup = self._run_setup
+        try:
+            batch = setup.build_batch() if setup is not None and setup.build_batch else None
+        except ProviderError:
+            batch = None
+        if batch is None:
+            self.show_error(
+                NO_BATCH_TO_COLLECT.format(provider_job_id=pending.jobs[0].provider_job_id)
+            )
+            return
+        self._run_folder = pending.source_dir
+        self._watch(BatchController(pending.project_dir, batch, None, self)).start()
+
+    def _watch(self, controller: BatchController) -> BatchController:
+        """Hold `controller` and wire it to the window, which hands each event
+        to whichever panel is showing - the run panel during the local stages,
+        the waiting panel once the wait begins."""
+        self.batch_run = controller
+        controller.event.connect(self._batch_event)
+        controller.poll_failed.connect(self._poll_failed)
+        controller.waiting.connect(self._waiting)
+        controller.ended.connect(self._batch_ended)
+        return controller
+
+    @Slot(object)
+    def _batch_event(self, event: RunEvent) -> None:
+        current = self.centralWidget()
+        if isinstance(current, RunProgressPanel | BatchWaitingPanel):
+            current.on_event(event)
+
+    @Slot(object)
+    def _poll_failed(self, error: BaseException) -> None:
+        current = self.centralWidget()
+        if isinstance(current, BatchWaitingPanel):
+            current.poll_error(error)
+
+    @Slot(object)
+    def _waiting(self, state: WaitingState) -> None:
+        """The wait has begun: the waiting panel, filled, becomes the content
+        in place of the run panel or the drop target (AC-1, AC-3)."""
+        panel = BatchWaitingPanel(self)
+        panel.show_state(state)
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.setCentralWidget(panel)
+
+    @Slot(object)
+    def _batch_ended(self, end: BatchEnd) -> None:
+        """A collected batch opens the review; a failed one leaves the waiting
+        panel's banner, a refused one the run panel's."""
+        if end == "collected":
+            self._review()
 
     @Slot(object)
     def _run_ended(self, outcome: RunOutcome) -> None:
@@ -216,6 +327,9 @@ class MainWindow(QMainWindow):
         outcome = self._open(folder)
         if isinstance(outcome, Chapter):
             self.show_summary(outcome)
+            return
+        if isinstance(outcome, PendingBatch):
+            self.show_waiting(outcome)
             return
         if isinstance(outcome, str):
             self.show_error(outcome)

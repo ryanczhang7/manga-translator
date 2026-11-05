@@ -55,11 +55,27 @@ records what it cost. `collect_volume`:
 
 MT-137 records a volume as several jobs over consecutive page ranges, so one
 collection fills exactly its own job's pages.
+
+**The batch run's whole Start** (MT-113 C-1) is `submit_chapter`, and it owns
+an order `run_chapter` cannot give it (PO-5): `run_chapter`'s prelude runs
+before page 1, before any OCR exists, so the glossary pre-pass cannot ride it.
+
+1. The LOCAL stages, through `run_chapter` with **no** prelude. Every event is
+   forwarded except `RunFinished`: the local stages finishing is not the run
+   finishing, and the window opens the review on it. An aborted local run
+   returns `()`, its `RunAborted` already emitted.
+2. The prelude, with the local run's id, once every page's OCR exists. It
+   fails as the runner's prelude fails: `BudgetRefused` as `BUDGET`, anything
+   else as its type and message, never naming a page.
+3. A cancel set during the local stages' last stage or the prelude is honoured
+   here, before anything is handed to the provider.
+4. `submit_volume`, whose own refusals pass straight through.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 from mangatl.domain.batch import (
     INLINE_REQUEST_LIMIT_BYTES,
@@ -78,19 +94,24 @@ from mangatl.domain.events import (
     CallPriced,
     RunAborted,
     RunEvent,
+    RunFinished,
 )
 from mangatl.domain.glossary import EMPTY_CONTEXT, mark_seen, merge
 from mangatl.domain.money import Usd
 from mangatl.domain.rates import price
 from mangatl.domain.translation import TranslationResult
 from mangatl.pipeline.continuity import build_prompt_context
-from mangatl.pipeline.runner import BUDGET
+from mangatl.pipeline.prelude import ChapterStep
+from mangatl.pipeline.runner import BUDGET, CANCELLED, RUN_ABORTED, run_chapter
+from mangatl.pipeline.stage import BudgetRefused, Stage
 from mangatl.pipeline.translate_stage import budget_for
 from mangatl.store.batch import mark_collected, mark_failed, pending_jobs, record_submission
 from mangatl.store.glossary import read_entries, upsert
 from mangatl.store.ledger import chapter_call_costs, chapter_total, record_call
 from mangatl.store.project import PAGE_DONE, Project
 
+# MT-113's `ChapterSubmit` and `submit_chapter` are public by name but not listed:
+# `tests/core/test_batch_submit.py` pins this list exactly, and changing it is RED's.
 __all__ = [
     "AlreadyCollected",
     "BatchCollector",
@@ -112,11 +133,62 @@ RequestSize = Callable[[BatchPageInput], int]
 #: `translate`.
 BatchCollector = Callable[[str, Sequence[BatchPageInput]], BatchAnswer]
 
+#: The batch path's whole Start once the window has a models folder (MT-113
+#: C-1): `(project, models_dir, emit, cancelled)` to the `batch_job` ids
+#: recorded. `compose.build_batch_submit` binds it around `submit_chapter`.
+ChapterSubmit = Callable[
+    [Project, Path, Callable[[RunEvent], None], Callable[[], bool]], tuple[int, ...]
+]
+
 
 class AlreadyCollected(Exception):
     """`collect_volume` was handed a job that is no longer `submitted` (MT-112
     AC-5): it was collected or it failed, and collecting it again would write a
     second bill for one job."""
+
+
+def submit_chapter(
+    project: Project,
+    stages: Sequence[Stage],
+    prelude: ChapterStep | None,
+    submit: BatchSubmitter,
+    request_size: RequestSize,
+    model_id: str,
+    page_estimate: Usd,
+    emit: Callable[[RunEvent], None],
+    cancelled: Callable[[], bool],
+) -> tuple[int, ...]:
+    """The local stages, the prelude, a cancel check, then `submit_volume`
+    (module docstring, "The batch run's whole Start"); return the `batch_job`
+    ids recorded, `()` on any abort.
+
+    `stages` are the LOCAL ones (`build_pipeline(..., translate=False)`), and
+    the `run` row is theirs, ended by `run_chapter`; the prelude's ledger row
+    and every `batch_job` row carry its id. `page_estimate` is the batch tier.
+    """
+
+    def local_emit(event: RunEvent) -> None:
+        if not isinstance(event, RunFinished):
+            emit(event)
+
+    outcome = run_chapter(project, stages, local_emit, cancelled)
+    if outcome.outcome == RUN_ABORTED:
+        return ()
+    if prelude is not None:
+        try:
+            prelude(project, outcome.run_id, emit)
+        except BudgetRefused:
+            emit(RunAborted(reason=BUDGET, ordinal=None))
+            return ()
+        except Exception as error:  # the runner's own wording for a failed prelude
+            emit(RunAborted(reason=f"{type(error).__name__}: {error}", ordinal=None))
+            return ()
+    if cancelled():
+        emit(RunAborted(reason=CANCELLED, ordinal=None))
+        return ()
+    return submit_volume(
+        project, outcome.run_id, submit, request_size, model_id, page_estimate, emit
+    )
 
 
 def submit_volume(

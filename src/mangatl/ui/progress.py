@@ -35,6 +35,14 @@ a `RunThumbnail` beside the stepper, fed the page image from the chapter's own
 folder on `PageStarted` and its region outlines on a `RegionsDetected` for that
 page. The `Chapter` is domain data; the panel still reads nothing from the store.
 
+**A batch run's panel** (MT-113 C-5, `batch=True`) shows only the local stages
+- three steps, `BATCH_STAGE_STEPS`, finishing OCR makes `Done` done - and an
+abort under it never claims a page translated and offers no action (PO-6): no
+page is translated until the batch is collected. A budget refusal names the
+refused `CallPriced`'s projection and ceiling (AM-1), or the panel's own
+ceiling when no `CallPriced` arrived; the readout is marked aborted as a
+per-page budget stop marks it.
+
 Every colour and type size comes from the application stylesheet by object
 name and dynamic property (MT-061's rule); spacing comes from the tokens.
 """
@@ -78,6 +86,7 @@ from mangatl.ui.labels import plain_label
 from mangatl.ui.run_thumbnail import RunThumbnail
 
 __all__ = [
+    "BATCH_STAGE_STEPS",
     "ESTIMATING",
     "MIN_PAGES_FOR_ETA",
     "STAGE_STEPS",
@@ -92,6 +101,8 @@ __all__ = [
 MIN_PAGES_FOR_ETA: int = 3
 #: §8: the four labelled steps of the current page, in order.
 STAGE_STEPS: tuple[str, ...] = ("Detecting", "Reading", "Translating", "Done")
+#: MT-113 C-5: a batch run's local stages - no page is translated before Done.
+BATCH_STAGE_STEPS: tuple[str, ...] = ("Detecting", "Reading", "Done")
 
 StepState = Literal["pending", "active", "done"]
 
@@ -115,13 +126,17 @@ def format_duration(ms: int) -> str:
 
 
 class PageStageStepper(QWidget):
-    """Four labelled steps for the current page - not one spinner."""
+    """Labelled steps for the current page - not one spinner. `steps` is
+    `STAGE_STEPS`, or `BATCH_STAGE_STEPS` for a batch run (MT-113 C-5)."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, *, steps: tuple[str, ...] = STAGE_STEPS
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("stage-stepper")
-        self._states: list[StepState] = ["pending"] * len(STAGE_STEPS)
-        self._labels = [plain_label("stage-step", step) for step in STAGE_STEPS]
+        self._steps = steps
+        self._states: list[StepState] = ["pending"] * len(steps)
+        self._labels = [plain_label("stage-step", step) for step in steps]
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(tokens_gen.SPACE_S3)
@@ -132,12 +147,12 @@ class PageStageStepper(QWidget):
         self._render()
 
     def step_states(self) -> tuple[StepState, ...]:
-        """One state per `STAGE_STEPS` entry, in order."""
+        """One state per step, in order."""
         return tuple(self._states)
 
     def start(self) -> None:
         """A page has started: Detecting is active, the rest pending."""
-        self._states = ["pending"] * len(STAGE_STEPS)
+        self._states = ["pending"] * len(self._steps)
         self._states[0] = "active"
         self._render()
 
@@ -145,15 +160,16 @@ class PageStageStepper(QWidget):
         """`stage` finished: its step is done and the next is active - or, after
         the last stage, done. A stage the stepper does not know changes nothing."""
         index = _STAGE_INDEX.get(stage)
+        last = len(self._steps) - 1
         if index is None:
             return
         self._states[index] = "done"
         following = index + 1
-        self._states[following] = "done" if following == len(STAGE_STEPS) - 1 else "active"
+        self._states[following] = "done" if following == last else "active"
         self._render()
 
     def _render(self) -> None:
-        for label, step, state in zip(self._labels, STAGE_STEPS, self._states, strict=True):
+        for label, step, state in zip(self._labels, self._steps, self._states, strict=True):
             label.setText(f"{_STEP_MARK[state]}{step}")
             label.setAccessibleName(f"{step}: {state}")
             label.setProperty("stepState", state)
@@ -235,11 +251,16 @@ class RunProgressPanel(QWidget):
         parent: QWidget | None = None,
         *,
         chapter: Chapter | None = None,
+        batch: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("run-progress")
         self._ceiling = ceiling
         self._chapter = chapter
+        #: A batch run's panel (MT-113 C-5): its steps and its aborts differ.
+        self._batch = batch
+        #: The last `CallPriced`: a batch budget refusal names its figures (AM-1).
+        self._priced: CallPriced | None = None
         #: The ordinal of the last `PageStarted`: the page the thumbnail shows.
         self._shown: int | None = None
         self._page_count = 0
@@ -257,7 +278,7 @@ class RunProgressPanel(QWidget):
         self.overall.setValue(0)
         self.overall.setTextVisible(False)
         self.overall_label = plain_label("run-overall-label", "")
-        self.stepper = PageStageStepper()
+        self.stepper = PageStageStepper(steps=BATCH_STAGE_STEPS if batch else STAGE_STEPS)
         #: The current page and its markers (MT-062); `None` without a chapter,
         #: which has no page images to show.
         self.thumbnail: RunThumbnail | None = None if chapter is None else RunThumbnail()
@@ -315,12 +336,15 @@ class RunProgressPanel(QWidget):
             self._complete_current()
             self.overall.setValue(self._page_count)
         elif isinstance(event, CallPriced):
+            self._priced = event
             self.cost_readout.set_state(event.spent, event.ceiling, event.projection)
         elif isinstance(event, RunAborted):
             # Narrowed rather than a bare fall-through since MT-111 added
-            # `BatchSubmitted` to the union; what the panel shows for it is
-            # MT-113's, so here it is inert.
-            if event.reason == BUDGET:
+            # `BatchSubmitted` to the union; the batch events are the waiting
+            # panel's (MT-113 C-4), so here they are inert.
+            if self._batch:
+                self._batch_abort(event)
+            elif event.reason == BUDGET:
                 self._budget_abort(event)
             elif event.reason != CANCELLED:
                 self._failed(event)
@@ -385,9 +409,37 @@ class RunProgressPanel(QWidget):
         )
         self._show_banner(headline, event.reason + "\n", kept)
 
+    def _batch_abort(self, event: RunAborted) -> None:
+        """MT-113 C-5: a batch abort never claims a page and offers nothing
+        (PO-6). A cancel shows nothing, as a per-page one does (D-4)."""
+        if event.reason == CANCELLED:
+            return
+        if event.reason == BUDGET:
+            if self._priced is not None:
+                projected = format_usd(self._priced.projection.next_call)
+                ceiling = format_usd(self._priced.ceiling)
+                headline = (
+                    f"Batch not submitted \N{EM DASH} projected {projected} exceeds"
+                    f" the {ceiling} budget."
+                )
+            else:
+                headline = (
+                    f"Batch not submitted \N{EM DASH} the {format_usd(self._ceiling)}"
+                    " budget would be exceeded."
+                )
+            self._show_banner(headline, "", 0)
+            self.cost_readout.mark_aborted()
+            return
+        if event.ordinal is not None:
+            headline = f"Batch not submitted \N{EM DASH} page {event.ordinal + 1} failed."
+        else:
+            headline = "Batch not submitted."
+        self._show_banner(headline, event.reason + "\n", 0)
+
     def _show_banner(self, headline: str, lead: str, kept: int) -> None:
         """The banner at the top of the panel: `lead`, then what survived, and
-        - when a page did - the one action, which takes focus (D-3)."""
+        - when a page did - the one action, which takes focus (D-3). A batch
+        abort passes `kept=0`: nothing survived it as a translation."""
         if kept:
             body = f"Pages 1\N{EN DASH}{kept} are translated and can be reviewed and rendered."
             actions: tuple[str, ...] = (f"Review pages 1\N{EN DASH}{kept}",)
