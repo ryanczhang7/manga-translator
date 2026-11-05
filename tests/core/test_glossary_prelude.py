@@ -1,9 +1,13 @@
-"""MT-105: the run proposes the glossary once, before page 1.
+"""MT-105: the run proposes the glossary once, before any page is translated.
 
-`pipeline.prelude.glossary_prelude` builds a `ChapterStep` that the runner calls
-after `RunStarted` and before the first `PageStarted`. These tests drive it
-through the **real** `run_chapter`, with fake page stages that record the order
-they run in (PO-4) and a fake proposer standing where
+`pipeline.prelude.glossary_prelude` builds a `ChapterStep`. Since **MT-130** the
+runner calls it between its two passes - after the reading pass, before the
+translating pass's first `PageStarted` (MT-130 PO-5 supersedes MT-105's "before
+the first page"). These tests drive it through the **real** `run_chapter` as a
+two-pass run: the reading pass is `_AlreadyRead` (the fixture has already stored
+what OCR would have), and the recording page stage is the translating pass
+(`after_prelude`), so every "before any page stage" below now reads "before the
+translating pass's first stage". A fake proposer stands where
 `partial(gemini.propose_glossary, client)` stands in production.
 
 **Oracle partition** (the story's): AC-5 is *settled* - the rate row's $2.00 in
@@ -210,6 +214,20 @@ class _RecordingStage:
         return ctx.project.page_status(ctx.page.ordinal) == PAGE_DONE
 
 
+class _AlreadyRead:
+    """MT-130: the reading pass's stand-in. Every page reports its reading
+    done - the fixture stored the OCR itself (PO-4) - so the reading pass emits
+    `PageSkipped` for each page and runs nothing."""
+
+    name = "already-read"
+
+    def run(self, ctx: PageContext) -> None:  # pragma: no cover - always done
+        raise AssertionError("the reading pass ran a stage the fixture had done")
+
+    def is_done(self, ctx: PageContext) -> bool:
+        return True
+
+
 # -- fixture -------------------------------------------------------------------
 
 
@@ -264,15 +282,22 @@ class _World:
         stage: _RecordingStage | None = None,
         bind: bool = True,
     ) -> tuple[list[RunEvent], RunOutcome, _RecordingStage]:
-        """One whole run through the real runner, the prelude bound unless
-        `bind=False`."""
+        """One whole two-pass run through the real runner (MT-130): the
+        reading pass `_AlreadyRead`, the recording stage after the prelude, the
+        prelude bound unless `bind=False`."""
         stage = stage if stage is not None else _RecordingStage(self.log)
+        prelude = (
+            _prelude(proposer if proposer is not None else _Proposer(self.log)) if bind else None
+        )
         events: list[RunEvent] = []
-        if bind:
-            prelude = _prelude(proposer if proposer is not None else _Proposer(self.log))
-            outcome = run_chapter(self.project, (stage,), events.append, _never, prelude=prelude)  # type: ignore[call-arg]
-        else:
-            outcome = run_chapter(self.project, (stage,), events.append, _never)
+        outcome = run_chapter(  # type: ignore[call-arg]
+            self.project,
+            (_AlreadyRead(),),
+            events.append,
+            _never,
+            prelude=prelude,
+            after_prelude=(stage,),
+        )
         return events, outcome, stage
 
 
@@ -365,15 +390,24 @@ def test_call_priced_ordinal_admits_none_for_a_chapter_level_call() -> None:
     )
 
 
-def test_the_pipeline_carries_the_stage_tuple_and_the_prelude_and_nothing_else() -> None:
-    from mangatl.pipeline.prelude import Pipeline  # type: ignore[import-not-found]
+def test_the_pipeline_carries_the_two_passes_and_the_prelude_and_nothing_else() -> None:
+    """MT-130 C-3 / AC-13: `["stages", "prelude", "after_prelude"]`, in that
+    order, `after_prelude` defaulting to `()` so every two-argument constructor
+    in the tree stays valid; `page_stages` is both passes in run order."""
+    from mangatl.pipeline.prelude import Pipeline
 
     names = [f.name for f in dataclasses.fields(Pipeline)]
     pipeline = Pipeline(stages=(), prelude=None)
 
-    assert names == ["stages", "prelude"]
+    assert names == ["stages", "prelude", "after_prelude"]
+    assert pipeline.after_prelude == ()  # type: ignore[attr-defined]
     with pytest.raises(dataclasses.FrozenInstanceError):
         pipeline.prelude = None  # type: ignore[misc]
+    a, b, c = _AlreadyRead(), _AlreadyRead(), _AlreadyRead()
+    split = Pipeline(stages=(a, b), prelude=None, after_prelude=(c,))  # type: ignore[call-arg]
+    assert split.page_stages == (a, b, c)  # type: ignore[attr-defined]
+    assert type(split.page_stages) is tuple  # type: ignore[attr-defined]
+    assert Pipeline(stages=(a,), prelude=None).page_stages == (a,)  # type: ignore[attr-defined]
 
 
 def test_the_glossary_prelude_takes_the_listing_and_the_output_limit_by_keyword() -> None:
@@ -397,7 +431,7 @@ def test_the_glossary_prelude_takes_the_listing_and_the_output_limit_by_keyword(
 
 
 # =============================================================================
-# AC-1: the terms are in the store before any page stage runs
+# AC-1: the terms are in the store before any translating stage runs (MT-130)
 # =============================================================================
 
 
@@ -732,7 +766,8 @@ def test_with_an_empty_listing_the_pages_run_exactly_as_with_no_prelude(
     one_bit_png: Callable[..., bytes],
 ) -> None:
     """The stream of a bound run over an empty listing equals an unbound run's
-    over an identical chapter, event for event (durations aside)."""
+    over an identical chapter, event for event (durations aside). Both are
+    two-pass since MT-130; the unbound one passes `prelude=None`."""
     bound_events, _, _ = fresh_world.run()
     unbound = _make_world(tmp_path / "unbound", png_bytes, one_bit_png, {})
     try:
@@ -895,5 +930,12 @@ def test_an_unpriceable_answer_writes_no_bill_no_term_and_no_marker(world: _Worl
 def _run_bound(world: _World, prelude: Any) -> tuple[list[RunEvent], RunOutcome, _RecordingStage]:
     stage = _RecordingStage(world.log)
     events: list[RunEvent] = []
-    outcome = run_chapter(world.project, (stage,), events.append, _never, prelude=prelude)  # type: ignore[call-arg]
+    outcome = run_chapter(  # type: ignore[call-arg]
+        world.project,
+        (_AlreadyRead(),),
+        events.append,
+        _never,
+        prelude=prelude,
+        after_prelude=(stage,),
+    )
     return events, outcome, stage

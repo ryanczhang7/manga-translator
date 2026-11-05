@@ -130,14 +130,18 @@ class Asker:
 class PipelineRecorder:
     """Stands in for `mangatl.compose.build_pipeline`: no weight is loaded."""
 
-    def __init__(self, *, raise_after: Exception | None = None) -> None:
+    def __init__(self, *, raise_after: Exception | None = None, pipeline: object = None) -> None:
         self.calls: list[tuple[Path, dict[str, Any]]] = []
         self.raise_after = raise_after
+        #: MT-130: the pipeline to hand back, when a test builds its own.
+        self.pipeline = pipeline
 
     def __call__(self, models_dir: Path, **kwargs: Any) -> object:
         self.calls.append((models_dir, dict(kwargs)))
         if self.raise_after is not None:
             raise self.raise_after
+        if self.pipeline is not None:
+            return self.pipeline
         # MT-105: `build_pipeline` returns `Pipeline(stages, prelude)`. Imported
         # here so that its absence in RED fails only the tests that build.
         from mangatl.pipeline.prelude import Pipeline  # type: ignore[import-not-found]
@@ -433,6 +437,45 @@ def test_start_does_not_put_the_stored_key_into_the_process_environment(
         "precondition: the stored key reached the selection"
     )
     assert GEMINI not in os.environ, "build_stages wrote the stored key into os.environ"
+
+
+class _NamedStage:
+    """A `Stage` that is only an identity: MT-130 AC-15 compares by `is`."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def run(self, ctx: object) -> None:  # pragma: no cover - never run here
+        raise AssertionError("build_stages runs no stage")
+
+    def is_done(self, ctx: object) -> bool:  # pragma: no cover - never run here
+        raise AssertionError("build_stages runs no stage")
+
+
+def test_build_stages_returns_both_passes_in_run_order_for_the_windows_single_pass_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """MT-130 AC-15: `app.build_stages` is `build_pipeline(...).page_stages` -
+    the reading pass and the translating pass joined, the prelude dropped - so
+    the window's run is one pass, unchanged, until MT-139."""
+    from mangatl.pipeline.prelude import Pipeline
+
+    _clear_provider_env(monkeypatch)
+    _store(settings_path(), {"gemini_api_key": STORED_KEY})
+    a, b, c = _NamedStage("a"), _NamedStage("b"), _NamedStage("c")
+
+    def prelude(project: object, run_id: int, emit: object) -> None:  # pragma: no cover
+        raise AssertionError("build_stages runs no prelude")
+
+    pipeline = Pipeline(stages=(a, b), prelude=prelude, after_prelude=(c,))  # type: ignore[call-arg, arg-type]
+    _record_pipeline(monkeypatch, PipelineRecorder(pipeline=pipeline))
+
+    stages = app_module.build_stages(tmp_path)
+
+    assert type(stages) is tuple, f"build_stages returned a {type(stages).__name__}"
+    assert len(stages) == 3 and all(
+        got is want for got, want in zip(stages, (a, b, c), strict=True)
+    ), f"build_stages returned {[getattr(s, 'name', s) for s in stages]}, not (a, b, c)"
 
 
 def test_start_selects_the_environments_key_over_a_different_stored_one(
