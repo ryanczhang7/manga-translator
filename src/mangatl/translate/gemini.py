@@ -60,6 +60,12 @@ change.
 over the volume's listing, with `glossary_pass`'s prompt, schema and cap, the
 same model and thinking level as a page, and the same `_usage_of`. Its input
 limit is checked before the client is touched.
+
+**The consistency pass** (MT-114) is `run_consistency`: one text-only call per
+chunk `consistency.chunk_pages` cut, with `consistency`'s prompt, schema and
+cap, the same model, thinking level and `_usage_of`. It checks no limit - the
+chunker did - and returns the answer's text raw: the parse and the ledger row
+are MT-115's, which may want the body when the parse fails.
 """
 
 from __future__ import annotations
@@ -69,6 +75,7 @@ from typing import Any
 
 from google.genai import Client, types
 
+from mangatl.domain.correction import ConsistencyResult
 from mangatl.domain.glossary import PromptContext, estimate_tokens
 from mangatl.domain.line import OcrResult
 from mangatl.domain.translation import (
@@ -76,6 +83,11 @@ from mangatl.domain.translation import (
     GlossaryProposal,
     TokenUsage,
     TranslationResult,
+)
+from mangatl.translate.consistency import (
+    CONSISTENCY_MAX_OUTPUT_TOKENS,
+    CONSISTENCY_PROMPT,
+    CORRECTIONS_SCHEMA,
 )
 from mangatl.translate.glossary_pass import (
     GLOSSARY_PASS_MAX_INPUT_TOKENS,
@@ -95,7 +107,14 @@ from mangatl.translate.page_prompt import (
 )
 from mangatl.translate.parse import parse_lines_text, parse_terms_text
 
-__all__ = ["MAX_OUTPUT_TOKENS", "MODEL_ID", "build_request", "propose_glossary", "translate_page"]
+__all__ = [
+    "MAX_OUTPUT_TOKENS",
+    "MODEL_ID",
+    "build_request",
+    "propose_glossary",
+    "run_consistency",
+    "translate_page",
+]
 
 #: V-1: the API's only spelling of Gemini 3.1 Pro (PO-2's model).
 MODEL_ID: str = "gemini-3.1-pro-preview"
@@ -206,6 +225,37 @@ def propose_glossary(client: Client, pages: Sequence[Sequence[OcrResult]]) -> Gl
 
     return GlossaryProposal(
         terms=parse_glossary_pass(response.text or ""),
+        usage=_usage_of(response.usage_metadata),
+        call=CallInfo(
+            request_id=response.response_id or "",
+            model_id=response.model_version or MODEL_ID,
+        ),
+    )
+
+
+def run_consistency(client: Client, chunk_text: str) -> ConsistencyResult:
+    """Send one consistency-pass chunk on Gemini: one text-only request.
+
+    `contents` is the chunk text alone - no image. No input-limit check and no
+    retry: `chunk_pages` owns the limit and a chunk is sent as given. `text` is
+    the answer unparsed (`""` when there is none); `call` is recorded as
+    `propose_glossary` records it.
+    """
+    contents: list[types.PartUnionDict] = [chunk_text]
+    response = client.models.generate_content(
+        model=MODEL_ID,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=CONSISTENCY_PROMPT,
+            response_mime_type="application/json",
+            response_json_schema=CORRECTIONS_SCHEMA,
+            thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.MEDIUM),
+            max_output_tokens=CONSISTENCY_MAX_OUTPUT_TOKENS,
+        ),
+    )
+
+    return ConsistencyResult(
+        text=response.text or "",
         usage=_usage_of(response.usage_metadata),
         call=CallInfo(
             request_id=response.response_id or "",
