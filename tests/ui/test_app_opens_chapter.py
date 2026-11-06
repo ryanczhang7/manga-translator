@@ -60,6 +60,7 @@ from mangatl import app as app_module
 from mangatl.domain.line import OcrResult
 from mangatl.domain.page import Chapter, Page
 from mangatl.domain.region import RawRegion
+from mangatl.pipeline.prelude import Pipeline
 from mangatl.store.project import (
     SCHEMA_VERSION,
     Project,
@@ -740,9 +741,10 @@ class _LoggingSetup:
         self.log.append("resolve")
         return None
 
-    def build_stages(self, models_dir: Path) -> tuple[()]:
+    def build_stages(self, models_dir: Path) -> Pipeline:
+        # MT-139 C-1: a `StageBuilder` returns a `Pipeline`; never reached here.
         self.log.append("build")
-        return ()
+        return Pipeline(stages=(), prelude=None)
 
     def select_model(self) -> str:
         self.log.append("select")

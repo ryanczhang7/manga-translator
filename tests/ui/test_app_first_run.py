@@ -440,7 +440,7 @@ def test_start_does_not_put_the_stored_key_into_the_process_environment(
 
 
 class _NamedStage:
-    """A `Stage` that is only an identity: MT-130 AC-15 compares by `is`."""
+    """A `Stage` that is only an identity: MT-139 AC-1 compares by `is`."""
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -452,30 +452,58 @@ class _NamedStage:
         raise AssertionError("build_stages runs no stage")
 
 
-def test_build_stages_returns_both_passes_in_run_order_for_the_windows_single_pass_run(
+def test_build_stages_returns_the_pipeline_build_pipeline_returned_prelude_included(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """MT-130 AC-15: `app.build_stages` is `build_pipeline(...).page_stages` -
-    the reading pass and the translating pass joined, the prelude dropped - so
-    the window's run is one pass, unchanged, until MT-139."""
+    """MT-139 AC-1 (supersedes MT-130 AC-15's
+    `test_build_stages_returns_both_passes_in_run_order_for_the_windows_single_pass_run`,
+    MT-139 PO-1): `app.build_stages` hands back `build_pipeline`'s very
+    `Pipeline` - both passes AND the chapter step - built once, with
+    translation on, the selection and the context mode as before. MT-130's
+    `.page_stages` dropped the prelude; that is the defect this story removes."""
     from mangatl.pipeline.prelude import Pipeline
 
     _clear_provider_env(monkeypatch)
+    monkeypatch.delenv("MANGATL_CONTEXT_MODE", raising=False)
     _store(settings_path(), {"gemini_api_key": STORED_KEY})
     a, b, c = _NamedStage("a"), _NamedStage("b"), _NamedStage("c")
 
     def prelude(project: object, run_id: int, emit: object) -> None:  # pragma: no cover
         raise AssertionError("build_stages runs no prelude")
 
-    pipeline = Pipeline(stages=(a, b), prelude=prelude, after_prelude=(c,))  # type: ignore[call-arg, arg-type]
-    _record_pipeline(monkeypatch, PipelineRecorder(pipeline=pipeline))
+    pipeline = Pipeline(stages=(a, b), prelude=prelude, after_prelude=(c,))  # type: ignore[arg-type]
+    recorder = _record_pipeline(monkeypatch, PipelineRecorder(pipeline=pipeline))
 
-    stages = app_module.build_stages(tmp_path)
+    built = app_module.build_stages(tmp_path)
 
-    assert type(stages) is tuple, f"build_stages returned a {type(stages).__name__}"
-    assert len(stages) == 3 and all(
-        got is want for got, want in zip(stages, (a, b, c), strict=True)
-    ), f"build_stages returned {[getattr(s, 'name', s) for s in stages]}, not (a, b, c)"
+    assert built is pipeline, (
+        f"build_stages returned {built!r}, not the Pipeline build_pipeline returned"
+    )
+    assert recorder.calls == [
+        (
+            tmp_path,
+            {
+                "translate": True,
+                "selection": Selection("gemini", STORED_KEY),
+                "context_mode": "rolling",
+            },
+        )
+    ]
+
+
+def test_the_default_window_setup_starts_through_the_real_build_stages(
+    qtbot,  # type: ignore[no-untyped-def]
+) -> None:
+    """MT-139 AC-1: `build_window([])`'s default `RunSetup` carries
+    `app.build_stages` itself - the window's Start is the real builder, not a
+    copy or a wrapper that could drop the prelude again."""
+    window = app_module.build_window([])
+    qtbot.addWidget(window)
+    setup = getattr(window, "_run_setup", None)
+
+    assert isinstance(setup, RunSetup)
+    assert setup.build_stages is app_module.build_stages
+    window.close()
 
 
 def test_start_selects_the_environments_key_over_a_different_stored_one(

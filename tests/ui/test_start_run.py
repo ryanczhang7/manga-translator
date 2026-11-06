@@ -76,6 +76,7 @@ from mangatl.domain.events import (
     CallPriced,
     PageSkipped,
     PageStarted,
+    PassStarted,
     RunAborted,
     RunEvent,
     RunFinished,
@@ -85,7 +86,15 @@ from mangatl.domain.events import (
 from mangatl.domain.money import Usd
 from mangatl.domain.page import Chapter
 from mangatl.domain.region import RawRegion
-from mangatl.pipeline.runner import RUN_ABORTED, RUN_FINISHED, RunOutcome, run_chapter
+from mangatl.pipeline.prelude import Pipeline
+from mangatl.pipeline.runner import (
+    READING,
+    RUN_ABORTED,
+    RUN_FINISHED,
+    TRANSLATING,
+    RunOutcome,
+    run_chapter,
+)
 from mangatl.pipeline.stage import BudgetRefused, PageContext, PassThroughStage, Stage
 from mangatl.store.intake import read_chapter
 from mangatl.store.project import PAGE_DONE, Project, create_project, open_project, project_dir_for
@@ -296,18 +305,34 @@ def _refusal() -> BudgetRefused:
 
 
 class Builder:
-    """A `StageBuilder` that records every call and returns `stages`."""
+    """A `StageBuilder` that records every call and returns a `Pipeline`.
 
-    def __init__(self, stages: Sequence[Stage] = (), on_call: Callable[[], None] | None = None):
+    MT-139 C-1: the builder returns the pipeline, not a stage list. Given a
+    stage list it returns the single-pass `Pipeline(stages, prelude=None)` -
+    the shape every test here had before MT-139; given a `Pipeline` it
+    returns that very object (AC-2's and AC-4's two-pass runs)."""
+
+    def __init__(
+        self,
+        stages: Sequence[Stage] | Pipeline = (),
+        on_call: Callable[[], None] | None = None,
+    ):
         self.calls: list[Path] = []
-        self._stages = tuple(stages)
+        self._pipeline = _pipeline(stages)
         self._on_call = on_call
 
-    def __call__(self, models_dir: Path) -> Sequence[Stage]:
+    def __call__(self, models_dir: Path) -> Pipeline:
         self.calls.append(models_dir)
         if self._on_call is not None:
             self._on_call()
-        return self._stages
+        return self._pipeline
+
+
+def _pipeline(stages: Sequence[Stage] | Pipeline) -> Pipeline:
+    """A stage list as the single-pass pipeline; a `Pipeline` as itself."""
+    if isinstance(stages, Pipeline):
+        return stages
+    return Pipeline(stages=tuple(stages), prelude=None)
 
 
 def _models(path: Path) -> Callable[[], Path | None]:
@@ -386,9 +411,11 @@ def world(qtbot) -> Iterator[World]:  # type: ignore[no-untyped-def]
 
 
 def _controller(
-    world: World, project_dir: Path, stages: Sequence[Stage]
+    world: World, project_dir: Path, stages: Sequence[Stage] | Pipeline
 ) -> tuple[RunController, Recorder]:
-    run = RunController(project_dir, stages)
+    """MT-139 C-1: `RunController` takes a `Pipeline`; a stage list is wrapped
+    as the single-pass one, so the callers below keep their stage lists."""
+    run = RunController(project_dir, _pipeline(stages))
     world.runs.append(run)
     recorder = Recorder()
     run.event.connect(recorder.on_event)
@@ -520,7 +547,7 @@ def test_run_setup_is_a_frozen_resolver_builder_and_model_selector(tmp_path: Pat
     setup = RunSetup(resolve_models=_models(tmp_path), build_stages=builder, select_model=_claude)
 
     assert setup.resolve_models() == tmp_path
-    assert setup.build_stages(tmp_path) == ()
+    assert setup.build_stages(tmp_path) == Pipeline(stages=(), prelude=None)
     assert setup.select_model() == "claude-opus-5"
     with pytest.raises(AttributeError):
         setup.resolve_models = _models(tmp_path)  # type: ignore[misc]
@@ -1443,9 +1470,14 @@ def _keyed_run(
     window = _window(qtbot, world, folder, RunSetup(app_module.resolve_models, builder, _claude))
     environ = RecordingEnviron(_REAL_ENVIRON)
     monkeypatch.setattr(os, "environ", environ)
-    _press_start(window)
-    _wait_run_ended(qtbot, window)
-    monkeypatch.setattr(os, "environ", _REAL_ENVIRON)
+    # MT-139 RED: restored in `finally`. Restored only on the happy path, a
+    # failing Start left `os.environ` a read-only `RecordingEnviron` for every
+    # later test in the session (265 setup errors in `test_tokens.py` alone).
+    try:
+        _press_start(window)
+        _wait_run_ended(qtbot, window)
+    finally:
+        monkeypatch.setattr(os, "environ", _REAL_ENVIRON)
     return window, calls, builder, environ, folder
 
 
@@ -1581,7 +1613,7 @@ def test_build_stages_is_build_pipeline_with_translation_on(
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test-not-a-key")
     unset = object()
     seen: list[tuple[Path, bool, object, object]] = []
-    stage = PassThroughStage()
+    built = Pipeline(stages=(PassThroughStage(),), prelude=None)
 
     # MT-107 (amended in that story's RED): `context_mode=` is passed too, and
     # with the variable unset it is "rolling", said out loud.
@@ -1593,18 +1625,15 @@ def test_build_stages_is_build_pipeline_with_translation_on(
         context_mode: object = unset,
     ) -> object:
         seen.append((models_dir, translate, selection, context_mode))
-        # MT-105: `build_pipeline` returns `Pipeline(stages, prelude)`; the
-        # window's `build_stages` still hands back the stage tuple.
-        from mangatl.pipeline.prelude import Pipeline  # type: ignore[import-not-found]
-
-        return Pipeline(stages=(stage,), prelude=None)
+        return built
 
     monkeypatch.setattr(compose_module, "build_pipeline", fake_build_pipeline)
 
-    stages = app_module.build_stages(models_dir)
+    pipeline = app_module.build_stages(models_dir)
 
     assert seen == [(models_dir, True, Selection("gemini", "gemini-test-not-a-key"), "rolling")]
-    assert tuple(stages) == (stage,)
+    # MT-139 C-2: the pipeline itself, not its stages (was `tuple(stages) == (stage,)`).
+    assert pipeline is built, f"build_stages returned {pipeline!r}, not build_pipeline's Pipeline"
 
 
 def _top_level_imports(source: str) -> list[str]:
@@ -1999,3 +2028,235 @@ def test_an_unknown_context_mode_at_start_is_shown_as_the_windows_error(
     assert target.headline.text() == message
     assert window.run is None and window.run_panel is None, "a run started after the refusal"
     assert not _project_dir(folder).exists(), "a refused Start left a project beside the scans"
+
+
+# =============================================================================
+# MT-139 AC-2 / AC-4: Start runs the Pipeline the builder returned - every page
+# read, the chapter step once, every page translated
+# =============================================================================
+#
+# MECHANICAL (story C-8): the shared log, the exact event list, the page
+# statuses and the run row are pinned with equality. `PassStarted`'s place and
+# the runner's streams are MT-130's (C-7 there) and are read out, not re-tested.
+
+#: What the recording chapter step bills: `ordinal=None`, a chapter-level call
+#: (MT-105). Its figures are arbitrary; the event is compared whole.
+CHAPTER_CALL = CallPriced(
+    ordinal=None,
+    spent=Usd(Decimal("0.04")),
+    ceiling=DEFAULT_CEILING,
+    projection=Projection(
+        next_call=usd("0.06"), remaining_chapter=usd("0.18"), basis="estimate", sample_count=0
+    ),
+)
+
+
+def _recording_prelude(calls: Calls) -> Callable[[Project, int, Callable[[RunEvent], None]], None]:
+    """A `ChapterStep` that appends `"prelude"` to the shared log and emits one
+    chapter-level `CallPriced`, from whichever thread runs it."""
+
+    def step(project: Project, run_id: int, emit: Callable[[RunEvent], None]) -> None:
+        calls.made.append("prelude")  # type: ignore[arg-type]
+        calls.threads.append(threading.current_thread())
+        emit(CHAPTER_CALL)
+
+    return step
+
+
+def _two_pass(calls: Calls, detect: Callable[[PageContext], None] | None = None) -> Pipeline:
+    """AC-2's pipeline: `detect` reads, the step proposes, `translate` translates."""
+    return Pipeline(
+        stages=(FakeStage("detect", calls, detect),),
+        prelude=_recording_prelude(calls),
+        after_prelude=(FakeStage("translate", calls),),
+    )
+
+
+def _record_window_runs(monkeypatch: pytest.MonkeyPatch) -> Recorder:
+    """A `Recorder` connected to every `RunController` before it starts, so
+    the window's run is recorded from its first event (connecting after
+    `_press_start` would race the worker)."""
+    recorder = Recorder()
+    real = RunController.start
+
+    def start(self: RunController) -> None:
+        self.event.connect(recorder.on_event)
+        self.ended.connect(recorder.on_ended)
+        real(self)
+
+    monkeypatch.setattr(RunController, "start", start)
+    return recorder
+
+
+def _assert_run_started(window: MainWindow) -> RunController:
+    """Start made a `RunController`: fail at once, naming what is there, rather
+    than on a wait's timeout (in RED `RunController` refuses a `Pipeline`)."""
+    run = window.run
+    assert isinstance(run, RunController), f"Start started no run: window.run is {run!r}"
+    return run
+
+
+def test_start_on_a_two_pass_pipeline_reads_every_page_then_proposes_once_then_translates(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    world: World,
+    tmp_path: Path,
+    page_png: bytes,
+) -> None:
+    """AC-2, the story's central claim (DV-1 puts the defect back: a
+    `RunController` that hands `run_chapter` no prelude). Today's window drops
+    the prelude and runs one pass, so a Gemini run never proposes."""
+    folder = _pages_folder(tmp_path, "ch", 3, page_png)
+    recorder = _record_window_runs(monkeypatch)
+    calls = Calls()
+    builder = Builder(_two_pass(calls))
+    window = _window(qtbot, world, folder, RunSetup(_models(tmp_path), builder, _claude))
+
+    _press_start(window)
+    _assert_run_started(window)
+    _wait_workspace(qtbot, window, pages=3)
+    qtbot.waitUntil(lambda: recorder.outcome is not None, timeout=RUN_MS)
+
+    assert builder.calls == [tmp_path]
+    assert calls.made == [
+        ("detect", 0),
+        ("detect", 1),
+        ("detect", 2),
+        "prelude",
+        ("translate", 0),
+        ("translate", 1),
+        ("translate", 2),
+    ]
+    assert _normalised(recorder.events) == [
+        RunStarted(run_id=1, page_count=3),
+        PassStarted(name=READING),
+        PageStarted(ordinal=0),
+        StageFinished(ordinal=0, stage="detect", elapsed_ms=0),
+        PageStarted(ordinal=1),
+        StageFinished(ordinal=1, stage="detect", elapsed_ms=0),
+        PageStarted(ordinal=2),
+        StageFinished(ordinal=2, stage="detect", elapsed_ms=0),
+        PassStarted(name=TRANSLATING),
+        CHAPTER_CALL,
+        PageStarted(ordinal=0),
+        StageFinished(ordinal=0, stage="translate", elapsed_ms=0),
+        PageStarted(ordinal=1),
+        StageFinished(ordinal=1, stage="translate", elapsed_ms=0),
+        PageStarted(ordinal=2),
+        StageFinished(ordinal=2, stage="translate", elapsed_ms=0),
+        RunFinished(run_id=1, pages_done=3),
+    ]
+    assert recorder.outcome == RunOutcome(
+        run_id=1, outcome=RUN_FINISHED, pages_done=3, aborted_reason=None
+    )
+    assert all(thread is not threading.main_thread() for thread in calls.threads), (
+        "a stage or the chapter step ran on the GUI thread"
+    )
+    assert _statuses(_project_dir(folder)) == [PAGE_DONE] * 3
+    assert _run_rows(_project_dir(folder)) == [(RUN_FINISHED, None)]
+
+
+def test_start_on_a_single_pass_pipeline_runs_one_pass_reading_page_n_of_3(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    world: World,
+    tmp_path: Path,
+    page_png: bytes,
+) -> None:
+    """AC-2's other half: `Pipeline(stages=(detect, translate), prelude=None)`
+    - every stub above, re-shaped - is one pass: no `PassStarted`, and the
+    panel reads `Page 3 of 3` while the last page runs."""
+    folder = _pages_folder(tmp_path, "ch", 3, page_png)
+    recorder = _record_window_runs(monkeypatch)
+    gate = Gate()
+    world.gates.append(gate)
+    calls = Calls()
+    stages = (FakeStage("detect", calls), FakeStage("translate", calls, _on_page(2, gate)))
+    window = _window(
+        qtbot,
+        world,
+        folder,
+        RunSetup(_models(tmp_path), Builder(Pipeline(stages=stages, prelude=None)), _claude),
+    )
+
+    _press_start(window)
+    _assert_run_started(window)
+    qtbot.waitUntil(gate.entered.is_set, timeout=RUN_MS)
+    _settle()  # PageStarted(2) was queued before the gate was entered
+    label = _panel(window).overall_label.text()
+    gate.release.set()
+    _wait_workspace(qtbot, window, pages=3)
+    qtbot.waitUntil(lambda: recorder.outcome is not None, timeout=RUN_MS)
+
+    assert label == "Page 3 of 3"
+    assert calls.made == [
+        ("detect", 0),
+        ("translate", 0),
+        ("detect", 1),
+        ("translate", 1),
+        ("detect", 2),
+        ("translate", 2),
+    ]
+    passes = [e for e in recorder.events if isinstance(e, PassStarted)]
+    assert passes == [], f"a single-pass run announced passes: {passes}"
+    assert _statuses(_project_dir(folder)) == [PAGE_DONE] * 3
+
+
+def test_closing_the_window_during_the_reading_pass_translates_and_proposes_nothing(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    world: World,
+    tmp_path: Path,
+    page_png: bytes,
+) -> None:
+    """AC-4 (MT-130 PO-3 at the window): page 1's detect holds until
+    `cancel()` and keeps working `AFTER_CANCEL_S` after it. Contrast the
+    single-pass closing test above, where page 0 is kept `done`: here the
+    reading pass marks nothing, so nothing is kept."""
+    folder = _pages_folder(tmp_path, "ch", 3, page_png)
+    project_dir = _project_dir(folder)
+    cancelled = _hook_cancel(monkeypatch)
+    opened, exited = _capture_worker_projects(monkeypatch)
+    recorder = _record_window_runs(monkeypatch)
+    gate = Gate(release=cancelled, linger_s=AFTER_CANCEL_S)
+    world.gates.append(gate)
+    calls = Calls()
+    window = _window(
+        qtbot,
+        world,
+        folder,
+        RunSetup(_models(tmp_path), Builder(_two_pass(calls, _on_page(1, gate))), _claude),
+    )
+    _press_start(window)
+    run = _assert_run_started(window)
+    qtbot.waitUntil(gate.entered.is_set, timeout=RUN_MS)
+
+    window.close()
+
+    assert cancelled.is_set(), "closing the window did not call run.cancel()"
+    assert not run.is_running(), "close() returned before the worker did"
+    assert len(opened) == 1 and any(opened[0][0] is p for p in exited), (
+        "close() returned before the worker closed its project"
+    )
+    assert _run_rows(project_dir) == [(RUN_ABORTED, "cancelled")]
+    assert _statuses(project_dir) == ["pending", "pending", "pending"]
+    assert calls.made == [("detect", 0), ("detect", 1)], (
+        f"a cancel in the reading pass still ran {calls.made}"
+    )
+
+    _settle()
+    assert _normalised(recorder.events) == [
+        RunStarted(run_id=1, page_count=3),
+        PassStarted(name=READING),
+        PageStarted(ordinal=0),
+        StageFinished(ordinal=0, stage="detect", elapsed_ms=0),
+        PageStarted(ordinal=1),
+        StageFinished(ordinal=1, stage="detect", elapsed_ms=0),
+        RunAborted(reason="cancelled", ordinal=None),
+    ]
+    assert PassStarted(name=TRANSLATING) not in recorder.events
+    assert window.opened is None, "a cancelled run opened the Workspace after the close"
+    shown = [
+        w for w in QApplication.topLevelWidgets() if isinstance(w, Workspace) and w.isVisible()
+    ]
+    assert shown == [], "a Workspace is showing after the window closed"

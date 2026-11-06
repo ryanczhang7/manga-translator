@@ -34,7 +34,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from PySide6.QtGui import QAccessible
+from PySide6.QtGui import QAccessible, QColor, QImage
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
@@ -46,9 +46,13 @@ from PySide6.QtWidgets import (
 )
 
 import mangatl.ui.progress as progress_module
+from mangatl.domain.budget import DEFAULT_CEILING, Projection
 from mangatl.domain.events import (
+    CallPriced,
     PageSkipped,
     PageStarted,
+    PassStarted,
+    RegionsDetected,
     RunAborted,
     RunEvent,
     RunFinished,
@@ -56,9 +60,10 @@ from mangatl.domain.events import (
     StageFinished,
 )
 from mangatl.domain.money import Usd
+from mangatl.domain.page import Chapter, Page
 from mangatl.pipeline.detect_stage import DetectStage
 from mangatl.pipeline.ocr_stage import OcrStage
-from mangatl.pipeline.runner import BUDGET, CANCELLED
+from mangatl.pipeline.runner import BUDGET, CANCELLED, READING, TRANSLATING
 from mangatl.pipeline.translate_stage import TranslateStage
 from mangatl.ui.cost_readout import CostReadout
 from mangatl.ui.progress import (
@@ -576,8 +581,10 @@ def test_a_failed_run_shows_the_failed_banner_not_the_budget_one(qtbot) -> None:
 _UI = Path(progress_module.__file__).parent
 
 #: The abort reasons the panel branches on (MT-059 C-5 added CANCELLED to
-#: MT-018's BUDGET); the runner's constants, never re-spelled.
-_REASONS = {"BUDGET", "CANCELLED"}
+#: MT-018's BUDGET) and, since MT-139 C-10, the pass names `PassStarted`
+#: carries (MT-130 C-1: "the panel and the CLI import them rather than
+#: re-spell"); the runner's constants, never re-spelled.
+_REASONS = {"BUDGET", "CANCELLED", "READING", "TRANSLATING"}
 
 
 def _reaching_past_the_stream(source: str) -> list[str]:
@@ -601,11 +608,13 @@ def _reaching_past_the_stream(source: str) -> list[str]:
     return offending
 
 
-def test_control_the_boundary_check_flags_anything_but_the_two_reasons() -> None:
+def test_control_the_boundary_check_flags_anything_but_the_reasons_and_the_pass_names() -> None:
     planted = "\n".join(
         (
             "from mangatl.pipeline.runner import BUDGET, CANCELLED",
+            "from mangatl.pipeline.runner import BUDGET, CANCELLED, READING, TRANSLATING",
             "from mangatl.pipeline.runner import BUDGET, run_chapter",
+            "from mangatl.pipeline.runner import READING, run_chapter",
             "from mangatl.pipeline.stage import Stage",
             "import mangatl.store.project",
         )
@@ -613,6 +622,7 @@ def test_control_the_boundary_check_flags_anything_but_the_two_reasons() -> None
 
     assert _reaching_past_the_stream(planted) == [
         "from mangatl.pipeline.runner import BUDGET, run_chapter",
+        "from mangatl.pipeline.runner import READING, run_chapter",
         "from mangatl.pipeline.stage import Stage",
         "mangatl.store.project",
     ]
@@ -626,3 +636,452 @@ def test_the_run_widgets_import_nothing_from_store_or_translate_and_only_reasons
 ) -> None:
     offending = _reaching_past_the_stream((_UI / module).read_text(encoding="utf-8"))
     assert offending == [], f"{module} reaches past the event stream: {offending}"
+
+
+# =============================================================================
+# MT-139: the panel reads the pass - a two-pass run (reading, the chapter
+# step, translating), fed directly. Every string, bar value, stepper tuple and
+# figure here is MECHANICAL (story C-8), its wording SETTLED by MT-130 PO-4 and
+# MT-139 PO-6 (the user, 2026-11-05); C-7 is the exact table walked below.
+# Without any `PassStarted` the panel is the single-pass panel above, byte for
+# byte: every test above this section is that half of AC-5.
+# =============================================================================
+
+#: `components.md` §8 / MT-130 PO-4, spelled out (never read from the module).
+READING_PAGES = "Reading pages"
+TRANSLATING_PAGES = "Translating pages"
+
+ALL_PENDING = (PENDING, PENDING, PENDING, PENDING)
+ALL_DONE = (DONE, DONE, DONE, DONE)
+
+
+def _reading_page(ordinal: int, detect: int = 1, ocr: int = 1) -> list[RunEvent]:
+    """One page of the reading pass: `PageStarted`, detect, OCR. No translate."""
+    return [
+        PageStarted(ordinal=ordinal),
+        StageFinished(ordinal=ordinal, stage=DETECT, elapsed_ms=detect),
+        StageFinished(ordinal=ordinal, stage=OCR, elapsed_ms=ocr),
+    ]
+
+
+def _translating_page(ordinal: int, translate: int = 1) -> list[RunEvent]:
+    """One page of the translating pass: `PageStarted`, translate."""
+    return [
+        PageStarted(ordinal=ordinal),
+        StageFinished(ordinal=ordinal, stage=TRANSLATE, elapsed_ms=translate),
+    ]
+
+
+def _read_every_page(page_count: int) -> list[RunEvent]:
+    """`RunStarted`, the reading pass over every page - nothing after it."""
+    events: list[RunEvent] = [
+        RunStarted(run_id=1, page_count=page_count),
+        PassStarted(name=READING),
+    ]
+    for ordinal in range(page_count):
+        events += _reading_page(ordinal)
+    return events
+
+
+def _chapter_priced(cents: int) -> CallPriced:
+    """The chapter step's bill: `ordinal=None` (MT-105)."""
+    return CallPriced(
+        ordinal=None,
+        spent=Usd(Decimal(cents) / 100),
+        ceiling=DEFAULT_CEILING,
+        projection=Projection(
+            next_call=Usd(Decimal("0.06")),
+            remaining_chapter=Usd(Decimal("0.18")),
+            basis="estimate",
+            sample_count=0,
+        ),
+    )
+
+
+def _reading(panel: RunProgressPanel) -> tuple[str, int, tuple[str, ...]]:
+    return (panel.overall_label.text(), panel.overall.value(), panel.stepper.step_states())
+
+
+# --- AC-5 / AC-6: C-7's table, row by row ----------------------------------------
+
+
+def test_a_two_pass_run_reads_each_row_of_the_contract_table(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """C-7, every row, m = 3: the label names the pass, the bar restarts at 0
+    for the translating pass, and the stepper starts each translating page with
+    Detecting and Reading already done."""
+    panel = _panel(qtbot)
+
+    _feed(panel, RunStarted(run_id=1, page_count=3))
+    assert _reading(panel) == ("3 pages", 0, ALL_PENDING)
+
+    _feed(panel, PassStarted(name=READING))
+    assert _reading(panel) == (READING_PAGES, 0, ALL_PENDING)
+
+    _feed(panel, PageStarted(ordinal=0))
+    assert _reading(panel) == ("Reading page 1 of 3", 0, (ACTIVE, PENDING, PENDING, PENDING))
+    _feed(panel, StageFinished(ordinal=0, stage=DETECT, elapsed_ms=1))
+    assert _reading(panel) == ("Reading page 1 of 3", 0, (DONE, ACTIVE, PENDING, PENDING))
+    _feed(panel, StageFinished(ordinal=0, stage=OCR, elapsed_ms=1))
+    assert _reading(panel) == ("Reading page 1 of 3", 0, (DONE, DONE, ACTIVE, PENDING))
+
+    _feed(panel, *_reading_page(1), PageStarted(ordinal=2))
+    assert _reading(panel) == ("Reading page 3 of 3", 2, (ACTIVE, PENDING, PENDING, PENDING))
+    _feed(
+        panel,
+        StageFinished(ordinal=2, stage=DETECT, elapsed_ms=1),
+        StageFinished(ordinal=2, stage=OCR, elapsed_ms=1),
+    )
+
+    _feed(panel, PassStarted(name=TRANSLATING))
+    assert _reading(panel) == (TRANSLATING_PAGES, 0, ALL_PENDING), (
+        "the translating pass did not restart the bar at 0 with every step pending"
+    )
+    assert panel.remaining_label.text() == ESTIMATING
+
+    _feed(panel, _chapter_priced(5))
+    assert _reading(panel) == (TRANSLATING_PAGES, 0, ALL_PENDING)
+    assert panel.cost_readout.figure.text() == "$0.05", "the chapter step's spend is not shown"
+
+    _feed(panel, PageStarted(ordinal=0))
+    assert _reading(panel) == ("Translating page 1 of 3", 0, (DONE, DONE, ACTIVE, PENDING))
+    _feed(panel, StageFinished(ordinal=0, stage=TRANSLATE, elapsed_ms=1))
+    assert _reading(panel) == ("Translating page 1 of 3", 0, ALL_DONE)
+
+    _feed(panel, *_translating_page(1), PageStarted(ordinal=2))
+    assert _reading(panel) == ("Translating page 3 of 3", 2, (DONE, DONE, ACTIVE, PENDING))
+    _feed(panel, StageFinished(ordinal=2, stage=TRANSLATE, elapsed_ms=1))
+
+    _feed(panel, RunFinished(run_id=1, pages_done=3))
+    assert _reading(panel) == ("Translating page 3 of 3", 3, ALL_DONE)
+    assert (panel.overall.minimum(), panel.overall.maximum()) == (0, 3)
+
+
+def test_each_reading_page_reads_reading_page_n_of_m_on_the_bar_at_n(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-5: `PageStarted(n)` in the reading pass, every n of a 5-page run."""
+    panel = _panel(qtbot)
+    _feed(panel, RunStarted(run_id=1, page_count=5), PassStarted(name=READING))
+
+    for ordinal in range(5):
+        _feed(panel, *_reading_page(ordinal))
+        assert panel.overall_label.text() == f"Reading page {ordinal + 1} of 5"
+        assert panel.overall.value() == ordinal
+
+
+def test_each_translating_page_reads_translating_page_n_of_m_on_the_bar_at_n(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-5: `PageStarted(n)` in the translating pass, every n of a 5-page run."""
+    panel = _panel(qtbot)
+    _feed(panel, *_read_every_page(5), PassStarted(name=TRANSLATING))
+
+    for ordinal in range(5):
+        _feed(panel, *_translating_page(ordinal))
+        assert panel.overall_label.text() == f"Translating page {ordinal + 1} of 5"
+        assert panel.overall.value() == ordinal
+
+
+def test_elapsed_is_every_stage_of_both_passes_and_is_never_reset(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-5, PO-4: the reading pass is 3 x (10 s + 5 s) = 45 s and the
+    translating pass 3 x 20 s = 60 s; the run's elapsed is 1:45, and the
+    translating pass starts it at 0:45, not 0:00."""
+    panel = _panel(qtbot)
+    _feed(panel, RunStarted(run_id=1, page_count=3), PassStarted(name=READING))
+    for ordinal in range(3):
+        _feed(panel, *_reading_page(ordinal, detect=10_000, ocr=5_000))
+    assert panel.elapsed_label.text() == "Elapsed 0:45"
+
+    _feed(panel, PassStarted(name=TRANSLATING))
+    assert panel.elapsed_label.text() == "Elapsed 0:45", "the translating pass reset elapsed"
+
+    for ordinal in range(3):
+        _feed(panel, *_translating_page(ordinal, translate=20_000))
+    _feed(panel, RunFinished(run_id=1, pages_done=3))
+    assert panel.elapsed_label.text() == "Elapsed 1:45"
+
+
+# --- AC-6: the stepper's two new entry points -----------------------------------
+
+
+def test_the_stepper_started_at_translating_has_detecting_and_reading_done(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """C-6: `start(active=2)` - steps before 2 done, 2 active, the rest pending."""
+    stepper = PageStageStepper()
+    qtbot.addWidget(stepper)
+
+    stepper.start(active=2)
+
+    assert stepper.step_states() == (DONE, DONE, ACTIVE, PENDING)
+    names = [label.accessibleName() for label in stepper.findChildren(QLabel)]
+    assert names == [
+        "Detecting: done",
+        "Reading: done",
+        "Translating: active",
+        "Done: pending",
+    ]
+
+
+def test_the_stepper_reset_makes_every_step_pending(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """C-6: `reset()`, between passes - after a page that had finished."""
+    stepper = PageStageStepper()
+    qtbot.addWidget(stepper)
+    stepper.start()
+    for stage in (DETECT, OCR, TRANSLATE):
+        stepper.finish(stage)
+    assert stepper.step_states() == ALL_DONE, "precondition: the page finished"
+
+    stepper.reset()
+
+    assert stepper.step_states() == ALL_PENDING
+    names = [label.accessibleName() for label in stepper.findChildren(QLabel)]
+    assert names == [f"{step}: pending" for step in STAGE_STEPS]
+
+
+def test_a_translating_page_finishing_translate_makes_every_step_done(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-6: in the translating pass, `PageStarted` gives (done, done, active,
+    pending) and `StageFinished("translate")` (done, done, done, done) - for
+    every page, not only the first."""
+    panel = _panel(qtbot)
+    _feed(panel, *_read_every_page(3), PassStarted(name=TRANSLATING))
+
+    for ordinal in range(3):
+        _feed(panel, PageStarted(ordinal=ordinal))
+        assert panel.stepper.step_states() == (DONE, DONE, ACTIVE, PENDING), f"page {ordinal}"
+        _feed(panel, StageFinished(ordinal=ordinal, stage=TRANSLATE, elapsed_ms=1))
+        assert panel.stepper.step_states() == ALL_DONE, f"page {ordinal}"
+
+
+# --- AC-7: the remaining time is per pass ---------------------------------------
+
+
+def test_the_remaining_time_is_estimated_per_pass_never_from_both(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-7, m = 5. Reading pages of 1,000 ms: after three, (3_000 // 3) * 2 =
+    2,000 ms. The translating pass starts estimating again, and after three
+    translating pages of 20,000 ms it is (60_000 // 3) * 2 = 40,000 ms - the
+    reading pass's 5,000 ms excluded. Counters carried across the passes
+    read "Remaining about 0:01" at `PassStarted` (4 completed, 1 left) and
+    "Remaining about 0:00" at the end (8 completed of 5, none left)."""
+    panel = _panel(qtbot)
+    _feed(panel, RunStarted(run_id=1, page_count=5), PassStarted(name=READING))
+    for ordinal in range(3):
+        _feed(panel, *_reading_page(ordinal, detect=400, ocr=600))
+    _assert_estimating(panel, "two reading pages completed, the third in progress")
+
+    _feed(panel, PageStarted(ordinal=3))
+    assert panel.remaining_label.text() == "Remaining about 0:02"
+
+    _feed(
+        panel,
+        StageFinished(ordinal=3, stage=DETECT, elapsed_ms=400),
+        StageFinished(ordinal=3, stage=OCR, elapsed_ms=600),
+        *_reading_page(4, detect=400, ocr=600),
+        PassStarted(name=TRANSLATING),
+    )
+    _assert_estimating(panel, "after PassStarted(translating)")
+
+    for ordinal in range(3):
+        _feed(panel, *_translating_page(ordinal, translate=20_000))
+        _assert_estimating(panel, f"translating page {ordinal + 1} in progress")
+
+    _feed(panel, PageStarted(ordinal=3))
+    assert panel.remaining_label.text() == "Remaining about 0:40"
+
+
+# --- AC-8: aborts, by pass (m = 5) ----------------------------------------------
+
+
+def _banner(panel: RunProgressPanel) -> ErrorBanner:
+    banner = panel.banner
+    assert isinstance(banner, ErrorBanner), f"no ErrorBanner after the abort: {banner!r}"
+    return banner
+
+
+def test_a_reading_pass_failure_names_the_page_and_says_no_pages_were_translated(
+    qtbot,  # type: ignore[no-untyped-def]
+) -> None:
+    """AC-8 (a), PO-3 / PO-5: pages 0-1 were READ, not translated. Today's
+    panel says `Pages 1-2 are translated` here - the lie DV-2 puts back."""
+    panel = _panel(qtbot)
+    _feed(
+        panel,
+        RunStarted(run_id=1, page_count=5),
+        PassStarted(name=READING),
+        *_reading_page(0),
+        *_reading_page(1),
+        PageStarted(ordinal=2),
+        RunAborted(reason="RuntimeError: x", ordinal=2),
+    )
+
+    banner = _banner(panel)
+    assert banner.headline.text() == f"Run stopped at page 3 of 5 {EM} page 3 failed."
+    assert banner.body.text() == "RuntimeError: x\nNo pages were translated."
+    assert banner.actions == ()
+    assert banner.findChildren(QAbstractButton) == []
+    assert panel.cost_readout.state() != "aborted"
+
+
+def test_a_refused_chapter_step_stops_the_run_before_page_1(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-8 (b), PO-6: the budget refused the glossary step, after every page
+    was read and before any page was translated."""
+    panel = _panel(qtbot)
+    _feed(
+        panel,
+        *_read_every_page(5),
+        PassStarted(name=TRANSLATING),
+        RunAborted(reason=BUDGET, ordinal=None),
+    )
+
+    banner = _banner(panel)
+    assert banner.headline.text() == (
+        f"Run stopped before page 1 of 5 {EM} the $2.00 budget was reached."
+    )
+    assert banner.body.text() == "No pages were translated."
+    assert banner.actions == ()
+    assert banner.findChildren(QAbstractButton) == []
+    assert panel.cost_readout.state() == "aborted"
+
+
+def test_a_refused_chapter_step_names_the_panels_own_ceiling(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-8 (b): the ceiling in the PO-6 headline is the panel's, as today's
+    budget headline's is (`format_usd(self._ceiling)`)."""
+    panel = _panel(qtbot, ceiling=Usd(Decimal("5.00")))
+    _feed(
+        panel,
+        *_read_every_page(5),
+        PassStarted(name=TRANSLATING),
+        RunAborted(reason=BUDGET, ordinal=None),
+    )
+
+    assert _banner(panel).headline.text() == (
+        f"Run stopped before page 1 of 5 {EM} the $5.00 budget was reached."
+    )
+
+
+def test_a_failed_chapter_step_says_the_glossary_step_failed(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-8 (c), PO-6: the reason verbatim, nothing translated, no action, and
+    the cost readout exactly as it was (only the budget marks it aborted)."""
+    panel = _panel(qtbot)
+    _feed(panel, *_read_every_page(5), PassStarted(name=TRANSLATING), _chapter_priced(5))
+    readout_before = (panel.cost_readout.state(), panel.cost_readout.figure.text())
+
+    _feed(panel, RunAborted(reason="RuntimeError: x", ordinal=None))
+
+    banner = _banner(panel)
+    assert banner.headline.text() == (
+        f"Run stopped before page 1 of 5 {EM} the glossary step failed."
+    )
+    assert banner.body.text() == "RuntimeError: x\nNo pages were translated."
+    assert banner.actions == ()
+    assert banner.findChildren(QAbstractButton) == []
+    assert (panel.cost_readout.state(), panel.cost_readout.figure.text()) == readout_before
+    assert panel.cost_readout.state() != "aborted"
+
+
+def test_a_translating_pass_budget_abort_reads_exactly_as_today(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-8 (d): two pages translated, the budget stops page 3. The five
+    reading-pass completions count for nothing; `ordinal` says what was kept."""
+    panel = _panel(qtbot)
+    _feed(
+        panel,
+        *_read_every_page(5),
+        PassStarted(name=TRANSLATING),
+        *_translating_page(0),
+        *_translating_page(1),
+        PageStarted(ordinal=2),
+        RunAborted(reason=BUDGET, ordinal=2),
+    )
+    requested: list[int] = []
+    panel.review_requested.connect(requested.append)
+
+    banner = _banner(panel)
+    assert banner.headline.text() == (
+        f"Run stopped at page 3 of 5 {EM} the $2.00 budget was reached."
+    )
+    assert banner.body.text() == f"Pages 1{EN}2 are translated and can be reviewed and rendered."
+    assert [button.text() for button in banner.actions] == [f"Review pages 1{EN}2"]
+
+    banner.actions[0].click()
+
+    assert requested == [2]
+
+
+@pytest.mark.parametrize("in_pass", [READING, TRANSLATING])
+def test_a_cancel_in_either_pass_shows_no_banner(qtbot, in_pass: str) -> None:  # type: ignore[no-untyped-def]
+    """AC-8 (e), MT-059 D-4: a cancel (only ever the window closing) shows nothing."""
+    panel = _panel(qtbot)
+    if in_pass == READING:
+        events: list[RunEvent] = [
+            RunStarted(run_id=1, page_count=5),
+            PassStarted(name=READING),
+            *_reading_page(0),
+            PageStarted(ordinal=1),
+        ]
+    else:
+        events = [*_read_every_page(5), PassStarted(name=TRANSLATING), PageStarted(ordinal=0)]
+
+    _feed(panel, *events, RunAborted(reason=CANCELLED, ordinal=None))
+
+    assert panel.banner is None
+    assert panel.findChildren(ErrorBanner) == []
+
+
+# --- AC-9: the thumbnail keeps each page's markers through the translating pass --
+
+
+def _chapter_of(tmp_path: Path, count: int) -> Chapter:
+    """`count` pages of 300 x 400, each a small PNG of that aspect."""
+    folder = tmp_path / "Chapter 9"
+    folder.mkdir()
+    pages = []
+    for ordinal in range(count):
+        filename = f"{ordinal + 1:02d}.png"
+        image = QImage(30, 40, QImage.Format.Format_RGB32)
+        image.fill(QColor("#3060c0"))
+        assert image.save(str(folder / filename), "PNG"), "precondition: the page was written"
+        pages.append(Page(ordinal, filename, 300, 400, f"{ordinal:064d}"))
+    return Chapter(source_dir=folder, pages=tuple(pages))
+
+
+def _ring(x0: int, y0: int, x1: int, y1: int) -> tuple[tuple[int, int], ...]:
+    return ((x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0))
+
+
+def _marker_points(panel: RunProgressPanel) -> list[list[tuple[float, float]]]:
+    assert panel.thumbnail is not None, "a panel given a Chapter has no thumbnail"
+    return [[(p.x(), p.y()) for p in marker] for marker in panel.thumbnail.markers()]
+
+
+def test_a_page_starting_in_the_translating_pass_shows_its_own_markers_again(
+    qtbot,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
+) -> None:
+    """AC-9, PO-7: page 0 had two regions and page 1 one in the reading pass.
+    When page 0 starts translating, the thumbnail shows page 0 WITH page 0's
+    two markers - not page 1's, not none - and says so to assistive
+    technology, rather than "detecting text regions..." for the whole call."""
+    panel = _panel(qtbot, chapter=_chapter_of(tmp_path, 3))
+    thumb = panel.thumbnail
+    assert thumb is not None
+    page_0 = (_ring(10, 10, 100, 100), _ring(150, 200, 250, 350))
+    page_1 = (_ring(20, 30, 40, 50),)
+
+    _feed(
+        panel,
+        RunStarted(run_id=1, page_count=3),
+        PassStarted(name=READING),
+        PageStarted(ordinal=0),
+        RegionsDetected(ordinal=0, polygons=page_0),
+    )
+    page_0_markers = _marker_points(panel)
+    assert len(page_0_markers) == 2, "precondition: the reading pass showed page 0's markers"
+    _feed(panel, PageStarted(ordinal=1), RegionsDetected(ordinal=1, polygons=page_1))
+    page_1_markers = _marker_points(panel)
+    assert thumb.accessibleName() == "Page 2: 1 text region found", "precondition"
+
+    _feed(panel, PassStarted(name=TRANSLATING), PageStarted(ordinal=0))
+
+    assert thumb.accessibleName() == "Page 1: 2 text regions found", (
+        "page 0 started translating with its markers forgotten"
+    )
+    assert _marker_points(panel) == page_0_markers
+
+    _feed(panel, PageStarted(ordinal=1))
+
+    assert thumb.accessibleName() == "Page 2: 1 text region found"
+    assert _marker_points(panel) == page_1_markers

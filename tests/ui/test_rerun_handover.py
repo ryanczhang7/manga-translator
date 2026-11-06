@@ -46,6 +46,7 @@ from shiboken6 import isValid
 
 from mangatl.domain.line import OcrResult
 from mangatl.domain.region import RawRegion
+from mangatl.pipeline.prelude import Pipeline
 from mangatl.pipeline.stage import PageContext, Stage
 from mangatl.store.intake import read_chapter
 from mangatl.store.project import PAGE_DONE, Project, create_project, open_project, project_dir_for
@@ -184,9 +185,10 @@ class Setup:
         self.log.append("resolve")
         return Path("models")
 
-    def build_stages(self, models_dir: Path) -> Sequence[Stage]:
+    def build_stages(self, models_dir: Path) -> Pipeline:
+        # MT-139 C-1: the builder returns the (here single-pass) `Pipeline`.
         self.log.append("build")
-        return self.stages
+        return Pipeline(stages=self.stages, prelude=None)
 
     def select_model(self) -> str:
         self.log.append("select")
