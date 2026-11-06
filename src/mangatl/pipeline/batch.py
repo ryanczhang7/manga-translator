@@ -46,8 +46,8 @@ records what it cost. `collect_volume`:
    and emits `BatchFailed` (AC-4).
 4. Results, page by page in **the job's** ordinal order (AC-2): one ledger row
    against the job's `run_id`, request id `f"{provider_job_id}#{n}"` (MT-110),
-   priced at the batch tier; its `CallPriced`; the glossary folded as the
-   translate stage folds it; the proposals by reading index (PO-2); the page
+   priced at the batch tier; its `CallPriced`; the glossary's sightings
+   marked as the translate stage marks them; the proposals by reading index (PO-2); the page
    marked done. A page whose item failed is marked done with nothing written or
    billed, so its lines read `failed` (AC-3), and its message rides
    `BatchCollected.failures` (PO-1).
@@ -96,7 +96,7 @@ from mangatl.domain.events import (
     RunEvent,
     RunFinished,
 )
-from mangatl.domain.glossary import EMPTY_CONTEXT, mark_seen, merge
+from mangatl.domain.glossary import EMPTY_CONTEXT, mark_seen
 from mangatl.domain.money import Usd
 from mangatl.domain.rates import price
 from mangatl.domain.translation import TranslationResult
@@ -392,21 +392,17 @@ def _write_page(
             projection=budget.project(chapter_call_costs(project), page_count - n - 1),
         )
     )
-    _update_glossary(project, n, result)
+    _update_glossary(project, n)
     project.write_proposed(n, result.lines)
 
 
-def _update_glossary(project: Project, n: int, result: TranslationResult) -> None:
-    """`translate_stage._update_glossary`, exactly: `merge` the page's proposals,
-    `mark_seen` its stored lines, and `upsert` only the entries that changed.
-    The lines are every stored line of the page, because a batch sends every
-    one (PO-2)."""
+def _update_glossary(project: Project, n: int) -> None:
+    """`translate_stage._update_glossary`, exactly: `mark_seen` the page's
+    stored lines and `upsert` only the entries that changed - a page's
+    proposals are never folded (MT-106). The lines are every stored line of the
+    page, because a batch sends every one (PO-2)."""
     before = read_entries(project)
-    after = mark_seen(
-        merge(before, result.proposed_terms, n),
-        [line.text for line in project.read_lines(n)],
-        n,
-    )
+    after = mark_seen(before, [line.text for line in project.read_lines(n)], n)
     unchanged = set(before)
     for entry in after:
         if entry not in unchanged:

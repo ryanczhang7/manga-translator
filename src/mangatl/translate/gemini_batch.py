@@ -27,7 +27,7 @@ from MT-101 `## Decided`, checked against `google-genai` 2.29.0:
   as a `BatchItemError`; the pipeline decides what a failed page means
   (MT-112).
 - **Parse through the parser** (D-14): an answer is parsed by
-  `parse_lines_text` / `parse_terms_text` and priced by `_usage_of`, exactly as
+  `parse_lines_text` and priced by `_usage_of`, exactly as
   `translate_page` does - the live probe answered an index the page does not
   have, and the parser is the defence. Any exception there fails that page with
   `"<Type>: <message>"` and the other pages still parse.
@@ -51,7 +51,7 @@ from mangatl.domain.glossary import PromptContext
 from mangatl.domain.line import OcrResult
 from mangatl.domain.translation import CallInfo, TranslationResult
 from mangatl.translate.gemini import MODEL_ID, _usage_of, build_request
-from mangatl.translate.parse import parse_lines_text, parse_terms_text
+from mangatl.translate.parse import parse_lines_text
 
 __all__ = [
     "BatchItemError",
@@ -224,7 +224,7 @@ def _result_of(
                 request_id=f"{job_name}#{page.ordinal}",
                 model_id=response.model_version or MODEL_ID,
             ),
-            proposed_terms=parse_terms_text(text),
+            proposed_terms=(),
         )
     except Exception as exc:
         return BatchItemError(page.ordinal, f"{type(exc).__name__}: {exc}")

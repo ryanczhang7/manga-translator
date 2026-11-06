@@ -5,7 +5,7 @@ together: it asks **the same question** - `page_prompt`'s system prompt, region
 listing, context block, capped page image and response schema, unchanged
 (MT-079) - in Gemini's call shape, and turns the answer into the same
 `TranslationResult` Claude's adapter returns, through the same
-`parse_lines_text` / `parse_terms_text`. Nothing above this module can tell the
+`parse_lines_text`. Nothing above this module can tell the
 providers apart except by `CallInfo.model_id`, which is the point: the ledger,
 the budget guard and the review screen are unchanged.
 
@@ -105,7 +105,7 @@ from mangatl.translate.page_prompt import (
     response_schema,
     user_text,
 )
-from mangatl.translate.parse import parse_lines_text, parse_terms_text
+from mangatl.translate.parse import parse_lines_text
 
 __all__ = [
     "MAX_OUTPUT_TOKENS",
@@ -189,7 +189,7 @@ def translate_page(
             request_id=response.response_id or "",
             model_id=response.model_version or MODEL_ID,
         ),
-        proposed_terms=parse_terms_text(text),
+        proposed_terms=(),
     )
 
 
