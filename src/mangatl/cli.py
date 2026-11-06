@@ -49,6 +49,12 @@ prints one line. A pending batch needs the Gemini key that submitted it, so
 without a Gemini selection it is one line and exit 1. `--sync` is the per-page
 run (PO-4): with a job pending it refuses, naming the first, rather than
 translate those pages twice; with none it is today's run, unchanged.
+
+**MT-140: the consistency pass runs after the run and after the collection.**
+Both paths ask `build_consistency(selection)` (the seam, by name) once and hand
+the step on as `postlude=`. What it did is one stdout line; a refused or failed
+pass is one stderr line and exit 1, with every page kept and no output folder,
+and the next plain run finishes it.
 """
 
 from __future__ import annotations
@@ -64,6 +70,7 @@ from mangatl.compose import (
     MODELS_ENV,
     ModelsNotFound,
     build_batch_collector,
+    build_consistency,
     build_pipeline,
     resolve_models_dir,
 )
@@ -71,9 +78,11 @@ from mangatl.domain.batch import BatchJob
 from mangatl.domain.budget import page_estimate
 from mangatl.domain.events import (
     BatchCollected,
+    CorrectionsApplied,
     PageSkipped,
     PageStarted,
     PassStarted,
+    RunAborted,
     RunEvent,
 )
 from mangatl.domain.glossary import (
@@ -85,7 +94,7 @@ from mangatl.domain.glossary import (
 )
 from mangatl.pipeline.bake import bake_chapter
 from mangatl.pipeline.batch import collect_volume
-from mangatl.pipeline.runner import READING, RUN_FINISHED, TRANSLATING, run_chapter
+from mangatl.pipeline.runner import BUDGET, READING, RUN_FINISHED, TRANSLATING, run_chapter
 from mangatl.store.batch import pending_jobs
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
 from mangatl.store.project import (
@@ -238,6 +247,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             selection=selection,
             context_mode=mode,
         )
+        # MT-140 AC-1: the consistency pass, asked for by name after the
+        # pipeline (a provider with no translator refuses once, above) and
+        # before the project is created (a refusal leaves nothing behind).
+        # `--no-translate` selects nothing and never asks (AC-4).
+        postlude = build_consistency(selection) if selection is not None else None
     except ProviderError as error:
         return _fail(str(error))
 
@@ -258,8 +272,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             _never,
             prelude=pipeline.prelude,
             after_prelude=pipeline.after_prelude,
+            postlude=postlude,
         )
         if outcome.outcome != RUN_FINISHED:
+            # Only the postlude runs after the final pass's last page, and only
+            # when every page completed; a page failure leaves `pages_done`
+            # short of the count and a refused prelude leaves it at 0 (MT-130
+            # PO-6). The reason text cannot tell them apart; this can.
+            if outcome.pages_done == len(filenames):
+                return _fail(_pass_failure(outcome.aborted_reason))
             return _fail(f"run aborted: {outcome.aborted_reason}")
         report = bake_chapter(project, output_dir)
 
@@ -314,20 +335,35 @@ def _collect_pending(
         collector = None  # a provider with no adapter has no batch either
     if collector is None:
         return _fail(unkeyed)
+    # MT-140 AC-5: asked once, after the collector, before any job; every
+    # `collect_volume` is handed it and runs it only once nothing is pending.
+    postlude = build_consistency(selection)
 
     collected: list[BatchCollected] = []
+    corrections: list[CorrectionsApplied] = []
+    aborted: list[RunAborted] = []
 
     def tally(event: RunEvent) -> None:
         if isinstance(event, BatchCollected):
             collected.append(event)
+        elif isinstance(event, CorrectionsApplied):
+            corrections.append(event)
+        elif isinstance(event, RunAborted):
+            aborted.append(event)
 
     estimate = page_estimate(model_for(selection.provider), pricing="batch")
     for job in pending:
-        collect_volume(project, job, collector, estimate, tally)
+        collect_volume(project, job, collector, estimate, tally, postlude=postlude)
     done = sum(event.pages_done for event in collected)
     failed = sum(event.pages_failed for event in collected)
     still = len(pending_jobs(project))
     print(f"batch: {done} pages collected, {failed} failed, {still} jobs still pending")
+    if corrections:
+        print(_pass_line(corrections[-1]))
+    if aborted:
+        # A failed pass never escapes `collect_volume`: it is a `RunAborted`
+        # on the stream, the job still collected (AC-6).
+        return _fail(_pass_failure(aborted[-1].reason))
     return _OK
 
 
@@ -349,8 +385,46 @@ def _reporter(filenames: dict[int, str]) -> Callable[[RunEvent], None]:
             print(f"[{event.ordinal + 1}/{total}] {filenames[event.ordinal]}")
         elif isinstance(event, PageSkipped):
             print(f"[{event.ordinal + 1}/{total}] {filenames[event.ordinal]} ({event.reason})")
+        elif isinstance(event, CorrectionsApplied):
+            print(_pass_line(event))
 
     return report
+
+
+def _n(count: int, noun: str) -> str:
+    """`1 line`, `0 lines`, `2 lines`: singular at exactly one."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _pass_line(event: CorrectionsApplied) -> str:
+    """MT-140 PO-2: what the consistency pass did, in one line.
+
+    `unchanged_returned` is not shown: a defect of the pass, not news for the
+    user (EPIC-09 PO-6); the event keeps it for the log.
+    """
+    corrected = f"{_n(event.applied, 'line')} corrected"
+    if event.chunks_refused == 0:
+        reviewed = _n(event.skipped_user_lines, "reviewed line")
+        return f"Consistency pass: {corrected}, {reviewed} left alone"
+    requests = event.chunks_run + event.chunks_refused
+    return (
+        f"Consistency pass stopped part way: {corrected}, {event.chunks_run} of {requests}"
+        " requests made before the budget was reached. Raise the budget and run again to"
+        " finish it."
+    )
+
+
+def _pass_failure(reason: str | None) -> str:
+    """MT-140 PO-3: a refused or failed pass, and how to finish the chapter."""
+    if reason == BUDGET:
+        return (
+            "consistency pass not run: the budget would be exceeded. Every page is"
+            " translated and kept; raise the budget and run again to finish."
+        )
+    return (
+        f"consistency pass failed: {reason}. Every page is translated and kept;"
+        " run again to retry it."
+    )
 
 
 def _never() -> bool:
