@@ -29,7 +29,16 @@ Four decisions are load-bearing, and each is a test away from being wrong:
 4. **`pages_done` is how many pages are complete when the run ends** - the ones
    this run processed *plus* the ones it skipped as already done - and never the
    page an abort happened on. The alternative reading makes a fully translated
-   chapter report zero.
+   chapter report zero. In a two-pass run "complete" means through the final
+   pass (MT-130 PO-6), so a run that never reaches it reports zero.
+
+**Two passes (MT-130 C-1).** With `after_prelude` non-empty the run walks every
+page through `stages` (the reading pass), consults `cancelled()` once, runs the
+chapter step, then walks every page through `after_prelude` (the translating
+pass), each pass announced by `PassStarted`. Only the final pass marks a page
+done (PO-7): `PAGE_DONE` reads as "every stage done" everywhere it is read. With
+`after_prelude=()` and no prelude the run is the single pass above, its stream
+unchanged and no `PassStarted` in it.
 """
 
 from __future__ import annotations
@@ -42,17 +51,32 @@ from datetime import UTC, datetime
 from mangatl.domain.events import (
     PageSkipped,
     PageStarted,
+    PassStarted,
     RunAborted,
     RunEvent,
     RunFinished,
     RunStarted,
     StageFinished,
 )
+from mangatl.domain.page import Page
 from mangatl.pipeline.prelude import ChapterStep
 from mangatl.pipeline.stage import BudgetRefused, PageContext, Stage
 from mangatl.store.project import PAGE_DONE, Project
 
-__all__ = ["BUDGET", "RUN_ABORTED", "RUN_FINISHED", "RunOutcome", "run_chapter"]
+__all__ = [
+    "BUDGET",
+    "READING",
+    "RUN_ABORTED",
+    "RUN_FINISHED",
+    "TRANSLATING",
+    "RunOutcome",
+    "run_chapter",
+]
+
+#: `PassStarted.name` for the two passes. Constants beside BUDGET/CANCELLED
+#: for their reason: the panel and the CLI import them rather than re-spell.
+READING = "reading"
+TRANSLATING = "translating"
 
 #: The two values written to the `run` row's `outcome` column, and carried on
 #: `RunOutcome.outcome`. One value in two places, so AC-1's "ends with outcome
@@ -107,23 +131,34 @@ def run_chapter(
     cancelled: Callable[[], bool],
     *,
     prelude: ChapterStep | None = None,
+    after_prelude: Sequence[Stage] = (),
     postlude: ChapterStep | None = None,
 ) -> RunOutcome:
-    """Walk every page of `project`'s chapter through `stages`, in ordinal order.
+    """Walk every page of `project`'s chapter through `stages`, in ordinal order,
+    then - in a two-pass run - every page through `after_prelude`.
 
     Returns rather than raises on a stage failure: AC-4 says the run *emits*
     `RunAborted`, and a runner that let the exception through would leave
     MT-015's worker thread dead with the progress readout stuck on the page that
     failed.
 
-    `prelude` (MT-105) is the chapter step, run once after `RunStarted` and
-    before the first page, with the run's id and its own `emit`. It fails as a
-    stage fails - `BudgetRefused` as `reason="budget"`, anything else as its
-    type and message - except that it names no page (`ordinal=None`), and the
-    run then starts no page at all.
+    `stages` is the pass before the prelude's slot and `after_prelude` the pass
+    after it (MT-130 C-1). Two-pass mode is `bool(after_prelude)`: emit
+    `PassStarted(READING)`, walk `stages` marking no page done, consult
+    `cancelled()` once, emit `PassStarted(TRANSLATING)`, run `prelude`, walk
+    `after_prelude` marking each page done.
 
-    `postlude` (MT-115) is the chapter step run once after the last page and
-    before the run ends - only when every page completed, so never after a
+    `prelude` (MT-105) is the chapter step, run once with the run's id and its
+    own `emit`. It fails as a stage fails - `BudgetRefused` as
+    `reason="budget"`, anything else as its type and message - except that it
+    names no page (`ordinal=None`), and the run then starts no page of the
+    pass after it. A prelude with `after_prelude=()` (MT-130 A-R1, no caller
+    does this) runs after the one pass, behind the same single `cancelled()`
+    check, with no `PassStarted` emitted.
+
+    `postlude` (MT-115) is the chapter step run once after the final pass -
+    after `after_prelude` in a two-pass run, after `stages` in a one-pass run -
+    and before the run ends; only when every page completed, so never after a
     failed prelude, a failed page or a cancel. It fails as the prelude fails,
     naming no page, and the run then ends `RunAborted` with every page done
     and no `RunFinished`: `RunFinished` means the pages **and** the step are
@@ -134,17 +169,23 @@ def run_chapter(
     emit(RunStarted(run_id=run_id, page_count=len(pages)))
 
     progress = _Progress()
-    if prelude is not None:
-        _run_prelude(prelude, project, run_id, emit, progress)
-    # A failed prelude has already set `reason`: no page starts after it.
-    for page in pages if progress.reason is None else ():
+    two_pass = bool(after_prelude)
+    if two_pass:
+        emit(PassStarted(name=READING))
+    _run_pass(project, pages, stages, run_id, emit, cancelled, progress, final=not two_pass)
+    if progress.reason is None and (two_pass or prelude is not None):
+        # C-1 step 4 (PO-8): the one boundary between the passes, before the
+        # first paid call of the run. A cancel set *during* the prelude is
+        # honoured at the next pass's first page-loop check.
         if cancelled():
             progress.reason = CANCELLED
-            break
-        ctx = PageContext(project=project, page=page, run_id=run_id, emit=emit)
-        if not _run_page(project, ctx, stages, emit, cancelled, progress):
-            break
-        progress.pages_done += 1
+        else:
+            if two_pass:
+                emit(PassStarted(name=TRANSLATING))
+            if prelude is not None:
+                _run_prelude(prelude, project, run_id, emit, progress)
+    if two_pass and progress.reason is None:
+        _run_pass(project, pages, after_prelude, run_id, emit, cancelled, progress, final=True)
     if progress.reason is None and postlude is not None:
         _run_prelude(postlude, project, run_id, emit, progress)
 
@@ -160,6 +201,32 @@ def run_chapter(
         pages_done=progress.pages_done,
         aborted_reason=progress.reason,
     )
+
+
+def _run_pass(
+    project: Project,
+    pages: Sequence[Page],
+    stages: Sequence[Stage],
+    run_id: int,
+    emit: Callable[[RunEvent], None],
+    cancelled: Callable[[], bool],
+    progress: _Progress,
+    *,
+    final: bool,
+) -> None:
+    """Walk every page through `stages`, stopping at a cancel or a failure.
+
+    Only the `final` pass marks pages done and counts them (PO-6, PO-7).
+    """
+    for page in pages:
+        if cancelled():
+            progress.reason = CANCELLED
+            return
+        ctx = PageContext(project=project, page=page, run_id=run_id, emit=emit)
+        if not _run_page(project, ctx, stages, emit, cancelled, progress, mark_done=final):
+            return
+        if final:
+            progress.pages_done += 1
 
 
 def _run_prelude(
@@ -189,11 +256,14 @@ def _run_page(
     emit: Callable[[RunEvent], None],
     cancelled: Callable[[], bool],
     progress: _Progress,
+    *,
+    mark_done: bool,
 ) -> bool:
     """Take one page through every stage. `False` means the run must stop.
 
     A page that was already complete is skipped and still counts towards
-    `pages_done`: it is done, whoever did it.
+    `pages_done`: it is done, whoever did it. `mark_done` is `False` in the
+    reading pass of a two-pass run, which marks nothing (PO-7).
     """
     ordinal = ctx.page.ordinal
     if stages and all(stage.is_done(ctx) for stage in stages):
@@ -242,7 +312,8 @@ def _run_page(
             )
         )
 
-    _mark_done(project, ordinal)
+    if mark_done:
+        _mark_done(project, ordinal)
     return True
 
 

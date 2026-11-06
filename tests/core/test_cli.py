@@ -139,6 +139,11 @@ class _CompositionRoot:
         #: MT-105: the chapter step the built pipeline carries; `None` unless a
         #: test hands one in.
         self.prelude: object = None
+        #: MT-130: the pipeline's two passes when a test hands them in. `None`
+        #: keeps MT-105's one-pass pipeline of `self.stage`, built without the
+        #: `after_prelude` keyword, so every older test here still runs in RED.
+        self.reading: tuple[Stage, ...] | None = None
+        self.after_prelude: tuple[Stage, ...] = ()
         #: MT-107: `context_mode=` as `main` passed it, or `None` where it passed
         #: none - the sentinel C-14's reasoning asks for (see above).
         self.context_modes: list[object] = []
@@ -155,16 +160,23 @@ class _CompositionRoot:
         self.translate_flags.append(translate)
         self.selections.append(selection)
         self.context_modes.append(context_mode)
-        return _pipeline((self.stage,), self.prelude)
+        reading = self.reading if self.reading is not None else (self.stage,)
+        return _pipeline(reading, self.prelude, self.after_prelude)
 
 
-def _pipeline(stages: tuple[Stage, ...], prelude: object = None) -> object:
-    """`Pipeline(stages, prelude)`, what `build_pipeline` returns from MT-105 on.
+def _pipeline(
+    stages: tuple[Stage, ...], prelude: object = None, after_prelude: tuple[Stage, ...] = ()
+) -> object:
+    """`Pipeline(stages, prelude, after_prelude)`, what `build_pipeline` returns
+    from MT-130 on.
 
-    Imported at call time: `mangatl.pipeline.prelude` does not exist in RED, and a
-    top-level import would take every test in this file dark with it."""
-    from mangatl.pipeline.prelude import Pipeline  # type: ignore[import-not-found]
+    `after_prelude` is passed only when there is one: the keyword does not
+    exist before MT-130's GREEN, and every one-pass test in this file must
+    keep running in RED. Imported at call time for the same reason."""
+    from mangatl.pipeline.prelude import Pipeline
 
+    if after_prelude:
+        return Pipeline(stages=stages, prelude=prelude, after_prelude=after_prelude)  # type: ignore[call-arg]
     return Pipeline(stages=stages, prelude=prelude)
 
 
@@ -518,30 +530,121 @@ def test_the_cli_runs_the_stages_the_composition_root_built(
     )
 
 
-def test_the_cli_runs_the_pipelines_prelude_once_before_the_first_page(
+class _LoggingStage:
+    """MT-130: a `Stage` that appends `(name, ordinal)` to a shared log.
+
+    `is_done` is `False` for the reading stages (a fresh chapter) and the
+    store's done marker for the translating one, so the runner's own
+    bookkeeping is what marks a page complete."""
+
+    def __init__(self, log: list[object], name: str, *, final: bool = False) -> None:
+        self.log = log
+        self.name = name
+        self.final = final
+
+    def run(self, ctx: PageContext) -> None:
+        self.log.append((self.name, ctx.page.ordinal))
+
+    def is_done(self, ctx: PageContext) -> bool:
+        return self.final and ctx.project.page_status(ctx.page.ordinal) == PAGE_DONE
+
+
+_THREE_PAGES = _SOURCE_PAGES[:3]
+
+
+def _two_passes(composition_root: _CompositionRoot) -> list[object]:
+    """Install MT-130's two-pass pipeline at the seam: `(detect, ocr)` reading,
+    a recording prelude, `(translate,)` translating. Returns the shared log."""
+    log: list[object] = []
+
+    def prelude(project: object, run_id: int, emit: object) -> None:
+        log.append("prelude")
+
+    composition_root.reading = (_LoggingStage(log, "detect"), _LoggingStage(log, "ocr"))
+    composition_root.prelude = prelude
+    composition_root.after_prelude = (_LoggingStage(log, "translate", final=True),)
+    return log
+
+
+def test_the_cli_reads_every_page_then_runs_the_prelude_then_translates_page_by_page(
     tmp_path: Path,
     png_bytes: Callable[..., bytes],
     models_dir: Path,
     composition_root: _CompositionRoot,
 ) -> None:
-    """**MT-105**: `mangatl-run` hands `run_chapter` the prelude the composition
-    root built, so a Gemini run proposes its glossary from the CLI too. The step
-    records what it was handed and what the stage had run by then."""
-    source_dir = _build_source(tmp_path, png_bytes)
-    calls: list[tuple[object, int, list[int]]] = []
-
-    def prelude(project: object, run_id: int, emit: object) -> None:
-        calls.append((project, run_id, list(composition_root.stage.ran)))
-
-    composition_root.prelude = prelude
+    """**MT-130 AC-14** (supersedes MT-105's "prelude before the first page",
+    PO-5): `mangatl-run` hands `run_chapter` `pipeline.stages`,
+    `prelude=pipeline.prelude` and `after_prelude=pipeline.after_prelude`, so
+    the run's order is AC-2's."""
+    source_dir = _build_source(tmp_path, png_bytes, _THREE_PAGES)
+    log = _two_passes(composition_root)
 
     assert main([str(source_dir), "--models", str(models_dir)]) == 0
 
-    assert len(calls) == 1, f"the prelude ran {len(calls)} times; once per run"
-    ((_, run_id, ran_before),) = calls
-    assert ran_before == [], f"page stages ran before the prelude: {ran_before}"
-    assert isinstance(run_id, int)
-    assert composition_root.stage.ran == list(range(len(_SOURCE_PAGES)))
+    assert log == [
+        ("detect", 0),
+        ("ocr", 0),
+        ("detect", 1),
+        ("ocr", 1),
+        ("detect", 2),
+        ("ocr", 2),
+        "prelude",
+        ("translate", 0),
+        ("translate", 1),
+        ("translate", 2),
+    ], f"the CLI's run went {log}"
+
+
+def test_the_cli_announces_each_pass_once_and_prints_each_page_once_per_pass(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**MT-130 AC-14**, stdout: `Reading 3 pages` before the first page line,
+    `Translating 3 pages` before the translating pass's first page line
+    (PO-4's wording, the user's), and the page lines as today, once per pass.
+    The bake's own summary line follows and is MT-021's, not pinned here."""
+    source_dir = _build_source(tmp_path, png_bytes, _THREE_PAGES)
+    _two_passes(composition_root)
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    lines = _lines(capsys.readouterr().out)
+    assert lines[:8] == [
+        "Reading 3 pages",
+        "[1/3] p1.png",
+        "[2/3] p2.png",
+        "[3/3] p3.png",
+        "Translating 3 pages",
+        "[1/3] p1.png",
+        "[2/3] p2.png",
+        "[3/3] p3.png",
+    ], f"stdout opened {lines[:8]}"
+    assert lines.count("Reading 3 pages") == 1
+    assert lines.count("Translating 3 pages") == 1
+    assert len(lines) == 9, f"stdout had {len(lines)} lines after the passes: {lines[8:]}"
+
+
+def test_a_one_pass_cli_run_prints_no_pass_line(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """MT-130 AC-5 at the entry point: a pipeline with no `after_prelude`
+    (`--no-translate`) runs one pass, and stdout has no pass line at all."""
+    source_dir = _build_source(tmp_path, png_bytes, _THREE_PAGES)
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    lines = _lines(capsys.readouterr().out)
+    assert lines[:3] == ["[1/3] p1.png", "[2/3] p2.png", "[3/3] p3.png"], (
+        f"stdout opened {lines[:3]}"
+    )
+    assert not [line for line in lines if line.startswith(("Reading", "Translating"))]
 
 
 def test_the_cli_no_longer_reaches_for_the_pass_through_stage() -> None:

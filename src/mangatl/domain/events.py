@@ -30,6 +30,7 @@ __all__ = [
     "CorrectionsApplied",
     "PageSkipped",
     "PageStarted",
+    "PassStarted",
     "RegionsDetected",
     "RunAborted",
     "RunEvent",
@@ -45,6 +46,15 @@ class RunStarted:
 
     run_id: int
     page_count: int
+
+
+@dataclass(frozen=True)
+class PassStarted:
+    """A two-pass run begins one of its passes (MT-130): `name` is
+    `runner.READING` or `runner.TRANSLATING`. Not emitted by a single-pass
+    run, whose stream is unchanged."""
+
+    name: str
 
 
 @dataclass(frozen=True)
@@ -197,6 +207,7 @@ class CorrectionsApplied:
 #: carries a 100% line-and-branch bar.
 RunEvent = (
     RunStarted
+    | PassStarted
     | PageStarted
     | RegionsDetected
     | StageFinished

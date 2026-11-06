@@ -435,13 +435,15 @@ def test_an_event_cannot_be_mutated_after_it_is_emitted() -> None:
         event.ordinal = 2  # type: ignore[misc]
 
 
-def test_the_run_event_union_names_all_thirteen_event_types_and_no_others() -> None:
+def test_the_run_event_union_names_all_fourteen_event_types_and_no_others() -> None:
     # MT-063 added `CallPriced` to the union (its `## Contract`); this set was
     # six until then. MT-062 added `RegionsDetected` (its C-1, C-6), making it
     # eight. MT-111 adds `BatchSubmitted` (its `## Contract`), making it nine.
     # MT-112 adds `BatchWaiting`, `BatchCollected` and `BatchFailed` (its
-    # `## Contract`), making it twelve. MT-115 adds `CorrectionsApplied` (its
-    # pinned `## Contract`), making it thirteen.
+    # `## Contract`), making it twelve. MT-130 adds `PassStarted` (its C-2) and
+    # MT-115 adds `CorrectionsApplied` (its pinned `## Contract`), each written
+    # against twelve and each pinning thirteen; merged (MT-115 R-1) it is
+    # fourteen.
     # All are imported here rather than at the top of the file so that, while
     # one does not exist, only this test fails rather than every test in the
     # file (MT-063 `## Handoff: RED -> GREEN`).
@@ -452,6 +454,7 @@ def test_the_run_event_union_names_all_thirteen_event_types_and_no_others() -> N
         BatchWaiting,
         CallPriced,
         CorrectionsApplied,
+        PassStarted,
         RegionsDetected,
     )
 
@@ -462,6 +465,7 @@ def test_the_run_event_union_names_all_thirteen_event_types_and_no_others() -> N
         BatchSubmitted,
         CorrectionsApplied,
         RunStarted,
+        PassStarted,
         PageStarted,
         StageFinished,
         PageSkipped,

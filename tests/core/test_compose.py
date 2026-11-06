@@ -54,7 +54,7 @@ import dataclasses
 import inspect
 import os
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from io import BytesIO
 from pathlib import Path
@@ -608,7 +608,7 @@ def test_the_unflagged_build_still_translates_and_constructs_exactly_one_client(
     refuses, so the provider is explicit - and AC-6's first half is exactly
     this: `selection=anthropic` binds one `Anthropic()`, as today.
     """
-    stages = build_pipeline(weights_dir, selection=_selection("anthropic")).stages
+    stages = build_pipeline(weights_dir, selection=_selection("anthropic")).page_stages
 
     assert [type(stage) for stage in stages] == [
         DetectStage,
@@ -718,7 +718,9 @@ def test_an_anthropic_selection_binds_translate_page_to_one_bare_anthropic_clien
     out of the environment either: the selection is the only source, and it is
     ignored for Claude in this story.
     """
-    stages = build_pipeline(weights_dir, selection=_selection("anthropic", "sk-SECRET-ant")).stages
+    stages = build_pipeline(
+        weights_dir, selection=_selection("anthropic", "sk-SECRET-ant")
+    ).page_stages
 
     assert [type(stage) for stage in stages] == [
         DetectStage,
@@ -756,7 +758,7 @@ def test_a_gemini_selection_binds_the_gemini_adapter_to_one_client_built_with_it
     `keyless` is in force, so the selection is the only place the key can come
     from.
     """
-    stages = build_pipeline(weights_dir, selection=_selection("gemini", "g-SECRET-key")).stages
+    stages = build_pipeline(weights_dir, selection=_selection("gemini", "g-SECRET-key")).page_stages
 
     from mangatl.translate import gemini
 
@@ -807,7 +809,7 @@ def test_the_translate_stage_is_built_with_the_selected_models_page_estimate(
     translate stage, so the guard a Gemini run consults projects $0.03 a page
     and a Claude run $0.06. A root that passed `BOOTSTRAP_PAGE_ESTIMATE` (or
     nothing, letting `Budget()` default) would show $0.06 for Gemini."""
-    stages = build_pipeline(weights_dir, selection=_selection(provider)).stages
+    stages = build_pipeline(weights_dir, selection=_selection(provider)).page_stages
 
     (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
     assert translate_stage.page_estimate == Usd.from_micro(micro), (
@@ -828,7 +830,7 @@ def test_with_no_selection_a_lone_gemini_key_builds_the_stage_at_three_cents(
     filed for."""
     _provider_env(monkeypatch, GEMINI_API_KEY="g-SECRET-env")
 
-    stages = build_pipeline(weights_dir).stages
+    stages = build_pipeline(weights_dir).page_stages
 
     (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
     assert translate_stage.page_estimate == Usd.from_micro(_GEMINI_PAGE_MICRO)
@@ -862,7 +864,7 @@ def test_with_no_selection_a_lone_gemini_key_binds_gemini_with_that_key(
     reaches the constructor - by the selection, not by the SDK's own lookup."""
     _provider_env(monkeypatch, GEMINI_API_KEY="g-SECRET-env")
 
-    stages = build_pipeline(weights_dir).stages
+    stages = build_pipeline(weights_dir).page_stages
 
     from mangatl.translate import gemini
 
@@ -919,7 +921,7 @@ def test_an_explicit_selection_is_not_second_guessed_by_the_environment(
         MANGATL_PROVIDER="gemini",
     )
 
-    stages = build_pipeline(weights_dir, selection=_selection("anthropic")).stages
+    stages = build_pipeline(weights_dir, selection=_selection("anthropic")).page_stages
 
     assert len(stages) == 4
     assert len(client_spy.clients) == 1
@@ -936,7 +938,7 @@ def test_with_no_selection_the_one_key_in_the_environment_decides(
     explicit form of the lookup `Anthropic()` already did."""
     _provider_env(monkeypatch, ANTHROPIC_API_KEY="sk-SECRET-ant")
 
-    stages = build_pipeline(weights_dir).stages
+    stages = build_pipeline(weights_dir).page_stages
 
     assert [type(stage) for stage in stages][-1] is TranslateStage
     assert client_spy.calls == [((), {})]
@@ -1614,6 +1616,118 @@ def test_an_anthropic_or_untranslated_pipeline_carries_no_prelude(
     assert pipeline.prelude is None, f"a {provider or 'no-translate'} pipeline carries a prelude"
 
 
+# -- MT-130 AC-13: the pipeline is the reading pass, the prelude, the translating pass --
+#
+# `build_pipeline` splits `build_stages`' tuple with `split_passes` (C-4):
+# `stages` is the reading pass, `after_prelude` the translating pass, and
+# `page_stages` the whole list in run order. `build_stages` is spied at the
+# name `compose` calls it through, so "equals what `build_stages` returned for
+# the same arguments" is asserted by identity against the real return.
+
+
+@dataclass
+class _BuildStagesSpy:
+    returned: list[tuple[Any, ...]] = field(default_factory=list)
+
+
+@pytest.fixture
+def build_stages_spy(monkeypatch: pytest.MonkeyPatch) -> _BuildStagesSpy:
+    from mangatl.pipeline.stages import build_stages as real
+
+    spy = _BuildStagesSpy()
+
+    def recording(*args: Any, **kwargs: Any) -> tuple[Any, ...]:
+        stages = real(*args, **kwargs)
+        spy.returned.append(stages)
+        return stages
+
+    monkeypatch.setattr("mangatl.compose.build_stages", recording)
+    return spy
+
+
+def _pipeline_for(weights_dir: Path, case: str) -> Any:
+    if case == "gemini":
+        return build_pipeline(weights_dir, selection=_selection("gemini", "g-SECRET-key"))
+    if case == "anthropic":
+        return build_pipeline(weights_dir, selection=_selection("anthropic", "sk-SECRET-ant"))
+    return build_pipeline(weights_dir, translate=False)
+
+
+@pytest.mark.parametrize(
+    ("case", "after_types", "prelude_bound"),
+    [
+        ("gemini", [TranslateStage], True),
+        ("anthropic", [TranslateStage], False),
+        ("no-translate", [], False),
+    ],
+    ids=["gemini", "anthropic", "no-translate"],
+)
+def test_the_pipeline_is_the_reading_pass_then_the_prelude_then_the_translating_pass(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    gemini_client: list[_FakeGeminiClient],
+    keyless: None,
+    build_stages_spy: _BuildStagesSpy,
+    case: str,
+    after_types: list[type],
+    prelude_bound: bool,
+) -> None:
+    """MT-130 AC-13, every selection: `stages` is detect, clean, OCR;
+    `after_prelude` is the translate stage, or nothing under `translate=False`;
+    the prelude is bound for Gemini only."""
+    pipeline = _pipeline_for(weights_dir, case)
+
+    assert [type(stage) for stage in pipeline.stages] == [DetectStage, CleanStage, OcrStage], (
+        f"the {case} pipeline's reading pass is"
+        f" {[type(stage).__name__ for stage in pipeline.stages]}"
+    )
+    assert [type(stage) for stage in pipeline.after_prelude] == after_types, (
+        f"the {case} pipeline's translating pass is"
+        f" {[type(stage).__name__ for stage in pipeline.after_prelude]}"
+    )
+    assert type(pipeline.stages) is tuple and type(pipeline.after_prelude) is tuple
+    if prelude_bound:
+        assert pipeline.prelude is not None and callable(pipeline.prelude)
+    else:
+        assert pipeline.prelude is None, f"the {case} pipeline carries a prelude"
+
+
+@pytest.mark.parametrize("case", ["gemini", "anthropic", "no-translate"])
+def test_the_pipelines_page_stages_are_both_passes_in_order_and_are_what_build_stages_built(
+    weights_dir: Path,
+    loaders: _Loaders,
+    client_spy: _ClientSpy,
+    gemini_client: list[_FakeGeminiClient],
+    keyless: None,
+    build_stages_spy: _BuildStagesSpy,
+    case: str,
+) -> None:
+    pipeline = _pipeline_for(weights_dir, case)
+
+    (built,) = build_stages_spy.returned
+    page_stages = pipeline.page_stages
+    assert page_stages == (*pipeline.stages, *pipeline.after_prelude)
+    assert type(page_stages) is tuple
+    assert len(page_stages) == len(built) and all(
+        a is b for a, b in zip(page_stages, built, strict=True)
+    ), (
+        f"a {case} pipeline's page_stages are {[type(s).__name__ for s in page_stages]},"
+        f" not the {[type(s).__name__ for s in built]} build_stages returned"
+    )
+
+
+def test_the_pipelines_fields_are_exactly_stages_prelude_and_after_prelude() -> None:
+    """MT-130 AC-13's last clause, from the composition root's side."""
+    from mangatl.pipeline.prelude import Pipeline
+
+    assert [f.name for f in dataclasses.fields(Pipeline)] == [
+        "stages",
+        "prelude",
+        "after_prelude",
+    ]
+
+
 def test_the_gemini_prelude_at_exactly_the_pass_estimate_reaches_the_client_with_the_listing(
     weights_dir: Path,
     loaders: _Loaders,
@@ -1670,7 +1784,7 @@ def test_the_translate_stage_is_built_with_the_context_mode_it_was_asked_for(
     stage builds its requests for."""
     stages = build_pipeline(
         weights_dir, selection=_selection("anthropic"), context_mode="neighbours"
-    ).stages
+    ).page_stages
 
     (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
     assert translate_stage.context_mode == "neighbours", (
@@ -1682,7 +1796,7 @@ def test_with_no_context_mode_the_translate_stage_is_rolling(
     weights_dir: Path, loaders: _Loaders, client_spy: _ClientSpy, keyless: None
 ) -> None:
     """MT-107 AC-3 at the composition root: the default is unchanged."""
-    stages = build_pipeline(weights_dir, selection=_selection("anthropic")).stages
+    stages = build_pipeline(weights_dir, selection=_selection("anthropic")).page_stages
 
     (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
     assert translate_stage.context_mode == "rolling"
