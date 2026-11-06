@@ -527,8 +527,11 @@ def test_the_three_collection_events_are_frozen_run_events_with_the_contracts_fi
     assert cls in typing.get_args(RunEvent), f"{name} is not in the RunEvent union"
 
 
-def test_the_domain_events_module_exports_exactly_its_fourteen_names() -> None:
-    """MT-130 C-2 adds `PassStarted`, alphabetically after `PageStarted`."""
+def test_the_domain_events_module_exports_exactly_its_fifteen_names() -> None:
+    """MT-130 C-2 adds `PassStarted`, alphabetically after `PageStarted`; MT-115
+    adds `CorrectionsApplied`, sorted in (its pinned `## Contract`). Each was
+    written against thirteen and pinned fourteen; merged (MT-115 R-1) it is
+    fifteen: fourteen event types and `RunEvent`."""
     from mangatl.domain import events
 
     assert events.__all__ == [
@@ -537,6 +540,7 @@ def test_the_domain_events_module_exports_exactly_its_fourteen_names() -> None:
         "BatchSubmitted",
         "BatchWaiting",
         "CallPriced",
+        "CorrectionsApplied",
         "PageSkipped",
         "PageStarted",
         "PassStarted",
@@ -815,3 +819,197 @@ def test_collecting_the_same_job_twice_never_writes_a_second_bill(world: _World)
     rows = world.ledger_count()
     assert rows == 3, f"a second collection of one job wrote a second bill: {rows} ledger rows"
     assert refused is not None, "collecting a collected job a second time was not refused"
+
+
+# =============================================================================
+# MT-115 AC-6, batch half: `collect_volume(..., postlude=step)`
+#
+# The step runs once, after the `BatchCollected` of the volume's LAST pending
+# job (no job still `submitted`, `pending_jobs(project) == ()`), with the job's
+# run id and the collection's own `emit`. A `BudgetRefused` is reported as
+# `RunAborted(BUDGET, None)`, any other failure as `RunAborted("<Type>: msg",
+# None)` - `submit_chapter`'s spelling - and the answer is returned either way,
+# with the job left `collected`. The step here is a recording `ChapterStep`, so
+# these tests say nothing about corrections; the consistency pass through this
+# hook is `test_consistency_apply.py`'s.
+#
+# RED: `collect_volume` has no `postlude` keyword, so every call passing one is
+# `TypeError: collect_volume() got an unexpected keyword argument 'postlude'`.
+# =============================================================================
+
+#: What the recording step emits, so its place in the stream is observable.
+_STEP_EVENT = CallPriced(
+    None,  # type: ignore[arg-type]
+    Usd.from_micro(1),
+    _CEILING,
+    _projection(20_000, 0, "estimate", 0),
+)
+
+
+@dataclass
+class _Step:
+    """A `ChapterStep`, recorded: `(project, run_id, emit) -> None`."""
+
+    raises: Exception | None = None
+    calls: list[tuple[Project, int]] = field(default_factory=list)
+
+    def __call__(self, project: Project, run_id: int, emit: Callable[[RunEvent], None]) -> None:
+        self.calls.append((project, run_id))
+        if self.raises is not None:
+            raise self.raises
+        emit(_STEP_EVENT)
+
+
+def _collect_with(world: _World, job: BatchJob, collector: _Collector, step: Any) -> Any:
+    return _collect_volume(
+        world.project, job, collector, _ESTIMATE, world.events.append, postlude=step
+    )
+
+
+def _budget_refusal() -> Exception:
+    from mangatl.domain.budget import Budget
+    from mangatl.pipeline.stage import BudgetRefused
+
+    budget = Budget(Usd.from_micro(0))
+    return BudgetRefused(budget.check(Usd.from_micro(0), budget.project((), 1)))
+
+
+def test_collect_volume_takes_postlude_as_a_keyword_only_argument_defaulting_to_none() -> None:
+    import inspect
+
+    from mangatl.pipeline.batch import collect_volume
+
+    parameter = inspect.signature(collect_volume).parameters.get("postlude")
+
+    assert parameter is not None, "collect_volume has no postlude parameter"
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is None
+
+
+def test_an_explicit_none_postlude_collects_exactly_as_no_keyword(world: _World) -> None:
+    job = world.job()
+
+    returned = _collect_with(world, job, _Collector(_all_answered()), None)
+
+    assert world.events == [*_PRICED_ALL, _collected(job.id, 3, 0, ())], f"emitted {world.events}"
+    assert returned == _all_answered()
+
+
+def test_collecting_the_volumes_only_job_runs_the_postlude_once_after_batch_collected(
+    world: _World,
+) -> None:
+    job = world.job()
+    step = _Step()
+
+    _collect_with(world, job, _Collector(_all_answered()), step)
+
+    assert step.calls == [(world.project, world.run_id)], (
+        f"the postlude was called {step.calls}; once, with the JOB's run id"
+    )
+    assert world.events == [*_PRICED_ALL, _collected(job.id, 3, 0, ()), _STEP_EVENT], (
+        f"emitted {world.events}"
+    )
+
+
+def test_a_volume_of_two_jobs_runs_the_postlude_only_after_the_second_is_collected(
+    world: _World,
+) -> None:
+    """AC-6 (MT-137): collecting the first job of two leaves the second
+    `submitted`, so nothing runs; collecting the second runs the step once."""
+    first = world.job(0, 1, "batches/first")
+    last = world.job(2, 2, "batches/last")
+    step = _Step()
+
+    _collect_with(world, first, _Collector(_results({0: _RESULTS[0], 1: _RESULTS[1]})), step)
+
+    assert step.calls == [], "the postlude ran while a job of the volume was still submitted"
+    assert pending_jobs(world.project) == (last,)
+
+    _collect_with(world, last, _Collector(_results({2: _RESULTS[2]})), step)
+
+    assert step.calls == [(world.project, world.run_id)]
+    assert world.events[-2:] == [_collected(last.id, 1, 0, ()), _STEP_EVENT], (
+        f"emitted {world.events}"
+    )
+
+
+def test_the_last_job_collected_out_of_order_still_runs_the_postlude_once(
+    world: _World,
+) -> None:
+    """ "Last" is "no job still submitted", not "the job over the last pages"."""
+    first = world.job(0, 1, "batches/first")
+    last = world.job(2, 2, "batches/last")
+    step = _Step()
+
+    _collect_with(world, last, _Collector(_results({2: _RESULTS[2]})), step)
+    assert step.calls == []
+
+    _collect_with(world, first, _Collector(_results({0: _RESULTS[0], 1: _RESULTS[1]})), step)
+    assert len(step.calls) == 1
+
+
+def test_a_pending_answer_runs_no_postlude(world: _World) -> None:
+    job = world.job()
+    step = _Step()
+
+    _collect_with(world, job, _Collector(_state("pending")), step)
+
+    assert step.calls == []
+    assert world.events == [_waiting(job.id, "pending")]
+
+
+def test_a_job_that_failed_runs_no_postlude(world: _World) -> None:
+    """The step follows `BatchCollected`, and a failed job emits none."""
+    job = world.job()
+    step = _Step()
+
+    _collect_with(world, job, _Collector(_state("expired")), step)
+
+    assert step.calls == []
+    assert world.events == [_failed(job.id, "expired")]
+
+
+def test_a_refused_postlude_is_reported_as_run_aborted_budget_after_batch_collected(
+    world: _World,
+) -> None:
+    from mangatl.domain.events import RunAborted
+    from mangatl.pipeline.runner import BUDGET
+
+    job = world.job()
+
+    returned = _collect_with(world, job, _Collector(_all_answered()), _Step(_budget_refusal()))
+
+    assert world.events[-2:] == [
+        _collected(job.id, 3, 0, ()),
+        RunAborted(reason=BUDGET, ordinal=None),
+    ], f"emitted {world.events}"
+    assert returned == _all_answered()
+    assert world.job_row(job.id) == ("collected", True, None)
+
+
+def test_any_other_postlude_failure_is_reported_with_its_type_and_message(
+    world: _World,
+) -> None:
+    from mangatl.domain.events import RunAborted
+
+    job = world.job()
+
+    returned = _collect_with(
+        world, job, _Collector(_all_answered()), _Step(ValueError("no corrections key"))
+    )
+
+    assert world.events[-1] == RunAborted(reason="ValueError: no corrections key", ordinal=None), (
+        f"emitted {world.events}"
+    )
+    assert returned == _all_answered()
+    assert world.job_row(job.id) == ("collected", True, None)
+    assert world.ledger_count() == 3, "the collection's own bills did not stand"
+
+
+def test_a_postlude_failure_does_not_escape_collect_volume(world: _World) -> None:
+    job = world.job()
+
+    try:
+        _collect_with(world, job, _Collector(_all_answered()), _Step(RuntimeError("boom")))
+    except RuntimeError as error:  # pragma: no cover - the failure being pinned
+        pytest.fail(f"the postlude's exception escaped collect_volume: {error!r}")

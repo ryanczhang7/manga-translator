@@ -132,6 +132,7 @@ def run_chapter(
     *,
     prelude: ChapterStep | None = None,
     after_prelude: Sequence[Stage] = (),
+    postlude: ChapterStep | None = None,
 ) -> RunOutcome:
     """Walk every page of `project`'s chapter through `stages`, in ordinal order,
     then - in a two-pass run - every page through `after_prelude`.
@@ -154,6 +155,14 @@ def run_chapter(
     pass after it. A prelude with `after_prelude=()` (MT-130 A-R1, no caller
     does this) runs after the one pass, behind the same single `cancelled()`
     check, with no `PassStarted` emitted.
+
+    `postlude` (MT-115) is the chapter step run once after the final pass -
+    after `after_prelude` in a two-pass run, after `stages` in a one-pass run -
+    and before the run ends; only when every page completed, so never after a
+    failed prelude, a failed page or a cancel. It fails as the prelude fails,
+    naming no page, and the run then ends `RunAborted` with every page done
+    and no `RunFinished`: `RunFinished` means the pages **and** the step are
+    done (AC-6, PO-3).
     """
     pages = project.pages()
     run_id = _start_run(project)
@@ -177,6 +186,8 @@ def run_chapter(
                 _run_prelude(prelude, project, run_id, emit, progress)
     if two_pass and progress.reason is None:
         _run_pass(project, pages, after_prelude, run_id, emit, cancelled, progress, final=True)
+    if progress.reason is None and postlude is not None:
+        _run_prelude(postlude, project, run_id, emit, progress)
 
     outcome = RUN_FINISHED if progress.reason is None else RUN_ABORTED
     _end_run(project, run_id, outcome, progress.reason)

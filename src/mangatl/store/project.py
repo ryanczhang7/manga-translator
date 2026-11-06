@@ -63,6 +63,7 @@ from mangatl.domain.region import EXCLUSION_REASONS, ExclusionReason, RawRegion
 from mangatl.store.intake import read_chapter
 from mangatl.store.schema import (
     BATCH_JOB_DDL,
+    CHAPTER_CONSISTENCY_RUN_DDL,
     CHAPTER_DDL,
     CHAPTER_GLOSSARY_PROPOSED_DDL,
     CLEANED_ERASED_DDL,
@@ -136,7 +137,14 @@ __all__ = [
 #: `chapter.glossary_proposed_at`. Every migrated call reads `'standard'`, every
 #: migrated chapter has not run the glossary pre-pass, and both tables are empty:
 #: each is the truth about a file no earlier version could write otherwise.
-SCHEMA_VERSION: int = 11
+#:
+#: Version 11 is MT-137's: a `batch_job` row holds its pages.
+#:
+#: Version 12 is MT-115's: `chapter.consistency_run_id`, the run whose
+#: consistency pass completed, appended by `ALTER TABLE ... ADD COLUMN`. Every
+#: migrated chapter reads NULL, "the pass has not run" - the truth about a file
+#: no earlier version could run it on.
+SCHEMA_VERSION: int = 12
 
 #: `page.status` as `create_project` writes it: read, hashed, nothing done yet.
 PAGE_PENDING: str = "pending"
@@ -174,6 +182,10 @@ _SELECT_CEILING = "SELECT budget_ceiling_micro_usd FROM chapter"
 #: MT-103 AC-6, unqualified for `_SELECT_CEILING`'s reason.
 _SELECT_GLOSSARY_PROPOSED = "SELECT glossary_proposed_at FROM chapter"
 _UPDATE_GLOSSARY_PROPOSED = "UPDATE chapter SET glossary_proposed_at = ?"
+
+#: MT-115 AC-6, unqualified for `_SELECT_CEILING`'s reason.
+_SELECT_CONSISTENCY_RUN = "SELECT consistency_run_id FROM chapter"
+_UPDATE_CONSISTENCY_RUN = "UPDATE chapter SET consistency_run_id = ?"
 
 _INSERT_CHAPTER = (
     "INSERT INTO chapter (source_dir, output_dir, created_at, schema_version,"
@@ -551,6 +563,12 @@ DROP TABLE batch_job_v10;
 """
 )
 
+#: Version 11 to version 12 (MT-115): `chapter.consistency_run_id`, altered
+#: rather than rebuilt for `_MIGRATE_TO_V2`'s reason, and the fresh schema's
+#: own string (`schema.CHAPTER_CONSISTENCY_RUN_DDL`), so both paths store the
+#: same `chapter` declaration. Every migrated chapter reads NULL.
+_MIGRATE_TO_V12: str = CHAPTER_CONSISTENCY_RUN_DDL
+
 #: The migration chain, in order, each step keyed on the version it *produces*.
 #: A step runs when the file found on disk is older than that.
 #:
@@ -571,6 +589,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (9, _MIGRATE_TO_V9),
     (10, _MIGRATE_TO_V10),
     (11, _MIGRATE_TO_V11),
+    (12, _MIGRATE_TO_V12),
 )
 
 
@@ -868,6 +887,25 @@ class Project:
         """
         with self.transaction() as cursor:
             cursor.execute(_UPDATE_GLOSSARY_PROPOSED, (datetime.now(UTC).isoformat(),))
+
+    def consistency_run_id(self) -> int | None:
+        """The `run` whose consistency pass completed for this chapter, or
+        `None` if none has (MT-115 AC-6).
+
+        A read and only a read, for `glossary_proposed_at`'s reason. Opens no
+        transaction.
+        """
+        row = self._connection.execute(_SELECT_CONSISTENCY_RUN).fetchone()
+        return None if row[0] is None else int(row[0])
+
+    def mark_consistency_run(self, run_id: int) -> None:
+        """Record that run `run_id` completed the consistency pass.
+
+        Committed before it returns, as `mark_glossary_proposed` is. The column
+        references `run(id)`, so a run id with no row is refused.
+        """
+        with self.transaction() as cursor:
+            cursor.execute(_UPDATE_CONSISTENCY_RUN, (run_id,))
 
     def write_regions(self, page_ordinal: int, regions: Sequence[RawRegion]) -> None:
         """Replace one page's regions with `regions`, in the order handed over.

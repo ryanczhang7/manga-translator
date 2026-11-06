@@ -315,7 +315,7 @@ def _migrated(source_dir: Path, mask: bytes) -> Path:
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 11, (
+    assert _user_version(db_path) == 12, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -336,9 +336,9 @@ def test_this_build_writes_and_reads_schema_version_nine(
     """C-4's bump, in both records of it (MT-005 PO-7)."""
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"))
 
-    assert SCHEMA_VERSION == 11
-    assert _user_version(db_path) == 11
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(11,)]
+    assert SCHEMA_VERSION == 12
+    assert _user_version(db_path) == 12
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(12,)]
 
 
 def test_the_erased_column_is_a_shared_string_appended_after_the_cleaned_page_table() -> None:
@@ -372,7 +372,7 @@ def test_a_version_eight_file_is_migrated_to_nine_when_it_is_opened(
     """**AC-6**: "a version 8 file opens at 9" - in both records of it."""
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"), mask)
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(11,)]
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(12,)]
     assert _raw(db_path, _SHAPE) == _CLEANED_PAGE_SHAPE_V9
 
 
@@ -459,7 +459,7 @@ def test_the_v9_step_changes_only_the_cleaned_page_erased_column(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 11
+    assert _user_version(db_path) == 12
     assert _raw(db_path, schema) == schema_before
     assert images() == images_before
     rows_after = rows()
@@ -489,7 +489,7 @@ def test_a_version_six_file_migrates_all_the_way_to_nine(
         project.write_cleaned(0, png_bytes(7, 3, (1, 2, 3)), erased=[0])
         assert project.read_erased(0) == frozenset({0})
 
-    assert _user_version(db_path) == 11
+    assert _user_version(db_path) == 12
     assert _cleaned_page_sql(db_path) == _cleaned_page_sql(
         _fresh(_sources(tmp_path, png_bytes, "fresh"))
     )

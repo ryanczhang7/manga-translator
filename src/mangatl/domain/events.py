@@ -27,6 +27,7 @@ __all__ = [
     "BatchSubmitted",
     "BatchWaiting",
     "CallPriced",
+    "CorrectionsApplied",
     "PageSkipped",
     "PageStarted",
     "PassStarted",
@@ -183,6 +184,24 @@ class BatchFailed:
     state: str
 
 
+@dataclass(frozen=True)
+class CorrectionsApplied:
+    """The consistency pass ran over the chapter (MT-115 AC-1, AC-2, AC-4).
+
+    `applied` corrections landed on `proposed` lines; `skipped_user_lines`
+    were aimed at a line the user had accepted, edited or reverted, and were
+    not written; `unchanged_returned` items restated the current English.
+    `chunks_run` requests were made and `chunks_refused` were refused by the
+    budget guard after the first had run.
+    """
+
+    applied: int
+    skipped_user_lines: int
+    unchanged_returned: int
+    chunks_run: int
+    chunks_refused: int
+
+
 #: Every event a run can emit. A plain union alias: a `TYPE_CHECKING` guard or a
 #: `sys.version_info` branch here would be an uncovered branch in a module that
 #: carries a 100% line-and-branch bar.
@@ -200,4 +219,5 @@ RunEvent = (
     | BatchWaiting
     | BatchCollected
     | BatchFailed
+    | CorrectionsApplied
 )

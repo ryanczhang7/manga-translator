@@ -119,6 +119,11 @@ _CHAPTER_COLUMNS_V4: tuple[str, ...] = (
 #: What a fresh file, and a v3 file once opened, holds today.
 _CHAPTER_COLUMNS_V10: tuple[str, ...] = (*_CHAPTER_COLUMNS_V4, "glossary_proposed_at")
 
+#: The `chapter` table at version 12 (MT-115): version 10's, plus
+#: `consistency_run_id` appended by the v11 -> v12 step. What a fresh file, and
+#: a v3 file once opened, holds today.
+_CHAPTER_COLUMNS_V12: tuple[str, ...] = (*_CHAPTER_COLUMNS_V10, "consistency_run_id")
+
 #: The three tables that cascade off `chapter`. Named explicitly rather than
 #: discovered, because a migration that dropped one of them entirely would make
 #: a discovered list agree with the damage.
@@ -385,7 +390,7 @@ def _migrating(
             " no migration ran, and every metric below is vacuously satisfied by a"
             " file nobody rebuilt"
         )
-        assert _columns(db_path, "chapter") == _CHAPTER_COLUMNS_V10
+        assert _columns(db_path, "chapter") == _CHAPTER_COLUMNS_V12
         yield project, db_path, before
 
 
@@ -448,7 +453,8 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     # MT-119 C-4 takes it to 9: `cleaned_page.erased`.
     # MT-103 PO-3 takes it to 10: chapter-level ledger rows, `pricing`, two tables.
     # MT-137 takes it to 11: `batch_job` holds its pages (`first_ordinal`, `last_ordinal`).
-    assert SCHEMA_VERSION == 11
+    # MT-115 takes it to 12: `chapter.consistency_run_id`, the consistency pass's marker.
+    assert SCHEMA_VERSION == 12
     assert _user_version(db_path) == SCHEMA_VERSION
     assert _raw(db_path, "SELECT schema_version FROM chapter") == [(SCHEMA_VERSION,)]
 
@@ -466,7 +472,7 @@ def test_a_freshly_created_chapter_table_has_the_ceiling_column_in_position_six(
     """
     db_path = project_dir_for(source_dir) / "project.db"
 
-    assert _columns(db_path, "chapter") == _CHAPTER_COLUMNS_V10
+    assert _columns(db_path, "chapter") == _CHAPTER_COLUMNS_V12
     assert _columns(db_path, "chapter")[5] == "budget_ceiling_micro_usd"
     assert "budget_ceiling_usd" not in _columns(db_path, "chapter")
     assert _raw(
@@ -521,7 +527,7 @@ def test_a_version_three_file_is_migrated_to_the_current_version_when_it_is_open
 
     assert _user_version(db_path) == SCHEMA_VERSION
     assert _raw(db_path, "SELECT schema_version FROM chapter") == [(SCHEMA_VERSION,)]
-    assert _columns(db_path, "chapter") == _CHAPTER_COLUMNS_V10
+    assert _columns(db_path, "chapter") == _CHAPTER_COLUMNS_V12
 
 
 def test_the_rebuild_preserves_the_project_on_all_four_counts(source_dir: Path) -> None:
@@ -735,7 +741,7 @@ def test_a_migrated_chapter_table_is_the_same_table_as_a_freshly_created_one(
 
     shape = "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('chapter')"
     assert _raw(migrated_db, shape) == _raw(fresh_db, shape)
-    assert _columns(migrated_db, "chapter") == _CHAPTER_COLUMNS_V10
+    assert _columns(migrated_db, "chapter") == _CHAPTER_COLUMNS_V12
 
 
 #: Every schema object the v3 -> v4 step has no business touching. `glossary` is
