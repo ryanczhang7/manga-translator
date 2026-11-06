@@ -2,7 +2,7 @@
 id: EPIC-09
 title: A whole volume as one Gemini batch, then a consistency pass that returns only corrections
 status: todo
-stories: [MT-101, MT-102, MT-103, MT-104, MT-105, MT-106, MT-107, MT-108, MT-109, MT-110, MT-111, MT-112, MT-113, MT-114, MT-115, MT-116, MT-130, MT-139, MT-137]
+stories: [MT-101, MT-102, MT-103, MT-104, MT-105, MT-106, MT-107, MT-108, MT-109, MT-110, MT-111, MT-112, MT-113, MT-114, MT-115, MT-116, MT-130, MT-139, MT-137, MT-140, MT-141]
 ---
 
 *Added 2026-10-28 by lead-po on Claude Fable 5.1, from the user's request:
@@ -162,8 +162,17 @@ MT-108 exist, each with a `## Decided` section the implementing stories cite.
 - **MT-115** - corrections applied to untouched proposals and recorded with
   their reason; guarded and ledgered as a chapter-level call; run after
   collection.
+- **MT-140** - `mangatl-run` runs the pass after the last page and after the
+  last batch job is collected, and says what it did in one line; a refused
+  pass ends the invocation with the pages kept (MT-115 PO-2's follow-up, the
+  CLI half; cut 2026-11-06).
+- **MT-141** - the window's run and its batch collection run the pass, the
+  panels say so, and a refused pass is shown rather than the review opening
+  over it (the window half; waits on MT-139, which carries the `Pipeline`
+  down the window's run).
 - **MT-116** - *cut after Q-2*: the review shows a corrected line's previous
   text and the reason (or the suggestion surface, if Q-2 goes that way).
+  Q-2 was answered "apply" (MT-115 PO-1), so it is the former; not yet cut.
 
 ## Deliberately not in this epic
 
