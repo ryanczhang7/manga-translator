@@ -67,7 +67,7 @@ from mangatl.domain.page import Chapter
 from mangatl.models.manifest import ModelHashMismatch, load_manifest, verify_bundled_models
 from mangatl.models.providers import select_providers
 from mangatl.pipeline.batch import collect_volume
-from mangatl.pipeline.stage import Stage
+from mangatl.pipeline.prelude import Pipeline
 from mangatl.pipeline.translate_stage import budget_for
 from mangatl.store.batch import pending_jobs
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
@@ -220,17 +220,16 @@ def translation_env(env: Mapping[str, str], settings_file: Path) -> dict[str, st
     return result
 
 
-def build_stages(models_dir: Path) -> tuple[Stage, ...]:
-    """The real stage list, translation on - what `mangatl-run` runs, with the
+def build_stages(models_dir: Path) -> Pipeline:
+    """The real pipeline, translation on - what `mangatl-run` runs, with the
     provider selected from the environment plus the stored key.
 
     `select_provider` refuses (`NoApiKey`, ...) before `build_pipeline` is
     called, so a refused Start loads no weight.
 
-    The stages only, both passes in run order (`Pipeline.page_stages`, MT-130
-    C-6): the window's run does not carry the pipeline's chapter step yet
-    (MT-105 PO-5; MT-139 wires it), so a Gemini run started from the window
-    is one pass and skips the glossary pre-pass.
+    The whole `Pipeline` - reading pass, chapter step, translating pass
+    (MT-139) - so a run started from the window proposes the glossary once,
+    after every page is read, as the CLI does.
 
     The context mode is `MANGATL_CONTEXT_MODE`'s (MT-107 AC-5), resolved
     before `select_provider`, so an unknown one raises `UnknownContextMode`
@@ -240,9 +239,7 @@ def build_stages(models_dir: Path) -> tuple[Stage, ...]:
     mode = context_mode(os.environ.get(CONTEXT_MODE_VAR))
     env = translation_env(os.environ, settings_path())
     selection = select_provider(os.environ.get(PROVIDER_VAR) or None, env)
-    return build_pipeline(
-        models_dir, translate=True, selection=selection, context_mode=mode
-    ).page_stages
+    return build_pipeline(models_dir, translate=True, selection=selection, context_mode=mode)
 
 
 def build_batch() -> BatchSetup | None:

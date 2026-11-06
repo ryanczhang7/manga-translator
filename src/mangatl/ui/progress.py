@@ -4,8 +4,16 @@
 `ErrorBanner` for the budget abort. The panel is fed the run's typed events
 (`architecture.md` §6) through `on_event` and never calls into the pipeline,
 the translator or the store; the only names it takes from `pipeline` are the
-abort reasons `BUDGET` and `CANCELLED`, imported so they cannot drift from the
-runner's spelling.
+abort reasons `BUDGET` and `CANCELLED` and the pass names `READING` and
+`TRANSLATING`, imported so they cannot drift from the runner's spelling.
+
+**A two-pass run** (MT-139) announces each pass with `PassStarted`: the label
+names the pass (`Reading page n of m`, `Translating page n of m`), and the bar,
+the stepper and the estimate's counters start again for each pass - the passes
+run at different rates - while elapsed stays the run's. A reading-pass abort
+has translated nothing; a chapter-step abort stops the run "before page 1".
+Each page's last regions are kept and shown again when it starts translating.
+A run with no `PassStarted` reads exactly as before.
 
 **Pages are 0-based ordinals** (`domain/page.py`) and shown 1-based. A page is
 *completed* when, after its `PageStarted`, the next `PageStarted`, `PageSkipped`
@@ -68,6 +76,7 @@ from mangatl.domain.events import (
     CallPriced,
     PageSkipped,
     PageStarted,
+    PassStarted,
     RegionsDetected,
     RunAborted,
     RunEvent,
@@ -77,7 +86,7 @@ from mangatl.domain.events import (
 )
 from mangatl.domain.money import Usd
 from mangatl.domain.page import Chapter
-from mangatl.pipeline.runner import BUDGET, CANCELLED
+from mangatl.pipeline.runner import BUDGET, CANCELLED, READING, TRANSLATING
 from mangatl.ui import tokens_gen
 from mangatl.ui.buttons import ActivatedByEnter
 from mangatl.ui.cost_estimate import format_usd
@@ -150,10 +159,19 @@ class PageStageStepper(QWidget):
         """One state per step, in order."""
         return tuple(self._states)
 
-    def start(self) -> None:
-        """A page has started: Detecting is active, the rest pending."""
+    def start(self, *, active: int = 0) -> None:
+        """A page has started: steps before `active` are done, `active` is
+        active, the rest pending. The translating pass starts at 2 - Detecting
+        and Reading were done for this page in the reading pass (MT-139)."""
         self._states = ["pending"] * len(self._steps)
-        self._states[0] = "active"
+        for index in range(active):
+            self._states[index] = "done"
+        self._states[active] = "active"
+        self._render()
+
+    def reset(self) -> None:
+        """Every step pending: between passes, before the next page starts."""
+        self._states = ["pending"] * len(self._steps)
         self._render()
 
     def finish(self, stage: str) -> None:
@@ -270,6 +288,12 @@ class RunProgressPanel(QWidget):
         self._completed_ms = 0
         self._skipped = 0
         self._elapsed_ms = 0
+        #: The pass in progress (MT-139): `READING`, `TRANSLATING`, or `None`
+        #: for a single-pass run, which reads exactly as before.
+        self._pass: str | None = None
+        #: Each page's last `RegionsDetected`, re-applied when the page starts
+        #: in the translating pass (AC-9, PO-7).
+        self._regions: dict[int, tuple[tuple[tuple[int, int], ...], ...]] = {}
         self.banner: ErrorBanner | None = None
 
         self.overall = QProgressBar()
@@ -314,15 +338,26 @@ class RunProgressPanel(QWidget):
         """Advance the panel by one event of the run."""
         if isinstance(event, RunStarted):
             self._start(event.page_count)
+        elif isinstance(event, PassStarted):
+            # Before the `RunAborted` fall-through below, which reads `reason`.
+            self._pass = event.name
+            self._reset_pass()
+            self.overall_label.setText(
+                "Reading pages" if event.name == READING else "Translating pages"
+            )
         elif isinstance(event, PageStarted):
             self._complete_current()
             self._current = event.ordinal
             self.overall.setValue(event.ordinal)
-            self.overall_label.setText(f"Page {event.ordinal + 1} of {self._page_count}")
-            self.stepper.start()
+            self.overall_label.setText(self._page_label(event.ordinal))
+            self.stepper.start(active=2 if self._pass == TRANSLATING else 0)
             self._show_page(event.ordinal)
+            regions = self._regions.get(event.ordinal)
+            if self.thumbnail is not None and regions is not None:
+                self.thumbnail.set_regions(regions)
         elif isinstance(event, RegionsDetected):
             # Before the `RunAborted` fall-through below, which reads `reason`.
+            self._regions[event.ordinal] = event.polygons
             if self.thumbnail is not None and event.ordinal == self._shown:
                 self.thumbnail.set_regions(event.polygons)
         elif isinstance(event, StageFinished):
@@ -365,9 +400,28 @@ class RunProgressPanel(QWidget):
         self._current = None
         self._current_ms = self._completed = self._completed_ms = 0
         self._skipped = self._elapsed_ms = 0
+        self._pass = None
+        self._regions = {}
         self.overall.setRange(0, page_count)
         self.overall.setValue(0)
         self.overall_label.setText(f"{page_count} pages")
+
+    def _reset_pass(self) -> None:
+        """A pass begins (MT-139): the bar, the stepper and the counters the
+        estimate reads start again; elapsed, the regions and the cost do not."""
+        self._current = None
+        self._current_ms = self._completed = self._completed_ms = 0
+        self._skipped = 0
+        self.overall.setValue(0)
+        self.stepper.reset()
+
+    def _page_label(self, ordinal: int) -> str:
+        page = f"page {ordinal + 1} of {self._page_count}"
+        if self._pass == READING:
+            return f"Reading {page}"
+        if self._pass == TRANSLATING:
+            return f"Translating {page}"
+        return f"Page {ordinal + 1} of {self._page_count}"
 
     def _complete_current(self) -> None:
         if self._current is None:
@@ -387,13 +441,24 @@ class RunProgressPanel(QWidget):
         self.remaining_label.setText(f"Remaining about {format_duration(remaining)}")
 
     def _kept(self, event: RunAborted) -> int:
+        # A reading-pass abort has translated nothing this run (MT-139 PO-5).
+        if self._pass == READING:
+            return 0
         # The stopped page is `ordinal`; every page before it was kept.
         return event.ordinal if event.ordinal is not None else self._completed + self._skipped
+
+    def _stopped_at(self, event: RunAborted, kept: int) -> str:
+        """The headline's position: the page the run stopped at, or - when the
+        chapter step stopped a two-pass run (no ordinal) - before page 1."""
+        if event.ordinal is None and self._pass == TRANSLATING:
+            return f"Run stopped before page 1 of {self._page_count}"
+        page = event.ordinal if event.ordinal is not None else kept
+        return f"Run stopped at page {page + 1} of {self._page_count}"
 
     def _budget_abort(self, event: RunAborted) -> None:
         kept = self._kept(event)
         headline = (
-            f"Run stopped at page {kept + 1} of {self._page_count} \N{EM DASH} "
+            f"{self._stopped_at(event, kept)} \N{EM DASH} "
             f"the {format_usd(self._ceiling)} budget was reached."
         )
         self._show_banner(headline, "", kept)
@@ -401,12 +466,16 @@ class RunProgressPanel(QWidget):
 
     def _failed(self, event: RunAborted) -> None:
         """D-3: the runner's reason verbatim; the cost readout is not touched -
-        `aborted` means the budget was reached and nothing else."""
+        `aborted` means the budget was reached and nothing else. The page is
+        the event's `ordinal` when it has one; a chapter step that failed a
+        two-pass run is "the glossary step" (MT-139 PO-6)."""
         kept = self._kept(event)
-        headline = (
-            f"Run stopped at page {kept + 1} of {self._page_count} \N{EM DASH} "
-            f"page {kept + 1} failed."
-        )
+        if event.ordinal is None and self._pass == TRANSLATING:
+            what = "the glossary step failed."
+        else:
+            page = event.ordinal if event.ordinal is not None else kept
+            what = f"page {page + 1} failed."
+        headline = f"{self._stopped_at(event, kept)} \N{EM DASH} {what}"
         self._show_banner(headline, event.reason + "\n", kept)
 
     def _batch_abort(self, event: RunAborted) -> None:
