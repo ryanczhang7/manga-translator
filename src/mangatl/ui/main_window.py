@@ -184,7 +184,7 @@ class MainWindow(QMainWindow):
             self._start_batch(chapter, batch, models)
             return
         try:
-            stages = setup.build_stages(models)
+            pipeline = setup.build_stages(models)
         except (ProviderError, UnknownContextMode) as error:
             self.show_error(str(error))
             return
@@ -202,7 +202,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(panel)
         self.run_panel = panel
         self._run_folder = chapter.source_dir
-        self.run = RunController(project_dir, stages, self)
+        self.run = RunController(project_dir, pipeline, self)
         self.run.event.connect(panel.on_event)
         self.run.ended.connect(self._run_ended)
         panel.review_requested.connect(self._review)

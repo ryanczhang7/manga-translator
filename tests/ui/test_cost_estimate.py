@@ -87,6 +87,7 @@ from mangatl.domain.budget import Budget
 from mangatl.domain.money import Usd
 from mangatl.domain.page import Chapter, Page
 from mangatl.domain.rates import ModelRates
+from mangatl.pipeline.prelude import Pipeline
 from mangatl.pipeline.stage import BudgetRefused, PageContext, Stage
 from mangatl.pipeline.translate_stage import TranslateStage
 from mangatl.store.intake import read_chapter
@@ -269,8 +270,9 @@ def _folder_of(root: Path, name: str, pages: int, png: bytes) -> Path:
     return folder
 
 
-def _no_stages(models_dir: Path) -> Sequence[Stage]:
-    return ()
+def _no_stages(models_dir: Path) -> Pipeline:
+    """MT-139 C-1: a `StageBuilder` returns a `Pipeline`; never called here."""
+    return Pipeline(stages=(), prelude=None)
 
 
 def _fixed(model: str) -> Callable[[], str]:

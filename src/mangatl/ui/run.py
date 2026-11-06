@@ -14,9 +14,12 @@ thread gets them through Qt's queued connection, so they arrive there, in
 emission order, and `ended` after the last `event`. `domain.events` are frozen
 dataclasses, so nothing a receiver holds is shared mutable state.
 
-The stages arrive already built (`RunSetup.build_stages`, injected by the
+The `Pipeline` arrives already built (`RunSetup.build_stages`, injected by the
 composition root `mangatl.app`): `ui` never imports `mangatl.compose`, so the
-window never constructs an inference session or an API client itself.
+window never constructs an inference session or an API client itself. The
+controller hands `run_chapter` all of it - the reading pass, the chapter step
+and the translating pass (MT-139) - so a window run proposes the glossary once,
+after every page is read.
 
 **The batch run** (MT-113 C-3) is `BatchController`, built from a `BatchSetup`
 the composition root binds (`RunSetup.build_batch`, asked at Start, PO-2). It
@@ -47,8 +50,8 @@ from mangatl.domain.batch import BatchAnswer, BatchJob
 from mangatl.domain.events import BatchFailed, BatchSubmitted, RunEvent
 from mangatl.domain.money import Usd
 from mangatl.pipeline.batch import ChapterSubmit
+from mangatl.pipeline.prelude import Pipeline
 from mangatl.pipeline.runner import run_chapter
-from mangatl.pipeline.stage import Stage
 from mangatl.store.batch import pending_jobs
 from mangatl.store.project import Project, open_project
 
@@ -79,8 +82,9 @@ NO_MODELS: str = (
 
 #: The models folder, or `None` when there is none.
 ModelsResolver = Callable[[], Path | None]
-#: The stage list for a models folder.
-StageBuilder = Callable[[Path], Sequence[Stage]]
+#: The pipeline for a models folder: the reading pass, the chapter step, the
+#: translating pass (MT-139). The name is kept; only what it returns changed.
+StageBuilder = Callable[[Path], Pipeline]
 #: The model the run would call, or a `ProviderError` saying why none can be
 #: chosen (MT-100 C-5). What the summary's estimate is priced on.
 ModelSelector = Callable[[], str]
@@ -137,7 +141,8 @@ _PollResult = Literal["collected", "failed", "pending"] | BaseException
 
 
 class RunController(QObject):
-    """One run of the chapter in `project_dir` through `stages`, on a worker."""
+    """One run of the chapter in `project_dir` through `pipeline`, on a worker:
+    the reading pass, the chapter step, the translating pass (MT-139)."""
 
     #: Each `RunEvent`, in emission order. The contract names it `event`, and the
     #: tests connect to it so; it shadows `QObject.event()`, which Qt calls from
@@ -150,12 +155,12 @@ class RunController(QObject):
     def __init__(
         self,
         project_dir: Path,
-        stages: Sequence[Stage],
+        pipeline: Pipeline,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._project_dir = project_dir
-        self._stages = tuple(stages)
+        self._pipeline = pipeline
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -179,7 +184,14 @@ class RunController(QObject):
 
     def _work(self) -> None:
         with open_project(self._project_dir) as project:
-            outcome = run_chapter(project, self._stages, self._emit, self._cancel.is_set)
+            outcome = run_chapter(
+                project,
+                self._pipeline.stages,
+                self._emit,
+                self._cancel.is_set,
+                prelude=self._pipeline.prelude,
+                after_prelude=self._pipeline.after_prelude,
+            )
         self.ended.emit(outcome)
 
     def _emit(self, event: RunEvent) -> None:

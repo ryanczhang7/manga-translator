@@ -74,6 +74,7 @@ from mangatl.domain.events import (
     CallPriced,
     PageSkipped,
     PageStarted,
+    PassStarted,
     RunEvent,
     RunFinished,
     RunStarted,
@@ -84,7 +85,8 @@ from mangatl.domain.money import Usd
 from mangatl.domain.rates import CostRecord
 from mangatl.domain.region import RawRegion
 from mangatl.domain.translation import TranslationResult
-from mangatl.pipeline.runner import RUN_ABORTED, RUN_FINISHED
+from mangatl.pipeline.prelude import Pipeline
+from mangatl.pipeline.runner import READING, RUN_ABORTED, RUN_FINISHED, TRANSLATING
 from mangatl.pipeline.stage import BudgetRefused, PageContext, Stage
 from mangatl.pipeline.stages import build_stages
 from mangatl.store.intake import read_chapter
@@ -374,12 +376,17 @@ class Gate:
 
 
 class Setup:
-    """A `RunSetup` whose three callables log their calls, in order."""
+    """A `RunSetup` whose three callables log their calls, in order.
+
+    MT-139 C-1: `build_stages` returns a `Pipeline` - the single-pass
+    `Pipeline(stages, prelude=None)` over `stages`, or `pipeline` when given
+    (AC-3's two-pass run)."""
 
     def __init__(
         self,
         stages: Sequence[Stage] = (),
         *,
+        pipeline: Pipeline | None = None,
         models: Path | None = Path("models"),
         build_error: Exception | None = None,
         select_error: Exception | None = None,
@@ -387,6 +394,7 @@ class Setup:
     ) -> None:
         self.log: list[str] = []
         self.stages = tuple(stages)
+        self.pipeline = pipeline if pipeline is not None else Pipeline(self.stages, prelude=None)
         self._models = models
         self._build_error = build_error
         self._select_error = select_error
@@ -398,11 +406,11 @@ class Setup:
             self._on_resolve()
         return self._models
 
-    def build_stages(self, models_dir: Path) -> Sequence[Stage]:
+    def build_stages(self, models_dir: Path) -> Pipeline:
         self.log.append("build")
         if self._build_error is not None:
             raise self._build_error
-        return self.stages
+        return self.pipeline
 
     def select_model(self) -> str:
         self.log.append("select")
@@ -1338,3 +1346,133 @@ def test_control_without_the_restore_there_is_nothing_to_run_and_no_engine_is_ca
     _settle()
     assert (engines.detect, engines.clean, engines.read, engines.translate) == ([], [], [], [])
     assert _run_rows(every_page_done) == []
+
+
+# =============================================================================
+# MT-139 AC-3: Run again previews every page stage and runs the Pipeline it
+# previewed - the chapter step once, between the passes
+# =============================================================================
+#
+# MECHANICAL (story C-8): the dialog's lines, the shared log, the panel's
+# receipts and the run row, by equality. `rerun_preview` is MT-124's and is not
+# re-tested: what this pins is which stages the workspace hands it.
+
+#: What the recording chapter step bills: a chapter-level call (MT-105).
+CHAPTER_CALL = CallPriced(
+    ordinal=None,
+    spent=Usd(Decimal("0.04")),
+    ceiling=DEFAULT_CEILING,
+    projection=PROJ,
+)
+
+
+def _recording_prelude(calls: Calls) -> Callable[[Project, int, Callable[[RunEvent], None]], None]:
+    """A `ChapterStep`: appends `"prelude"` to the shared log, emits one
+    chapter-level `CallPriced`."""
+
+    def step(project: Project, run_id: int, emit: Callable[[RunEvent], None]) -> None:
+        calls.made.append("prelude")  # type: ignore[arg-type]
+        calls.threads.append(threading.current_thread())
+        emit(CHAPTER_CALL)
+
+    return step
+
+
+@pytest.fixture
+def three_pages_one_done(tmp_path: Path) -> Path:
+    """Three pages; page 1 (ordinal 0) translated and done, pages 2-3 not.
+    CLOSED. Returns the project directory."""
+    folder = tmp_path / "ch3"
+    folder.mkdir()
+    for ordinal in range(3):
+        (folder / f"{ordinal + 1:02d}.png").write_bytes(_page_png(ordinal))
+    project_dir = project_dir_for(folder.resolve())
+    with create_project(read_chapter(folder.resolve()), project_dir) as project:
+        project.write_regions(0, [_region(0)])
+        project.write_lines(0, [OcrResult("一")])
+        project.write_proposed(0, {0: "Hello."})
+        _mark_done(project, 0)
+    return project_dir
+
+
+def test_run_again_on_a_two_pass_pipeline_previews_every_page_stage_and_proposes_once(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    world: World,
+    three_pages_one_done: Path,
+) -> None:
+    """AC-3. The translate stage is in `after_prelude`, so a preview over
+    `pipeline.stages` alone would say nothing is to translate; the dialog says
+    2. On confirm the run reads pages 2-3, proposes once, translates pages 2-3
+    - page 1, already done, is skipped in both passes."""
+    chapter = three_pages_one_done
+    log = _record_panel(monkeypatch)
+    started: list[object] = []
+    real_start = RunController.start
+
+    def start(self: RunController) -> None:
+        started.append(self)
+        real_start(self)
+
+    monkeypatch.setattr(RunController, "start", start)
+    calls = Calls()
+    pipeline = Pipeline(
+        stages=(FakeStage("detect", calls),),
+        prelude=_recording_prelude(calls),
+        after_prelude=(FakeStage("translate", calls, _price(25)),),
+    )
+    setup = Setup(pipeline=pipeline)
+    window, _ = _workspace(qtbot, world, chapter, setup)
+
+    dialog = _dialog(window)
+
+    assert _shown_lines(dialog) == [
+        "2 of 3 pages still to run.",
+        "2 to detect, 2 to translate.",
+        "Estimated cost to translate 2 pages: $0.06.",
+        "Nothing spent yet of the $2.00 budget.",
+    ]
+    primary = getattr(dialog, "run_button", None)
+    assert isinstance(primary, QPushButton)
+    assert primary.text() == "Run 2 pages"
+    assert setup.log == ["resolve", "build", "select"], "Run again did not build once"
+
+    primary.click()
+    _settle()
+    # Not `window.run`: this run can finish inside `_settle()`, which sets it
+    # back to `None` - the controller is captured as it starts instead.
+    assert len(started) == 1 and isinstance(started[0], RunController), (
+        f"the confirm started {started!r}, not one RunController"
+    )
+    _wait_returned(qtbot, window)
+
+    assert calls.made == [
+        ("detect", 1),
+        ("detect", 2),
+        "prelude",
+        ("translate", 1),
+        ("translate", 2),
+    ]
+    assert _normalised([event for event, _ in log]) == [
+        RunStarted(run_id=1, page_count=3),
+        PassStarted(name=READING),
+        PageSkipped(ordinal=0, reason=ALREADY_DONE),
+        PageStarted(ordinal=1),
+        StageFinished(ordinal=1, stage="detect", elapsed_ms=0),
+        PageStarted(ordinal=2),
+        StageFinished(ordinal=2, stage="detect", elapsed_ms=0),
+        PassStarted(name=TRANSLATING),
+        CHAPTER_CALL,
+        PageSkipped(ordinal=0, reason=ALREADY_DONE),
+        PageStarted(ordinal=1),
+        StageFinished(ordinal=1, stage="translate", elapsed_ms=0),
+        PageStarted(ordinal=2),
+        StageFinished(ordinal=2, stage="translate", elapsed_ms=0),
+        RunFinished(run_id=1, pages_done=3),
+    ]
+    on_main = [t for t in calls.threads if t is threading.main_thread()]
+    assert on_main == [], f"{len(on_main)} stage or step calls ran on the GUI thread"
+    assert _run_rows(chapter) == [(RUN_FINISHED, None)]
+    assert _statuses(chapter) == [PAGE_DONE] * 3
+    assert window.splitter.isVisible(), "the body did not come back on RunFinished"
+    assert window.live_region.text() == "Run finished. 3 of 3 pages done."

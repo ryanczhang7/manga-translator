@@ -38,7 +38,7 @@ nothing reads the machine's provider keys.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from importlib.resources import files
 from pathlib import Path
 
@@ -51,7 +51,7 @@ from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 import mangatl.domain.budget as budget
 from mangatl import app as app_module
 from mangatl.domain.page import Chapter, Page
-from mangatl.pipeline.stage import Stage
+from mangatl.pipeline.prelude import Pipeline
 from mangatl.ui import tokens_gen
 from mangatl.ui.main_window import MainWindow
 from mangatl.ui.run import RunSetup
@@ -75,8 +75,9 @@ def _last_page_inside_budget(model: str = OPUS) -> int:
     return budget.DEFAULT_CEILING.micro() // budget.page_estimate(model).micro()
 
 
-def _no_stages(models_dir: Path) -> Sequence[Stage]:
-    return ()
+def _no_stages(models_dir: Path) -> Pipeline:
+    """MT-139 C-1: a `StageBuilder` returns a `Pipeline`; never called here."""
+    return Pipeline(stages=(), prelude=None)
 
 
 def _selecting(model: str) -> RunSetup:

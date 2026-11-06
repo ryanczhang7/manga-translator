@@ -52,6 +52,7 @@ from mangatl.domain.line import OcrResult
 from mangatl.domain.money import Usd
 from mangatl.domain.page import Chapter
 from mangatl.domain.region import RawRegion
+from mangatl.pipeline.prelude import Pipeline
 from mangatl.pipeline.stage import PageContext
 from mangatl.pipeline.translate_stage import budget_for
 from mangatl.store.batch import mark_collected, mark_failed, pending_jobs
@@ -257,9 +258,10 @@ class Builder:
         self.calls: list[Path] = []
         self._stages = tuple(stages)
 
-    def __call__(self, models_dir: Path) -> Sequence[Any]:
+    def __call__(self, models_dir: Path) -> Pipeline:
+        # MT-139 C-1: a `StageBuilder` returns a `Pipeline`; never called here.
         self.calls.append(models_dir)
-        return self._stages
+        return Pipeline(stages=self._stages, prelude=None)
 
 
 @dataclass

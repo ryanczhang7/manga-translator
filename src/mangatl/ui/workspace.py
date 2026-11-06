@@ -123,9 +123,9 @@ from mangatl.domain.page import Chapter
 from mangatl.domain.page_status import PageProgress, PageStatus, page_progress
 from mangatl.domain.region import RawRegion
 from mangatl.pipeline.bake import BakePreview, BakeReport
+from mangatl.pipeline.prelude import Pipeline
 from mangatl.pipeline.resume import rerun_preview
 from mangatl.pipeline.runner import RUN_FINISHED, RunOutcome
-from mangatl.pipeline.stage import Stage
 from mangatl.store import ledger
 from mangatl.store.lines import commit_line, read_review_lines
 from mangatl.store.project import PAGE_DONE, PAGE_STALE, Project, project_dir_for
@@ -1076,7 +1076,7 @@ class Workspace(QMainWindow):
         self.run_panel: RunProgressPanel | None = None
         #: The Run again dialog last opened, kept after it closes; `None` before.
         self.rerun_dialog: RerunDialog | None = None
-        self._rerun_stages: Sequence[Stage] = ()
+        self._rerun_pipeline: Pipeline | None = None
         self._run_outcome: RunOutcome | None = None
         self._run_row = -1
         self._chapter: Chapter | None = None
@@ -1498,14 +1498,16 @@ class Workspace(QMainWindow):
             self._say(NO_MODELS)
             return
         try:
-            stages = setup.build_stages(models)
+            pipeline = setup.build_stages(models)
             estimate = page_estimate(setup.select_model())
         except (ProviderError, UnknownContextMode) as error:
             self._say(str(error))
             return
-        # Reads only, one pass, on this thread: nothing is running.
-        preview = rerun_preview(self._project, stages, estimate)
-        self._rerun_stages = stages
+        # Reads only, one pass over every page stage, on this thread: nothing
+        # is running. `page_stages`, because the translate stage the preview
+        # counts lives in `after_prelude` (MT-130 PO-12).
+        preview = rerun_preview(self._project, pipeline.page_stages, estimate)
+        self._rerun_pipeline = pipeline
         if self.rerun_dialog is not None:
             self.rerun_dialog.deleteLater()
         self.rerun_dialog = RerunDialog(preview, self)
@@ -1528,6 +1530,7 @@ class Workspace(QMainWindow):
         """The body becomes the run's `RunProgressPanel`; the stages run on a
         worker over its own `Project`, while this window's reads nothing."""
         assert self._project is not None and self._chapter is not None
+        assert self._rerun_pipeline is not None
         self._run_row = self.page_strip.currentRow()
         ceiling = self._project.budget_ceiling() or DEFAULT_CEILING
         panel = RunProgressPanel(ceiling, chapter=self._chapter)
@@ -1538,7 +1541,7 @@ class Workspace(QMainWindow):
         self.splitter.hide()
         self._body.insertWidget(self._body.indexOf(self.splitter) + 1, panel, 1)
         self._set_run_on(True)
-        run = RunController(project_dir_for(self._chapter.source_dir), self._rerun_stages, self)
+        run = RunController(project_dir_for(self._chapter.source_dir), self._rerun_pipeline, self)
         self.run = run
         # Bound methods, so each arrives queued on this thread.
         run.event.connect(panel.on_event)
