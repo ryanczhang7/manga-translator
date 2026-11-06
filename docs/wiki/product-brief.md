@@ -201,6 +201,13 @@ Detail belongs to the Lead Designer; this section is the brief, not the design.
 - **O1 — What is the benchmark chapter?** S1, S2, S3 and S5 all measure against
   a held-out chapter that does not exist yet. It must be chosen before the first
   quality story, and it must not be used while tuning. *Owner: user.*
+  **Partly settled 2026-11-06 (MT-108 PO-1):** the reviewer does not read
+  Japanese, so the benchmark chapter is one with an **official English
+  release**, used as the reference for *meaning* only. A line is kept as-is
+  when it says what the official line says **and** reads as good English in
+  the reviewer's own judgement (grammar, readability, style); the official
+  wording is not the target, since official releases are often weak English
+  too. Which chapter is still open.
 - **O2 — What counts as "a line accepted as-is"?** ~~The 80% bar needs an
   operational definition (per bubble? per sentence? does a one-word fix count as
   a rejection?) before it can be measured rather than argued about.~~
