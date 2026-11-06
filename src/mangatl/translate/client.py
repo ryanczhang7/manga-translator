@@ -46,7 +46,7 @@ from anthropic.types import Usage
 from mangatl.domain.glossary import PromptContext
 from mangatl.domain.line import OcrResult
 from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
-from mangatl.translate.parse import parse_lines, parse_terms
+from mangatl.translate.parse import parse_lines
 from mangatl.translate.prompt import build_request
 
 __all__ = ["translate_page"]
@@ -79,9 +79,6 @@ def translate_page(
     that pin is named rather than hidden: an id `domain.rates.RATES` does not
     list makes `price` raise `UnknownModel` and aborts the run, which is
     `rates.py`'s designed behaviour and is carried as MT-044 DV-5.
-
-    On a call, `proposed_terms` is `parse_terms(response)`: the glossary terms
-    the model proposed, in order, malformed items skipped.
     """
     if all(result.ocr_empty for result in ocr_results):
         return TranslationResult(
@@ -95,7 +92,7 @@ def translate_page(
         lines=parse_lines(response, range(len(ocr_results))),
         usage=_usage_of(response.usage),
         call=CallInfo(request_id=response.id, model_id=response.model),
-        proposed_terms=parse_terms(response),
+        proposed_terms=(),
     )
 
 

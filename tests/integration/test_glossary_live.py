@@ -5,7 +5,10 @@
 defensible readings - once per page, bare kanji, no furigana. Each run
 translates page 1 with `EMPTY_CONTEXT` and page 2 either with the continuity
 context built from page 1's result exactly as the pipeline builds it
-(`context_on`, AC-3 pins the equality) or with `EMPTY_CONTEXT`. A run is
+(`context_on`, AC-3 pins the equality) or with `EMPTY_CONTEXT`. Since MT-106
+(C-5, PO-3) the "on" arm's glossary is the pre-pass's: one
+`gemini.propose_glossary` call over both pages' OCR per "on" run, its terms
+passed to `context_on` - a page proposes no terms any more. A run is
 consistent iff the two name lines read the same (C-2's `reading`) and neither
 reads `"?"`.
 
@@ -15,14 +18,15 @@ reads `"?"`.
   mechanism and the test FAILS - the fixture changes, never the bar.
 
 Both bars are asserted in the one live test, after the full printout: the
-per-run table (each run printed as it completes), page 1's proposed terms
-for 翔, both counts and the total cost.
+per-run table (each run printed as it completes), the pre-pass's proposed
+terms for 翔 ("on" runs), both counts and the total cost.
 
 **Marked `network`** (the whole file), so it runs only in the optional
 `integration` gate (`pytest -m "gpu or network"`), never on CI. **Skips** when
 `GEMINI_API_KEY` is unset; `google.genai` is imported inside the test body.
 The live test spends about $0.22 per run (4 calls x K at MT-080's measured
-~$0.0055 a page). Run it with the output visible:
+~$0.0055 a page), plus K text-only pre-pass calls since MT-106 - cents. Run it
+with the output visible:
 
     uv run pytest -q -s tests/integration/test_glossary_live.py -m network
 
@@ -59,7 +63,7 @@ from types import ModuleType
 import pytest
 from PIL import Image
 
-from mangatl.domain.glossary import EMPTY_CONTEXT, PromptContext
+from mangatl.domain.glossary import EMPTY_CONTEXT, PromptContext, ProposedTerm
 from mangatl.domain.rates import price
 from mangatl.domain.translation import TranslationResult
 
@@ -237,19 +241,41 @@ def test_live_a_name_keeps_its_reading_with_continuity_and_drifts_without_it() -
         usage = f"{page} in={u.input_tokens} out={u.output_tokens} cr={u.cache_read_tokens}"
         return result, usage, record.cost.amount
 
+    def prepass() -> tuple[tuple[ProposedTerm, ...], str, Decimal]:
+        """MT-106 C-5 / PO-3: the glossary the product now delivers to page 2 -
+        the pre-pass over both pages' OCR, once per "on" run."""
+        proposal = gemini.propose_glossary(client, [ocr["p1"], ocr["p2"]])
+        record = price(proposal.call.model_id, proposal.usage)
+        u = proposal.usage
+        usage = f"pre in={u.input_tokens} out={u.output_tokens} cr={u.cache_read_tokens}"
+        return proposal.terms, usage, record.cost.amount
+
     def run(arm: str) -> _Run:
+        proposed: tuple[ProposedTerm, ...] = ()
+        usages: tuple[str, ...] = ()
+        cost = Decimal(0)
+        if arm == "on":
+            proposed, u0, cost = prepass()
+            usages = (u0,)
         p1, u1, c1 = call("p1", EMPTY_CONTEXT)
-        context = context_on(p1, ocr["p1"]) if arm == "on" else EMPTY_CONTEXT
+        context = context_on(p1, ocr["p1"], proposed) if arm == "on" else EMPTY_CONTEXT
         p2, u2, c2 = call("p2", context)
         line1 = p1.lines.get(NAME_REGION["p1"], "")
         line2 = p2.lines.get(NAME_REGION["p2"], "")
-        terms = tuple(
-            f"{t.term_ja}={t.term_en}({t.note})" for t in p1.proposed_terms if NAME in t.term_ja
+        terms = tuple(f"{t.term_ja}={t.term_en}({t.note})" for t in proposed if NAME in t.term_ja)
+        return _Run(
+            arm,
+            reading(line1),
+            reading(line2),
+            line1,
+            line2,
+            terms,
+            (*usages, u1, u2),
+            cost + c1 + c2,
         )
-        return _Run(arm, reading(line1), reading(line2), line1, line2, terms, (u1, u2), c1 + c2)
 
     _say(f"\n--- MT-045 AC-1/AC-2: K = {K} per arm, alternated on/off ---")
-    _say(f"{'#':>2} {'arm':<3} {'r1':<6} {'r2':<6} {'consistent':<10} p1 proposed 翔 terms")
+    _say(f"{'#':>2} {'arm':<3} {'r1':<6} {'r2':<6} {'consistent':<10} pre-pass 翔 terms")
     started = time.monotonic()
     try:
         for _ in range(K):
@@ -309,4 +335,5 @@ def _say_totals(runs: list[_Run]) -> None:
         f"continuity OFF: inconsistent {sum(not r.consistent for r in off)}/{len(off)}"
         f" (AC-2 needs >= {OFF_INCONSISTENT_AT_LEAST} of {K})"
     )
-    _say(f"total cost: ${sum((r.cost for r in runs), Decimal(0))} over {2 * len(runs)} calls")
+    calls = sum(len(r.usage) for r in runs)
+    _say(f"total cost: ${sum((r.cost for r in runs), Decimal(0))} over {calls} calls")

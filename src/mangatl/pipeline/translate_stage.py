@@ -54,7 +54,7 @@ from dataclasses import dataclass
 
 from mangatl.domain.budget import Budget
 from mangatl.domain.events import CallPriced
-from mangatl.domain.glossary import ContextMode, PromptContext, mark_seen, merge
+from mangatl.domain.glossary import ContextMode, PromptContext, mark_seen
 from mangatl.domain.line import OcrResult
 from mangatl.domain.money import Usd
 from mangatl.domain.rates import price
@@ -117,19 +117,14 @@ def pages_remaining(ctx: PageContext) -> int:
     return len(ctx.project.pages()) - ctx.page.ordinal
 
 
-def _update_glossary(
-    ctx: PageContext, result: TranslationResult, ocr_results: Sequence[OcrResult]
-) -> None:
-    """C-9 step 4: fold the page's proposals and sightings into the glossary,
-    and write only the entries that changed - each `upsert` opens its own
-    transaction, so an unchanged chapter costs one read and no writes."""
+def _update_glossary(ctx: PageContext, ocr_results: Sequence[OcrResult]) -> None:
+    """C-9 step 4: mark the glossary's terms seen on this page, and write only
+    the entries that changed - each `upsert` opens its own transaction, so an
+    unchanged chapter costs one read and no writes. A page proposes no terms
+    (MT-106): the glossary is the pre-pass's, and a page only sights it."""
     ordinal = ctx.page.ordinal
     before = read_entries(ctx.project)
-    after = mark_seen(
-        merge(before, result.proposed_terms, ordinal),
-        [line.text for line in ocr_results],
-        ordinal,
-    )
+    after = mark_seen(before, [line.text for line in ocr_results], ordinal)
     unchanged = set(before)
     for entry in after:
         if entry not in unchanged:
@@ -225,10 +220,10 @@ class TranslateStage:
         5. **The glossary is written after the bill and before the proposals**
            (MT-014 C-9). After the bill, so an unpriceable call leaves no names
            behind either (clause 3). Before the proposals, for clause 2's
-           reason: a crash in between re-translates the page, and `merge` is
-           idempotent, whereas the other order marks the page done with its
-           names never recorded. A wordless page still runs it - `mark_seen`
-           over empty text changes nothing and nothing was proposed.
+           reason: a crash in between re-translates the page, and `mark_seen`
+           is idempotent, whereas the other order marks the page done with its
+           sightings never recorded. A wordless page still runs it -
+           `mark_seen` over empty text changes nothing.
         6. **`CallPriced` is emitted right after `record_call`** (MT-063), and
            before the glossary and the proposals, with every number read from
            the ledger *after* the write: `spent` is `chapter_total`, and the
@@ -281,7 +276,7 @@ class TranslateStage:
                     ),
                 )
             )
-        _update_glossary(ctx, result, sent)
+        _update_glossary(ctx, sent)
         ctx.project.write_proposed(ctx.page.ordinal, _to_reading_indices(result, included))
 
     def is_done(self, ctx: PageContext) -> bool:

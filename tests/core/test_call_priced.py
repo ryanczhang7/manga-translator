@@ -55,7 +55,7 @@ from mangatl.domain.events import (
     RunFinished,
     StageFinished,
 )
-from mangatl.domain.glossary import ProposedTerm
+from mangatl.domain.glossary import GlossaryEntry, ProposedTerm
 from mangatl.domain.line import OcrResult
 from mangatl.domain.money import Usd
 from mangatl.domain.rates import price
@@ -65,7 +65,7 @@ from mangatl.pipeline.runner import BUDGET, run_chapter
 from mangatl.pipeline.stage import PageContext
 from mangatl.pipeline.stages import build_stages
 from mangatl.pipeline.translate_stage import TranslateStage, budget_for
-from mangatl.store.glossary import read_entries
+from mangatl.store.glossary import read_entries, upsert
 from mangatl.store.intake import read_chapter
 from mangatl.store.ledger import chapter_call_costs, chapter_total, record_call
 from mangatl.store.project import Project, create_project, project_dir_for
@@ -626,46 +626,58 @@ def test_the_stage_emits_through_its_context_after_the_bill_and_before_the_propo
 ) -> None:
     """`TranslateStage.run` called directly, with a recording `emit` that looks
     at the store **at the moment it is called**: the ledger row is already there,
-    and neither the glossary term nor the proposals are yet ("immediately after
+    and neither the glossary write nor the proposals are yet ("immediately after
     `record_call` and before the glossary and proposal writes"). After `run`
-    returns, both are there - the control that the snapshot could see them."""
-    fixture.project.write_regions(0, _Detector(fixture.mask)(b""))
-    fixture.project.write_lines(0, (OcrResult(text="ja-0"), OcrResult(text="ja-1")))
+    returns, both are there - the control that the snapshot could see them.
+
+    MT-106: the glossary write is now a sighting, not a merge - the page's
+    proposals (a re-rendering and a new term) never reach the glossary - so the
+    evidence is a seeded entry on **page 1**, whose OCR contains it: last seen
+    on 0 when `CallPriced` is emitted, on 1 after `run`. Page 1 rather than 0
+    because a sighting on page 0 cannot move an entry already seen there. The
+    projection is page 0's with one page fewer after it: the same single ledger
+    row, `pages_remaining - 1 == 1`."""
+    fixture.project.write_regions(1, _Detector(fixture.mask)(b""))
+    fixture.project.write_lines(1, (OcrResult(text="ja-1 さくら"), OcrResult(text="ja-2")))
     run_id = fixture.open_run()
-    term = ProposedTerm("さくら", "Sakura", "name")
-    seen: list[tuple[RunEvent, list[int], tuple[str | None, ...], int]] = []
+    seeded = GlossaryEntry("さくら", "Sakura", "name", 0, 0, "model")
+    upsert(fixture.project, seeded)
+    terms = (ProposedTerm("さくら", "Sakura-chan", "name"), ProposedTerm("翔", "Kakeru", "name"))
+    seen: list[tuple[RunEvent, list[int], tuple[str | None, ...], list[GlossaryEntry]]] = []
 
     def emit(event: RunEvent) -> None:
         seen.append(
             (
                 event,
                 _ledger_micro(fixture.db_path),
-                fixture.project.read_proposed(0),
-                len(read_entries(fixture.project)),
+                fixture.project.read_proposed(1),
+                read_entries(fixture.project),
             )
         )
 
-    page = fixture.project.pages()[0]
+    page = fixture.project.pages()[1]
     stage = TranslateStage(
         page_estimate=BOOTSTRAP_PAGE_ESTIMATE,
-        translate=_Translator((_Reply(_OPUS, _OPUS_USAGE, (term,)),)),
+        translate=_Translator((_Reply(_OPUS, _OPUS_USAGE, terms),)),
     )
     stage.run(PageContext(project=fixture.project, page=page, run_id=run_id, emit=emit))
 
     assert len(seen) == 1, f"the stage emitted {len(seen)} events for one priced call"
     event, ledger_then, proposed_then, glossary_then = seen[0]
     assert event == CallPriced(
-        ordinal=0,
+        ordinal=1,
         spent=_usd(_OPUS_MICRO),
         ceiling=DEFAULT_CEILING,
-        projection=_projection(_ESTIMATE_MICRO, 2, "estimate", 1),
+        projection=_projection(_ESTIMATE_MICRO, 1, "estimate", 1),
     )
     assert ledger_then == [_OPUS_MICRO], "CallPriced was emitted before record_call"
     assert proposed_then == (None, None), "CallPriced was emitted after write_proposed"
-    assert glossary_then == 0, "CallPriced was emitted after the glossary write"
+    assert glossary_then == [seeded], "CallPriced was emitted after the glossary write"
     # The control: the snapshot could have seen them.
-    assert fixture.project.read_proposed(0) == ("EN(ja-0)", "EN(ja-1)")
-    assert len(read_entries(fixture.project)) == 1
+    assert fixture.project.read_proposed(1) == ("EN(ja-1 さくら)", "EN(ja-2)")
+    assert read_entries(fixture.project) == [
+        GlossaryEntry("さくら", "Sakura", "name", 0, 1, "model")
+    ], "the page's proposals reached the glossary, or its sighting was not marked"
 
 
 def test_the_stage_emits_nothing_for_a_result_with_no_call(fixture: _Fixture) -> None:

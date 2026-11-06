@@ -116,11 +116,7 @@ Continuity across pages:
 - You may also be given a glossary of names, honorifics and place names this \
 chapter has already settled on, and the previous page's English in reading \
 order. Use the glossary's renderings exactly, every time, and read the previous \
-page for who is speaking and what is being continued.
-- When a character name, an honorific or a place name appears on this page that \
-the glossary does not have, add it under the "glossary" key: its Japanese as \
-written, the English you used, and a note of "name", "honorific" or "place" \
-("" for anything else). Do not repeat terms the glossary already has."""
+page for who is speaking and what is being continued."""
 
 
 def prepare_page_image(page_image: bytes) -> tuple[bytes, int]:
@@ -183,8 +179,9 @@ def context_text(context: PromptContext) -> str:
 
 
 def response_schema(region_count: int) -> dict[str, Any]:
-    """The JSON schema of one page's answer: a string per reading index, plus
-    the optional `glossary` array (MT-011 C-5, MT-014 C-3).
+    """The JSON schema of one page's answer: a string per reading index and
+    nothing else (MT-011 C-5). A page proposes no glossary terms (MT-106): the
+    pre-pass does, so `glossary` is forbidden like any other unknown key.
 
     **No `required`**, and that is what makes an omitted region a real case
     (MT-011 AC-5): a compliant model may omit a region only if the schema lets
@@ -199,7 +196,6 @@ def response_schema(region_count: int) -> dict[str, Any]:
                 "description": f"The English for the region at reading index {index}.",
             }
             for index in range(region_count)
-        }
-        | {GLOSSARY_KEY: GLOSSARY_SCHEMA},
+        },
         "additionalProperties": False,
     }

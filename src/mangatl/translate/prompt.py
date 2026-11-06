@@ -87,8 +87,7 @@ def build_request(
     `[image, context, listing]`, the context being the non-empty halves of the
     glossary and rolling blocks joined by a blank line. Nothing page-specific
     enters `system` (AC-6), and no image but the current page's is ever sent
-    (AC-4). The response schema carries the `glossary` property the model
-    proposes terms under; it is not required.
+    (AC-4).
     """
     prepared, est_tokens = prepare_page_image(page_image)
     context_blocks: list[dict[str, Any]] = (
