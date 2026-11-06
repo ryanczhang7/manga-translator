@@ -58,8 +58,18 @@ from pathlib import Path
 import pytest
 
 from mangatl.cli import main
-from mangatl.pipeline.stage import PageContext, Stage
+from mangatl.domain.budget import Decision, Projection
+from mangatl.domain.events import (
+    BatchCollected,
+    CallPriced,
+    CorrectionsApplied,
+    PageStarted,
+    RunFinished,
+)
+from mangatl.domain.money import Usd
+from mangatl.pipeline.stage import BudgetRefused, PageContext, Stage
 from mangatl.store.project import PAGE_DONE, project_dir_for
+from mangatl.translate.provider import Selection
 
 _SOURCE_PAGES: tuple[tuple[str, int, int], ...] = (
     ("p1.png", 7, 3),
@@ -147,6 +157,9 @@ class _CompositionRoot:
         #: MT-107: `context_mode=` as `main` passed it, or `None` where it passed
         #: none - the sentinel C-14's reasoning asks for (see above).
         self.context_modes: list[object] = []
+        #: MT-140: the `build_consistency` stand-in the fixture installs beside
+        #: this one, answering `None` until a test hands it a step.
+        self.consistency = _ConsistencyRoot()
 
     def __call__(
         self,
@@ -162,6 +175,59 @@ class _CompositionRoot:
         self.context_modes.append(context_mode)
         reading = self.reading if self.reading is not None else (self.stage,)
         return _pipeline(reading, self.prelude, self.after_prelude)
+
+
+class _ConsistencyRoot:
+    """MT-140: a stand-in for `mangatl.compose.build_consistency`, at the seam
+    `mangatl.cli.build_consistency` (PO-1), the shape of `_CompositionRoot`.
+
+    Records every selection it was asked with and, per ask, whatever
+    `observe()` returns at that moment - the hook the order assertions use
+    (did the project exist yet, had the stage list or the collector been
+    built). Answers `None` (the real one's answer for `anthropic`) until a
+    test calls `hand_out(...)`; from then on answers `self.step`, which records
+    the `run_id` it was called with, appends `"consistency"` to `log` when a
+    log is given, emits `emits` through the `emit` it was handed, in order,
+    and then raises `raises` if one is set."""
+
+    def __init__(self) -> None:
+        self.selections: list[object] = []
+        self.observed: list[object] = []
+        self.observe: Callable[[], object] = lambda: None
+        self.answers_a_step = False
+        self.runs: list[int] = []
+        self.emits: tuple[object, ...] = ()
+        self.raises: BaseException | None = None
+        self.log: list[object] | None = None
+        #: the one step object handed out, so `is` can say "this step" - a
+        #: fresh `self.step` bound method on each access would not be.
+        self.handed: Callable[[object, int, Callable[[object], None]], None] = self.step
+
+    def hand_out(
+        self,
+        *,
+        emits: Sequence[object] = (),
+        raises: BaseException | None = None,
+        log: list[object] | None = None,
+    ) -> None:
+        self.answers_a_step = True
+        self.emits = tuple(emits)
+        self.raises = raises
+        self.log = log
+
+    def step(self, project: object, run_id: int, emit: Callable[[object], None]) -> None:
+        self.runs.append(run_id)
+        if self.log is not None:
+            self.log.append("consistency")
+        for event in self.emits:
+            emit(event)
+        if self.raises is not None:
+            raise self.raises
+
+    def __call__(self, selection: object) -> object:
+        self.selections.append(selection)
+        self.observed.append(self.observe())
+        return self.handed if self.answers_a_step else None
 
 
 def _pipeline(
@@ -243,8 +309,18 @@ def models_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def composition_root(monkeypatch: pytest.MonkeyPatch) -> _CompositionRoot:
+    """`build_pipeline` replaced - and, from MT-140, `build_consistency` too.
+
+    **MT-140: the consistency seam answers `None` by default.** The real
+    `build_consistency` builds a `GeminiClient` and a live step for any Gemini
+    selection, and several tests here select Gemini; a real step at the end
+    of their run would make a network call. A test that wants a pass
+    configures `root.consistency` (`_ConsistencyRoot`, below). `raising=False`:
+    `mangatl.cli` has no `build_consistency` before MT-140's GREEN, and the
+    older tests must keep running in RED."""
     root = _CompositionRoot()
     monkeypatch.setattr("mangatl.cli.build_pipeline", root)
+    monkeypatch.setattr("mangatl.cli.build_consistency", root.consistency, raising=False)
     return root
 
 
@@ -1742,10 +1818,19 @@ def test_a_collect_run_hands_collect_volume_the_batch_tier_page_estimate(
     seen: list[tuple[str, object]] = []
 
     def recording(
-        project: object, job: object, collect: object, page_estimate: object, emit: object
+        project: object,
+        job: object,
+        collect: object,
+        page_estimate: object,
+        emit: object,
+        *,
+        postlude: object = None,
     ) -> object:
+        # MT-140: `_collect_pending` passes `postlude=` on every call; the
+        # recorder accepts it and forwards it, so this test pins the estimate
+        # and nothing about the pass.
         seen.append((job.provider_job_id, page_estimate))  # type: ignore[attr-defined]
-        return collect_volume(project, job, collect, page_estimate, emit)
+        return collect_volume(project, job, collect, page_estimate, emit, postlude=postlude)
 
     monkeypatch.setattr("mangatl.cli.collect_volume", recording)
 
@@ -1874,3 +1959,648 @@ def test_the_sync_flag_is_one_the_parser_tells_the_user_about(
 
     assert exited.value.code == 0
     assert "--sync" in capsys.readouterr().out, "mangatl-run --help does not mention --sync"
+
+
+# -- MT-140: the consistency pass, after a run and after a collection -----------
+#
+# The seam is `mangatl.cli.build_consistency` (PO-1), replaced by the
+# `_ConsistencyRoot` the `composition_root` fixture installs - `None` by
+# default, a recording step once a test calls `hand_out(...)`. `run_chapter`
+# and `collect_volume` are the REAL ones: they are what runs the step as a
+# postlude (MT-115), so the lines, the exit code and the store are the real
+# consequences of the step `main` handed over. `collect_volume` is wrapped by a
+# recorder only where AC-5's "every call receives the step as `postlude=`" is
+# asserted, because the real one runs the step on the last job alone and the
+# step's own call record cannot say what the earlier calls were handed.
+#
+# RED: `mangatl.cli` never asks for the step, so every case that needs the pass
+# to run, or the seam to have been consulted, fails on that - not on a fixture.
+
+_PASS_LINE_2_1 = "Consistency pass: 2 lines corrected, 1 reviewed line left alone"
+_PASS_NOT_RUN = (
+    "mangatl-run: consistency pass not run: the budget would be exceeded. Every page"
+    " is translated and kept; raise the budget and run again to finish."
+)
+_PASS_FAILED_BOOM = (
+    "mangatl-run: consistency pass failed: RuntimeError: boom. Every page is"
+    " translated and kept; run again to retry it."
+)
+_FOUR_PAGE_BATCH_LINE = "batch: 4 pages collected, 0 failed, 0 jobs still pending"
+
+
+def _corrections(
+    applied: int, skipped: int, unchanged: int, run: int, refused: int
+) -> CorrectionsApplied:
+    return CorrectionsApplied(
+        applied=applied,
+        skipped_user_lines=skipped,
+        unchanged_returned=unchanged,
+        chunks_run=run,
+        chunks_refused=refused,
+    )
+
+
+def _chapter_call_priced() -> CallPriced:
+    """A chapter-level bill (`ordinal=None`), as the pass's own calls are."""
+    return CallPriced(
+        ordinal=None,
+        spent=Usd.from_micro(1_000),
+        ceiling=Usd.from_micro(500_000),
+        projection=Projection(
+            next_call=Usd.from_micro(0),
+            remaining_chapter=Usd.from_micro(0),
+            basis="estimate",
+            sample_count=0,
+        ),
+    )
+
+
+def _budget_refused() -> BudgetRefused:
+    """Any refused decision will do (contract): the CLI reads only the type."""
+    return BudgetRefused(
+        Decision(
+            permitted=False,
+            reason="the consistency pass would exceed the budget",
+            spent=Usd.from_micro(0),
+            ceiling=Usd.from_micro(1),
+            projection=Projection(
+                next_call=Usd.from_micro(60_000),
+                remaining_chapter=Usd.from_micro(60_000),
+                basis="estimate",
+                sample_count=0,
+            ),
+        )
+    )
+
+
+def _boom() -> RuntimeError:
+    return RuntimeError("boom")
+
+
+def _run_ids(source_dir: Path) -> list[object]:
+    rows = _raw(project_dir_for(source_dir) / "project.db", "SELECT id FROM run ORDER BY id")
+    return [run_id for (run_id,) in rows]
+
+
+def _record_reporter(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Every event `main`'s reporter receives, in order, the real reporter
+    still printing. `mangatl.cli._reporter` is the name the contract gives the
+    per-page path's emit (`_reporter(filenames)`)."""
+    import mangatl.cli as cli
+
+    real = cli._reporter
+    events: list[object] = []
+
+    def reporter(filenames: dict[int, str]) -> Callable[[object], None]:
+        report = real(filenames)
+
+        def both(event: object) -> None:
+            events.append(event)
+            report(event)  # type: ignore[arg-type]
+
+        return both
+
+    monkeypatch.setattr("mangatl.cli._reporter", reporter)
+    return events
+
+
+class _FailingOn:
+    """A final-pass stage that raises `error` on `ordinal`; on every other
+    page it does nothing, and the runner marks the page done."""
+
+    name = "failing"
+
+    def __init__(self, ordinal: int, error: Exception) -> None:
+        self.ordinal = ordinal
+        self.error = error
+
+    def run(self, ctx: PageContext) -> None:
+        if ctx.page.ordinal == self.ordinal:
+            raise self.error
+
+    def is_done(self, ctx: PageContext) -> bool:
+        return ctx.project.page_status(ctx.page.ordinal) == PAGE_DONE
+
+
+def _pass_lines(lines: Sequence[str]) -> list[str]:
+    return [line for line in lines if line.startswith("Consistency")]
+
+
+# -- AC-1: the per-page path asks for the step once and runs it once -------------
+
+
+def test_the_run_asks_for_the_pass_once_with_its_selection_after_the_pipeline_before_the_project(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**AC-1.** `build_consistency` once, with the Gemini `Selection` `main`
+    made; when it is asked, `build_pipeline` has been asked once and the
+    project does not exist yet (a refusal leaves no `.mtproj` behind)."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes, _SOURCE_PAGES[:3])
+    consistency = composition_root.consistency
+    consistency.observe = lambda: (
+        len(composition_root.models_dirs),
+        project_dir_for(source_dir).exists(),
+    )
+    consistency.hand_out(emits=[_corrections(2, 1, 0, 1, 0)])
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    assert consistency.selections == [Selection("gemini", _GEMINI_KEY)], (
+        f"main asked build_consistency with {consistency.selections!r}; AC-1 asks it"
+        " once, with the selection main made"
+    )
+    assert consistency.observed == [(1, False)], (
+        "when build_consistency was asked, (build_pipeline calls so far, project"
+        f" exists) was {consistency.observed}; AC-1 wants it after the pipeline and"
+        " before the project is created"
+    )
+
+
+def test_the_run_runs_the_pass_once_with_its_run_id_after_the_final_pass_before_it_finishes(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**AC-1.** A two-pass run (MT-130) over three pages: the step runs once,
+    with the run's id, after the translating pass's last page and before
+    `RunFinished`; the `CallPriced(ordinal=None)` it emits reaches the
+    reporter, because the step's emit stream is the run's."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes, _SOURCE_PAGES[:3])
+    log = _two_passes(composition_root)
+    priced = _chapter_call_priced()
+    composition_root.consistency.hand_out(emits=[priced, _corrections(2, 1, 0, 1, 0)], log=log)
+    events = _record_reporter(monkeypatch)
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    consistency = composition_root.consistency
+    assert consistency.runs == _run_ids(source_dir), (
+        f"the step ran with run ids {consistency.runs}; the chapter's runs are"
+        f" {_run_ids(source_dir)} - AC-1 runs it exactly once, with the run's id"
+    )
+    assert log[-4:] == [("translate", 0), ("translate", 1), ("translate", 2), "consistency"], (
+        f"the run went {log}; AC-1 runs the pass after every page of the final pass"
+    )
+    assert log.count("consistency") == 1, f"the run went {log}"
+    priced_at = [i for i, event in enumerate(events) if event is priced]
+    finished_at = [i for i, event in enumerate(events) if isinstance(event, RunFinished)]
+    last_page_at = max(i for i, event in enumerate(events) if isinstance(event, PageStarted))
+    assert len(priced_at) == 1, (
+        "the CallPriced(ordinal=None) the step emitted did not reach the reporter"
+        f" exactly once: {priced_at}"
+    )
+    assert len(finished_at) == 1 and last_page_at < priced_at[0] < finished_at[0], (
+        f"last page at {last_page_at}, the step's bill at {priced_at}, RunFinished at"
+        f" {finished_at}; AC-1 has the pass between the final page and RunFinished"
+    )
+
+
+# -- AC-2: the line a pass that ran prints ------------------------------------
+
+
+def test_a_pass_that_ran_prints_one_line_after_the_pages_and_before_the_bake_line(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**AC-2.** `CorrectionsApplied(2, 1, 0, 1, 0)`: stdout is the three page
+    lines, then exactly `Consistency pass: 2 lines corrected, 1 reviewed line
+    left alone`, then the bake line; the output folder is written; exit 0."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes, _SOURCE_PAGES[:3])
+    composition_root.consistency.hand_out(emits=[_corrections(2, 1, 0, 1, 0)])
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 0, f"exit {code}; stderr {captured.err!r}"
+    lines = _lines(captured.out)
+    assert lines[:4] == ["[1/3] p1.png", "[2/3] p2.png", "[3/3] p3.png", _PASS_LINE_2_1], (
+        f"stdout was {lines}"
+    )
+    assert len(lines) == 5, f"stdout was {lines}"
+    assert lines[4].startswith(f"3 pages written to {_output_dir_for(source_dir)};"), lines[4]
+    assert _output_dir_for(source_dir).is_dir()
+
+
+def test_a_pass_stopped_part_way_says_so_and_the_output_is_still_written(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**AC-2.** `CorrectionsApplied(1, 0, 0, 1, 1)` is not an abort: the
+    part-way line, the bake line after it, the folder written, exit 0."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes, _SOURCE_PAGES[:3])
+    composition_root.consistency.hand_out(emits=[_corrections(1, 0, 0, 1, 1)])
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 0, f"exit {code}; stderr {captured.err!r}"
+    lines = _lines(captured.out)
+    assert lines[3:4] == [
+        "Consistency pass stopped part way: 1 line corrected, 1 of 2 requests made"
+        " before the budget was reached. Raise the budget and run again to finish it."
+    ], f"stdout was {lines}"
+    assert len(lines) == 5 and lines[4].startswith("3 pages written to "), lines
+    assert _output_dir_for(source_dir).is_dir()
+    assert captured.err == ""
+
+
+_PART_WAY_TAIL = " before the budget was reached. Raise the budget and run again to finish it."
+
+#: AC-2's number words: singular at exactly 1, plural otherwise, for both
+#: counts; `unchanged_returned` never shown (PO-2).
+_PASS_LINES: dict[str, tuple[tuple[int, int, int, int, int], str]] = {
+    "nothing-changed": (
+        (0, 0, 0, 1, 0),
+        "Consistency pass: 0 lines corrected, 0 reviewed lines left alone",
+    ),
+    "one-and-one": (
+        (1, 1, 0, 1, 0),
+        "Consistency pass: 1 line corrected, 1 reviewed line left alone",
+    ),
+    "two-and-two": (
+        (2, 2, 0, 2, 0),
+        "Consistency pass: 2 lines corrected, 2 reviewed lines left alone",
+    ),
+    "unchanged-is-not-shown": ((2, 1, 5, 1, 0), _PASS_LINE_2_1),
+    "part-way-plural": (
+        (2, 0, 0, 3, 2),
+        "Consistency pass stopped part way: 2 lines corrected, 3 of 5 requests made"
+        + _PART_WAY_TAIL,
+    ),
+    "part-way-none-corrected": (
+        (0, 0, 0, 1, 1),
+        "Consistency pass stopped part way: 0 lines corrected, 1 of 2 requests made"
+        + _PART_WAY_TAIL,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_PASS_LINES))
+def test_the_pass_line_is_singular_at_exactly_one_and_plural_otherwise(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """**AC-2.** `1 line`, `0 lines`, `2 lines`; `1 reviewed line`, `2
+    reviewed lines`; `unchanged_returned` is not shown (PO-2)."""
+    counts, expected = _PASS_LINES[case]
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes, _SOURCE_PAGES[:3])
+    composition_root.consistency.hand_out(emits=[_corrections(*counts)])
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    passes = _pass_lines(_lines(capsys.readouterr().out))
+    assert passes == [expected], f"{counts} printed {passes}"
+
+
+# -- AC-3: a refused or failed pass ends the invocation ------------------------
+
+
+@pytest.mark.parametrize(
+    ("raised", "expected"),
+    [(_budget_refused, _PASS_NOT_RUN), (_boom, _PASS_FAILED_BOOM)],
+    ids=["budget-refused", "runtime-error"],
+)
+def test_a_pass_that_does_not_complete_keeps_the_pages_writes_nothing_and_says_how_to_finish(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+    raised: Callable[[], BaseException],
+    expected: str,
+) -> None:
+    """**AC-3.** Every page `done`, no output folder, exit 1, stdout the page
+    lines alone (no pass line, no `pages written` line), and stderr exactly
+    one line - `not run` for `BudgetRefused`, `failed: RuntimeError: boom`
+    otherwise - with no traceback."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes, _SOURCE_PAGES[:3])
+    composition_root.consistency.hand_out(raises=raised())
+
+    escaped: BaseException | None = None
+    code = None
+    try:
+        code = main([str(source_dir), "--models", str(models_dir)])
+    except Exception as error:
+        escaped = error
+
+    captured = capsys.readouterr()
+    assert escaped is None, f"main let {type(escaped).__name__}: {escaped} escape"
+    assert code == 1, f"exit {code}; stderr {captured.err!r}"
+    assert captured.err.splitlines() == [expected], f"stderr was {captured.err!r}"
+    assert _lines(captured.out) == ["[1/3] p1.png", "[2/3] p2.png", "[3/3] p3.png"], (
+        f"stdout was {captured.out!r}"
+    )
+    assert "Traceback" not in captured.err + captured.out
+    assert _page_statuses(source_dir) == [PAGE_DONE] * 3
+    assert not _output_dir_for(source_dir).exists(), "a run whose pass did not run was baked"
+
+
+def test_a_run_aborted_by_a_page_of_the_final_pass_still_reads_run_aborted_and_skips_the_pass(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**AC-3, the negative control.** A stage raising `RuntimeError("boom")`
+    on page 2 - the same reason text a failed pass would carry - is a page's
+    abort: `run aborted: RuntimeError: boom`, exit 1, and the step `main` was
+    handed is never called."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes, _SOURCE_PAGES[:3])
+    composition_root.reading = (_FailingOn(1, RuntimeError("boom")),)
+    consistency = composition_root.consistency
+    consistency.hand_out(emits=[_corrections(2, 1, 0, 1, 0)])
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 1, f"exit {code}"
+    assert captured.err.splitlines() == ["mangatl-run: run aborted: RuntimeError: boom"], (
+        f"stderr was {captured.err!r}"
+    )
+    assert consistency.selections == [Selection("gemini", _GEMINI_KEY)], (
+        "the seam was never consulted, so 'the step is not called' would hold of a"
+        f" CLI with no pass at all: {consistency.selections!r}"
+    )
+    assert consistency.runs == [], f"the pass ran after a page aborted: {consistency.runs}"
+    assert _pass_lines(_lines(captured.out)) == []
+
+
+# -- AC-4: no pass, no line --------------------------------------------------
+
+
+def test_with_no_translate_the_pass_is_never_asked_for_and_no_line_is_printed(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**AC-4.** `--no-translate` selects nothing, so `build_consistency` is
+    not called at all; the output is written, exit 0, no pass line. A Gemini
+    key is set and the seam would hand out a step, so a CLI that asked the
+    seam regardless would be seen."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes, _SOURCE_PAGES[:3])
+    consistency = composition_root.consistency
+    consistency.hand_out(emits=[_corrections(2, 1, 0, 1, 0)])
+
+    code = main([str(source_dir), "--models", str(models_dir), "--no-translate"])
+
+    captured = capsys.readouterr()
+    assert code == 0, f"exit {code}; stderr {captured.err!r}"
+    assert consistency.selections == [], (
+        f"--no-translate asked build_consistency with {consistency.selections!r}"
+    )
+    assert consistency.runs == []
+    assert _pass_lines(_lines(captured.out)) == []
+    assert _output_dir_for(source_dir).is_dir()
+
+
+def test_a_selection_with_no_pass_prints_no_line_and_writes_the_output(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+) -> None:
+    """**AC-4.** The file's Anthropic selection, the seam answering `None` (as
+    the real one does for `anthropic`): it IS asked - once, with that
+    selection - and then no pass line, the output written, exit 0."""
+    source_dir = _build_source(tmp_path, png_bytes, _SOURCE_PAGES[:3])
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 0, f"exit {code}; stderr {captured.err!r}"
+    assert composition_root.consistency.selections == [Selection("anthropic", _DEFAULT_KEY)], (
+        f"the seam was asked with {composition_root.consistency.selections!r}; with no"
+        " ask, 'no line' would hold of a CLI that has no pass at all"
+    )
+    lines = _lines(captured.out)
+    assert _pass_lines(lines) == [], lines
+    assert len(lines) == 4 and lines[3].startswith("3 pages written to "), lines
+    assert _output_dir_for(source_dir).is_dir()
+
+
+# -- AC-5: the collect path hands every collection the step ----------------------
+
+
+def _two_pending_jobs(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    monkeypatch: pytest.MonkeyPatch,
+    second: object | None = None,
+) -> tuple[Path, _CollectorRoot]:
+    """Four pages under two pending jobs, `batches/a` (0..1) and `batches/b`
+    (2..3), and a Gemini-only environment. `second` replaces `batches/b`'s
+    answer (`_still_pending()` keeps it pending)."""
+    _gemini_only(monkeypatch)
+    source_dir = _build_source(tmp_path, png_bytes)
+    _project_with_jobs(source_dir, one_bit_png, [("batches/a", 0, 1), ("batches/b", 2, 3)])
+    collector_root = _collector_root(
+        monkeypatch,
+        {
+            "batches/a": _answer_for([0, 1]),
+            "batches/b": _answer_for([2, 3]) if second is None else second,
+        },
+    )
+    return source_dir, collector_root
+
+
+def test_a_collection_asks_for_the_pass_once_after_the_collector_and_before_any_job(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**AC-5.** `build_consistency` once with the Gemini selection; when it is
+    asked the collector has been built once and no job collected."""
+    source_dir, collector_root = _two_pending_jobs(tmp_path, png_bytes, one_bit_png, monkeypatch)
+    consistency = composition_root.consistency
+    consistency.observe = lambda: (len(collector_root.selections), len(collector_root.calls))
+    consistency.hand_out(emits=[_corrections(2, 1, 0, 1, 0)])
+
+    main([str(source_dir), "--models", str(models_dir)])
+
+    assert consistency.selections == [Selection("gemini", _GEMINI_KEY)], (
+        f"the collect path asked build_consistency with {consistency.selections!r}"
+    )
+    assert consistency.observed == [(1, 0)], (
+        f"(collectors built, jobs collected) when it was asked: {consistency.observed};"
+        " AC-5 wants it after build_batch_collector and before any job"
+    )
+
+
+def test_every_collection_is_handed_the_step_and_it_runs_once_after_the_last_job(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**AC-5.** `mangatl.cli.collect_volume` wrapped around the real one: both
+    calls receive the step `build_consistency` returned, as `postlude=`; the
+    step runs exactly once, with the jobs' run id, after the second job's
+    `BatchCollected` reached the emit stream."""
+    from mangatl.pipeline.batch import collect_volume
+
+    source_dir, _ = _two_pending_jobs(tmp_path, png_bytes, one_bit_png, monkeypatch)
+    log: list[object] = []
+    consistency = composition_root.consistency
+    consistency.hand_out(emits=[_corrections(2, 1, 0, 1, 0)], log=log)
+    handed: list[object] = []
+    missing = object()
+
+    def recording(
+        project: object,
+        job: object,
+        collect: object,
+        page_estimate: object,
+        emit: Callable[[object], None],
+        **keywords: object,
+    ) -> object:
+        handed.append(keywords.get("postlude", missing))
+
+        def logging(event: object) -> None:
+            if isinstance(event, BatchCollected):
+                log.append("collected")
+            emit(event)
+
+        return collect_volume(project, job, collect, page_estimate, logging, **keywords)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("mangatl.cli.collect_volume", recording)
+
+    assert main([str(source_dir), "--models", str(models_dir)]) == 0
+
+    assert len(handed) == 2 and all(p is consistency.handed for p in handed), (
+        f"collect_volume was handed postlude={handed!r}; AC-5 hands every call the step"
+        " build_consistency returned"
+    )
+    assert log == ["collected", "collected", "consistency"], f"the collection went {log}"
+    assert consistency.runs == _run_ids(source_dir), (
+        f"the step ran with {consistency.runs}; the jobs' run is {_run_ids(source_dir)}"
+    )
+
+
+def test_a_collection_that_finishes_the_chapter_prints_the_batch_line_then_the_pass_line(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**AC-5.** The real `collect_volume`: stdout is exactly two lines, the
+    `batch:` line then AC-2's pass line, nothing on stderr, exit 0."""
+    source_dir, _ = _two_pending_jobs(tmp_path, png_bytes, one_bit_png, monkeypatch)
+    composition_root.consistency.hand_out(emits=[_corrections(2, 1, 0, 1, 0)])
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 0, f"exit {code}; stderr {captured.err!r}"
+    assert _lines(captured.out) == [_FOUR_PAGE_BATCH_LINE, _PASS_LINE_2_1], (
+        f"stdout was {captured.out!r}"
+    )
+    assert captured.err == ""
+    assert composition_root.consistency.runs == _run_ids(source_dir)
+
+
+def test_with_a_job_still_pending_the_pass_does_not_run_and_the_output_is_todays(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**AC-5, the negative control.** `batches/b` still pending after the
+    poll: the step was handed over (the seam was asked) and is not called;
+    stdout is the one `batch:` line; exit 0."""
+    source_dir, _ = _two_pending_jobs(
+        tmp_path, png_bytes, one_bit_png, monkeypatch, second=_still_pending()
+    )
+    consistency = composition_root.consistency
+    consistency.hand_out(emits=[_corrections(2, 1, 0, 1, 0)])
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 0, f"exit {code}; stderr {captured.err!r}"
+    assert consistency.selections == [Selection("gemini", _GEMINI_KEY)], (
+        "the seam was never consulted, so 'the step is not called' would hold of a"
+        f" CLI with no pass at all: {consistency.selections!r}"
+    )
+    assert consistency.runs == [], f"the pass ran with a job still pending: {consistency.runs}"
+    assert _lines(captured.out) == ["batch: 2 pages collected, 0 failed, 1 jobs still pending"]
+
+
+# -- AC-6: a refused or failed pass after a collection ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("raised", "expected"),
+    [(_budget_refused, _PASS_NOT_RUN), (_boom, _PASS_FAILED_BOOM)],
+    ids=["budget-refused", "runtime-error"],
+)
+def test_a_pass_that_does_not_complete_after_a_collection_keeps_the_jobs_and_exits_one(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    capsys: pytest.CaptureFixture[str],
+    models_dir: Path,
+    composition_root: _CompositionRoot,
+    monkeypatch: pytest.MonkeyPatch,
+    raised: Callable[[], BaseException],
+    expected: str,
+) -> None:
+    """**AC-6.** The jobs `collected`, the pages `done`, stdout the `batch:`
+    line alone, stderr exactly AC-3's line, exit 1, no traceback."""
+    source_dir, _ = _two_pending_jobs(tmp_path, png_bytes, one_bit_png, monkeypatch)
+    composition_root.consistency.hand_out(raises=raised())
+
+    code = main([str(source_dir), "--models", str(models_dir)])
+
+    captured = capsys.readouterr()
+    assert code == 1, f"exit {code}; stderr {captured.err!r}"
+    assert captured.err.splitlines() == [expected], f"stderr was {captured.err!r}"
+    assert _lines(captured.out) == [_FOUR_PAGE_BATCH_LINE], f"stdout was {captured.out!r}"
+    assert "Traceback" not in captured.err + captured.out
+    assert _job_states(source_dir) == [("batches/a", "collected"), ("batches/b", "collected")]
+    assert _page_statuses(source_dir) == [PAGE_DONE] * 4
