@@ -508,11 +508,12 @@ def test_the_response_schema_names_the_pages_indices_and_requires_none_of_them()
 
     assert schema["type"] == "object"
     assert schema["additionalProperties"] is False
-    # MT-014 C-3 adds exactly one non-index property, `glossary`, which can
-    # never collide with a reading index because an index is always digits.
-    regions = [name for name in schema["properties"] if name != "glossary"]
-    assert set(schema["properties"]) == {"0", "1", "2", "3", "glossary"}
-    assert sorted(regions, key=int) == ["0", "1", "2", "3"]
+    # MT-014 C-3 added one non-index property, `glossary`; MT-106 removes it
+    # again (a page proposes no terms), so the properties are the indices only.
+    assert set(schema["properties"]) == {"0", "1", "2", "3"}, (
+        "the page schema names something other than the reading indices"
+        " (MT-106: no `glossary` property)"
+    )
     assert not schema.get("required"), "AC-5 turns on no region being required"
 
 
@@ -526,20 +527,9 @@ _GLOSSARY_BLOCK = "Glossary - use these renderings exactly:\nさくら = Sakura 
 _ROLLING_BLOCK = "Previous page, in reading order:\nWait up, Sakura!\nQZV rolls on."
 _BOTH = PromptContext(glossary_block=_GLOSSARY_BLOCK, rolling_block=_ROLLING_BLOCK)
 
-#: C-3's schema property, verbatim.
-_GLOSSARY_SCHEMA: dict[str, Any] = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "term_ja": {"type": "string"},
-            "term_en": {"type": "string"},
-            "note": {"type": "string", "enum": ["name", "honorific", "place", ""]},
-        },
-        "required": ["term_ja", "term_en", "note"],
-        "additionalProperties": False,
-    },
-}
+#: C-3's schema property was pinned verbatim here until MT-106 took it out of
+#: the page schema; its value is still pinned in `test_page_prompt.py`
+#: (`_GLOSSARY_SCHEMA_GOLDEN`), where the pre-pass's copy of it lives.
 
 
 def _content(request: dict[str, Any]) -> list[dict[str, Any]]:
@@ -675,28 +665,32 @@ def test_nothing_page_specific_is_in_or_before_the_cache_breakpoint() -> None:
 
 
 def test_the_system_prompt_tells_the_model_about_the_glossary() -> None:
-    """C-3: `_SYSTEM_PROMPT` gains stable text telling the model to follow the
-    glossary and to propose new terms under the `glossary` key. Pinned by the
-    key's name only - the wording is the implementer's - because a model never
-    told the key exists will never fill it, and AC-1 then has nothing to carry."""
+    """C-3: `_SYSTEM_PROMPT` carries stable text telling the model to follow the
+    glossary. Pinned by the word only - the wording is pinned to the character
+    in `test_page_prompt.py`. (MT-106 removed the bullet asking the model to
+    propose new terms under the `glossary` key; the first continuity bullet
+    still names the glossary, so this holds.)"""
     system_text = str(_request()["system"][0]["text"])
 
     assert "glossary" in system_text
 
 
-def test_the_response_schema_carries_the_glossary_property_c3_names() -> None:
-    """C-3's schema property, exactly, and **not** in a top-level `required`
-    (MT-011 AC-5: there is none). `additionalProperties: false` on each item is
-    what keeps a term the model invents a field for out of `parse_terms`."""
+def test_claudes_page_schema_no_longer_offers_a_glossary_property() -> None:
+    """MT-106 AC-1 through Claude's request (it supersedes MT-014 C-3's schema
+    property): a page proposes no terms, so the schema has no `glossary`, and
+    `additionalProperties: false` forbids the key rather than inviting it."""
     schema = _request()["output_config"]["format"]["schema"]
 
-    assert schema["properties"]["glossary"] == _GLOSSARY_SCHEMA
-    assert "glossary" not in (schema.get("required") or [])
+    assert "glossary" not in schema["properties"], (
+        "Claude's page request still offers a glossary array to fill"
+    )
+    assert schema["additionalProperties"] is False
+    assert "required" not in schema
 
 
-def test_a_page_with_no_regions_still_offers_the_glossary_property() -> None:
-    """The zero of zero-one-many for the schema: a page with no reading
-    indices has one property, `glossary`, and nothing else."""
+def test_a_page_with_no_regions_has_no_properties_at_all() -> None:
+    """The zero of zero-one-many for the schema, after MT-106: a page with no
+    reading indices has no property - not even `glossary`."""
     schema = _request(results=())["output_config"]["format"]["schema"]
 
-    assert set(schema["properties"]) == {"glossary"}
+    assert schema["properties"] == {}

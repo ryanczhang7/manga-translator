@@ -5,6 +5,14 @@ MT-014 C-8 and C-9. Covers **AC-1** end to end (page 0's proposal is in page
 English) and **AC-5** (page 1 carries nothing and does not fail), and the order
 C-9 fixes: `record_call` -> glossary -> `write_proposed`.
 
+**MT-106 amended this file in RED** ("pages stop proposing glossary terms"):
+the stage marks the glossary's terms seen and merges nothing a page proposes
+(AC-3). Every stage test that relied on a page's proposal reaching the glossary
+now seeds the glossary with `upsert`, as the pre-pass would have left it, and
+asserts the proposal is ignored; MT-014 AC-1's end-to-end test asserts the
+*chapter's* glossary reaches page 2. AC-3 itself runs on a four-page chapter
+(`chapter_of_four`), so its page is ordinal 3.
+
 **Why `pipeline` and not `translate`** (C-8, PO-5): the caller is
 `TranslateStage`, which may not import `mangatl.translate` at all under the
 *"Only translate imports anthropic"* contract. `pipeline` may import `store`
@@ -29,6 +37,7 @@ from __future__ import annotations
 import ast
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -112,14 +121,55 @@ class _Chapter:
 def chapter(
     tmp_path: Path, png_bytes: Callable[..., bytes], one_bit_png: Callable[..., bytes]
 ) -> Iterator[_Chapter]:
+    with _open_chapter(tmp_path, png_bytes, one_bit_png, _SOURCE_PAGES, _OCR) as opened:
+        yield opened
+
+
+#: MT-106 AC-3's chapter: the target page is **ordinal 3**, so a `mark_seen`
+#: or `merge` handed the wrong ordinal (0, or the loop index of a three-page
+#: fixture) cannot pass by coincidence. さくら and ケンジ are on page 3; 東京 is
+#: only on page 1.
+_SOURCE_PAGES_OF_FOUR: tuple[tuple[str, int, int], ...] = (
+    *_SOURCE_PAGES,
+    ("p4.png", 60, 50),
+)
+_OCR_OF_FOUR: tuple[tuple[str, str], ...] = (
+    ("さくら、待って!", "どこへ行くの?"),
+    ("東京タワーだ", "家へ。"),
+    ("行くぞ", "走れ!"),
+    ("さくら!", "ケンジはどこ?"),
+)
+
+
+@pytest.fixture
+def chapter_of_four(
+    tmp_path: Path, png_bytes: Callable[..., bytes], one_bit_png: Callable[..., bytes]
+) -> Iterator[_Chapter]:
+    with _open_chapter(
+        tmp_path, png_bytes, one_bit_png, _SOURCE_PAGES_OF_FOUR, _OCR_OF_FOUR
+    ) as opened:
+        yield opened
+
+
+@contextmanager
+def _open_chapter(
+    tmp_path: Path,
+    png_bytes: Callable[..., bytes],
+    one_bit_png: Callable[..., bytes],
+    source_pages: Sequence[tuple[str, int, int]],
+    ocr: Sequence[tuple[str, str]],
+) -> Iterator[_Chapter]:
+    """A chapter whose every page has two regions and the given OCR text, and
+    one `run` row. Factored out of `chapter` by MT-106 so AC-3 can use four
+    pages; the three-page chapter is built exactly as before."""
     source_dir = tmp_path / "scans"
     source_dir.mkdir()
-    for index, (filename, width, height) in enumerate(_SOURCE_PAGES):
+    for index, (filename, width, height) in enumerate(source_pages):
         (source_dir / filename).write_bytes(png_bytes(width, height, (index * 40, 0, 0)))
     mask = one_bit_png(30, 20, [(0, 0, 4, 4)])
 
     with create_project(read_chapter(source_dir), project_dir_for(source_dir)) as project:
-        for ordinal, texts in enumerate(_OCR):
+        for ordinal, texts in enumerate(ocr):
             project.write_regions(
                 ordinal,
                 tuple(
@@ -297,13 +347,21 @@ def test_each_block_is_held_to_its_own_cap_and_not_the_others(chapter: _Chapter)
 # -- C-9: the stage, and AC-1 end to end --------------------------------------------
 
 
-def test_the_proposal_from_page_one_is_in_page_twos_request(chapter: _Chapter) -> None:
-    """**AC-1**, as C-10 words it: page 0's response proposes "Sakura" for
-    さくら; page 1's `PromptContext.glossary_block` carries the line
-    `さくら = Sakura (name)`, and so does the context text block of the request
-    `build_request` assembles from it."""
+def test_the_chapters_glossary_is_in_page_twos_request_and_page_ones_proposal_is_not(
+    chapter: _Chapter,
+) -> None:
+    """**MT-014 AC-1**, as MT-106 leaves it: the glossary reaches the next
+    page's request, but it is the chapter's glossary - seeded here as the
+    pre-pass would have written it - and not what page 0's model proposed.
+    Page 0 proposes a re-rendering of さくら and a new term, 家; page 1's
+    `glossary_block` and the context text block `build_request` assembles from
+    it carry `さくら = Sakura (name)` and neither proposal."""
+    upsert(chapter.project, GlossaryEntry("さくら", "Sakura", "name", 0, 0, "model"))
     translator = _Scripted(
-        _result({0: "Wait, Sakura!"}, [ProposedTerm("さくら", "Sakura", "name")]),
+        _result(
+            {0: "Wait, Sakura-chan!"},
+            [ProposedTerm("さくら", "Sakura-chan", "name"), ProposedTerm("家", "Home", "place")],
+        ),
         _result({0: "Where's Sakura?"}),
     )
     stage = TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator)
@@ -312,11 +370,15 @@ def test_the_proposal_from_page_one_is_in_page_twos_request(chapter: _Chapter) -
     stage.run(chapter.context(1))
 
     page_two = translator.contexts[1]
-    assert "さくら = Sakura (name)" in page_two.glossary_block.split("\n")
+    assert page_two.glossary_block.split("\n") == [_GLOSSARY_HEADER, "さくら = Sakura (name)"], (
+        "page 1 was told something other than the chapter's one glossary term -"
+        " page 0's proposals reached the glossary"
+    )
     request, _ = build_request(chapter.page_bytes(1), chapter.project.read_lines(1), page_two)
     context_block = request["messages"][0]["content"][1]
     assert context_block["type"] == "text"
     assert "さくら = Sakura (name)" in context_block["text"]
+    assert "Home" not in context_block["text"]
 
 
 def test_page_one_is_translated_with_the_empty_context(chapter: _Chapter) -> None:
@@ -350,10 +412,46 @@ def test_page_n_is_handed_page_n_minus_ones_proposed_lines(chapter: _Chapter) ->
     assert translator.seen[2][0] == chapter.page_bytes(2)
 
 
-def test_a_proposed_term_is_stored_as_first_and_last_seen_on_its_page(chapter: _Chapter) -> None:
-    """C-9 step 4 with C-1's `merge`: the page is `ctx.page.ordinal`, here 1,
-    not 0 - and the entry is a model's."""
-    chapter.project.write_proposed(0, {0: "Wait, Sakura!"})
+def test_a_translated_page_marks_the_glossary_seen_and_adds_and_re_renders_nothing(
+    chapter_of_four: _Chapter,
+) -> None:
+    """**MT-106 AC-3.** A glossary of two terms - さくら, in page 3's OCR, and
+    東京, not - and a translator whose result for page 3 proposes **a new
+    term** (ケンジ, which is on the page too, so "added because sighted" is
+    caught as well) **and a new rendering of an existing one** (さくら as
+    "Sakura-chan"). Afterwards さくら is last seen on 3, 東京 keeps its page,
+    nothing was added and no `term_en` changed: the whole `read_entries` list,
+    not a count. (Supersedes MT-014 C-9's "a proposed term is stored".)"""
+    seeded = [
+        GlossaryEntry("さくら", "Sakura", "name", 0, 0, "model"),
+        GlossaryEntry("東京", "Tokyo", "place", 1, 1, "user"),
+    ]
+    for entry in seeded:
+        upsert(chapter_of_four.project, entry)
+    translator = _Scripted(
+        _result(
+            {0: "Sakura-chan!", 1: "Where's Kenji?"},
+            [
+                ProposedTerm("ケンジ", "Kenji", "name"),
+                ProposedTerm("さくら", "Sakura-chan", "name"),
+            ],
+        )
+    )
+
+    TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(
+        chapter_of_four.context(3)
+    )
+
+    assert read_entries(chapter_of_four.project) == [
+        GlossaryEntry("さくら", "Sakura", "name", 0, 3, "model"),
+        GlossaryEntry("東京", "Tokyo", "place", 1, 1, "user"),
+    ], "the page's proposals reached the glossary, or its sighting was not marked on page 3"
+    assert chapter_of_four.project.read_proposed(3) == ("Sakura-chan!", "Where's Kenji?")
+
+
+def test_a_term_a_page_proposes_into_an_empty_glossary_is_not_stored(chapter: _Chapter) -> None:
+    """MT-106 AC-3's zero: with no pre-pass glossary at all - a Claude run (PO-4)
+    - a page's proposal leaves the glossary empty rather than starting one."""
     translator = _Scripted(
         _result({0: "Where's Sakura?"}, [ProposedTerm("さくら", "Sakura", "name")])
     )
@@ -362,9 +460,7 @@ def test_a_proposed_term_is_stored_as_first_and_last_seen_on_its_page(chapter: _
         chapter.context(1)
     )
 
-    assert read_entries(chapter.project) == [
-        GlossaryEntry("さくら", "Sakura", "name", 1, 1, "model")
-    ]
+    assert read_entries(chapter.project) == [], "a page's proposed term was stored"
 
 
 def test_a_name_on_the_page_is_seen_there_even_when_nobody_re_proposes_it(
@@ -395,8 +491,11 @@ def test_a_later_page_cannot_re_render_a_name_the_chapter_already_has(
     chapter: _Chapter,
 ) -> None:
     """The story's reason for existing, at the stage: page 1's model proposes
-    "Sakura-chan" for a name page 0 introduced as "Sakura". The chapter keeps
-    "Sakura" (C-1), and page 2 is told so."""
+    "Sakura-chan" for a name the chapter's glossary already has as "Sakura".
+    The chapter keeps "Sakura", and page 2 is told so. MT-106: the glossary is
+    seeded as the pre-pass would leave it (a page no longer starts one), and
+    the re-rendering is ignored because pages write nothing to the glossary."""
+    upsert(chapter.project, GlossaryEntry("さくら", "Sakura", "name", 0, 0, "model"))
     translator = _Scripted(
         _result({0: "Wait, Sakura!"}, [ProposedTerm("さくら", "Sakura", "name")]),
         _result({0: "Where's Sakura-chan?"}, [ProposedTerm("さくら", "Sakura-chan", "name")]),
@@ -416,21 +515,24 @@ def test_a_later_page_cannot_re_render_a_name_the_chapter_already_has(
 def test_the_glossary_is_written_before_the_proposals(chapter: _Chapter) -> None:
     """C-9's order, second half: glossary **before** `write_proposed`. The
     result names region 99, so `write_proposed` raises with nothing written
-    (MT-011 C-6); the page's names must already be on disk, and so must its
-    bill (MT-044 C-7). The other order marks the page done with its names never
-    recorded."""
+    (MT-011 C-6); the page's sightings must already be on disk, and so must its
+    bill (MT-044 C-7). The other order marks the page done with its sightings
+    never recorded. MT-106: the glossary step marks seen and merges nothing, so
+    the evidence is a seeded entry whose `last_seen_page` page 1 moves - the
+    re-rendering the result proposes is ignored either way."""
+    upsert(chapter.project, GlossaryEntry("さくら", "Sakura", "name", 0, 0, "model"))
     translator = _Scripted(
-        _result({99: "a region that is not there"}, [ProposedTerm("さくら", "Sakura", "name")])
+        _result({99: "a region that is not there"}, [ProposedTerm("さくら", "Sakura-chan", "name")])
     )
 
     with pytest.raises(ValueError, match=r"\b99\b"):
         TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(
-            chapter.context(0)
+            chapter.context(1)
         )
 
     assert read_entries(chapter.project) == [
-        GlossaryEntry("さくら", "Sakura", "name", 0, 0, "model")
-    ]
+        GlossaryEntry("さくら", "Sakura", "name", 0, 1, "model")
+    ], "page 1's sighting of さくら was not on disk when write_proposed raised"
     assert chapter.ledger_rows() == 1
     assert chapter.project.read_proposed(0) == (None, None)
 
@@ -439,7 +541,11 @@ def test_a_call_that_cannot_be_priced_writes_no_glossary_either(chapter: _Chapte
     """C-9's order, first half: `record_call(...)` is "unchanged, and still
     first", and `price(...)` sits inside its argument list (MT-044 C-7 clause
     3), so an unpriceable model raises before **any** write. A glossary step
-    moved ahead of the ledger would leave this page's names behind."""
+    moved ahead of the ledger would leave this page's names behind. MT-106:
+    with no merge, an empty glossary stays `[]` whatever the order, so the
+    evidence is a seeded entry page 1 would mark seen - it must not move."""
+    seeded = GlossaryEntry("さくら", "Sakura", "name", 0, 0, "model")
+    upsert(chapter.project, seeded)
     translator = _Scripted(
         _result(
             {0: "Wait, Sakura!"},
@@ -450,10 +556,12 @@ def test_a_call_that_cannot_be_priced_writes_no_glossary_either(chapter: _Chapte
 
     with pytest.raises(UnknownModel):
         TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(
-            chapter.context(0)
+            chapter.context(1)
         )
 
-    assert read_entries(chapter.project) == []
+    assert read_entries(chapter.project) == [seeded], (
+        "the glossary step ran before the unpriceable call was refused"
+    )
     assert chapter.ledger_rows() == 0
     assert chapter.project.read_proposed(0) == (None, None)
 
@@ -480,20 +588,22 @@ def test_a_wordless_page_still_runs_the_glossary_step_and_changes_nothing(
     assert chapter.project.read_proposed(1) == (None, None)
 
 
-def test_re_running_a_page_leaves_one_entry_per_term(chapter: _Chapter) -> None:
-    """`merge` is idempotent (C-9's reason the order is safe): a page
-    re-translated after a crash re-proposes its names and the glossary does not
-    grow."""
-    terms = [ProposedTerm("さくら", "Sakura", "name")]
+def test_re_running_a_page_leaves_the_seeded_glossary_as_it_was(chapter: _Chapter) -> None:
+    """`mark_seen` is idempotent (C-9's reason the order is safe, as MT-106
+    words it): a page re-translated after a crash re-proposes its names - a
+    re-rendering and a new term - and the glossary is exactly the seeded one,
+    sighted on the page, both times."""
+    upsert(chapter.project, GlossaryEntry("さくら", "Sakura", "name", 0, 0, "model"))
+    terms = [ProposedTerm("さくら", "Sakura-chan", "name"), ProposedTerm("どこ", "where", "")]
     translator = _Scripted(_result({0: "Wait!"}, terms), _result({0: "Wait!"}, terms))
     stage = TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator)
 
-    stage.run(chapter.context(0))
-    stage.run(chapter.context(0))
+    stage.run(chapter.context(1))
+    stage.run(chapter.context(1))
 
     assert read_entries(chapter.project) == [
-        GlossaryEntry("さくら", "Sakura", "name", 0, 0, "model")
-    ]
+        GlossaryEntry("さくら", "Sakura", "name", 0, 1, "model")
+    ], "re-running the page let its proposals into the glossary"
 
 
 # -- MT-107: the `neighbours` mode, and `rolling` unchanged ---------------------------

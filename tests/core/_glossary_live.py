@@ -1,6 +1,11 @@
 """MT-045's shared helper: the measure (C-2), the fixture (C-1) and the
 continuity-on context (C-3), in ONE module that both test files reach.
 
+**MT-106 changed `context_on`** (C-5, PO-3 - the user's decision, 2026-11-06):
+a page proposes no glossary terms any more, so page 2's glossary comes from
+the pre-pass - `propose_glossary` over both pages, as the product now delivers
+it - and `context_on` takes those terms as its third argument.
+
 **Why here, and how it is shared.** `tests/` has no `__init__.py`, so neither
 test directory is importable from the other by package name. pytest's default
 `prepend` import mode puts `tests/core` on `sys.path` when it collects a file
@@ -30,6 +35,7 @@ from mangatl.domain.glossary import (
     MAX_GLOSSARY_TOKENS,
     MAX_ROLLING_TOKENS,
     PromptContext,
+    ProposedTerm,
     mark_seen,
     merge,
     render_block,
@@ -78,12 +84,21 @@ def load_ocr() -> dict[str, tuple[OcrResult, ...]]:
     }
 
 
-def context_on(result_p1: TranslationResult, ocr_p1: Sequence[OcrResult]) -> PromptContext:
+def context_on(
+    result_p1: TranslationResult,
+    ocr_p1: Sequence[OcrResult],
+    proposed: Sequence[ProposedTerm],
+) -> PromptContext:
     """C-3's continuity-on context for page 2 (ordinal 1): what
-    `continuity.build_prompt_context(project, 1)` returns after
+    `continuity.build_prompt_context(project, 1)` returns after the glossary
+    pre-pass wrote `proposed` (`merge([], proposed, 0)`, as
+    `prelude.glossary_prelude` writes it before page 0) and then
     `translate_stage._update_glossary` and `write_proposed` ran on page 0's
-    result - computed without a store. AC-3 pins the equality."""
-    entries = mark_seen(merge([], result_p1.proposed_terms, 0), [r.text for r in ocr_p1], 0)
+    result - computed without a store. AC-3 of MT-045 pins the equality.
+
+    `proposed` is **the pre-pass's** terms, never `result_p1.proposed_terms`:
+    since MT-106 a page's proposals reach no glossary (C-5, PO-3)."""
+    entries = mark_seen(merge([], proposed, 0), [r.text for r in ocr_p1], 0)
     return PromptContext(
         render_block(entries, MAX_GLOSSARY_TOKENS),
         render_rolling(

@@ -55,7 +55,7 @@ from PIL import Image
 from mangatl.domain.glossary import EMPTY_CONTEXT, PromptContext, ProposedTerm
 from mangatl.domain.line import OcrResult
 from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
-from mangatl.translate import page_prompt
+from mangatl.translate import page_prompt, prompt
 from mangatl.translate.parse import UnknownRegionIndex, parse_terms_text
 
 # -- the fixture page ----------------------------------------------------------
@@ -338,6 +338,25 @@ def test_the_request_asks_for_json_against_the_page_schema_as_is(gemini: ModuleT
     assert getattr(config, "response_schema", None) is None
 
 
+@pytest.mark.parametrize("region_count", [0, 1, 4])
+def test_claude_and_gemini_send_one_and_the_same_page_schema(
+    gemini: ModuleType, region_count: int
+) -> None:
+    """MT-106 AC-4: one `response_schema`, still shared - Claude's
+    `output_config.format.schema` equals Gemini's `response_json_schema` for the
+    same page. (The batch path's `config` is pinned equal to this one by
+    `test_gemini_batch.py`'s inlined-request tests.) The equality is not where
+    the glossary's absence is pinned - both sides would move together - that
+    is AC-1, in `test_page_prompt.py`."""
+    ocr = _OCR_RESULTS[:region_count]
+    claude, _ = prompt.build_request(_page(), ocr, EMPTY_CONTEXT)
+    config = gemini.build_request(_page(), ocr, EMPTY_CONTEXT)["config"]
+
+    assert config.response_json_schema == claude["output_config"]["format"]["schema"], (
+        "Gemini's page schema is not Claude's for the same page"
+    )
+
+
 def test_the_schema_follows_the_number_of_regions_on_the_page(gemini: ModuleType) -> None:
     """The N of `response_schema(N)` is this page's region count, not a
     constant: a two-region page's schema has two index properties."""
@@ -416,10 +435,16 @@ def test_a_response_naming_an_unknown_region_raises_naming_it(gemini: ModuleType
         gemini.translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
 
 
-def test_the_proposed_terms_are_the_shared_parse_of_the_response_text(gemini: ModuleType) -> None:
-    """MT-014 C-5 through this adapter: `proposed_terms ==
-    parse_terms_text(response.text)`, in order, and the `glossary` key is not a
-    region."""
+def test_a_gemini_page_that_returns_a_glossary_anyway_proposes_no_terms(
+    gemini: ModuleType,
+) -> None:
+    """MT-106 AC-2, Gemini's case (it supersedes MT-014 C-5's `proposed_terms
+    == parse_terms_text(response.text)`): a page proposes no terms, so a stray
+    `glossary` array reaches neither `proposed_terms` nor `lines`, and does not
+    raise. The array is **well-formed** - the negative control, checked in the
+    test itself: `parse_terms_text`, unchanged because the pre-pass reads
+    through it, still returns both terms from this very body - so an adapter
+    that still parsed it fails here on content."""
     body = (
         '{"1": "Sakura!", "glossary": ['
         '{"term_ja": "さくら", "term_en": "Sakura", "note": "name"},'
@@ -429,11 +454,14 @@ def test_the_proposed_terms_are_the_shared_parse_of_the_response_text(gemini: Mo
 
     result = gemini.translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
 
-    assert result.lines == {1: "Sakura!"}
-    assert result.proposed_terms == parse_terms_text(body)
-    assert result.proposed_terms == (
+    assert parse_terms_text(body) == (
         ProposedTerm("さくら", "Sakura", "name"),
         ProposedTerm("先輩", "senpai", "honorific"),
+    ), "the control body is not a glossary parse_terms_text accepts"
+    assert result.lines == {1: "Sakura!"}
+    assert result.proposed_terms == (), (
+        "a Gemini page's stray glossary array reached proposed_terms; after"
+        " MT-106 a page proposes nothing"
     )
 
 

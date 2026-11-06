@@ -133,13 +133,16 @@ _LINES: dict[int, tuple[OcrResult, ...]] = {
     2: (OcrResult("ケンジ先輩"), OcrResult("", ocr_empty=True)),
 }
 
-#: The glossary before collection: ケンジ, seen on page 0 only. Never proposed
-#: below, so its `last_seen_page` moving to 2 is `mark_seen`'s doing alone.
+#: The glossary before collection: ケンジ, seen on page 0 only. Page 2's
+#: answer re-proposes it as "Kenji-kun" (MT-106 AC-5: "the existing one under
+#: another rendering"), and its `last_seen_page` moving to 2 is still
+#: `mark_seen`'s doing alone - a page proposes nothing to the glossary.
 _GLOSSARY = [GlossaryEntry("ケンジ", "Kenji", "name", 0, 0, "model")]
 
 #: Each page's answer. `lines` keyed by reading index (PO-2); page 2 omits its
-#: `ocr_empty` region. Page 2 re-proposes 先輩 with another rendering, which
-#: `merge` must ignore (first rendering wins). `CallInfo.request_id` is
+#: `ocr_empty` region. The answers propose terms - new ones (先輩, どこ), 先輩
+#: again under another rendering, and the glossary's own ケンジ as "Kenji-kun" -
+#: and since MT-106 none of them reaches the glossary (AC-5). `CallInfo.request_id` is
 #: deliberately NOT the ledger's spelling, so a collector that stored the
 #: item's own id rather than `f"{provider_job_id}#{ordinal}"` fails.
 _RESULTS: dict[int, TranslationResult] = {
@@ -159,21 +162,23 @@ _RESULTS: dict[int, TranslationResult] = {
         lines={0: "Kenji-senpai"},
         usage=_USAGE[2],
         call=CallInfo("item-response-2", _MODEL),
-        proposed_terms=(ProposedTerm("先輩", "senior", "other"),),
+        proposed_terms=(
+            ProposedTerm("先輩", "senior", "other"),
+            ProposedTerm("ケンジ", "Kenji-kun", "name"),
+        ),
     ),
 }
 
-#: AC-2's glossary after collection, in `read_entries`' (first-written) order.
+#: AC-2's glossary after collection, as MT-106 AC-5 leaves it: exactly the one
+#: seeded term, its `term_en` unchanged, last seen on page 2 (the last page
+#: whose OCR contains it) - and nothing the answers proposed.
 _GLOSSARY_AFTER_ALL = [
     GlossaryEntry("ケンジ", "Kenji", "name", 0, 2, "model"),
-    GlossaryEntry("先輩", "senpai", "honorific", 0, 2, "model"),
-    GlossaryEntry("どこ", "where", "", 1, 1, "model"),
 ]
 
-#: AC-3's: page 1 failed, so どこ was never proposed.
+#: AC-3's: page 1 failed; page 2 still sights ケンジ, and nothing is proposed.
 _GLOSSARY_AFTER_FAILURE = [
     GlossaryEntry("ケンジ", "Kenji", "name", 0, 2, "model"),
-    GlossaryEntry("先輩", "senpai", "honorific", 0, 2, "model"),
 ]
 
 #: `read_proposed` after AC-2, page by page.
@@ -628,15 +633,21 @@ def test_a_collected_job_bills_one_batch_row_per_page_against_the_jobs_run(
     )
 
 
-def test_a_collected_job_folds_proposals_and_sightings_into_the_glossary(world: _World) -> None:
-    """AC-2: `merge` then `mark_seen` per page, as the translate stage does.
-    ケンジ moves to page 2 by sighting alone; 先輩 keeps page 0's rendering;
-    どこ is new on page 1."""
+def test_a_collected_job_folds_sightings_and_never_proposals_into_the_glossary(
+    world: _World,
+) -> None:
+    """MT-106 AC-5 (it supersedes MT-112 AC-2's `merge` then `mark_seen`):
+    `mark_seen` per page, as the translate stage does, and nothing else. The
+    answers propose 先輩 and どこ (new) and ケンジ as "Kenji-kun" (a
+    re-rendering); afterwards the glossary is exactly ケンジ = Kenji, moved to
+    page 2 by sighting alone."""
     job = world.job()
 
     world.collect(job, _Collector(_all_answered()))
 
-    assert read_entries(world.project) == _GLOSSARY_AFTER_ALL
+    assert read_entries(world.project) == _GLOSSARY_AFTER_ALL, (
+        "a batch page's proposals reached the glossary, or its sightings were not marked"
+    )
 
 
 def test_a_collected_job_marks_every_page_done(world: _World) -> None:

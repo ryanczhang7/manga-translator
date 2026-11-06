@@ -38,7 +38,7 @@ from mangatl.domain.glossary import EMPTY_CONTEXT, PromptContext, ProposedTerm
 from mangatl.domain.line import OcrResult
 from mangatl.domain.translation import TokenUsage, TranslationResult
 from mangatl.translate.client import translate_page
-from mangatl.translate.parse import UnknownRegionIndex
+from mangatl.translate.parse import UnknownRegionIndex, parse_terms_text
 from mangatl.translate.prompt import build_request
 
 # -- the fixture page ----------------------------------------------------------
@@ -400,12 +400,16 @@ def test_the_context_the_caller_passes_is_the_context_the_request_carries(
     assert client.messages.seen[0] != without, "the context never reached the request"
 
 
-def test_the_terms_the_model_proposed_come_back_on_the_result_in_order(
+def test_a_claude_page_that_returns_a_glossary_anyway_proposes_no_terms(
     fake_message: Callable[..., object],
 ) -> None:
-    """MT-014 C-5: `proposed_terms=parse_terms(response)` on a call. Two terms,
-    in the order the response gave them, beside the lines - the `glossary` key
-    is not a region and does not turn up in `lines`."""
+    """MT-106 AC-2, Claude's case (it supersedes MT-014 C-5's
+    `proposed_terms=parse_terms(response)`): a page proposes no terms, so a
+    body that still carries a `glossary` array - **well-formed**, two items
+    `parse_terms` would have accepted, which is the negative control - reaches
+    neither `proposed_terms` nor `lines`, and does not raise. An adapter that
+    still parsed the array fails here on content, not on a malformed item
+    being skipped."""
     body = (
         '{"1": "Sakura!", "glossary": ['
         '{"term_ja": "さくら", "term_en": "Sakura", "note": "name"},'
@@ -415,10 +419,14 @@ def test_the_terms_the_model_proposed_come_back_on_the_result_in_order(
 
     result = translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
 
-    assert result.lines == {1: "Sakura!"}
-    assert result.proposed_terms == (
+    assert parse_terms_text(body) == (
         ProposedTerm("さくら", "Sakura", "name"),
         ProposedTerm("先輩", "senpai", "honorific"),
+    ), "the control body is not a glossary parse_terms_text accepts"
+    assert result.lines == {1: "Sakura!"}
+    assert result.proposed_terms == (), (
+        "a Claude page's stray glossary array reached proposed_terms; after"
+        " MT-106 a page proposes nothing"
     )
 
 

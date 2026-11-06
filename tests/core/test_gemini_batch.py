@@ -51,6 +51,7 @@ from mangatl.domain.glossary import EMPTY_CONTEXT, PromptContext, ProposedTerm
 from mangatl.domain.line import OcrResult
 from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
 from mangatl.translate.gemini import MODEL_ID, build_request
+from mangatl.translate.parse import parse_terms_text
 
 # -- the module under test -----------------------------------------------------
 
@@ -222,8 +223,10 @@ def _job(
     )
 
 
-# The three good answers. Page 0's keys are out of order and it proposes one
-# well-formed term; page 2 is sparse (region 1 omitted, it is `ocr_empty`).
+# The three good answers. Page 0's keys are out of order and it carries one
+# well-formed glossary term - which, since MT-106, it is not asked for and which
+# reaches no result (AC-2's batch case); page 2 is sparse (region 1 omitted, it
+# is `ocr_empty`).
 _TEXT_0 = (
     '{"glossary": [{"term_ja": "翔", "term_en": "Kakeru", "note": "name"}],'
     ' "1": "Kakeru, over here!", "0": "Hey, hurry!"}'
@@ -246,12 +249,13 @@ def _good_items() -> list[types.InlinedResponse]:
 
 
 #: Written out by hand. Usage is `input = P - C`, `output = K + T`,
-#: `cache_read = C`, `cache_write = 0` (MT-101 D-7, MT-080 V-4).
+#: `cache_read = C`, `cache_write = 0` (MT-101 D-7, MT-080 V-4). Page 0's
+#: `proposed_terms` is `()` though `_TEXT_0` carries a glossary (MT-106 AC-2).
 _EXPECTED_0 = TranslationResult(
     lines={0: "Hey, hurry!", 1: "Kakeru, over here!"},
     usage=TokenUsage(800, 550, 200, 0),
     call=CallInfo("batches/abc#0", _REPORTED),
-    proposed_terms=(ProposedTerm("翔", "Kakeru", "name"),),
+    proposed_terms=(),
 )
 _EXPECTED_1 = TranslationResult(
     lines={0: "Wait up..."},
@@ -519,6 +523,27 @@ def test_a_succeeded_job_collects_one_translation_result_per_page(batch: Any) ->
     result = batch.collect_batch(client, _JOB, _pages(batch))
 
     assert result == {0: _EXPECTED_0, 1: _EXPECTED_1, 2: _EXPECTED_2}
+
+
+def test_a_batch_page_that_returns_a_glossary_anyway_proposes_no_terms(batch: Any) -> None:
+    """MT-106 AC-2, the batch item's case: page 0's body carries a
+    **well-formed** glossary array - the negative control, checked here:
+    `parse_terms_text`, which the pre-pass still reads through, accepts it -
+    and the collected result's `proposed_terms` is `()`, its lines the region
+    strings, and nothing raises."""
+    assert parse_terms_text(_TEXT_0) == (ProposedTerm("翔", "Kakeru", "name"),), (
+        "the control body is not a glossary parse_terms_text accepts"
+    )
+    client = _FakeGeminiClient(_job(_good_items()))
+
+    result = batch.collect_batch(client, _JOB, _pages(batch))
+
+    assert isinstance(result[0], TranslationResult), result[0]
+    assert result[0].lines == {0: "Hey, hurry!", 1: "Kakeru, over here!"}
+    assert result[0].proposed_terms == (), (
+        "a batch page's stray glossary array reached proposed_terms; after"
+        " MT-106 a page proposes nothing"
+    )
 
 
 def test_a_batch_item_prices_its_thinking_tokens_as_output(batch: Any) -> None:

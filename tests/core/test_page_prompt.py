@@ -4,6 +4,13 @@ MT-079. Covers **AC-1** (the golden: Claude's request is byte-for-byte what it
 was), **AC-2** (the response schema) and **AC-5** (the module loads no SDK). The
 parse half of the story, AC-3 and AC-4, is in `test_translate_parse.py`.
 
+**Amended by MT-106** ("pages stop proposing glossary terms"), in place: the
+system-prompt golden loses the glossary-proposal bullet (MT-106 AC-6, C-2), and
+the expected request's schema is now written out literally (MT-106 AC-1) instead
+of read off `page_prompt.response_schema` - read off it, the byte-for-byte pin
+moved with whatever the schema became. Everything else MT-079 pinned is
+unchanged.
+
 **Why the system prompt is pinned as a literal here, not read off `prompt`.**
 Deferred verification 1 is "one character of `SYSTEM_PROMPT` changed must turn
 AC-1 red". `test_translate_prompt.py` pins only a phrase of it, so a test that
@@ -47,6 +54,13 @@ from mangatl.translate import page_prompt, prompt
 #: `prompt._SYSTEM_PROMPT` before MT-079, verbatim. Every character is the
 #: criterion: one changed character invalidates the cache for every page of
 #: every chapter and changes what the model is asked (`## Out of scope`).
+#:
+#: **Re-pinned by MT-106** (AC-6, C-2, PO-1 - the user's decision, 2026-11-06):
+#: the final bullet of "Continuity across pages" - the one asking the model to
+#: add new terms under the `glossary` key - is removed, with the newline before
+#: it, and not one other character changed. The pre-MT-106 text is this one
+#: plus that bullet; `_SYSTEM_PROMPT_PRE_MT106_LAST_BULLET` below holds it so
+#: the "nothing else changed" half of AC-6 is a comparison, not a reading.
 _SYSTEM_PROMPT_GOLDEN = """You translate Japanese manga into natural English.
 
 You are given one page image and the text OCR read from each of its regions, \
@@ -68,7 +82,11 @@ Continuity across pages:
 - You may also be given a glossary of names, honorifics and place names this \
 chapter has already settled on, and the previous page's English in reading \
 order. Use the glossary's renderings exactly, every time, and read the previous \
-page for who is speaking and what is being continued.
+page for who is speaking and what is being continued."""
+
+#: The bullet MT-106 removed, verbatim, with the newline that preceded it. The
+#: pre-MT-106 prompt was exactly `_SYSTEM_PROMPT_GOLDEN + this`.
+_SYSTEM_PROMPT_PRE_MT106_LAST_BULLET = """
 - When a character name, an honorific or a place name appears on this page that \
 the glossary does not have, add it under the "glossary" key: its Japanese as \
 written, the English you used, and a note of "name", "honorific" or "place" \
@@ -123,6 +141,16 @@ def _region_property(index: int) -> dict[str, str]:
     }
 
 
+def _expected_schema(region_count: int) -> dict[str, Any]:
+    """MT-106 AC-1's page schema, literally: one string per reading index, no
+    `glossary` property, no `required`, `additionalProperties: False`."""
+    return {
+        "type": "object",
+        "properties": {str(index): _region_property(index) for index in range(region_count)},
+        "additionalProperties": False,
+    }
+
+
 def _expected_request(
     page_image: bytes, ocr_results: tuple[OcrResult, ...], context: PromptContext
 ) -> dict[str, Any]:
@@ -142,7 +170,10 @@ def _expected_request(
             "effort": "medium",
             "format": {
                 "type": "json_schema",
-                "schema": page_prompt.response_schema(len(ocr_results)),
+                # Written out rather than read off `page_prompt.response_schema`
+                # (MT-106): read off it, a schema change moves both sides of
+                # this equality together and the byte-for-byte pin sees nothing.
+                "schema": _expected_schema(len(ocr_results)),
             },
         },
         "system": [
@@ -180,9 +211,22 @@ def test_the_system_prompt_is_the_pre_story_text_to_the_character() -> None:
     A difference here is a change to what Claude is asked and to the cache
     prefix every page shares - a product decision, not a refactor."""
     assert page_prompt.SYSTEM_PROMPT == _SYSTEM_PROMPT_GOLDEN, (
-        "page_prompt.SYSTEM_PROMPT is not the pre-story system prompt; MT-079 moves"
-        " the text and must not change one character of it"
+        "page_prompt.SYSTEM_PROMPT is not the pinned system prompt (MT-079's text"
+        " less the glossary-proposal bullet MT-106 removed); not one other"
+        " character may change"
     )
+
+
+def test_the_system_prompt_no_longer_asks_pages_to_add_glossary_terms() -> None:
+    """MT-106 AC-6, stated on its own so a failure reads as the behaviour: the
+    page schema forbids a `glossary` key, so the prompt must not ask for one,
+    and it still tells the model to use the glossary's renderings exactly."""
+    assert _SYSTEM_PROMPT_PRE_MT106_LAST_BULLET not in page_prompt.SYSTEM_PROMPT, (
+        "SYSTEM_PROMPT still asks every page to add new terms under the"
+        ' "glossary" key, which the page schema no longer allows'
+    )
+    assert 'under the "glossary" key' not in page_prompt.SYSTEM_PROMPT
+    assert "Use the glossary's renderings exactly, every time" in page_prompt.SYSTEM_PROMPT
 
 
 @pytest.mark.parametrize(
@@ -209,7 +253,8 @@ def test_build_request_returns_exactly_the_pre_story_kwargs_composed_from_page_p
     kwargs, est_tokens = prompt.build_request(page, _OCR_RESULTS, context)
 
     assert kwargs == _expected_request(page, _OCR_RESULTS, context), (
-        "build_request no longer returns the pre-story kwargs built from page_prompt's parts"
+        "build_request is not the pinned Claude request (MT-079's kwargs, with MT-106's"
+        " schema: no glossary property)"
     )
     assert est_tokens == page_prompt.prepare_page_image(page)[1]
 
@@ -295,29 +340,51 @@ def test_the_glossary_schema_is_mt014s_verbatim() -> None:
     assert page_prompt.GLOSSARY_SCHEMA == _GLOSSARY_SCHEMA_GOLDEN
 
 
+def test_the_glossary_names_stay_exported_for_the_pre_pass() -> None:
+    """MT-106 AC-4's last clause and C-1: `GLOSSARY_SCHEMA` and `GLOSSARY_KEY`
+    leave the page schema but not the module - `glossary_pass` builds the
+    pre-pass schema from both - and `page_prompt.__all__` is unchanged."""
+    assert page_prompt.__all__ == [
+        "GLOSSARY_KEY",
+        "GLOSSARY_SCHEMA",
+        "MAX_IMAGE_LONG_EDGE_PX",
+        "SYSTEM_PROMPT",
+        "context_text",
+        "prepare_page_image",
+        "response_schema",
+        "user_text",
+    ]
+
+
 @pytest.mark.parametrize("region_count", [0, 1, 3, 20])
-def test_the_response_schema_names_every_region_and_the_glossary_and_requires_none(
+def test_the_response_schema_names_every_region_and_nothing_else_and_requires_none(
     region_count: int,
 ) -> None:
-    """AC-2. Exactly `"0".."n-1"` plus `glossary`; **no `required` key** (an
+    """MT-079 AC-2 as amended by MT-106 AC-1. Exactly `"0".."n-1"` and **no
+    `glossary` property** (MT-106: a page proposes no terms, and
+    `additionalProperties: False` forbids the key); **no `required` key** (an
     omitted region is legal, MT-011 AC-5); `additionalProperties: False` (an
     unknown index is the model disobeying, not the schema inviting it). 20 is
     past single digits, so a schema built from characters rather than numbers
     is caught; 0 is a page the detector found nothing on."""
     schema = page_prompt.response_schema(region_count)
 
-    expected_properties: dict[str, Any] = {
-        str(index): _region_property(index) for index in range(region_count)
-    }
-    expected_properties["glossary"] = _GLOSSARY_SCHEMA_GOLDEN
+    assert "glossary" not in schema["properties"], (
+        "a page's response schema still offers a glossary array; after MT-106 a"
+        " page proposes no terms and the key must be forbidden"
+    )
     assert schema == {
         "type": "object",
-        "properties": expected_properties,
+        "properties": {str(index): _region_property(index) for index in range(region_count)},
         "additionalProperties": False,
     }
     assert "required" not in schema, "AC-5 of MT-011 turns on no region being required"
     assert schema["additionalProperties"] is False
-    assert schema["properties"]["glossary"] == page_prompt.GLOSSARY_SCHEMA
+
+
+def test_a_page_with_no_regions_has_an_empty_properties_mapping() -> None:
+    """MT-106 AC-1's zero: no region, no glossary, nothing at all."""
+    assert page_prompt.response_schema(0)["properties"] == {}
 
 
 # -- AC-5: no SDK --------------------------------------------------------------
