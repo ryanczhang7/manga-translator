@@ -119,7 +119,8 @@ every page it was measured on, with the rule MT-121 implements in its
   states, the counts that leave removed regions out. Depends on MT-118.
 - **MT-121** - the automatic rule: the detect stage stores the regions the
   audit's predicate matches as `excluded = 'watermark'`. Depends on MT-117,
-  MT-118 and MT-120.
+  MT-118 and MT-120. **Closed as a no-op (2026-11-06):** MT-117 D-1 found no
+  predicate; watermarks come out by the user's Remove action (MT-120).
 
 ## Deliberately not in this epic
 
