@@ -105,6 +105,13 @@ Anything not on this list is not in v1.
   bubbles is left completely untouched — not erased, not typeset, not listed.
   The human handles SFX in their editor. (This is the hardest thing in manga
   cleaning, and doing it badly is worse than not doing it.)
+
+  *Planned for v2, decided by the user on 2026-11-07: signs and sound effects
+  in English are v2 work and must not be done before the first release. The
+  reference practice (the official English edition labels a sign beside the
+  untouched art) adds a label rather than erasing, so it does not reopen the
+  cleaning problem above. Plan: `docs/backlog/epics/EPIC-12.md` (no stories
+  cut); open decisions: O7. This bullet stands unchanged for v1.*
 - **No typeset editing.** No dragging or resizing text boxes, no per-bubble font
   or size control, no manual line-break control. If auto-placement is wrong, the
   human fixes it in their image editor.
@@ -228,6 +235,16 @@ Detail belongs to the Lead Designer; this section is the brief, not the design.
 - **O6 — Vertical text and furigana.** Japanese bubble text runs vertically and
   is often annotated with furigana. Whether that is handled by the OCR path or
   needs explicit treatment is unresolved. *Owner: `/plan-product`.*
+- **O7 — Signs and sound effects (v2 only).** Not for the first release (§5).
+  Before any v2 story is cut: signs only, or sound effects too, and is a sound
+  effect's line a gloss ("ring") or an English onomatopoeia? Shown how — a
+  label beside the art, a list in review, a translator's-note margin, or
+  redrawing? Found how — the detector's `seg` mask, Gemini listing them from
+  the page image the translate call already sends, the user marking them, or a
+  mix? Measured how, without changing S1b — the truth format knows only
+  `bubble` and `box`, and the benchmark truth excludes art text? And any spike
+  runs on `D:\bench\all-jp` pages outside 3–58, the held-out chapter (O1).
+  Detail: `docs/backlog/epics/EPIC-12.md`. *Owner: user, at v2 planning.*
 
 ## Interview notes
 
