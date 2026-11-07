@@ -93,14 +93,20 @@ No line differs in **acceptance** - every matched line was accepted in both
 copies. The renderings do differ; the clearest, from the user's page pairs,
 with the Japanese and both proposals from the project stores:
 
-1. `p018.jpg` region 5, `ラクテック全開ハイドロコーン１００ミリ側管注しろ！！`
+1. `p018.jpg` region 5, OCR text `ラクテック全開ハイドロコーン１００ミリ側管注しろ！！`
+   - Official: "Give him a lactec injection and 1,000 milligrams of hydrocodone!"
    - A: "Open up the lactec and give him 100 mil of hydrocone by IV push!!"
    - B: "Open the lactec wide and give 1000 mg of hydrocortisone via side tube!!"
-   - The Japanese says **100**; B's 1000 is a tenfold error on a dose.
-2. 永大 (the hero's university, read *Eidai*), nine lines on p012-p055
-   - A: "Eiroku U" / "an Eiroku graduate" (from the full name, 永禄大学).
+   - B agrees with the official dose; A's "100" follows the OCR, which most
+     likely dropped a zero. Under PO-1 A's line is a meaning dispute that
+     should have been edited.
+2. 永大 (the hero's university, short for 永禄大学), nine lines on p012-p055
+   - Official: "Eiroku grad!", "From Eiroku, huh?"
+   - A: "Eiroku U" / "an Eiroku graduate" - agrees.
    - B: "Eadai", consistently - a wrong reading, held across the chapter.
 3. `p017.jpg` regions 4-7, `っ` / `いてーよー！！` / `いてーよー！！` / `急ぐぞ！！こっから先は戦場だ！！`
+   - Official: "Please! Help me!!!", "Hurry! It's gonna be a war zone in
+     there!", "Yes, sir!"
    - A: "WEE" / "WEE" / "It hurts!!" / "It hurts!!" - the lines slid one region
      down; "Hurry!! From here on out it's a battlefield!!" landed in the wrong
      balloon at a tiny size and the shout balloon reads "It hurts!!".
@@ -108,9 +114,17 @@ with the Japanese and both proposals from the project stores:
      "Hurry!! It's a battlefield from here on out!!", "Yes, sir!!"); the
      sound-effect fragment `っ` became "WEE-WOO WEE-WOO".
 4. `p023.jpg` regions 8-9, `点` / `一律一１０円だ` (one balloon detected as two)
+   - Official: "Across the board, 10 cents for each point." (localised to
+     dollars).
    - A: "One point" + "is a flat rate of 10 yen." - typeset on top of each
      other.
    - B: "It's a flat 10 yen per point." - one line, clean.
+
+Read strictly by PO-1, lines 1 and 3 in A and line 2 in B should have been
+edited, so both copies' true S1b is somewhat below 92.4%, A by a few more
+lines than B on this sample. That does not reach the 2.0-point bar on the
+evidence here, but it is not zero either; it is the main reason the tie is
+called a tie of the review.
 
 **Control** (a rolling-mode line whose acceptance depended on the previous
 page's English - a sentence continued across a page break): **looked for, not
