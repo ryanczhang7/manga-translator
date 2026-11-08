@@ -1259,9 +1259,46 @@ only. When the banner has an action, focus moves to it; it activates on Space,
 Return and Enter. The stepper's failed step state stays designed but unbuilt
 (deferred). A cancellation (`cancelled`) shows no banner.
 
+**Consistency-pass banner** (MT-141, D-3). The pass runs after the last page
+(per-page run) or after the last batch job is collected; a `RunAborted` with
+no page at that point is the pass refused or failed, never a page. Same
+`ErrorBanner` shape and place, on whichever panel is showing - the
+`RunProgressPanel` or the `BatchWaitingPanel` - and the same words on both:
+
+> **Consistency pass not run — the budget would be exceeded.**
+> Every page is translated and can be reviewed and rendered.
+> `[ Review the chapter ]`
+
+A failed pass leads with `Consistency pass failed.` and the runner's reason
+on its own line, then the same survival line and action. No `Run stopped at
+page…`: nothing stopped at a page. "Would be exceeded" because the guard
+refuses the call before it is made; no figure, because the waiting panel after
+a reopen has no ceiling to name. The `CostReadout` goes `aborted` for the
+refusal only. Focus moves to the action; the review opens from it and from
+nothing else.
+
 **The run screen** (MT-059). Started from the intake, the window's central
 widget is the `RunProgressPanel` alone; the title stays `mangatl`; no focus stop
 while running.
+
+### `BatchWaitingPanel` (MT-113, MT-141)
+
+What the window shows while a submitted batch is waited for. Plain labels, in
+order, each also a line of the panel's accessible name:
+
+- `batch-submitted` - `Submitted {n} pages as one batch at HH:MM; waiting for
+  Gemini.` (`{k} batches` for several).
+- `batch-projection` - `Projected $x of $y`; hidden on a reopen, which has no
+  stored projection.
+- `batch-last-checked` - `Last checked HH:MM.`, or `Last checked HH:MM:
+  {Error}: {message}` after a poll that raised.
+- `batch-pass` (MT-141, D-4) - `Checking the chapter for consistency…`
+  (U+2026) once every job has been collected and the pass is running; empty
+  and hidden before that, and cleared when the consistency-pass banner above
+  takes over.
+
+A job the provider reports failed shows `Batch job failed — Gemini reports it
+{state}.` / `Its pages were not translated.` with no action.
 
 ---
 
