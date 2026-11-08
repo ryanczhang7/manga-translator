@@ -770,3 +770,100 @@ def test_acceptance_imports_o2s_predicate_and_the_matcher_and_normalises_nothing
         isinstance(node, ast.Attribute) and node.attr in {"normalize", "split"}
         for node in ast.walk(tree)
     ), "acceptance.py normalises or splits text itself"
+
+
+# -- MT-142 AC-4 and C-2: `measure(..., development=True)` ------------------------
+#
+# `NotADevelopmentSet` is imported inside the tests that need it, so that while it
+# does not exist the MT-022 tests above still run.
+
+#: MT-142 C-1, verbatim.
+_FLAGGED_REFUSAL = (
+    f"chapter {_CHAPTER!r} is flagged development_use, so it is not held out and cannot be a"
+    " benchmark"
+)
+_NOT_DEVELOPMENT_REFUSAL = (
+    f"chapter {_CHAPTER!r} is not flagged development_use: it is the held-out benchmark,"
+    " so measure it without --development"
+)
+
+
+def _flagged(tmp_path: Path, truth: GroundTruth) -> GroundTruth:
+    """`truth` flagged `development_use`, loaded past the loader's own refusal."""
+    path = _write_doc(tmp_path / "dev.truth.json", dataclasses.replace(truth, development_use=True))
+    loaded = load_ground_truth(path, benchmark=False)
+    assert loaded.development_use
+    return loaded
+
+
+def _boom(*args: object, **kwargs: object) -> object:
+    raise AssertionError(f"measured before refusing: called with {args!r} {kwargs!r}")
+
+
+def test_mt142_measure_in_development_mode_measures_a_flagged_document_as_its_unflagged_copy(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    flagged = _flagged(tmp_path, truth)
+    with _project(tmp_path, chapter, _all(_baseline)) as project:
+        expected = measure(project, truth)
+        report = measure(project, flagged, development=True)
+
+    assert report == expected
+    assert _counts(report) == (_GROUND_TRUTH, _GROUND_TRUTH, _GROUND_TRUTH, 0, _GROUND_TRUTH)
+
+
+def test_mt142_measure_still_refuses_a_flagged_document_when_development_is_false(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    flagged = _flagged(tmp_path, truth)
+    with _project(tmp_path, chapter, _all(_baseline)) as project:
+        for call in (
+            lambda: measure(project, flagged),
+            lambda: measure(project, flagged, development=False),
+        ):
+            with pytest.raises(BenchmarkChapterUsedInDevelopment) as refused:
+                call()
+            assert str(refused.value) == _FLAGGED_REFUSAL
+
+
+def test_mt142_measure_in_development_mode_refuses_the_held_out_benchmark_before_reading(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mangatl.bench.truth import NotADevelopmentSet
+
+    assert not truth.development_use
+    with _project(tmp_path, chapter, _all(_baseline)) as project:
+        monkeypatch.setattr(type(project), "read_regions", _boom)
+        with pytest.raises(NotADevelopmentSet) as refused:
+            measure(project, truth, development=True)
+
+    assert str(refused.value) == _NOT_DEVELOPMENT_REFUSAL
+
+
+def test_mt142_development_mode_does_not_skip_the_validator(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """`check_mode` replaces the flag check only: a stale development document is
+    still refused with every error line."""
+    stale = dataclasses.replace(
+        truth,
+        development_use=True,
+        pages=tuple(dataclasses.replace(page, sha256="0" * 64) for page in truth.pages),
+    )
+    loaded = load_ground_truth(_write_doc(tmp_path / "stale.truth.json", stale), benchmark=False)
+    errors = validate(loaded, chapter).errors
+    assert len(errors) == 2
+
+    with (
+        _project(tmp_path, chapter, _all(_baseline)) as project,
+        pytest.raises(InvalidGroundTruth) as refused,
+    ):
+        measure(project, loaded, development=True)
+
+    assert str(refused.value) == "\n".join(errors)
+
+
+def test_mt142_measure_takes_development_by_keyword_only_defaulting_to_false() -> None:
+    parameter = inspect.signature(measure).parameters["development"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is False

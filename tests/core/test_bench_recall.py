@@ -415,3 +415,65 @@ def test_ac7_the_validators_warnings_do_not_stop_a_measurement(
     assert report.ok and report.warnings  # the seeded truth is all seed: it warns
 
     assert _measure(tmp_path, chapter, truth, w.all_pages()).recall == 1.0
+
+
+# -- MT-142 AC-4 and C-2: `measure_recall(..., development=True)` -------------------
+#
+# `NotADevelopmentSet` is imported inside the test that needs it, so that while it
+# does not exist the MT-023 tests above still run.
+
+#: MT-142 C-1, verbatim.
+_FLAGGED_REFUSAL = (
+    f"chapter {w.CHAPTER!r} is flagged development_use, so it is not held out and cannot be a"
+    " benchmark"
+)
+_NOT_DEVELOPMENT_REFUSAL = (
+    f"chapter {w.CHAPTER!r} is not flagged development_use: it is the held-out benchmark,"
+    " so measure it without --development"
+)
+
+
+def test_mt142_measure_recall_in_development_mode_measures_a_flagged_document_as_its_copy(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    flagged = w.flagged(tmp_path, truth)
+    detections = w.all_pages()
+    del detections[0][1]
+    with w.project(tmp_path, chapter, detections) as project:
+        expected = measure_recall(project, truth)
+        report = measure_recall(project, flagged, development=True)
+
+    assert report == expected
+    assert (report.matched, report.missed, report.spurious) == (5, ((0, 1),), 0)
+
+
+def test_mt142_measure_recall_still_refuses_a_flagged_document_when_development_is_false(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flagged = w.flagged(tmp_path, truth)
+    with w.project(tmp_path, chapter, w.all_pages()) as project:
+        monkeypatch.setattr(type(project), "read_regions", w.boom)
+        with pytest.raises(BenchmarkChapterUsedInDevelopment) as refused:
+            measure_recall(project, flagged, development=False)
+
+    assert str(refused.value) == _FLAGGED_REFUSAL
+
+
+def test_mt142_measure_recall_in_development_mode_refuses_the_held_out_benchmark_first(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mangatl.bench.truth import NotADevelopmentSet
+
+    assert not truth.development_use
+    with w.project(tmp_path, chapter, w.all_pages()) as project:
+        monkeypatch.setattr(type(project), "read_regions", w.boom)
+        with pytest.raises(NotADevelopmentSet) as refused:
+            measure_recall(project, truth, development=True)
+
+    assert str(refused.value) == _NOT_DEVELOPMENT_REFUSAL
+
+
+def test_mt142_measure_recall_takes_development_by_keyword_only_defaulting_to_false() -> None:
+    parameter = inspect.signature(measure_recall).parameters["development"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is False

@@ -909,3 +909,94 @@ def test_main_names_the_missing_document_it_looked_for(
     captured = capsys.readouterr()
     assert status == 2
     assert str(folder.parent / "scans.truth.json") in captured.out + captured.err
+
+
+# -- MT-142 C-1: one rule for "benchmark or development", `check_mode` ------------
+#
+# `check_mode` and `NotADevelopmentSet` are imported inside each test, not at the
+# top of the file: while they do not exist, a module-level import would stop
+# every MT-029 test above from running at all.
+
+#: MT-142 C-1, verbatim. The first is MT-022's unchanged refusal.
+_FLAGGED_REFUSAL = (
+    "chapter {name!r} is flagged development_use, so it is not held out and cannot be a benchmark"
+)
+_NOT_DEVELOPMENT_REFUSAL = (
+    "chapter {name!r} is not flagged development_use: it is the held-out benchmark,"
+    " so measure it without --development"
+)
+
+
+def _truth(*, development_use: bool, chapter_name: str = "vol17-ch2") -> GroundTruth:
+    return GroundTruth(
+        schema_version=TRUTH_SCHEMA_VERSION,
+        chapter_name=chapter_name,
+        development_use=development_use,
+        pages=(),
+    )
+
+
+def test_mt142_check_mode_refuses_a_flagged_document_measured_as_a_benchmark_in_c1s_words() -> None:
+    from mangatl.bench.truth import check_mode
+
+    with pytest.raises(BenchmarkChapterUsedInDevelopment) as refused:
+        check_mode(_truth(development_use=True), development=False)
+
+    assert str(refused.value) == _FLAGGED_REFUSAL.format(name="vol17-ch2")
+
+
+def test_mt142_check_mode_refuses_development_mode_on_the_held_out_benchmark_in_c1s_words() -> None:
+    from mangatl.bench.truth import NotADevelopmentSet, check_mode
+
+    with pytest.raises(NotADevelopmentSet) as refused:
+        check_mode(_truth(development_use=False), development=True)
+
+    assert type(refused.value) is NotADevelopmentSet
+    assert str(refused.value) == _NOT_DEVELOPMENT_REFUSAL.format(name="vol17-ch2")
+    assert "held-out benchmark" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    ("development_use", "development"),
+    [(True, True), (False, False)],
+    ids=["flagged-in-development-mode", "unflagged-as-a-benchmark"],
+)
+def test_mt142_check_mode_returns_none_when_the_mode_matches_the_flag(
+    development_use: bool, development: bool
+) -> None:
+    from mangatl.bench.truth import check_mode
+
+    assert check_mode(_truth(development_use=development_use), development=development) is None
+
+
+def test_mt142_check_mode_names_whichever_chapter_it_is_given() -> None:
+    """Not a constant name: the message is built from `truth.chapter_name`."""
+    from mangatl.bench.truth import NotADevelopmentSet, check_mode
+
+    with pytest.raises(BenchmarkChapterUsedInDevelopment) as flagged:
+        check_mode(_truth(development_use=True, chapter_name="ch-01"), development=False)
+    with pytest.raises(NotADevelopmentSet) as unflagged:
+        check_mode(_truth(development_use=False, chapter_name="ch-01"), development=True)
+
+    assert str(flagged.value) == _FLAGGED_REFUSAL.format(name="ch-01")
+    assert str(unflagged.value) == _NOT_DEVELOPMENT_REFUSAL.format(name="ch-01")
+
+
+def test_mt142_check_mode_takes_development_by_keyword_only() -> None:
+    from mangatl.bench.truth import check_mode
+
+    parameter = inspect.signature(check_mode).parameters["development"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+
+
+def test_mt142_the_two_refusals_are_distinct_exceptions_so_neither_is_caught_as_the_other() -> None:
+    from mangatl.bench.truth import NotADevelopmentSet
+
+    assert issubclass(NotADevelopmentSet, Exception)
+    assert not issubclass(NotADevelopmentSet, BenchmarkChapterUsedInDevelopment)
+    assert not issubclass(BenchmarkChapterUsedInDevelopment, NotADevelopmentSet)
+
+
+def test_mt142_truth_exports_check_mode_and_not_a_development_set() -> None:
+    assert {"check_mode", "NotADevelopmentSet"} <= set(truth_module.__all__)

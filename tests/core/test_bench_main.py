@@ -595,3 +595,155 @@ def test_block1_cost_render_is_exactly_what_its_own_command_prints(
     assert cost.main([str(folder)]) == 0
 
     assert capsys.readouterr().out.splitlines() == parts.cost
+
+
+# -- MT-142: `--development` measures a flagged document, labelled ---------------
+
+#: MT-142 AC-1, verbatim.
+_DEVELOPMENT_LABEL = "DEVELOPMENT SET - not a benchmark result"
+_DEVELOPMENT_SUFFIX = "  [development]"
+
+#: MT-142 C-1, verbatim: what `NotADevelopmentSet` says of this fixture's chapter.
+_NOT_DEVELOPMENT_REFUSAL = (
+    f"chapter {w.CHAPTER!r} is not flagged development_use: it is the held-out benchmark,"
+    " so measure it without --development"
+)
+
+
+def _flag(folder: Path, truth: GroundTruth) -> None:
+    """Rewrite the chapter's own document as a flagged copy of `truth`."""
+    w.write_doc(truth_path_for(folder), dataclasses.replace(truth, development_use=True))
+    assert load_ground_truth(truth_path_for(folder), benchmark=False).development_use
+
+
+def _labelled(parts: _Parts) -> list[str]:
+    """AC-1's report, built by POSITION from the unflagged report's own parts - not
+    by the prefix rule GREEN implements - so the two are independent: S1b and S1a
+    are acceptance lines 0 and 1, the S2 verdict is the last S2 line, S5 is cost
+    line 0. Every other line is unchanged."""
+    acceptance_lines = [
+        *(line + _DEVELOPMENT_SUFFIX for line in parts.acceptance[:2]),
+        *parts.acceptance[2:],
+    ]
+    s2_lines = [*parts.s2[:-1], parts.s2[-1] + _DEVELOPMENT_SUFFIX]
+    cost_lines = [parts.cost[0] + _DEVELOPMENT_SUFFIX, *parts.cost[1:]]
+    return [_DEVELOPMENT_LABEL, *parts.warnings, *acceptance_lines, *s2_lines, *cost_lines]
+
+
+def _assert_positions_are_the_prefix_rule(parts: _Parts) -> None:
+    """Fixture check: the lines `_labelled` suffixes by position are exactly the
+    lines AC-1 names by prefix, so the oracle says what the criterion says."""
+    prefixed = [line for line in parts.joined() if line.startswith(("S1b", "S1a", "S2", "S5"))]
+    assert prefixed == [
+        parts.acceptance[0],
+        parts.acceptance[1],
+        parts.s2[-1],
+        parts.cost[0],
+    ], parts.joined()
+    assert parts.warnings, "the seeded truth warns: an unsuffixed non-S line must be present"
+
+
+def test_mt142_ac1_development_flag_measures_a_flagged_document_labelled_and_suffixed(
+    folder: Path, truth: GroundTruth, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parts = _expected(folder, truth)  # the unflagged copy, measured as a benchmark
+    _assert_positions_are_the_prefix_rule(parts)
+    assert parts.s2[-1] == "S2 PASS", parts.s2
+    _flag(folder, truth)
+
+    status = main([str(folder), "--development"])
+
+    captured = capsys.readouterr()
+    assert status == 0, captured.err
+    assert captured.err == ""
+    out = captured.out.splitlines()
+    assert out[0] == _DEVELOPMENT_LABEL
+    assert out == _labelled(parts)
+
+
+def test_mt142_ac1_an_unpriced_development_chapter_suffixes_the_dash_s5_line_too(
+    folder: Path, unpriced: GroundTruth, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parts = _expected(folder, unpriced)
+    _assert_positions_are_the_prefix_rule(parts)
+    assert parts.cost[0] == f"S5 chapter cost  {DASH}  no priced calls"
+    _flag(folder, unpriced)
+
+    status = main([str(folder), "--development"])
+
+    captured = capsys.readouterr()
+    assert status == 0, captured.err
+    assert captured.out.splitlines() == _labelled(parts)
+
+
+def test_mt142_ac1_an_s2_fail_verdict_is_suffixed_in_a_development_report(
+    folder: Path, truth: GroundTruth, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The verdict line is `S2 FAIL: ...` as well as `S2 PASS`: page 0's cleaning
+    is dropped, so its source scan's glyphs are measured and residual ink fails."""
+    with open_project(project_dir_for(folder)) as project:
+        project.write_regions(0, w.baseline())  # invalidates page 0's cleaned image
+    parts = _expected(folder, truth)
+    _assert_positions_are_the_prefix_rule(parts)
+    assert parts.s2[-1].startswith("S2 FAIL"), parts.s2
+    _flag(folder, truth)
+
+    status = main([str(folder), "--development"])
+
+    captured = capsys.readouterr()
+    assert status == 0, captured.err
+    assert captured.out.splitlines() == _labelled(parts)
+
+
+def test_mt142_ac1_python_dash_m_with_development_exits_zero_with_the_labelled_report(
+    folder: Path,
+    truth: GroundTruth,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parts = _expected(folder, truth)
+    _flag(folder, truth)
+
+    code = _run_module([str(folder), "--development"], monkeypatch)
+
+    assert code == 0
+    assert capsys.readouterr().out.splitlines() == _labelled(parts)
+
+
+def test_mt142_ac3_development_flag_refuses_the_held_out_benchmark_with_one_stderr_line(
+    folder: Path, truth: GroundTruth, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert not load_ground_truth(truth_path_for(folder)).development_use
+
+    status = main([str(folder), "--development"])
+
+    captured = capsys.readouterr()
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err == f"{_PROG}: {_NOT_DEVELOPMENT_REFUSAL}\n"
+    assert w.CHAPTER in captured.err and "held-out benchmark" in captured.err
+
+
+@pytest.mark.parametrize("measurement", ["measure", "measure_s2"])
+def test_mt142_c2_the_command_passes_development_mode_to_measure_and_measure_s2(
+    folder: Path,
+    truth: GroundTruth,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    measurement: str,
+) -> None:
+    """C-2: both measurements are told the mode, by keyword, with and without the flag."""
+    real = getattr(bench_main, measurement)
+    seen: list[bool] = []
+
+    def spy(project: Project, truth: GroundTruth, *, development: bool) -> object:
+        seen.append(development)
+        return real(project, truth, development=development)
+
+    monkeypatch.setattr(bench_main, measurement, spy)
+
+    assert main([str(folder)]) == 0
+    _flag(folder, truth)
+    assert main([str(folder), "--development"]) == 0, capsys.readouterr().err
+
+    assert seen == [False, True]

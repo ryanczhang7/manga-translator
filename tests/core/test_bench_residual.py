@@ -24,6 +24,7 @@ and sets `RESIDUAL_INK_MAX` from them. The numbers are in the story's handoff.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from pathlib import Path
 
 import _s2_world as w
@@ -32,6 +33,7 @@ import pytest
 from numpy.typing import NDArray
 from PIL import Image
 
+import mangatl.bench.residual as residual_module
 from mangatl.bench.residual import (
     CONTRAST_RADIUS,
     INK_CONTRAST_MIN,
@@ -482,3 +484,92 @@ def test_ac7_a_truth_failing_its_validator_is_refused_by_measure_residual_with_e
         measure_residual(project, loaded)
 
     assert all(error in str(refused.value) for error in errors), (errors, str(refused.value))
+
+
+# -- MT-142 AC-4 and C-2: `measure_residual(..., development=True)` -----------------
+#
+# `NotADevelopmentSet` is imported inside the test that needs it, so that while it
+# does not exist the MT-023 tests above still run.
+
+#: MT-142 C-1, verbatim.
+_FLAGGED_REFUSAL = (
+    f"chapter {w.CHAPTER!r} is flagged development_use, so it is not held out and cannot be a"
+    " benchmark"
+)
+_NOT_DEVELOPMENT_REFUSAL = (
+    f"chapter {w.CHAPTER!r} is not flagged development_use: it is the held-out benchmark,"
+    " so measure it without --development"
+)
+
+
+def test_mt142_measure_residual_in_development_mode_measures_a_flagged_document_as_its_copy(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    flagged = w.flagged(tmp_path, truth)
+    with w.project(tmp_path, chapter, w.all_pages(), {0: w.cleaned_page(0, w.WHITE)}) as project:
+        expected = measure_residual(project, truth)
+        report = measure_residual(project, flagged, development=True)
+
+    assert report == expected
+    assert _keys(report) == list(_ALL_REGIONS)
+    assert report.uncleaned_pages == (1,)
+
+
+def test_mt142_measure_residual_still_refuses_a_flagged_document_when_development_is_false(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flagged = w.flagged(tmp_path, truth)
+    with w.project(tmp_path, chapter, w.all_pages()) as project:
+        monkeypatch.setattr(type(project), "read_regions", w.boom)
+        monkeypatch.setattr(type(project), "read_cleaned", w.boom)
+        with pytest.raises(BenchmarkChapterUsedInDevelopment) as refused:
+            measure_residual(project, flagged, development=False)
+
+    assert str(refused.value) == _FLAGGED_REFUSAL
+
+
+def test_mt142_measure_residual_in_development_mode_refuses_the_held_out_benchmark_first(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mangatl.bench.truth import NotADevelopmentSet
+
+    assert not truth.development_use
+    with w.project(tmp_path, chapter, w.all_pages()) as project:
+        monkeypatch.setattr(type(project), "read_regions", w.boom)
+        monkeypatch.setattr(type(project), "read_cleaned", w.boom)
+        with pytest.raises(NotADevelopmentSet) as refused:
+            measure_residual(project, truth, development=True)
+
+    assert str(refused.value) == _NOT_DEVELOPMENT_REFUSAL
+
+
+@pytest.mark.parametrize("development", [True, False], ids=["development", "benchmark"])
+def test_mt142_measure_residual_passes_its_development_mode_to_its_own_measure_recall(
+    tmp_path: Path,
+    chapter: Chapter,
+    truth: GroundTruth,
+    monkeypatch: pytest.MonkeyPatch,
+    development: bool,
+) -> None:
+    """C-2: the matching is `measure_recall`'s, so the mode must reach it - or a
+    development document is measured by `measure_residual` and refused inside."""
+    document = w.flagged(tmp_path, truth) if development else truth
+    seen: list[object] = []
+    real = residual_module.measure_recall
+
+    def spy(project: object, truth: GroundTruth, *, development: bool) -> object:
+        seen.append(development)
+        return real(project, truth, development=development)
+
+    monkeypatch.setattr(residual_module, "measure_recall", spy)
+    with w.project(tmp_path, chapter, w.all_pages(), w.all_cleaned(w.WHITE)) as project:
+        report = measure_residual(project, document, development=development)
+
+    assert seen == [development]
+    assert _keys(report) == list(_ALL_REGIONS)
+
+
+def test_mt142_measure_residual_takes_development_by_keyword_only_defaulting_to_false() -> None:
+    parameter = inspect.signature(measure_residual).parameters["development"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is False

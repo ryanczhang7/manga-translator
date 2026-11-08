@@ -37,6 +37,7 @@ from mangatl.bench.truth import (
     BenchmarkChapterUsedInDevelopment,
     GroundTruth,
     InvalidGroundTruth,
+    check_mode,
     load_ground_truth,
     truth_path_for,
     validate,
@@ -61,13 +62,15 @@ class S2Report:
     passed: bool  # recall_ok and residual_ok - never a partial pass (AC-8)
 
 
-def measure_s2(project: Project, truth: GroundTruth) -> S2Report:
+def measure_s2(project: Project, truth: GroundTruth, *, development: bool = False) -> S2Report:
     """Measure recall, then residual ink, and judge the pair.
 
-    Refuses as `measure_recall` does, before anything is measured.
+    Refuses as `measure_recall` does, before anything is measured: `check_mode`
+    first. `development` is passed to both collaborators (MT-142).
     """
-    recall = measure_recall(project, truth)
-    residual = measure_residual(project, truth)
+    check_mode(truth, development=development)
+    recall = measure_recall(project, truth, development=development)
+    residual = measure_residual(project, truth, development=development)
     recall_ok = not recall.missed and recall.spurious == 0
     residual_ok = all(region.fraction <= RESIDUAL_INK_MAX for region in residual.regions)
     return S2Report(

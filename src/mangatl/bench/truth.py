@@ -17,6 +17,12 @@ matcher*, so the IoU it compares against is the matcher's own, imported rather
 than restated - a second copy could drift and the validator would then check a
 different question from the one it claims to.
 
+**One mode rule (MT-142).** `check_mode` is the refusal every measurement calls
+first: a benchmark run refuses a document flagged `development_use`
+(`BenchmarkChapterUsedInDevelopment`), and a development run refuses one that is
+not - the held-out benchmark (`NotADevelopmentSet`). It lives here, beside the
+flag, so that the measurements share it rather than each keeping a copy.
+
 `python -m mangatl.bench.truth FOLDER [--truth PATH]` validates from the shell
 (PO-4). It loads with `benchmark=False`, because a document still being
 annotated - or one flagged as used in development - must remain checkable.
@@ -43,9 +49,11 @@ __all__ = [
     "BenchmarkChapterUsedInDevelopment",
     "GroundTruth",
     "InvalidGroundTruth",
+    "NotADevelopmentSet",
     "TruthPage",
     "TruthRegion",
     "ValidationReport",
+    "check_mode",
     "dump_ground_truth",
     "load_ground_truth",
     "main",
@@ -133,6 +141,31 @@ class InvalidGroundTruth(Exception):
 
 class BenchmarkChapterUsedInDevelopment(Exception):
     """A document flagged `development_use` was loaded as a benchmark (AC-10)."""
+
+
+class NotADevelopmentSet(Exception):
+    """`development=True` was asked of a document not flagged development_use (MT-142)."""
+
+
+def check_mode(truth: GroundTruth, *, development: bool) -> None:
+    """Refuse a document whose `development_use` flag does not match the mode.
+
+    MT-142 C-1, the one rule every measurement calls first. A benchmark run
+    (`development=False`) of a flagged document raises
+    `BenchmarkChapterUsedInDevelopment`; a development run of an unflagged
+    document - the held-out benchmark - raises `NotADevelopmentSet`. Otherwise
+    returns None. `development` has no default, so no caller can forget the mode.
+    """
+    if truth.development_use and not development:
+        raise BenchmarkChapterUsedInDevelopment(
+            f"chapter {truth.chapter_name!r} is flagged development_use, so it is not"
+            " held out and cannot be a benchmark"
+        )
+    if development and not truth.development_use:
+        raise NotADevelopmentSet(
+            f"chapter {truth.chapter_name!r} is not flagged development_use: it is the"
+            " held-out benchmark, so measure it without --development"
+        )
 
 
 class _Malformed(Exception):

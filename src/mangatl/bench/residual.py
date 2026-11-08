@@ -46,7 +46,7 @@ from PIL import Image
 
 from mangatl.bench.matching import polygon_mask
 from mangatl.bench.recall import measure_recall
-from mangatl.bench.truth import GroundTruth
+from mangatl.bench.truth import GroundTruth, check_mode
 from mangatl.store.project import Project
 
 __all__ = [
@@ -147,13 +147,17 @@ def ink_fraction(cleaned: NDArray[np.uint8], mask: NDArray[np.bool_]) -> float:
     return int(ink.sum()) / area
 
 
-def measure_residual(project: Project, truth: GroundTruth) -> ResidualReport:
+def measure_residual(
+    project: Project, truth: GroundTruth, *, development: bool = False
+) -> ResidualReport:
     """Measure surviving ink inside every matched truth region of `truth`.
 
     Refuses exactly as `measure_recall` does, before anything is read, because
-    the matching is `measure_recall`'s.
+    the matching is `measure_recall`'s: `check_mode` first, then the validator.
+    `development` is passed through to it (MT-142).
     """
-    recall = measure_recall(project, truth)
+    check_mode(truth, development=development)
+    recall = measure_recall(project, truth, development=development)
     regions: list[RegionResidual] = []
     uncleaned: list[int] = []
     for page, page_recall in zip(truth.pages, recall.pages, strict=True):
