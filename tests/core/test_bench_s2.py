@@ -21,6 +21,7 @@ pin the rendering and the residual tests pin the metric.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import math
 import re
 import runpy
@@ -142,8 +143,12 @@ def _with_reports(
 ) -> None:
     """Amendment A-2: `measure_s2` calls the names `measure_recall` and
     `measure_residual` from its own module's namespace."""
-    monkeypatch.setattr(s2_module, "measure_recall", lambda project, truth: recall)
-    monkeypatch.setattr(s2_module, "measure_residual", lambda project, truth: residual)
+    monkeypatch.setattr(
+        s2_module, "measure_recall", lambda project, truth, *, development=False: recall
+    )
+    monkeypatch.setattr(
+        s2_module, "measure_residual", lambda project, truth, *, development=False: residual
+    )
 
 
 _OVER = math.nextafter(RESIDUAL_INK_MAX, 1.0)
@@ -576,3 +581,99 @@ def test_python_dash_m_runs_main_and_exits_with_its_status(
 
     assert exited.value.code == 2
     assert capsys.readouterr().err.startswith(f"{_PROG}: ")
+
+
+# -- MT-142 AC-4 and C-2: `measure_s2(..., development=True)` -----------------------
+#
+# `NotADevelopmentSet` is imported inside the test that needs it, so that while it
+# does not exist the MT-023 tests above still run.
+
+#: MT-142 C-1, verbatim.
+_FLAGGED_REFUSAL = (
+    f"chapter {w.CHAPTER!r} is flagged development_use, so it is not held out and cannot be a"
+    " benchmark"
+)
+_NOT_DEVELOPMENT_REFUSAL = (
+    f"chapter {w.CHAPTER!r} is not flagged development_use: it is the held-out benchmark,"
+    " so measure it without --development"
+)
+
+
+def test_mt142_measure_s2_in_development_mode_measures_a_flagged_document_as_its_copy(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    flagged = w.flagged(tmp_path, truth)
+    detections = w.all_pages()
+    del detections[1][2]
+    with w.project(tmp_path, chapter, detections, w.all_cleaned(w.WHITE)) as project:
+        expected = measure_s2(project, truth)
+        report = measure_s2(project, flagged, development=True)
+
+    assert report == expected
+    assert _verdict(report) == (False, True, False)
+    assert report.recall.missed == ((1, 2),)
+
+
+def test_mt142_measure_s2_still_refuses_a_flagged_document_when_development_is_false(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flagged = w.flagged(tmp_path, truth)
+    with w.project(tmp_path, chapter, w.all_pages()) as project:
+        monkeypatch.setattr(Project, "read_regions", w.boom)
+        monkeypatch.setattr(Project, "read_cleaned", w.boom)
+        with pytest.raises(BenchmarkChapterUsedInDevelopment) as refused:
+            measure_s2(project, flagged, development=False)
+
+    assert str(refused.value) == _FLAGGED_REFUSAL
+
+
+def test_mt142_measure_s2_in_development_mode_refuses_the_held_out_benchmark_first(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mangatl.bench.truth import NotADevelopmentSet
+
+    assert not truth.development_use
+    with w.project(tmp_path, chapter, w.all_pages()) as project:
+        monkeypatch.setattr(Project, "read_regions", w.boom)
+        monkeypatch.setattr(Project, "read_cleaned", w.boom)
+        with pytest.raises(NotADevelopmentSet) as refused:
+            measure_s2(project, truth, development=True)
+
+    assert str(refused.value) == _NOT_DEVELOPMENT_REFUSAL
+
+
+@pytest.mark.parametrize("development", [True, False], ids=["development", "benchmark"])
+def test_mt142_measure_s2_passes_its_development_mode_to_both_collaborators(
+    tmp_path: Path,
+    chapter: Chapter,
+    truth: GroundTruth,
+    monkeypatch: pytest.MonkeyPatch,
+    development: bool,
+) -> None:
+    """C-2 and MT-023 A-2: both collaborators are called through `s2`'s module
+    globals, and each is told the mode by keyword."""
+    document = w.flagged(tmp_path, truth) if development else truth
+    seen: list[tuple[str, bool]] = []
+    recall, residual = _recall(), _residual(0.0)
+
+    def fake_recall(project: object, truth: GroundTruth, *, development: bool) -> RecallReport:
+        seen.append(("measure_recall", development))
+        return recall
+
+    def fake_residual(project: object, truth: GroundTruth, *, development: bool) -> ResidualReport:
+        seen.append(("measure_residual", development))
+        return residual
+
+    monkeypatch.setattr(s2_module, "measure_recall", fake_recall)
+    monkeypatch.setattr(s2_module, "measure_residual", fake_residual)
+    with w.project(tmp_path, chapter, w.all_pages()) as project:
+        report = measure_s2(project, document, development=development)
+
+    assert seen == [("measure_recall", development), ("measure_residual", development)]
+    assert (report.recall, report.residual) == (recall, residual)
+
+
+def test_mt142_measure_s2_takes_development_by_keyword_only_defaulting_to_false() -> None:
+    parameter = inspect.signature(measure_s2).parameters["development"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is False
