@@ -185,6 +185,8 @@ class MainWindow(QMainWindow):
             return
         try:
             pipeline = setup.build_stages(models)
+            # MT-141 AC-2: the consistency pass, run after the last page.
+            postlude = setup.build_postlude() if setup.build_postlude is not None else None
         except (ProviderError, UnknownContextMode) as error:
             self.show_error(str(error))
             return
@@ -202,7 +204,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(panel)
         self.run_panel = panel
         self._run_folder = chapter.source_dir
-        self.run = RunController(project_dir, pipeline, self)
+        self.run = RunController(project_dir, pipeline, self, postlude=postlude)
         self.run.event.connect(panel.on_event)
         self.run.ended.connect(self._run_ended)
         panel.review_requested.connect(self._review)
@@ -265,16 +267,19 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _waiting(self, state: WaitingState) -> None:
         """The wait has begun: the waiting panel, filled, becomes the content
-        in place of the run panel or the drop target (AC-1, AC-3)."""
+        in place of the run panel or the drop target (AC-1, AC-3). Its pass
+        banner's action opens the review (MT-141 AC-5)."""
         panel = BatchWaitingPanel(self)
         panel.show_state(state)
+        panel.review_requested.connect(self._review)
         self.setFocus(Qt.FocusReason.OtherFocusReason)
         self.setCentralWidget(panel)
 
     @Slot(object)
     def _batch_ended(self, end: BatchEnd) -> None:
         """A collected batch opens the review; a failed one leaves the waiting
-        panel's banner, a refused one the run panel's."""
+        panel's banner, a refused one the run panel's, and a pass not run
+        leaves the waiting panel's banner with its action (MT-141 AC-5)."""
         if end == "collected":
             self._review()
 

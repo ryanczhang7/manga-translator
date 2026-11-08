@@ -1109,8 +1109,62 @@ class FakeCollector:
         return BatchResults({page.ordinal: empty for page in pages})
 
 
+class ConsistencySpy:
+    """`compose.build_consistency` (MT-141 C-2): records each selection it is
+    asked for and answers `None` - "no pass", so a collection's events are
+    exactly today's - unless `steps_wanted`, when it answers a fresh
+    `RecordingStep` per call and keeps each in `steps`."""
+
+    def __init__(self) -> None:
+        self.selections: list[object] = []
+        self.steps: list[RecordingStep] = []
+        self.steps_wanted = False
+
+    def __call__(self, selection: Any) -> RecordingStep | None:
+        self.selections.append(selection)
+        if not self.steps_wanted:
+            return None
+        step = RecordingStep()
+        self.steps.append(step)
+        return step
+
+
+def _pass_marker() -> Any:
+    """What a `RecordingStep` emits, so its place in a collection's events -
+    and that it was handed the collection's own `emit` - is observable."""
+    from mangatl.domain.events import CorrectionsApplied
+
+    return CorrectionsApplied(
+        applied=0, skipped_user_lines=0, unchanged_returned=0, chunks_run=1, chunks_refused=0
+    )
+
+
+class RecordingStep:
+    """A `ChapterStep` `(project, run_id, emit) -> None` standing for the
+    consistency pass: records each run id and emits `_pass_marker()`."""
+
+    def __init__(self) -> None:
+        self.run_ids: list[int] = []
+
+    def __call__(self, project: Any, run_id: int, emit: Callable[[Any], None]) -> None:
+        self.run_ids.append(run_id)
+        emit(_pass_marker())
+
+
 @pytest.fixture
-def batch_seams(monkeypatch: pytest.MonkeyPatch) -> BatchSeams:
+def consistency_seam(monkeypatch: pytest.MonkeyPatch) -> ConsistencySpy:
+    """`compose.build_consistency` replaced at its module name, as
+    `batch_seams` replaces the batch builders - `app` imports it inside the
+    function, so the name is looked up at each call. No client is built."""
+    spy = ConsistencySpy()
+    monkeypatch.setattr(compose_module, "build_consistency", spy)
+    return spy
+
+
+@pytest.fixture
+def batch_seams(monkeypatch: pytest.MonkeyPatch, consistency_seam: ConsistencySpy) -> BatchSeams:
+    # MT-141 C-2: `build_batch` builds the consistency pass too; with the batch
+    # seams installed, the pass is the spy's `None` unless a test asks for a step.
     submit = BatchSubmitSpy()
     collector_selections: list[object] = []
     collector = FakeCollector()
@@ -1270,4 +1324,260 @@ def test_the_default_window_setup_carries_build_batch(
     assert isinstance(setup, RunSetup)
     missing = "app.build_batch is missing"
     assert setup.build_batch is getattr(app_module, "build_batch", missing)  # type: ignore[attr-defined]
+    window.close()
+
+
+# =============================================================================
+# MT-141 AC-1: the collect closure hands `collect_volume` the consistency pass
+# =============================================================================
+#
+# `build_batch` builds `compose.build_consistency(selection)` once per call,
+# from the selection its collector was built from, and the collect closure
+# passes it as `collect_volume(..., postlude=step)`. `collect_volume` runs it
+# after the `BatchCollected` of the volume's last job, with the job's run id
+# (MT-115 AC-6) - observed here through `RecordingStep`'s run ids and the
+# marker it emits through the collection's own `emit`.
+
+
+def _project_with_jobs(tmp_path: Path, ranges: Sequence[tuple[int, int]]) -> tuple[Any, Any]:
+    """`_project_with_a_job`'s project, with one submitted job per range."""
+    from mangatl.store.batch import pending_jobs, record_submission
+    from mangatl.store.intake import read_chapter
+    from mangatl.store.project import create_project
+
+    folder = _chapter_folder(tmp_path)
+    project = create_project(read_chapter(folder), project_dir_for(folder))
+    with project.transaction() as cursor:
+        chapter_id = int(cursor.execute("SELECT id FROM chapter").fetchone()[0])
+        cursor.execute(
+            "INSERT INTO run (chapter_id, started_at) VALUES (?, ?)",
+            (chapter_id, "2026-11-04T08:00:00+00:00"),
+        )
+        run_id = int(cursor.execute("SELECT last_insert_rowid()").fetchone()[0])
+    for k, (first, last) in enumerate(ranges):
+        record_submission(project, run_id, f"batches/{k}", "gemini-3.1-pro-preview", first, last)
+    return project, pending_jobs(project)
+
+
+def test_build_batch_collects_the_volumes_only_job_then_runs_the_pass_once_with_its_run_id(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    batch_seams: BatchSeams,
+    consistency_seam: ConsistencySpy,
+) -> None:
+    """AC-1, the batch half of the story's central claim (DV-2 puts the
+    defect back): the step is built from the collector's selection, and runs
+    exactly once, after the job's `BatchCollected`, with the job's run id,
+    through the collection's `emit`."""
+    from mangatl.domain.events import BatchCollected
+
+    _submit, collector_selections, _collector = batch_seams
+    consistency_seam.steps_wanted = True
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv(GEMINI, ENV_KEY)
+    setup = _build_batch()
+    project, job = _project_with_a_job(tmp_path)
+    events: list[object] = []
+    try:
+        setup.collect(project, job, events.append)
+    finally:
+        project.__exit__(None, None, None)
+
+    assert consistency_seam.selections == collector_selections == [Selection("gemini", ENV_KEY)], (
+        f"build_consistency was asked for {consistency_seam.selections}; the collector's"
+        f" selection is {collector_selections}"
+    )
+    (step,) = consistency_seam.steps
+    assert step.run_ids == [job.run_id], f"the pass ran {len(step.run_ids)} times"
+    assert events[-2:] == [BatchCollected(job.id, 2, 0, ()), _pass_marker()], (
+        "the pass did not run after the job's BatchCollected, through the collection's emit"
+    )
+
+
+def test_build_batch_builds_the_pass_once_per_call_and_runs_it_only_after_the_last_job(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    batch_seams: BatchSeams,
+    consistency_seam: ConsistencySpy,
+) -> None:
+    """AC-1: once per `build_batch` call, not once per collection - two
+    jobs collected through one setup share one step, which runs once, after
+    the second (the volume's last) job."""
+    from mangatl.domain.events import BatchCollected
+
+    consistency_seam.steps_wanted = True
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv(GEMINI, ENV_KEY)
+    setup = _build_batch()
+    project, (first, second) = _project_with_jobs(tmp_path, ((0, 0), (1, 1)))
+    events: list[object] = []
+    try:
+        setup.collect(project, first, events.append)
+        assert consistency_seam.selections == [Selection("gemini", ENV_KEY)]
+        (step,) = consistency_seam.steps
+        assert step.run_ids == [], "the pass ran with a job of the volume still pending"
+        setup.collect(project, second, events.append)
+    finally:
+        project.__exit__(None, None, None)
+
+    assert len(consistency_seam.selections) == 1, "a collection built the pass again"
+    assert step.run_ids == [second.run_id]
+    assert events[-2:] == [BatchCollected(second.id, 1, 0, ()), _pass_marker()]
+
+
+def test_a_second_build_batch_call_builds_a_second_pass_from_a_second_selection(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    batch_seams: BatchSeams,
+    consistency_seam: ConsistencySpy,
+) -> None:
+    """AC-1: each `build_batch()` resolves its own selection and builds its
+    own step; a collection through the second runs the second step only."""
+    _submit, collector_selections, _collector = batch_seams
+    consistency_seam.steps_wanted = True
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv(GEMINI, ENV_KEY)
+    _build_batch()
+    second = _build_batch()
+
+    assert consistency_seam.selections == [Selection("gemini", ENV_KEY)] * 2
+    assert collector_selections == consistency_seam.selections
+    assert len(consistency_seam.steps) == 2
+    one, two = consistency_seam.steps
+    assert one is not two
+
+    project, job = _project_with_a_job(tmp_path)
+    try:
+        second.collect(project, job, lambda event: None)
+    finally:
+        project.__exit__(None, None, None)
+
+    assert (one.run_ids, two.run_ids) == ([], [job.run_id])
+
+
+def test_a_build_batch_whose_pass_is_none_collects_exactly_as_today(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    batch_seams: BatchSeams,
+    consistency_seam: ConsistencySpy,
+) -> None:
+    """AC-1 / AC-6: `build_consistency` was asked (an anthropic-like "no
+    pass" answer here), and the collection's events are today's - the
+    pages' `CallPriced`, then `BatchCollected`, last."""
+    from mangatl.domain.events import BatchCollected, CallPriced
+
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv(GEMINI, ENV_KEY)
+    setup = _build_batch()
+    project, job = _project_with_a_job(tmp_path)
+    events: list[object] = []
+    try:
+        setup.collect(project, job, events.append)
+    finally:
+        project.__exit__(None, None, None)
+
+    assert consistency_seam.selections == [Selection("gemini", ENV_KEY)], (
+        "build_batch did not ask build_consistency for the selection's pass"
+    )
+    assert [type(e) for e in events] == [CallPriced, CallPriced, BatchCollected]
+    assert events[-1] == BatchCollected(job.id, 2, 0, ())
+
+
+# =============================================================================
+# MT-141 AC-2 / AC-6: app.build_postlude - the pass a Start would run
+# =============================================================================
+
+
+def _build_postlude() -> Any:
+    return app_module.build_postlude()  # type: ignore[attr-defined]
+
+
+def test_build_postlude_is_exported_beside_build_batch() -> None:
+    """C-2: a public name of `mangatl.app`."""
+    assert "build_postlude" in app_module.__all__
+
+
+def test_build_postlude_builds_the_pass_for_the_environments_gemini_key(
+    monkeypatch: pytest.MonkeyPatch, consistency_seam: ConsistencySpy
+) -> None:
+    """AC-2: the selection `build_stages` makes; the step is
+    `build_consistency`'s, handed back itself."""
+    consistency_seam.steps_wanted = True
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv(GEMINI, ENV_KEY)
+
+    step = _build_postlude()
+
+    assert consistency_seam.selections == [Selection("gemini", ENV_KEY)]
+    assert step is consistency_seam.steps[0]
+
+
+def test_build_postlude_selects_the_stored_key_as_build_stages_does(
+    monkeypatch: pytest.MonkeyPatch, consistency_seam: ConsistencySpy
+) -> None:
+    """AC-2: the environment plus the stored key."""
+    _clear_provider_env(monkeypatch)
+    _store(settings_path(), {"gemini_api_key": STORED_KEY})
+
+    _build_postlude()
+
+    assert consistency_seam.selections == [Selection("gemini", STORED_KEY)]
+
+
+def test_build_postlude_lets_mangatl_provider_choose_between_two_keys(
+    monkeypatch: pytest.MonkeyPatch, consistency_seam: ConsistencySpy
+) -> None:
+    """AC-2: `MANGATL_PROVIDER` choosing between two."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-dummy-0000")
+    monkeypatch.setenv(GEMINI, ENV_KEY)
+    monkeypatch.setenv("MANGATL_PROVIDER", "gemini")
+
+    _build_postlude()
+
+    assert consistency_seam.selections == [Selection("gemini", ENV_KEY)]
+
+
+def test_build_postlude_is_none_for_an_anthropic_selection(
+    monkeypatch: pytest.MonkeyPatch, consistency_seam: ConsistencySpy
+) -> None:
+    """AC-6: `build_consistency` is asked for the anthropic selection, and its
+    `None` - anthropic has no pass - is the answer."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-dummy-0000")
+
+    assert _build_postlude() is None
+    assert [getattr(s, "provider", None) for s in consistency_seam.selections] == ["anthropic"]
+
+
+def test_build_postlude_refuses_a_keyless_start_before_building_anything(
+    monkeypatch: pytest.MonkeyPatch, consistency_seam: ConsistencySpy
+) -> None:
+    """AC-6: no key anywhere - `NoApiKey`, the sentence `build_stages`
+    raises, and `build_consistency` is never reached."""
+    _clear_provider_env(monkeypatch)
+
+    with pytest.raises(NoApiKey) as caught:
+        _build_postlude()
+
+    assert str(caught.value) == NO_API_KEY_TEXT
+    assert consistency_seam.selections == []
+
+
+def test_the_default_window_setup_carries_build_postlude(
+    qtbot,  # type: ignore[no-untyped-def]
+) -> None:
+    """AC-2: `build_window`'s default `RunSetup` carries `app.build_postlude`
+    itself, so a window built with no setup of its own runs the pass."""
+    window = app_module.build_window([])
+    qtbot.addWidget(window)
+    setup = getattr(window, "_run_setup", None)
+
+    assert isinstance(setup, RunSetup)
+    missing = "app.build_postlude is missing"
+    assert setup.build_postlude is getattr(app_module, "build_postlude", missing)  # type: ignore[attr-defined]
     window.close()

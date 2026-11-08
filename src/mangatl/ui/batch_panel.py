@@ -13,6 +13,12 @@ The panel is fed by the window: `show_state` with the controller's
 the time, `BatchFailed` the banner), and `poll_error` with what a poll raised.
 It never polls, and never reads the store.
 
+**The consistency pass** (MT-141) runs in the poll that collects the last job:
+once every job of the state is `BatchCollected` the `batch-pass` line says so
+(`CHECKING`); a `RunAborted` other than a cancel - the pass refused or failed -
+clears it and shows the run panel's pass banner, whose action emits
+`review_requested`.
+
 **Times are local `HH:MM`**, `t.astimezone().strftime("%H:%M")`, from the
 state's aware `submitted_at` and the injected `now` for each poll.
 
@@ -32,17 +38,22 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from mangatl.domain.batch import BatchJob
-from mangatl.domain.events import BatchFailed, BatchWaiting, RunEvent
+from mangatl.domain.events import BatchCollected, BatchFailed, BatchWaiting, RunAborted, RunEvent
+from mangatl.pipeline.runner import CANCELLED
 from mangatl.ui import tokens_gen
 from mangatl.ui.cost_estimate import format_usd
 from mangatl.ui.labels import plain_label
-from mangatl.ui.progress import ErrorBanner
+from mangatl.ui.progress import REVIEW_CHAPTER, ErrorBanner, pass_banner_text
 from mangatl.ui.run import WaitingState
 
-__all__ = ["BatchWaitingPanel", "PendingBatch"]
+__all__ = ["CHECKING", "BatchWaitingPanel", "PendingBatch"]
+
+#: MT-141 D-4: the waiting panel's line while the consistency pass runs.
+CHECKING = "Checking the chapter for consistency\N{HORIZONTAL ELLIPSIS}"
 
 
 @dataclass(frozen=True)
@@ -66,6 +77,9 @@ def _local_now() -> datetime:
 class BatchWaitingPanel(QWidget):
     """What was submitted, when, and the last time it was asked for."""
 
+    #: The pass banner's one action was activated: open the review (MT-141 AC-5).
+    review_requested = Signal()
+
     def __init__(
         self, parent: QWidget | None = None, *, now: Callable[[], datetime] = _local_now
     ) -> None:
@@ -75,7 +89,11 @@ class BatchWaitingPanel(QWidget):
         self.submitted = plain_label("batch-submitted", "")
         self.projection = plain_label("batch-projection", "")
         self.last_checked = plain_label("batch-last-checked", "")
+        self.pass_line = plain_label("batch-pass", "")
+        self.pass_line.hide()
         self.banner: ErrorBanner | None = None
+        self._job_count = 0
+        self._collected = 0
 
         self._column = QVBoxLayout(self)
         pad = tokens_gen.SPACE_S4
@@ -84,6 +102,7 @@ class BatchWaitingPanel(QWidget):
         self._column.addWidget(self.submitted)
         self._column.addWidget(self.projection)
         self._column.addWidget(self.last_checked)
+        self._column.addWidget(self.pass_line)
         self._column.addStretch(1)
 
     def show_state(self, state: WaitingState) -> None:
@@ -102,16 +121,31 @@ class BatchWaitingPanel(QWidget):
                 f"Projected {format_usd(state.projection)} of {format_usd(state.ceiling)}"
             )
             self.projection.show()
+        self._job_count = state.job_count
+        self._collected = 0
         self._name()
 
     def on_event(self, event: RunEvent) -> None:
         """A poll's event: a job still waiting sets the time it was asked; a
-        failed job shows the banner. Every other event changes nothing."""
+        failed job shows the banner. The last job collected shows the pass
+        line (MT-141 AC-3); the pass refused or failed replaces it with the
+        pass banner (AC-5). Every other event changes nothing."""
         if isinstance(event, BatchWaiting):
             self.last_checked.setText(f"Last checked {_hhmm(self._now())}.")
             self._name()
         elif isinstance(event, BatchFailed):
             self._failed(event.state)
+        elif isinstance(event, BatchCollected):
+            self._collected += 1
+            if self._collected >= self._job_count:
+                self.pass_line.setText(CHECKING)
+                self.pass_line.show()
+                self._name()
+        elif isinstance(event, RunAborted) and event.reason != CANCELLED:
+            self.pass_line.setText("")
+            self.pass_line.hide()
+            self._pass_not_run(event.reason)
+            self._name()
 
     def poll_error(self, error: BaseException) -> None:
         """A poll that raised: its type and message beside the time. Not a
@@ -133,11 +167,26 @@ class BatchWaitingPanel(QWidget):
         self.banner = banner
         banner.announce()
 
+    def _pass_not_run(self, reason: str) -> None:
+        """The run panel's consistency-pass banner (MT-141 D-3); its action
+        asks for the review, and takes focus."""
+        headline, body = pass_banner_text(reason)
+        banner = ErrorBanner(headline, body, (REVIEW_CHAPTER,), self)
+        banner.actions[0].clicked.connect(self.review_requested.emit)
+        self._column.insertWidget(0, banner)
+        banner.show()
+        self.banner = banner
+        banner.announce()
+        banner.actions[0].setFocus(Qt.FocusReason.OtherFocusReason)
+
     def _name(self) -> None:
-        """The accessible name is the visible lines, in order (C-4)."""
+        """The accessible name is the visible lines, in order (C-4), the pass
+        line last (MT-141 AC-3)."""
         lines = [self.submitted.text()]
         if not self.projection.isHidden():
             lines.append(self.projection.text())
         if self.last_checked.text():
             lines.append(self.last_checked.text())
+        if not self.pass_line.isHidden():
+            lines.append(self.pass_line.text())
         self.setAccessibleName(" ".join(lines))

@@ -74,6 +74,7 @@ from mangatl import app as app_module
 from mangatl.domain.budget import DEFAULT_CEILING, Decision, Projection
 from mangatl.domain.events import (
     CallPriced,
+    CorrectionsApplied,
     PageSkipped,
     PageStarted,
     PassStarted,
@@ -411,11 +412,13 @@ def world(qtbot) -> Iterator[World]:  # type: ignore[no-untyped-def]
 
 
 def _controller(
-    world: World, project_dir: Path, stages: Sequence[Stage] | Pipeline
+    world: World, project_dir: Path, stages: Sequence[Stage] | Pipeline, **keywords: Any
 ) -> tuple[RunController, Recorder]:
     """MT-139 C-1: `RunController` takes a `Pipeline`; a stage list is wrapped
-    as the single-pass one, so the callers below keep their stage lists."""
-    run = RunController(project_dir, _pipeline(stages))
+    as the single-pass one, so the callers below keep their stage lists.
+    MT-141 C-1: `keywords` reach the constructor (`postlude=`); none are
+    passed by any caller before MT-141's tests."""
+    run = RunController(project_dir, _pipeline(stages), **keywords)
     world.runs.append(run)
     recorder = Recorder()
     run.event.connect(recorder.on_event)
@@ -1694,6 +1697,13 @@ def test_every_window_build_window_makes_gets_the_real_setup(
     # "no batch" - AC-5's path, the one this test has always exercised.
     # raising=False: `build_batch` does not exist before MT-113's GREEN.
     monkeypatch.setattr(app_module, "build_batch", lambda: None, raising=False)
+    # MT-141 C-2: the default setup now carries `app.build_postlude` too, which
+    # makes `build_stages`' selection - on a keyless machine a NoApiKey at
+    # Start, on a keyed one a real consistency pass after the last page. This
+    # test is about which setup the window gets, not about the pass, so the
+    # pass builder answers "no pass" (AC-6's path). raising=False:
+    # `build_postlude` does not exist before MT-141's GREEN.
+    monkeypatch.setattr(app_module, "build_postlude", lambda: None, raising=False)
 
     window = app_module.build_window([str(folder)] if arguments == "folder" else [])
     _press_start_on_summary_of(qtbot, world, window, folder)
@@ -2260,3 +2270,254 @@ def test_closing_the_window_during_the_reading_pass_translates_and_proposes_noth
         w for w in QApplication.topLevelWidgets() if isinstance(w, Workspace) and w.isVisible()
     ]
     assert shown == [], "a Workspace is showing after the window closed"
+
+
+# =============================================================================
+# MT-141 AC-2 / AC-6: the consistency pass rides the window's Start
+# =============================================================================
+#
+# `RunSetup.build_postlude` (C-1) is asked once per Start, beside
+# `build_stages`, and its step reaches `run_chapter` as `postlude` through
+# `RunController(..., postlude=)`. The step here records the run id it was
+# given and emits `PASS_MARKER` through the `emit` it was given - so the
+# marker's place in the stream says WHEN the pass ran, and its arrival at the
+# recorder says it was handed the run's own `emit`.
+
+#: What the recording pass emits: the real pass's own event, inert on the panel.
+PASS_MARKER = CorrectionsApplied(
+    applied=0, skipped_user_lines=0, unchanged_returned=0, chunks_run=1, chunks_refused=0
+)
+#: MT-141 D-3, spelled out.
+PASS_REFUSED = f"Consistency pass not run {EM} the budget would be exceeded."
+PASS_SURVIVED = "Every page is translated and can be reviewed and rendered."
+REVIEW_CHAPTER = "Review the chapter"
+
+
+class PassStep:
+    """A `ChapterStep` standing for the consistency pass: records each call's
+    run id and thread, emits `PASS_MARKER`, then raises `error` if given."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.run_ids: list[int] = []
+        self.threads: list[threading.Thread] = []
+        self._error = error
+
+    def __call__(self, project: Project, run_id: int, emit: Callable[[RunEvent], None]) -> None:
+        self.run_ids.append(run_id)
+        self.threads.append(threading.current_thread())
+        emit(PASS_MARKER)
+        if self._error is not None:
+            raise self._error
+
+
+class PassBuilder:
+    """`RunSetup.build_postlude`: counts its calls, answers `step` (or raises)."""
+
+    def __init__(self, step: PassStep | None, error: Exception | None = None) -> None:
+        self.calls = 0
+        self._step = step
+        self._error = error
+
+    def __call__(self) -> PassStep | None:
+        self.calls += 1
+        if self._error is not None:
+            raise self._error
+        return self._step
+
+
+def _with_pass(models: Callable[[], Path | None], builder: Builder, passes: Any) -> RunSetup:
+    return RunSetup(models, builder, _claude, build_postlude=passes)  # type: ignore[call-arg]
+
+
+def _record_postludes(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """The `postlude` every `RunController` hands `run_chapter`, by the name
+    `mangatl.ui.run` calls it by; the real `run_chapter` then runs."""
+    seen: list[object] = []
+    real = run_module.run_chapter
+
+    def record(*args: Any, **keywords: Any) -> RunOutcome:
+        seen.append(keywords.get("postlude"))
+        return real(*args, **keywords)
+
+    monkeypatch.setattr(run_module, "run_chapter", record)
+    return seen
+
+
+def test_the_controller_hands_its_postlude_to_run_chapter_which_runs_it_before_run_finished(
+    qtbot,  # type: ignore[no-untyped-def]
+    world: World,
+    tmp_path: Path,
+    page_png: bytes,
+) -> None:
+    """C-1: `RunController(project_dir, pipeline, *, postlude=)` - the step
+    runs once, on the worker, with the run's id, after the last page's last
+    stage and before `RunFinished`."""
+    calls = Calls()
+    step = PassStep()
+    project_dir = _created(_pages_folder(tmp_path, "ch", 3, page_png))
+    run, recorder = _controller(world, project_dir, _quick_stages(calls), postlude=step)
+
+    run.start()
+    outcome = _wait_ended(qtbot, recorder)
+
+    events = _normalised(recorder.events)
+    started = events[0]
+    assert isinstance(started, RunStarted), f"the run began with {started!r}"
+    assert step.run_ids == [started.run_id], f"the pass ran {len(step.run_ids)} times"
+    assert step.threads[0] is not threading.main_thread(), "the pass ran on the GUI thread"
+    assert events[-3:] == [
+        StageFinished(ordinal=2, stage="translate", elapsed_ms=0),
+        PASS_MARKER,
+        RunFinished(run_id=started.run_id, pages_done=3),
+    ]
+    assert outcome.outcome == RUN_FINISHED
+
+
+def test_start_runs_the_pass_once_after_the_last_page_and_before_run_finished(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    world: World,
+    tmp_path: Path,
+    page_png: bytes,
+) -> None:
+    """AC-2, the story's central claim at the window (DV-1 puts the defect
+    back): Start asks `build_postlude()` once, and the step it answers runs
+    once with `RunStarted.run_id`, after page 3's last stage and before
+    `RunFinished`; its event reaches the run's receivers."""
+    folder = _pages_folder(tmp_path, "ch", 3, page_png)
+    recorder = _record_window_runs(monkeypatch)
+    calls = Calls()
+    step = PassStep()
+    passes = PassBuilder(step)
+    window = _window(
+        qtbot, world, folder, _with_pass(_models(tmp_path), Builder(_quick_stages(calls)), passes)
+    )
+
+    _press_start(window)
+    _assert_run_started(window)
+    _wait_workspace(qtbot, window, pages=3)
+    qtbot.waitUntil(lambda: recorder.outcome is not None, timeout=RUN_MS)
+
+    events = _normalised(recorder.events)
+    started = events[0]
+    assert isinstance(started, RunStarted), f"the run began with {started!r}"
+    assert passes.calls == 1, f"Start asked build_postlude {passes.calls} times"
+    assert step.run_ids == [started.run_id], f"the pass ran {len(step.run_ids)} times"
+    assert events[-3:] == [
+        StageFinished(ordinal=2, stage="translate", elapsed_ms=0),
+        PASS_MARKER,
+        RunFinished(run_id=started.run_id, pages_done=3),
+    ]
+
+
+def test_a_start_whose_pass_is_refused_keeps_the_panel_with_the_pass_banner_until_review(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    world: World,
+    tmp_path: Path,
+    page_png: bytes,
+) -> None:
+    """AC-2 + AC-4 at the window: the pass is refused after the last page, so
+    the run ends `RunAborted(BUDGET, None)` with every page done; the review
+    does not open by itself, the panel says the pass did not run, and its
+    action opens the review."""
+    folder = _pages_folder(tmp_path, "ch", 3, page_png)
+    recorder = _record_window_runs(monkeypatch)
+    calls = Calls()
+    step = PassStep(error=_refusal())
+    window = _window(
+        qtbot,
+        world,
+        folder,
+        _with_pass(_models(tmp_path), Builder(_quick_stages(calls)), PassBuilder(step)),
+    )
+
+    _press_start(window)
+    _assert_run_started(window)
+    _wait_run_ended(qtbot, window)
+    qtbot.waitUntil(lambda: recorder.outcome is not None, timeout=RUN_MS)
+
+    assert recorder.events[-1] == RunAborted(reason="budget", ordinal=None)
+    assert window.opened is None, "the review opened over a pass that did not run"
+    assert _statuses(_project_dir(folder)) == [PAGE_DONE] * 3
+    banner = _panel(window).banner
+    assert isinstance(banner, ErrorBanner), f"the run panel's banner is {banner!r}"
+    assert banner.headline.text() == PASS_REFUSED
+    assert banner.body.text() == PASS_SURVIVED
+    assert [button.text() for button in banner.actions] == [REVIEW_CHAPTER]
+
+    banner.actions[0].click()
+    _settle()
+
+    workspace = _wait_workspace(qtbot, window, pages=3)
+    assert workspace.page_strip.count() == 3
+
+
+def test_a_provider_refusal_from_the_pass_builder_is_shown_as_starts_error(
+    qtbot,  # type: ignore[no-untyped-def]
+    world: World,
+    tmp_path: Path,
+    page_png: bytes,
+) -> None:
+    """C-3: a `ProviderError` from `build_postlude` is shown exactly as one
+    from `build_stages` - the window's error, no run, no project."""
+    from mangatl.translate.provider import NoApiKey
+
+    message = "no API key is set: the pass builder refused"
+    folder = _pages_folder(tmp_path, "ch", 2, page_png)
+    builder = Builder()
+    passes = PassBuilder(None, error=NoApiKey(message))
+    window = _window(qtbot, world, folder, _with_pass(_models(tmp_path), builder, passes))
+
+    _press_start(window)
+
+    assert passes.calls == 1, "precondition: Start asked the pass builder"
+    target = window.centralWidget()
+    assert isinstance(target, FolderDropTarget), (
+        f"after the pass builder refused, the central widget is {type(target).__name__}"
+    )
+    assert target.headline.text() == message
+    assert window.run is None and window.run_panel is None, "a run started after the refusal"
+    assert not _project_dir(folder).exists(), "a refused Start left a project beside the scans"
+
+
+@pytest.mark.parametrize("case", ["no-builder", "builder-answers-none"])
+def test_a_start_without_a_pass_hands_run_chapter_none_and_runs_as_today(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    world: World,
+    tmp_path: Path,
+    page_png: bytes,
+    case: str,
+) -> None:
+    """AC-6: a setup with no `build_postlude`, or one answering `None` (an
+    Anthropic selection), runs exactly as today: `postlude=None`, and the
+    stream ends on the last page's stage and `RunFinished`. `no-builder` is a
+    control and passes before GREEN."""
+    folder = _pages_folder(tmp_path, "ch", 3, page_png)
+    seen = _record_postludes(monkeypatch)
+    recorder = _record_window_runs(monkeypatch)
+    calls = Calls()
+    builder = Builder(_quick_stages(calls))
+    passes = PassBuilder(None)
+    setup = (
+        RunSetup(_models(tmp_path), builder, _claude)
+        if case == "no-builder"
+        else _with_pass(_models(tmp_path), builder, passes)
+    )
+    window = _window(qtbot, world, folder, setup)
+
+    _press_start(window)
+    _assert_run_started(window)
+    _wait_workspace(qtbot, window, pages=3)
+    qtbot.waitUntil(lambda: recorder.outcome is not None, timeout=RUN_MS)
+
+    assert seen == [None], f"run_chapter was handed postlude={seen!r}"
+    events = _normalised(recorder.events)
+    assert PASS_MARKER not in events
+    assert events[-2:] == [
+        StageFinished(ordinal=2, stage="translate", elapsed_ms=0),
+        RunFinished(run_id=1, pages_done=3),
+    ]
+    if case == "builder-answers-none":
+        assert passes.calls == 1

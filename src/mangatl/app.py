@@ -16,8 +16,9 @@ given a `RunSetup`: `resolve_models` (`$MANGATL_MODELS`, read when Start is
 pressed) and `build_stages` (`mangatl.compose.build_pipeline`, translation
 on), since MT-100 `selected_model` (the model a Start would call, which
 the summary's estimate is priced on), and since MT-113 `build_batch` (the
-batch a Start on Gemini submits instead; `None` for a provider with no batch).
-`resolve_models`, `build_stages` and `build_batch` import `mangatl.compose`
+batch a Start on Gemini submits instead; `None` for a provider with no batch),
+and since MT-141 `build_postlude` (the consistency pass run after the last page).
+`resolve_models`, `build_stages`, `build_batch` and `build_postlude` import `mangatl.compose`
 inside their bodies, so a launch that only
 reviews never loads `onnxruntime` or `anthropic`; import-linter counts those
 imports all the same, which is why this module is exempt from the two
@@ -67,7 +68,7 @@ from mangatl.domain.page import Chapter
 from mangatl.models.manifest import ModelHashMismatch, load_manifest, verify_bundled_models
 from mangatl.models.providers import select_providers
 from mangatl.pipeline.batch import collect_volume
-from mangatl.pipeline.prelude import Pipeline
+from mangatl.pipeline.prelude import ChapterStep, Pipeline
 from mangatl.pipeline.translate_stage import budget_for
 from mangatl.store.batch import pending_jobs
 from mangatl.store.intake import NoPagesFound, UnreadablePage, read_chapter
@@ -93,6 +94,7 @@ __all__ = [
     "IntakeError",
     "ask_api_key",
     "build_batch",
+    "build_postlude",
     "build_stages",
     "build_window",
     "check_bundled_models",
@@ -252,8 +254,11 @@ def build_batch() -> BatchSetup | None:
     The collect half is `collect_volume` over one collector built once, at the
     batch-tier estimate - a closure rather than a `partial`, because the
     controller calls it `(project, job, emit)` (A-R3). The ceiling is the
-    stored one the guard judges against, else the default."""
-    from mangatl.compose import build_batch_collector, build_batch_submit
+    stored one the guard judges against, else the default.
+
+    The consistency pass is built once per call from the same selection and
+    run by `collect_volume` after the volume's last job (MT-141 AC-1)."""
+    from mangatl.compose import build_batch_collector, build_batch_submit, build_consistency
 
     env = translation_env(os.environ, settings_path())
     selection = select_provider(os.environ.get(PROVIDER_VAR) or None, env)
@@ -263,11 +268,25 @@ def build_batch() -> BatchSetup | None:
     collector = build_batch_collector(selection)
     assert collector is not None  # a provider with a batch submit has a collector
     estimate = page_estimate(model_for(selection.provider), pricing="batch")
+    step = build_consistency(selection)
 
     def collect(project: Project, job: BatchJob, emit: Callable[[RunEvent], None]) -> BatchAnswer:
-        return collect_volume(project, job, collector, estimate, emit)
+        return collect_volume(project, job, collector, estimate, emit, postlude=step)
 
     return BatchSetup(submit, collect, lambda project: budget_for(project, estimate).ceiling)
+
+
+def build_postlude() -> ChapterStep | None:
+    """The consistency pass a Start would run after its last page (MT-141
+    AC-2), by `build_stages`' selection - the environment plus the stored key,
+    `MANGATL_PROVIDER` choosing between two - so a keyless Start is refused
+    (`NoApiKey`, ...) here as it is there. `None` when the provider has no
+    pass (`compose.build_consistency` answers `None` for anthropic)."""
+    from mangatl.compose import build_consistency
+
+    env = translation_env(os.environ, settings_path())
+    selection = select_provider(os.environ.get(PROVIDER_VAR) or None, env)
+    return build_consistency(selection)
 
 
 def selected_model() -> str:
@@ -317,7 +336,13 @@ def build_window(arguments: Sequence[str], *, run_setup: RunSetup | None = None)
     the command line or from an intake window: each window's opener is
     `open_folder` bound with it (MT-125 C-3)."""
     if run_setup is None:
-        run_setup = RunSetup(resolve_models, build_stages, selected_model, build_batch=build_batch)
+        run_setup = RunSetup(
+            resolve_models,
+            build_stages,
+            selected_model,
+            build_batch=build_batch,
+            build_postlude=build_postlude,
+        )
     opener = partial(open_folder, run_setup=run_setup)
     if not arguments:
         return MainWindow(open_folder=opener, run_setup=run_setup)

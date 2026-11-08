@@ -1085,3 +1085,203 @@ def test_a_page_starting_in_the_translating_pass_shows_its_own_markers_again(
 
     assert thumb.accessibleName() == "Page 2: 1 text region found"
     assert _marker_points(panel) == page_1_markers
+
+
+# =============================================================================
+# MT-141 AC-4: the consistency pass refused or failed AFTER the last page.
+# `run_chapter` runs the postlude only once every page of the final pass has
+# completed, and reports its failure as `RunAborted(reason, ordinal=None)`
+# with no `RunFinished` (MT-115 AC-6). Today the panel reads that event as a
+# run stopped at page N+1 of N. Every string is the story's D-3, spelled out;
+# the MT-139 "before page 1" banners above are this section's controls.
+# =============================================================================
+
+PASS_REFUSED = f"Consistency pass not run {EM} the budget would be exceeded."
+PASS_FAILED = "Consistency pass failed."
+PASS_SURVIVED = "Every page is translated and can be reviewed and rendered."
+REVIEW_CHAPTER = "Review the chapter"
+PASS_REASON = "RuntimeError: the consistency call returned nothing"
+
+
+def _translated_every_page(page_count: int) -> list[RunEvent]:
+    """A two-pass run whose translating pass reached its last page: every page
+    read, then every page translated - nothing after the last `StageFinished`."""
+    events = [*_read_every_page(page_count), PassStarted(name=TRANSLATING)]
+    for ordinal in range(page_count):
+        events += _translating_page(ordinal)
+    return events
+
+
+def _one_pass_every_page(page_count: int) -> list[RunEvent]:
+    """A one-pass run (no `PassStarted`, `test_start_run.py`'s fakes) whose
+    last page has run its last stage."""
+    events: list[RunEvent] = [RunStarted(run_id=1, page_count=page_count)]
+    for ordinal in range(page_count):
+        events += _page(ordinal, 1, 1, 1)
+    return events
+
+
+def _no_run_stopped(panel: RunProgressPanel) -> None:
+    # The banner's own labels only (AC-4: "Neither banner contains `Run
+    # stopped`"): a refusal also marks the cost readout aborted, and its
+    # caption is MT-074's "Run stopped - budget reached" (§10.6).
+    texts = [label.text() for label in _banner(panel).findChildren(QLabel)]
+    stopped = [text for text in texts if "Run stopped" in text]
+    assert stopped == [], f"the pass's banner claims a page stopped the run: {stopped}"
+
+
+def test_a_pass_refused_after_the_last_translating_page_says_it_was_not_run(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-4, refused, two-pass: every page is translated; the pass did not run.
+    The readout is marked aborted, as every budget refusal marks it."""
+    panel = _panel(qtbot)
+    _feed(panel, *_translated_every_page(3), RunAborted(reason=BUDGET, ordinal=None))
+
+    banner = _banner(panel)
+    assert banner.headline.text() == PASS_REFUSED
+    assert banner.body.text() == PASS_SURVIVED
+    assert [button.text() for button in banner.actions] == [REVIEW_CHAPTER]
+    assert [b.text() for b in banner.findChildren(QAbstractButton)] == [REVIEW_CHAPTER]
+    assert panel.cost_readout.state() == "aborted"
+    _no_run_stopped(panel)
+
+
+def test_a_pass_failed_after_the_last_translating_page_leads_with_the_reason(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-4, failed, two-pass: the reason verbatim on its own line, what
+    survived, the same one action, and the readout exactly as it was."""
+    panel = _panel(qtbot)
+    _feed(panel, *_translated_every_page(3), _chapter_priced(5))
+    readout_before = (panel.cost_readout.state(), panel.cost_readout.figure.text())
+
+    _feed(panel, RunAborted(reason=PASS_REASON, ordinal=None))
+
+    banner = _banner(panel)
+    assert banner.headline.text() == PASS_FAILED
+    assert banner.body.text() == f"{PASS_REASON}\n{PASS_SURVIVED}"
+    assert [button.text() for button in banner.actions] == [REVIEW_CHAPTER]
+    assert (panel.cost_readout.state(), panel.cost_readout.figure.text()) == readout_before
+    assert panel.cost_readout.state() != "aborted"
+    _no_run_stopped(panel)
+
+
+def test_a_one_pass_run_refused_after_its_last_page_says_the_pass_was_not_run(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-4, one pass (no `PassStarted`): the last page is still `_current`
+    when the abort arrives - nothing but the next `PageStarted` or
+    `RunFinished` completes it - and it counts as started."""
+    panel = _panel(qtbot)
+    _feed(panel, *_one_pass_every_page(4), RunAborted(reason=BUDGET, ordinal=None))
+
+    banner = _banner(panel)
+    assert banner.headline.text() == PASS_REFUSED
+    assert banner.body.text() == PASS_SURVIVED
+    assert [button.text() for button in banner.actions] == [REVIEW_CHAPTER]
+    assert panel.cost_readout.state() == "aborted"
+    _no_run_stopped(panel)
+
+
+def test_a_resumed_run_with_every_page_skipped_then_refused_says_the_pass_was_not_run(
+    qtbot,  # type: ignore[no-untyped-def]
+) -> None:
+    """AC-4, PO-2's recovery: Run again over a chapter whose pages are all
+    done skips every page, then runs the pass - refused again here."""
+    panel = _panel(qtbot)
+    _feed(
+        panel,
+        RunStarted(run_id=2, page_count=3),
+        *[PageSkipped(ordinal=n, reason="already done") for n in range(3)],
+        RunAborted(reason=BUDGET, ordinal=None),
+    )
+
+    banner = _banner(panel)
+    assert banner.headline.text() == PASS_REFUSED
+    assert banner.body.text() == PASS_SURVIVED
+    assert [button.text() for button in banner.actions] == [REVIEW_CHAPTER]
+    _no_run_stopped(panel)
+
+
+def test_a_cancel_after_the_last_page_shows_no_banner(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-4: only BUDGET and a failure reason have a banner; a cancel (only
+    ever the window closing) shows nothing, after the last page as before it.
+    A control: it passes today, and must still pass with the pass arm."""
+    panel = _panel(qtbot)
+
+    _feed(panel, *_translated_every_page(3), RunAborted(reason=CANCELLED, ordinal=None))
+
+    assert panel.banner is None
+    assert panel.findChildren(ErrorBanner) == []
+
+
+@pytest.mark.parametrize("reason", [BUDGET, PASS_REASON], ids=["refused", "failed"])
+def test_the_pass_banners_action_asks_to_review_every_page(qtbot, reason: str) -> None:  # type: ignore[no-untyped-def]
+    """AC-4: `review_requested(page_count)` - every page is translated."""
+    panel = _panel(qtbot)
+    _feed(panel, *_translated_every_page(5), RunAborted(reason=reason, ordinal=None))
+    requested: list[int] = []
+    panel.review_requested.connect(requested.append)
+
+    _banner(panel).actions[0].click()
+
+    assert requested == [5]
+
+
+@pytest.mark.parametrize(
+    ("reason", "headline"),
+    [(BUDGET, PASS_REFUSED), (PASS_REASON, PASS_FAILED)],
+    ids=["refused", "failed"],
+)
+def test_the_pass_banner_takes_focus_and_is_announced(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    headline: str,
+) -> None:
+    """AC-4 / C-4: the banner is posted to assistive technology once, and its
+    one action takes focus - as every banner with an action does (D-3). The
+    headline is read first: today's misread banner also takes focus."""
+    announced: list[ErrorBanner] = []
+    monkeypatch.setattr(ErrorBanner, "announce", lambda self: announced.append(self))
+    panel = RunProgressPanel()
+    qtbot.addWidget(panel)
+    panel.resize(800, 500)
+    with qtbot.waitExposed(panel):
+        panel.show()
+    panel.activateWindow()
+    qtbot.waitUntil(panel.isActiveWindow)
+
+    _feed(panel, *_translated_every_page(3), RunAborted(reason=reason, ordinal=None))
+    QApplication.processEvents()
+
+    banner = _banner(panel)
+    assert banner.headline.text() == headline
+    assert announced == [banner], f"announced {announced!r}"
+    assert [button.text() for button in banner.actions] == [REVIEW_CHAPTER]
+    qtbot.waitUntil(banner.actions[0].hasFocus, timeout=2_000)
+
+
+@pytest.mark.parametrize(
+    ("reason", "headline"),
+    [
+        (BUDGET, f"Run stopped at page 3 of 3 {EM} the $2.00 budget was reached."),
+        ("RuntimeError: x", f"Run stopped at page 3 of 3 {EM} page 3 failed."),
+    ],
+    ids=["budget", "failed"],
+)
+def test_control_an_abort_naming_the_last_page_still_reads_as_a_stop_at_that_page(
+    qtbot,  # type: ignore[no-untyped-def]
+    reason: str,
+    headline: str,
+) -> None:
+    """A control for AC-4's boundary: an abort WITH an ordinal is a page's,
+    never the pass's, even on the last page - the arm reads `ordinal is None`
+    as well as "every page started". It passes today and must keep passing."""
+    panel = _panel(qtbot)
+    _feed(
+        panel,
+        *_read_every_page(3),
+        PassStarted(name=TRANSLATING),
+        *_translating_page(0),
+        *_translating_page(1),
+        PageStarted(ordinal=2),
+        RunAborted(reason=reason, ordinal=2),
+    )
+
+    assert _banner(panel).headline.text() == headline

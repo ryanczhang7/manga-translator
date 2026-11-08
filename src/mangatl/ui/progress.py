@@ -51,6 +51,13 @@ refused `CallPriced`'s projection and ceiling (AM-1), or the panel's own
 ceiling when no `CallPriced` arrived; the readout is marked aborted as a
 per-page budget stop marks it.
 
+**The consistency pass** (MT-141 AC-4) runs after the last page. A
+`RunAborted` with no ordinal that arrives once every page of the pass has
+started or been skipped is that pass refused or failed - never a stop at a
+page: its banner says the pass was not run, that every page survived
+(`PASS_SURVIVED`), and offers `REVIEW_CHAPTER` for all `page_count` pages.
+The waiting panel shows the same banner, through `pass_banner_text`.
+
 Every colour and type size comes from the application stylesheet by object
 name and dynamic property (MT-061's rule); spacing comes from the tokens.
 """
@@ -98,12 +105,15 @@ __all__ = [
     "BATCH_STAGE_STEPS",
     "ESTIMATING",
     "MIN_PAGES_FOR_ETA",
+    "PASS_SURVIVED",
+    "REVIEW_CHAPTER",
     "STAGE_STEPS",
     "ErrorBanner",
     "PageStageStepper",
     "RunProgressPanel",
     "StepState",
     "format_duration",
+    "pass_banner_text",
 ]
 
 #: §8: a remaining time from fewer completed pages than this is confidently wrong.
@@ -121,6 +131,22 @@ StepState = Literal["pending", "active", "done"]
 _STAGE_INDEX: dict[str, int] = {"detect": 0, "ocr": 1, "translate": 2}
 
 ESTIMATING = "Remaining estimating\N{HORIZONTAL ELLIPSIS}"
+
+#: MT-141 D-3: the consistency-pass banner's body and its one action, shared
+#: with the waiting panel so the two banners cannot drift.
+PASS_SURVIVED = "Every page is translated and can be reviewed and rendered."
+REVIEW_CHAPTER = "Review the chapter"
+
+
+def pass_banner_text(reason: str) -> tuple[str, str]:
+    """The consistency-pass banner's headline and body for an abort `reason`
+    other than a cancel (MT-141 D-3): a refusal says the pass was not run, any
+    other reason leads the body on its own line."""
+    if reason == BUDGET:
+        return "Consistency pass not run \N{EM DASH} the budget would be exceeded.", PASS_SURVIVED
+    return "Consistency pass failed.", f"{reason}\n{PASS_SURVIVED}"
+
+
 _STEP_MARK: dict[StepState, str] = {
     "pending": "",
     "active": "\N{BLACK RIGHT-POINTING SMALL TRIANGLE} ",
@@ -379,6 +405,8 @@ class RunProgressPanel(QWidget):
             # panel's (MT-113 C-4), so here they are inert.
             if self._batch:
                 self._batch_abort(event)
+            elif event.ordinal is None and self._after_every_page():
+                self._pass_abort(event)
             elif event.reason == BUDGET:
                 self._budget_abort(event)
             elif event.reason != CANCELLED:
@@ -505,6 +533,25 @@ class RunProgressPanel(QWidget):
             headline = "Batch not submitted."
         self._show_banner(headline, event.reason + "\n", 0)
 
+    def _after_every_page(self) -> bool:
+        """The run reached its postlude: every page of the pass in progress has
+        started or been skipped. `_current` counts, because nothing but the next
+        `PageStarted` or `RunFinished` completes the last page, and the postlude
+        runs only once every page completed."""
+        started = self._completed + self._skipped + (1 if self._current is not None else 0)
+        return self._page_count > 0 and started == self._page_count
+
+    def _pass_abort(self, event: RunAborted) -> None:
+        """MT-141 AC-4: the consistency pass refused or failed after the last
+        page. Every page survived; the readout is marked only for a refusal."""
+        self._complete_current()  # the last page did complete
+        if event.reason == CANCELLED:
+            return
+        headline, body = pass_banner_text(event.reason)
+        self._put_banner(headline, body, (REVIEW_CHAPTER,), self._page_count)
+        if event.reason == BUDGET:
+            self.cost_readout.mark_aborted()
+
     def _show_banner(self, headline: str, lead: str, kept: int) -> None:
         """The banner at the top of the panel: `lead`, then what survived, and
         - when a page did - the one action, which takes focus (D-3). A batch
@@ -514,7 +561,12 @@ class RunProgressPanel(QWidget):
             actions: tuple[str, ...] = (f"Review pages 1\N{EN DASH}{kept}",)
         else:
             body, actions = "No pages were translated.", ()
-        banner = ErrorBanner(headline, lead + body, actions, self)
+        self._put_banner(headline, lead + body, actions, kept)
+
+    def _put_banner(self, headline: str, body: str, actions: tuple[str, ...], kept: int) -> None:
+        """Insert, announce and focus the banner; its action asks to review
+        pages 1..`kept`."""
+        banner = ErrorBanner(headline, body, actions, self)
         for button in banner.actions:
             button.clicked.connect(lambda: self.review_requested.emit(kept))
         self._column.insertWidget(0, banner)

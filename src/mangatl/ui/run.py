@@ -30,16 +30,18 @@ signals - and adds the wait: a **single-shot** `poll_timer` of
 job pending (a `QTimer` belongs to its thread), never a thread sleep (AC-2).
 Each poll runs on a worker and asks every pending job once. A `BatchFailed`
 ends the run `failed` and polling stops; no job left pending ends it
-`collected`; a poll that raises is reported on `poll_failed` and the timer is
-armed again. `stop()` stops the timer and joins a worker in flight; nothing is
-cancelled at the provider, so the jobs stay pending for a reopen (AC-6).
+`collected`, or `pass_not_run` when the poll also carried a `RunAborted` - the
+consistency pass refused or failed (MT-141 AC-5); a poll that raises is
+reported on `poll_failed` and the timer is armed again. `stop()` stops the
+timer and joins a worker in flight; nothing is cancelled at the provider, so
+the jobs stay pending for a reopen (AC-6).
 """
 
 from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -47,10 +49,10 @@ from typing import Literal
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from mangatl.domain.batch import BatchAnswer, BatchJob
-from mangatl.domain.events import BatchFailed, BatchSubmitted, RunEvent
+from mangatl.domain.events import BatchFailed, BatchSubmitted, RunAborted, RunEvent
 from mangatl.domain.money import Usd
 from mangatl.pipeline.batch import ChapterSubmit
-from mangatl.pipeline.prelude import Pipeline
+from mangatl.pipeline.prelude import ChapterStep, Pipeline
 from mangatl.pipeline.runner import run_chapter
 from mangatl.store.batch import pending_jobs
 from mangatl.store.project import Project, open_project
@@ -64,6 +66,7 @@ __all__ = [
     "BatchSetup",
     "ModelSelector",
     "ModelsResolver",
+    "PostludeBuilder",
     "RunController",
     "RunSetup",
     "StageBuilder",
@@ -105,18 +108,26 @@ class BatchSetup:
 #: no batch; raises `ProviderError` when no provider can be selected.
 BatchBuilder = Callable[[], BatchSetup | None]
 
+#: The consistency pass for the provider a Start would use now (MT-141): the
+#: step, or `None` when the provider has no pass; raises `ProviderError` when
+#: no provider can be selected. Built once per run, beside the pipeline.
+PostludeBuilder = Callable[[], ChapterStep | None]
+
 
 @dataclass(frozen=True)
 class RunSetup:
     """What the composition root gives the window to start a run with.
 
     `build_batch` is defaulted (MT-113 PO-1): a setup without one has no
-    batch, and Start runs per page as it always has."""
+    batch, and Start runs per page as it always has. `build_postlude` is
+    defaulted the same way (MT-141 PO-1) and takes no part in `==` (A-1): a
+    setup without one runs no consistency pass."""
 
     resolve_models: ModelsResolver
     build_stages: StageBuilder
     select_model: ModelSelector
     build_batch: BatchBuilder | None = None
+    build_postlude: PostludeBuilder | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -134,15 +145,18 @@ class WaitingState:
 
 
 #: How a batch run ends, emitted once on `BatchController.ended`.
-BatchEnd = Literal["collected", "failed", "not_submitted"]
+#: `"pass_not_run"` (MT-141 AC-5): every job collected, but the consistency
+#: pass was refused or failed.
+BatchEnd = Literal["collected", "failed", "not_submitted", "pass_not_run"]
 
 #: What one poll found: a `BatchEnd`, `"pending"`, or the exception it raised.
-_PollResult = Literal["collected", "failed", "pending"] | BaseException
+_PollResult = Literal["collected", "failed", "pending", "pass_not_run"] | BaseException
 
 
 class RunController(QObject):
     """One run of the chapter in `project_dir` through `pipeline`, on a worker:
-    the reading pass, the chapter step, the translating pass (MT-139)."""
+    the reading pass, the chapter step, the translating pass (MT-139), then
+    `postlude` - the consistency pass - after the last page (MT-141 AC-2)."""
 
     #: Each `RunEvent`, in emission order. The contract names it `event`, and the
     #: tests connect to it so; it shadows `QObject.event()`, which Qt calls from
@@ -157,10 +171,13 @@ class RunController(QObject):
         project_dir: Path,
         pipeline: Pipeline,
         parent: QObject | None = None,
+        *,
+        postlude: ChapterStep | None = None,
     ) -> None:
         super().__init__(parent)
         self._project_dir = project_dir
         self._pipeline = pipeline
+        self._postlude = postlude
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -191,6 +208,7 @@ class RunController(QObject):
                 self._cancel.is_set,
                 prelude=self._pipeline.prelude,
                 after_prelude=self._pipeline.after_prelude,
+                postlude=self._postlude,
             )
         self.ended.emit(outcome)
 
@@ -301,10 +319,13 @@ class BatchController(QObject):
 
     def _poll_work(self, reopen: bool) -> None:
         failed: list[BatchFailed] = []
+        aborted: list[RunAborted] = []  # the consistency pass refused or failed (AC-5)
 
         def emit(event: RunEvent) -> None:
             if isinstance(event, BatchFailed):
                 failed.append(event)
+            elif isinstance(event, RunAborted):
+                aborted.append(event)
             self.event.emit(event)
 
         result: _PollResult
@@ -319,7 +340,15 @@ class BatchController(QObject):
             except Exception as error:  # reported on poll_failed; the wait goes on
                 result = error
             else:
-                result = "failed" if failed else "pending" if left else "collected"
+                result = (
+                    "failed"
+                    if failed
+                    else "pending"
+                    if left
+                    else "pass_not_run"
+                    if aborted
+                    else "collected"
+                )
         self._polled.emit(result)
 
     @Slot()
