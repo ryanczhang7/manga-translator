@@ -37,7 +37,8 @@ from PySide6.QtWidgets import QApplication, QMainWindow
 
 from mangatl import app as app_module
 from mangatl.domain.batch import BatchJob, BatchJobState, BatchResults
-from mangatl.domain.events import BatchCollected, BatchWaiting, RunEvent
+from mangatl.domain.events import BatchCollected, BatchWaiting, RunAborted, RunEvent
+from mangatl.pipeline.runner import BUDGET
 from mangatl.store.batch import mark_collected, pending_jobs, record_submission
 from mangatl.store.intake import read_chapter
 from mangatl.store.project import Project, create_project, open_project, project_dir_for
@@ -150,7 +151,12 @@ def _pending(folder: Path) -> tuple[BatchJob, ...]:
 
 
 class FakeCollect:
-    """`(project, job, emit) -> BatchAnswer` from a plan; the last answer repeats."""
+    """`(project, job, emit) -> BatchAnswer` from a plan; the last answer repeats.
+
+    MT-141: `"pass_refused"` collects the job as `"collected"` does, then
+    reports the consistency pass `collect_volume` runs after the volume's
+    last job as refused - `RunAborted(BUDGET, None)` after `BatchCollected`,
+    `_run_postlude`'s spelling."""
 
     def __init__(self, *plan: str, gate: threading.Event | None = None) -> None:
         self.plan = list(plan) or ["pending"]
@@ -164,9 +170,11 @@ class FakeCollect:
         if self.gate is not None:
             self.gate.wait(GATE_S)
         try:
-            if answer == "collected":
+            if answer in {"collected", "pass_refused"}:
                 mark_collected(project, job.id)
                 emit(BatchCollected(job.id, len(job.ordinals), 0, ()))
+                if answer == "pass_refused":
+                    emit(RunAborted(reason=BUDGET, ordinal=None))
                 return BatchResults({})
             emit(BatchWaiting(job_id=job.id, state="pending"))
             return BatchJobState("pending")
@@ -422,6 +430,49 @@ def test_a_reopened_job_that_is_collected_opens_the_review(
     qtbot.addWidget(workspace)
     assert workspace.page_strip.count() == 6
     assert _pending(folder) == ()
+
+
+#: MT-141 D-3, spelled out.
+PASS_REFUSED = "Consistency pass not run \N{EM DASH} the budget would be exceeded."
+REVIEW_CHAPTER = "Review the chapter"
+
+
+def test_a_reopened_job_whose_pass_is_refused_keeps_the_waiting_panel_until_review_is_asked(
+    qtbot: Any, world: World, tmp_path: Path
+) -> None:
+    """MT-141 AC-5 / D-2: the poll collects the only pending job and the pass
+    is refused after it. The review must NOT open over a pass that did not
+    run: the waiting panel stays, with the pass banner, and only its action
+    opens the review. (Q-3's defect, put back by DV-3.)"""
+    folder, _ids = _pending_folder(tmp_path)
+    collect = FakeCollect("pass_refused")
+    window = _intake(qtbot, world, _setup(tmp_path, _gemini(collect)))
+
+    _drop(window, folder)
+    controller = getattr(window, "batch_run", None)
+    assert controller is not None, "precondition: the reopen started a batch controller"
+    _until(qtbot, lambda: not controller.is_running(), "the reopen's poll never ended")
+    _settle()
+
+    assert window.opened is None, "the review opened over a consistency pass that did not run"
+    panel = window.centralWidget()
+    assert isinstance(panel, _batch_panel_type()), (
+        f"after a refused pass the window shows {type(panel).__name__}, not the waiting panel"
+    )
+    banner = panel.banner
+    assert banner is not None, "the waiting panel shows no banner for the refused pass"
+    assert banner.headline.text() == PASS_REFUSED
+    assert [button.text() for button in banner.actions] == [REVIEW_CHAPTER]
+    assert _pending(folder) == (), "precondition: the job was collected"
+
+    banner.actions[0].click()
+    _settle()
+
+    _until(qtbot, lambda: isinstance(window.opened, Workspace), "the action opened no review")
+    workspace = window.opened
+    assert isinstance(workspace, Workspace)
+    qtbot.addWidget(workspace)
+    assert workspace.page_strip.count() == 6
 
 
 # =============================================================================

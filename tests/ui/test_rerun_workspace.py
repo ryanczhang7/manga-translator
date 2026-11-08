@@ -72,6 +72,7 @@ import mangatl.ui.workspace as workspace_module
 from mangatl.domain.budget import DEFAULT_CEILING, Decision, Projection
 from mangatl.domain.events import (
     CallPriced,
+    CorrectionsApplied,
     PageSkipped,
     PageStarted,
     PassStarted,
@@ -375,12 +376,21 @@ class Gate:
             time.sleep(self._linger_s)
 
 
+#: `Setup(postlude=...)` not given: the `RunSetup` has no `build_postlude`.
+_NO_PASS_BUILDER: Any = object()
+
+
 class Setup:
     """A `RunSetup` whose three callables log their calls, in order.
 
     MT-139 C-1: `build_stages` returns a `Pipeline` - the single-pass
     `Pipeline(stages, prelude=None)` over `stages`, or `pipeline` when given
-    (AC-3's two-pass run)."""
+    (AC-3's two-pass run).
+
+    MT-141 C-1: with `postlude=` given (a step, or `None` for "no pass"), the
+    setup also has a `build_postlude`, which logs `"postlude"` and answers it
+    (or raises `postlude_error`). Without it the `RunSetup` has none - exactly
+    the three-callable setup every test before MT-141 used."""
 
     def __init__(
         self,
@@ -391,6 +401,8 @@ class Setup:
         build_error: Exception | None = None,
         select_error: Exception | None = None,
         on_resolve: Callable[[], None] | None = None,
+        postlude: Any = _NO_PASS_BUILDER,
+        postlude_error: Exception | None = None,
     ) -> None:
         self.log: list[str] = []
         self.stages = tuple(stages)
@@ -399,6 +411,8 @@ class Setup:
         self._build_error = build_error
         self._select_error = select_error
         self._on_resolve = on_resolve
+        self._postlude = postlude
+        self._postlude_error = postlude_error
 
     def resolve_models(self) -> Path | None:
         self.log.append("resolve")
@@ -418,8 +432,21 @@ class Setup:
             raise self._select_error
         return MODEL
 
+    def build_postlude(self) -> Any:
+        self.log.append("postlude")
+        if self._postlude_error is not None:
+            raise self._postlude_error
+        return self._postlude
+
     def run_setup(self) -> RunSetup:
-        return RunSetup(self.resolve_models, self.build_stages, self.select_model)
+        if self._postlude is _NO_PASS_BUILDER and self._postlude_error is None:
+            return RunSetup(self.resolve_models, self.build_stages, self.select_model)
+        return RunSetup(  # type: ignore[call-arg]
+            self.resolve_models,
+            self.build_stages,
+            self.select_model,
+            build_postlude=self.build_postlude,
+        )
 
 
 # =============================================================================
@@ -1476,3 +1503,155 @@ def test_run_again_on_a_two_pass_pipeline_previews_every_page_stage_and_proposes
     assert _statuses(chapter) == [PAGE_DONE] * 3
     assert window.splitter.isVisible(), "the body did not come back on RunFinished"
     assert window.live_region.text() == "Run finished. 3 of 3 pages done."
+
+
+# =============================================================================
+# MT-141 AC-2 / AC-6 (PO-2): Run again carries the consistency pass
+# =============================================================================
+#
+# Run again is the window's way to finish a chapter whose pass was refused:
+# every done page skipped, then the pass. `_rerun` asks `build_postlude()`
+# once, between `build_stages` and `select_model` (C-3), and `_start_run`
+# hands the step to `RunController(..., postlude=)`. The recording step emits
+# `PASS_MARKER` through the `emit` it is given, so its place among the
+# panel's receipts says when it ran, and its arrival says it had the run's
+# own `emit`.
+
+#: What the recording pass emits: the real pass's own event, inert on the panel.
+PASS_MARKER = CorrectionsApplied(
+    applied=0, skipped_user_lines=0, unchanged_returned=0, chunks_run=1, chunks_refused=0
+)
+
+
+class PassStep:
+    """A `ChapterStep` standing for the consistency pass: records each call's
+    run id and thread, and emits `PASS_MARKER`."""
+
+    def __init__(self) -> None:
+        self.run_ids: list[int] = []
+        self.threads: list[threading.Thread] = []
+
+    def __call__(self, project: Project, run_id: int, emit: Callable[[RunEvent], None]) -> None:
+        self.run_ids.append(run_id)
+        self.threads.append(threading.current_thread())
+        emit(PASS_MARKER)
+
+
+def _record_postludes(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """The `postlude` every `RunController` hands `run_chapter`, by the name
+    `mangatl.ui.run` calls it by; the real `run_chapter` then runs."""
+    seen: list[object] = []
+    real = run_module.run_chapter
+
+    def record(*args: Any, **keywords: Any) -> Any:
+        seen.append(keywords.get("postlude"))
+        return real(*args, **keywords)
+
+    monkeypatch.setattr(run_module, "run_chapter", record)
+    return seen
+
+
+def test_activating_run_again_with_a_pass_asks_for_it_between_the_stages_and_the_model(
+    qtbot,  # type: ignore[no-untyped-def]
+    world: World,
+    chapter: Path,
+) -> None:
+    """C-3's order, with the setup's every call logged: `build_postlude`
+    once, after `build_stages` and before `select_model` - and nothing runs
+    before the confirm. (The three-call order test above keeps its setup,
+    which has no pass builder.)"""
+    calls = Calls()
+    setup = Setup(_quick(calls), postlude=PassStep())
+    window, _ = _workspace(qtbot, world, chapter, setup)
+
+    _dialog(window)
+
+    assert setup.log == ["resolve", "build", "postlude", "select"]
+    assert calls.made == [], "a stage ran before the dialog was confirmed"
+
+
+def test_run_again_runs_the_pass_once_after_the_last_page_and_before_run_finished(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    world: World,
+    chapter: Path,
+) -> None:
+    """AC-2 for Run again (DV-1 puts the defect back): pages 1-2 skipped as
+    done, pages 3-4 run, then the pass - once, on the worker, with the run's
+    `RunStarted.run_id` - then `RunFinished`."""
+    log = _record_panel(monkeypatch)
+    calls = Calls()
+    step = PassStep()
+    setup = Setup(_quick(calls), postlude=step)
+    window, _ = _workspace(qtbot, world, chapter, setup)
+
+    _confirm(window)
+    _wait_returned(qtbot, window)
+
+    events = _normalised([event for event, _ in log])
+    started = events[0]
+    assert isinstance(started, RunStarted), f"the run began with {started!r}"
+    assert setup.log.count("postlude") == 1, f"the setup's calls were {setup.log}"
+    assert step.run_ids == [started.run_id], f"the pass ran {len(step.run_ids)} times"
+    assert step.threads[0] is not threading.main_thread(), "the pass ran on the GUI thread"
+    assert events[-3:] == [
+        StageFinished(ordinal=3, stage="translate", elapsed_ms=0),
+        PASS_MARKER,
+        RunFinished(run_id=started.run_id, pages_done=PAGES),
+    ]
+
+
+def test_a_provider_refusal_from_the_pass_builder_is_said_in_the_footer_on_run_again(
+    qtbot,  # type: ignore[no-untyped-def]
+    world: World,
+    chapter: Path,
+) -> None:
+    """C-3: a `ProviderError` from `build_postlude` is said exactly as one
+    from `build_stages` - footer and live region, no dialog, no run - and
+    `select_model` is never asked."""
+    message = "no API key is set: the pass builder refused"
+    calls = Calls()
+    setup = Setup(_quick(calls), postlude_error=ProviderError(message))
+    window, _ = _workspace(qtbot, world, chapter, setup)
+
+    dialog = _press(window)
+
+    assert setup.log == ["resolve", "build", "postlude"]
+    assert dialog is None, "a refused Run again opened a dialog"
+    assert window.render_status.text() == message
+    assert window.live_region.text() == message
+    assert window.run is None
+    assert calls.made == []
+    assert _run_rows(chapter) == []
+
+
+@pytest.mark.parametrize("case", ["no-builder", "builder-answers-none"])
+def test_run_again_without_a_pass_hands_run_chapter_none_and_runs_as_today(
+    qtbot,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+    world: World,
+    chapter: Path,
+    case: str,
+) -> None:
+    """AC-6 for Run again: no `build_postlude`, or one answering `None`, and
+    `run_chapter` is handed `postlude=None`; the receipts end on the last
+    page's stage and `RunFinished`. `no-builder` is a control and passes
+    before GREEN."""
+    seen = _record_postludes(monkeypatch)
+    log = _record_panel(monkeypatch)
+    calls = Calls()
+    setup = Setup(_quick(calls)) if case == "no-builder" else Setup(_quick(calls), postlude=None)
+    window, _ = _workspace(qtbot, world, chapter, setup)
+
+    _confirm(window)
+    _wait_returned(qtbot, window)
+
+    assert seen == [None], f"run_chapter was handed postlude={seen!r}"
+    events = _normalised([event for event, _ in log])
+    assert PASS_MARKER not in events
+    assert events[-2:] == [
+        StageFinished(ordinal=3, stage="translate", elapsed_ms=0),
+        RunFinished(run_id=1, pages_done=PAGES),
+    ]
+    asked = ["postlude"] if case == "builder-answers-none" else []
+    assert setup.log == ["resolve", "build", *asked, "select"]

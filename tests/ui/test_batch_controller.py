@@ -101,6 +101,8 @@ VOLUME = Projection(
     next_call=usd("0.06"), remaining_chapter=usd("0.06"), basis="estimate", sample_count=0
 )
 CEILING = usd("1.50")
+#: MT-141: a failed consistency pass, as `_run_postlude` reports one.
+PASS_REASON = "RuntimeError: the consistency call returned nothing"
 
 
 def _run() -> Any:
@@ -210,7 +212,13 @@ class FakeCollect:
 
     `plan` is consumed one answer per call and its last answer repeats:
     `"pending"`, `"collected"`, a settled state (`"failed"`, `"expired"`, ...),
-    or `"raise"`. With `gate`, every call blocks until it is released."""
+    or `"raise"`. With `gate`, every call blocks until it is released.
+
+    MT-141: `"pass_refused"` and `"pass_failed"` collect the job as
+    `"collected"` does and then report the consistency pass that
+    `collect_volume` runs after the volume's last job as not run - exactly
+    `_run_postlude`'s spelling, `RunAborted(reason, ordinal=None)`, after the
+    job's `BatchCollected` - and return the answer, the job collected."""
 
     def __init__(self, *plan: str, gate: threading.Event | None = None) -> None:
         self.plan = list(plan) or ["pending"]
@@ -230,9 +238,13 @@ class FakeCollect:
             if answer == "pending":
                 emit(BatchWaiting(job_id=job.id, state="pending"))
                 return BatchJobState("pending")
-            if answer == "collected":
+            if answer in {"collected", "pass_refused", "pass_failed"}:
                 mark_collected(project, job.id)
                 emit(BatchCollected(job.id, len(job.ordinals), 0, ()))
+                if answer == "pass_refused":
+                    emit(RunAborted(reason=BUDGET, ordinal=None))
+                elif answer == "pass_failed":
+                    emit(RunAborted(reason=PASS_REASON, ordinal=None))
                 return BatchResults({})
             mark_failed(project, job.id, answer)
             emit(BatchFailed(job_id=job.id, state=answer))
@@ -773,3 +785,110 @@ def test_stop_while_waiting_stops_the_timer_and_nothing_polls_after_it(
     assert collect.calls == []
     assert len(_pending(project_dir)) == 1
     assert not controller.is_running()
+
+
+# =============================================================================
+# MT-141 AC-5: a poll during which the consistency pass did not run
+# =============================================================================
+#
+# `collect_volume` runs the pass after the volume's last `BatchCollected` and
+# reports a refused or failed one as `RunAborted(reason, ordinal=None)` on the
+# poll's stream, the job collected. Only the controller sees the poll's whole
+# stream, so it decides the end: `"pass_not_run"` (Contract C-1, PO-4).
+
+
+def test_batch_end_has_pass_not_run_beside_the_three_it_had() -> None:
+    """C-1: `BatchEnd` grows by exactly one literal."""
+    import typing
+
+    assert set(typing.get_args(run_module.BatchEnd)) == {
+        "collected",
+        "failed",
+        "not_submitted",
+        "pass_not_run",
+    }
+
+
+def test_the_postlude_builder_is_exported_from_ui_run() -> None:
+    """C-1: `PostludeBuilder` is a public name of `mangatl.ui.run`."""
+    assert "PostludeBuilder" in run_module.__all__
+    from mangatl.ui.run import PostludeBuilder  # type: ignore[attr-defined]
+
+    assert PostludeBuilder is not None
+
+
+def test_run_setup_gains_a_postlude_builder_last_and_defaulted_to_none(tmp_path: Path) -> None:
+    """AC-2 / C-1 (PO-1): a fifth field, last, defaulted - so every existing
+    `RunSetup(` means "no pass" - and, as amended in RED (2026-11-08), left
+    out of the setup's equality, so a default setup compared by value
+    (`test_chapter_summary.py`, `test_folder_intake.py`,
+    `test_intake_errors.py`) still equals the one those tests spell."""
+    names = [f.name for f in dataclasses.fields(RunSetup)]
+    assert names == [
+        "resolve_models",
+        "build_stages",
+        "select_model",
+        "build_batch",
+        "build_postlude",
+    ]
+
+    def resolve() -> Path:
+        return tmp_path
+
+    def stages(models: Path) -> Any:
+        return ()
+
+    def select() -> str:
+        return MODEL
+
+    def postlude() -> Any:
+        return None
+
+    three = RunSetup(resolve, stages, select)
+    assert three.build_postlude is None  # type: ignore[attr-defined]
+    five = RunSetup(resolve, stages, select, build_postlude=postlude)  # type: ignore[call-arg]
+    assert five.build_postlude is postlude  # type: ignore[attr-defined]
+    assert five == three, "build_postlude takes part in RunSetup's equality (C-1 as amended)"
+
+
+@pytest.mark.parametrize("answer", ["pass_refused", "pass_failed"])
+def test_a_poll_whose_pass_did_not_run_ends_pass_not_run_and_stops(
+    qtbot: Any, world: World, tmp_path: Path, answer: str
+) -> None:
+    """AC-5: both jobs collected, the pass then refused (or failed) after the
+    last one - the run ends `pass_not_run`, never `collected`, and the timer
+    is not armed again."""
+    collect = FakeCollect("collected", answer)
+    controller, recorder, project_dir, _fake = _submitted(
+        qtbot, world, tmp_path, collect, ranges=((0, 1), (2, 2))
+    )
+
+    _elapse(controller)
+    _until(qtbot, lambda: recorder.ends != [], "a poll whose pass did not run never ended")
+    _settle()
+
+    assert recorder.ends == ["pass_not_run"]
+    aborted = [e for e in recorder.events if isinstance(e, RunAborted)]
+    assert [e.ordinal for e in aborted] == [None], f"the poll's stream carried {aborted}"
+    assert not controller.poll_timer.isActive(), "the timer was re-armed after the pass"
+    assert _pending(project_dir) == ()
+    _until(qtbot, lambda: not controller.is_running(), "the controller still runs after ending")
+
+
+def test_a_failed_job_in_the_poll_where_the_pass_did_not_run_still_ends_failed(
+    qtbot: Any, world: World, tmp_path: Path
+) -> None:
+    """AC-5: a `BatchFailed` wins - its pages were not translated, which is
+    the worse news. A control: it ends `failed` today, and must go on doing so."""
+    collect = FakeCollect("failed", "pass_refused")
+    controller, recorder, _dir, _fake = _submitted(
+        qtbot, world, tmp_path, collect, ranges=((0, 1), (2, 2))
+    )
+
+    _elapse(controller)
+    _until(qtbot, lambda: recorder.ends != [], "the poll never ended")
+    _settle()
+
+    assert recorder.ends == ["failed"]
+    assert RunAborted(reason=BUDGET, ordinal=None) in recorder.events, "precondition"
+    assert not controller.poll_timer.isActive()
