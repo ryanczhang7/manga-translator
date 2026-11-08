@@ -1122,7 +1122,10 @@ def _one_pass_every_page(page_count: int) -> list[RunEvent]:
 
 
 def _no_run_stopped(panel: RunProgressPanel) -> None:
-    texts = [label.text() for label in panel.findChildren(QLabel)]
+    # The banner's own labels only (AC-4: "Neither banner contains `Run
+    # stopped`"): a refusal also marks the cost readout aborted, and its
+    # caption is MT-074's "Run stopped - budget reached" (§10.6).
+    texts = [label.text() for label in _banner(panel).findChildren(QLabel)]
     stopped = [text for text in texts if "Run stopped" in text]
     assert stopped == [], f"the pass's banner claims a page stopped the run: {stopped}"
 

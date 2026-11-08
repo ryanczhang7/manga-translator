@@ -123,7 +123,7 @@ from mangatl.domain.page import Chapter
 from mangatl.domain.page_status import PageProgress, PageStatus, page_progress
 from mangatl.domain.region import RawRegion
 from mangatl.pipeline.bake import BakePreview, BakeReport
-from mangatl.pipeline.prelude import Pipeline
+from mangatl.pipeline.prelude import ChapterStep, Pipeline
 from mangatl.pipeline.resume import rerun_preview
 from mangatl.pipeline.runner import RUN_FINISHED, RunOutcome
 from mangatl.store import ledger
@@ -1077,6 +1077,7 @@ class Workspace(QMainWindow):
         #: The Run again dialog last opened, kept after it closes; `None` before.
         self.rerun_dialog: RerunDialog | None = None
         self._rerun_pipeline: Pipeline | None = None
+        self._rerun_postlude: ChapterStep | None = None
         self._run_outcome: RunOutcome | None = None
         self._run_row = -1
         self._chapter: Chapter | None = None
@@ -1499,6 +1500,8 @@ class Workspace(QMainWindow):
             return
         try:
             pipeline = setup.build_stages(models)
+            # MT-141 AC-2: the consistency pass, run after the last page.
+            postlude = setup.build_postlude() if setup.build_postlude is not None else None
             estimate = page_estimate(setup.select_model())
         except (ProviderError, UnknownContextMode) as error:
             self._say(str(error))
@@ -1508,6 +1511,7 @@ class Workspace(QMainWindow):
         # counts lives in `after_prelude` (MT-130 PO-12).
         preview = rerun_preview(self._project, pipeline.page_stages, estimate)
         self._rerun_pipeline = pipeline
+        self._rerun_postlude = postlude
         if self.rerun_dialog is not None:
             self.rerun_dialog.deleteLater()
         self.rerun_dialog = RerunDialog(preview, self)
@@ -1541,7 +1545,12 @@ class Workspace(QMainWindow):
         self.splitter.hide()
         self._body.insertWidget(self._body.indexOf(self.splitter) + 1, panel, 1)
         self._set_run_on(True)
-        run = RunController(project_dir_for(self._chapter.source_dir), self._rerun_pipeline, self)
+        run = RunController(
+            project_dir_for(self._chapter.source_dir),
+            self._rerun_pipeline,
+            self,
+            postlude=self._rerun_postlude,
+        )
         self.run = run
         # Bound methods, so each arrives queued on this thread.
         run.event.connect(panel.on_event)
