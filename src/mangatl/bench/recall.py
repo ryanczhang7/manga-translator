@@ -31,9 +31,9 @@ from dataclasses import dataclass
 from mangatl.bench.matching import IOU_MATCH_THRESHOLD as IOU_MATCH_THRESHOLD
 from mangatl.bench.matching import match_regions
 from mangatl.bench.truth import (
-    BenchmarkChapterUsedInDevelopment,
     GroundTruth,
     InvalidGroundTruth,
+    check_mode,
     validate,
 )
 from mangatl.store.project import Project
@@ -63,19 +63,19 @@ class RecallReport:
     pages: tuple[PageRecall, ...]  # one per truth page, in truth page order
 
 
-def measure_recall(project: Project, truth: GroundTruth) -> RecallReport:
+def measure_recall(
+    project: Project, truth: GroundTruth, *, development: bool = False
+) -> RecallReport:
     """Match `project`'s proposals against `truth`, every page of `truth` and nothing else.
 
-    Raises `BenchmarkChapterUsedInDevelopment` for a document flagged
-    `development_use`, and `InvalidGroundTruth` carrying every error line for
-    one that fails `validate` against the project's chapter - both before any
-    page is read. Warnings do not stop it.
+    Refuses first by `check_mode`: `BenchmarkChapterUsedInDevelopment` for a
+    document flagged `development_use` unless `development` is set, and
+    `NotADevelopmentSet` for an unflagged one when it is (MT-142). Then raises
+    `InvalidGroundTruth` carrying every error line for a document that fails
+    `validate` against the project's chapter - all before any page is read.
+    Warnings do not stop it.
     """
-    if truth.development_use:
-        raise BenchmarkChapterUsedInDevelopment(
-            f"chapter {truth.chapter_name!r} is flagged development_use, so it is not"
-            " held out and cannot be a benchmark"
-        )
+    check_mode(truth, development=development)
     report = validate(truth, project.chapter)
     if not report.ok:
         raise InvalidGroundTruth("\n".join(report.errors))

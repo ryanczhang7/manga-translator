@@ -39,6 +39,7 @@ from mangatl.bench.truth import (
     BenchmarkChapterUsedInDevelopment,
     GroundTruth,
     InvalidGroundTruth,
+    check_mode,
     load_ground_truth,
     truth_path_for,
     validate,
@@ -72,19 +73,16 @@ def _ratio(numerator: int, denominator: int) -> float:
     return numerator / denominator if denominator else 0.0
 
 
-def measure(project: Project, truth: GroundTruth) -> AcceptanceReport:
+def measure(project: Project, truth: GroundTruth, *, development: bool = False) -> AcceptanceReport:
     """Score `project` against `truth`, every page of `truth` and nothing else.
 
-    Raises `BenchmarkChapterUsedInDevelopment` for a document flagged
-    `development_use`, and `InvalidGroundTruth` carrying every error line for
-    one that fails `validate` against the project's chapter. Warnings do not
-    stop it.
+    Refuses first by `check_mode`: `BenchmarkChapterUsedInDevelopment` for a
+    document flagged `development_use` unless `development` is set, and
+    `NotADevelopmentSet` for an unflagged one when it is (MT-142). Then raises
+    `InvalidGroundTruth` carrying every error line for a document that fails
+    `validate` against the project's chapter. Warnings do not stop it.
     """
-    if truth.development_use:
-        raise BenchmarkChapterUsedInDevelopment(
-            f"chapter {truth.chapter_name!r} is flagged development_use, so it is not"
-            " held out and cannot be a benchmark"
-        )
+    check_mode(truth, development=development)
     report = validate(truth, project.chapter)
     if not report.ok:
         raise InvalidGroundTruth("\n".join(report.errors))
