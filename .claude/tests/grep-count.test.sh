@@ -272,10 +272,21 @@ describe "AC-4/AC-5: the real tree, and the guard blocking a PR"
 run_guard "$REPO_ROOT"
 assert_eq "AC-4: the real tree has no printing fallback" \
   "1" "$(count_prefix "$GUARD_OUT" 'check-grep-count: scanned ')"
-assert_eq "AC-4: and the finding count in that census is zero" \
-  "0" "$(awk 'index($0, "check-grep-count: scanned ") == 1 {
+# HARNESS-073 made this the ONLY place CI learns of a finding - the workflow's
+# own guard step is gone - so its failure has to say WHERE, as the step did.
+# The detail is the guard's output minus its census line: every finding line,
+# `<path>:<line>: ...`, verbatim. Still exactly one _ok or one _bad.
+REAL_FINDINGS="$(awk 'index($0, "check-grep-count: scanned ") == 1 {
                 i = index($0, "file(s), "); if (i == 0) next
                 print substr($0, i + 9) + 0; exit }' <<<"$GUARD_OUT")"
+if [ "$REAL_FINDINGS" = "0" ]; then
+  _ok "AC-4: and the finding count in that census is zero"
+else
+  _bad "AC-4: and the finding count in that census is zero" \
+    "expected: 0 findings
+actual:   ${REAL_FINDINGS:-<no census line>}
+$(awk 'index($0, "check-grep-count: ") != 1' <<<"$GUARD_OUT")"
+fi
 assert_eq "AC-4: so it exits 0 against this tree" "0" "$GUARD_RC"
 
 # The correct idiom is LIVE here, so the clean result above is not the vacuous

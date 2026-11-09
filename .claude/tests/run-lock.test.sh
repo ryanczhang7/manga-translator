@@ -197,6 +197,9 @@ leftovers() {
 
 # present <file>   `present` or `absent`, so a failure message says which.
 present() { if [ -e "$1" ]; then printf present; else printf absent; fi; }
+# is_alive <pid>   `alive` or `gone`, by kill -0. A local copy of the one-liner in
+# mutate.test.sh (HARNESS-091), so a failure message says which.
+is_alive() { if kill -0 "$1" 2>/dev/null; then printf alive; else printf gone; fi; }
 
 # plant <tree> <pid-line-or-empty> <started> <command>   A lock written by hand,
 # as a run that died would have left it. An empty pid writes no pid line.
@@ -221,9 +224,11 @@ assert_refused() {
   assert_eq "$1: refusal line 3 gives the remedy for pid $4" 1 "$(count_line "$(refusal3 "$4")" "$2")"
 }
 
-# Processes the suite owns: two live ones and one that has exited.
-sleep 600 & LIVE1=$!; BG="$BG $LIVE1"
-sleep 600 & LIVE2=$!; BG="$BG $LIVE2"
+# Processes the suite owns: two live ones and one that has exited. The two live
+# ones are hold_until_killed holders (HARNESS-091): no wall-clock bound, reaped
+# by cleanup's kill and wait, and by their own loop once this shell has gone.
+hold_until_killed LIVE1; BG="$BG $LIVE1"
+hold_until_killed LIVE2; BG="$BG $LIVE2"
 bash -c 'exit 0' & DEAD=$!; wait "$DEAD" 2>/dev/null
 PLANT_STARTED="2026-01-02T03:04:05Z"
 
@@ -513,6 +518,7 @@ conf_unit "$FIX"
 describe "AC-6  the markers are not a bypass: the pid must be the one the lock records"
 
 reset "$FIX"
+assert_eq "AC-6 precondition: the two live holders planted at the top are still alive" "alive alive" "$(is_alive "$LIVE1") $(is_alive "$LIVE2")"
 plant "$FIX" "$LIVE1" "$PLANT_STARTED" "scripts/gates.sh --gate unit"
 before="$(lock_snapshot "$FIX")"
 run "$FIX" env HARNESS_RUN_LOCK="$LOCKA" HARNESS_RUN_LOCK_PID="$LIVE2" bash scripts/selftest.sh tiny

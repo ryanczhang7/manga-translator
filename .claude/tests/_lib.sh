@@ -13,6 +13,15 @@
 
 set -uo pipefail
 
+# scripts/selftest.sh warns on stderr about other harness test runs it finds in
+# `ps -ef` (HARNESS-074), and HARNESS_PS_LISTING replaces that listing with a
+# file. Pointing it at /dev/null here - unconditionally, exported - makes every
+# fixture run any suite starts see an empty host and print nothing, whatever
+# else the machine is running; that is what keeps selftest.test.sh's empty-
+# stderr goldens and run-lock.test.sh's fixtures deterministic. Only
+# host-load.test.sh points it at listings of its own, per call.
+export HARNESS_PS_LISTING=/dev/null
+
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$TESTS_DIR/../.." && pwd)"
 
@@ -70,6 +79,20 @@ assert_not_contains() { # <what> <needle> <haystack>
 actual:                   $3" ;;
     *) _ok "$1" ;;
   esac
+}
+
+# --- processes ---------------------------------------------------------------
+
+# hold_until_killed <varname>   Start a process that lives until it is
+# signalled or the calling shell ($$) has gone, and put its pid in <varname>.
+# No wall-clock bound. The stand-in for a RUNNING mutation (HARNESS-091).
+# Its stdin, stdout and stderr are /dev/null: a holder that kept the caller's
+# stdout would hold open any $( ) or pipe the caller sits in, until it exited.
+hold_until_killed() {
+  local parent=$$
+  ( trap 'kill "$s" 2>/dev/null; exit 0' TERM INT
+    while kill -0 "$parent" 2>/dev/null; do sleep 1 & s=$!; wait "$s"; done ) </dev/null >/dev/null 2>&1 &
+  printf -v "$1" '%s' "$!"
 }
 
 # --- fixture -----------------------------------------------------------------

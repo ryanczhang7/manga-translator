@@ -276,12 +276,13 @@ assert_eq "AC-1: HARNESS-047's two Bash denies are still the last two deny eleme
   '"Bash(git log *--output*)"
 "Bash(git diff *--output*)"' "$(tail -n 2 <<< "$DENY")"
 # Contract C-1, read out: the whole array, in order.
-assert_eq "AC-1/C-1: the deny array is exactly the seven C-1 rules, in order" \
+assert_eq "AC-1/C-1: the deny array is exactly the eight C-1 rules (HARNESS-084 AC-6 adds attest.log), in order" \
   '"Read(./.env)"
 "Read(./.env.*)"
 "Read(./**/secrets/**)"
 "Edit(./.claude/state/current-story.env)"
 "Edit(./.claude/state/last-gate-run)"
+"Edit(./.claude/state/attest.log)"
 "Bash(git log *--output*)"
 "Bash(git diff *--output*)"' "$DENY"
 assert_eq "AC-1: settings.json is well-formed JSON by bracket and comma shape" "" "$(json_shape "$SETTINGS")"

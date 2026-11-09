@@ -533,7 +533,9 @@ clear_strays
 # real SIGKILL: a STRANDED mutation is planted - target mutated, `.bak` holding
 # the original, an `.active` whose pid is the `$$` of a `bash -c` that has
 # already exited and been reaped (the story's C-4). A RUNNING one uses the pid of
-# a bounded `sleep 30 &`, killed at the end of its block and by the EXIT trap.
+# a holder started by hold_until_killed (_lib.sh, HARNESS-091). It has no
+# wall-clock bound: it is reaped by its block's kill, by the EXIT trap, and
+# by its own loop within a second of this shell having gone.
 #
 # Needles are whole lines (whole_lines, `grep -cxF`) or exact values. The texts
 # of --check are downstream's (manga-translator a0b43a2), read out verbatim per
@@ -885,8 +887,7 @@ clear_strays
 describe "HARNESS-030 AC-4: a sentinel whose process is alive is RUNNING"
 
 clear_strays
-sleep 30 &
-H30_SLEEP=$!
+hold_until_killed H30_SLEEP
 assert_eq "AC-4 precondition: the planted pid is a live process" "alive" "$(is_alive "$H30_SLEEP")"
 R_BAK="$ABSMUT/src_other.ts.$STARTED.$H30_SLEEP.bak"
 R_ACT="$ABSMUT/src_other.ts.$STARTED.$H30_SLEEP.active"
@@ -913,6 +914,7 @@ assert_eq "AC-6 control: the command's own mutation is not listed as unaccounted
 
 # HARNESS_MUTATION alone is not enough: it must name a sentinel whose pid is
 # alive. Naming the live one above, it is that command's own...
+assert_eq "C-1 precondition: the stand-in planted at AC-4 is still alive" "alive" "$(is_alive "$H30_SLEEP")"
 out="$( cd "$FIX" && HARNESS_MUTATION="$R_ACT" bash scripts/mutate.sh --check 2>&1 )"; rc=$?
 assert_eq "C-1: HARNESS_MUTATION naming a live sentinel in this tree counts it out, exit 0" "0" "$rc"
 assert_eq "C-1: and says the one in flight is that command's own" 1 \
@@ -956,6 +958,65 @@ bak_bullet="$(awk '{ sub(/\r$/, "") }
 assert_contains "AC-7 precondition: the rules.md bullet holding the .bak sentence is found" '`.bak` left behind' "$bak_bullet"
 assert_contains "AC-7: rules.md's .bak bullet says what a surviving .active means" '.active' "$bak_bullet"
 assert_contains "AC-7: and names mutate.sh --check" 'mutate.sh --check' "$bak_bullet"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-091 AC-2/AC-3: hold_until_killed lives until killed, and reaps itself when its shell has gone"
+
+# The holder behind AC-4's RUNNING sentinel, observed by its own pid only, with
+# kill -0: no pgrep, no ps (not portable to Git Bash). The 10 s is a bound on
+# the OBSERVATION, not on the holder; its loop period is 1 s, so the expected
+# wait is under a second. Every holder started here is killed at the end of
+# the block whatever the assertions said, so a red run strands nothing.
+#
+# gone_within <pid> <seconds>   Poll kill -0 every 0.2 s for up to <seconds>;
+# print `gone` as soon as it fails, else `alive`. A pid that is not a number
+# prints `nopid`, so an empty variable cannot pass as a process that went.
+gone_within() {
+  local i=0 n=$(($2 * 5))
+  case "$1" in ''|*[!0-9]*) printf nopid; return ;; esac
+  while [ "$i" -lt "$n" ]; do
+    kill -0 "$1" 2>/dev/null || { printf gone; return; }
+    sleep 0.2; i=$((i + 1))
+  done
+  if kill -0 "$1" 2>/dev/null; then printf alive; else printf gone; fi
+}
+H91_POLL=10
+H91_KILLED=""; H91_CTL=""; H91_ORPHAN=""
+
+# AC-2: alive on return; killed and waited for, gone.
+hold_until_killed H91_KILLED
+assert_eq "AC-2 precondition: hold_until_killed puts a pid in the variable it is given" 1 \
+  "$(count_re_m '^[0-9]+$' "$H91_KILLED")"
+assert_eq "AC-2 control: the holder is alive when hold_until_killed returns" "alive" "$(is_alive "$H91_KILLED")"
+kill "$H91_KILLED" 2>/dev/null; wait "$H91_KILLED" 2>/dev/null
+# Observed once; a holder seen gone is reaped and its pid no longer ours, so
+# the cleanup must not name it (Windows reuses a freed pid quickly).
+H91_KILLED_SEEN="$(gone_within "$H91_KILLED" "$H91_POLL")"
+if [ "$H91_KILLED_SEEN" = gone ]; then H91_KILLED=""; fi
+assert_eq "AC-2: sent kill and waited for, the holder is gone within ${H91_POLL} s" "gone" \
+  "$H91_KILLED_SEEN"
+
+# AC-3: a holder whose shell exits without killing it - the shape of a suite
+# killed before its EXIT trap runs - goes on its own. The control is a holder
+# this suite started, whose parent (this shell) is still running: alive at the
+# moment the orphaned one is observed gone, so "gone" is tied to the parent
+# exiting, not to time passing.
+hold_until_killed H91_CTL
+H91_ORPHAN="$(bash -c '. "$1"; hold_until_killed p; printf %s "$p"' h91 "$TESTS_DIR/_lib.sh")"
+assert_eq "AC-3 precondition: the child shell started a holder and printed its pid" 1 \
+  "$(count_re_m '^[0-9]+$' "$H91_ORPHAN")"
+H91_ORPHAN_SEEN="$(gone_within "$H91_ORPHAN" "$H91_POLL")"
+if [ "$H91_ORPHAN_SEEN" = gone ]; then H91_ORPHAN=""; fi
+assert_eq "AC-3: a holder whose shell exited without killing it is gone within ${H91_POLL} s" "gone" \
+  "$H91_ORPHAN_SEEN"
+assert_eq "AC-3 control: the suite's own holder, whose shell is still running, is alive at that moment" "alive" \
+  "$(is_alive "$H91_CTL")"
+
+# Signal only holders still owned: a variable cleared above was observed gone.
+# On a red run a holder not seen gone keeps its pid and is killed here.
+for h91 in $H91_KILLED $H91_CTL $H91_ORPHAN; do kill "$h91" 2>/dev/null; done
+for h91 in $H91_KILLED $H91_CTL; do wait "$h91" 2>/dev/null; done
+H91_KILLED=""; H91_CTL=""; H91_ORPHAN=""; H91_KILLED_SEEN=""; H91_ORPHAN_SEEN=""
 
 # ===========================================================================
 # HARNESS-059: mutate.sh leaves the tree as it found it. --check sees a

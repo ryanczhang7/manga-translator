@@ -7,6 +7,8 @@ in here is ever committed; only this file and `.gitkeep` are tracked.
 |---|---|---|---|
 | `current-story.env` | `scripts/phase.sh` | the phase guard, the status line | no |
 | `last-gate-run` | `scripts/gates.sh` | the stop hook | no |
+| `attest.log` | `scripts/attest.sh` | `scripts/attest.sh check`, and the orchestrator | no |
+| `attest-logs/*.log` | `scripts/attest.sh` | you, and the story that quotes it | yes |
 | `gate-logs/*.log` | `scripts/gates.sh` | you, when a gate fails | yes |
 | `gate-logs/*.failed.log` | `scripts/gates.sh` | you, when a failure did not reproduce | yes |
 | `gate-logs/kept/*.log` | `scripts/gates.sh` | you, when an unexplained failure recurs | yes |
@@ -20,6 +22,7 @@ in here is ever committed; only this file and `.gitkeep` are tracked.
 | `run.lock` | `scripts/gates.sh`, `scripts/selftest.sh` | `scripts/run-lock.sh`, in the next run | yes |
 | `run.lock.<pid>` | `scripts/run-lock.sh` | `ln`, while it takes the lock | yes |
 | `selftest.<pid>/*.out` | `scripts/selftest.sh`, with `SELFTEST_JOBS` above 1 | `scripts/selftest.sh`, to print each suite in order | yes |
+| `check-boundaries/*` | `scripts/check-boundaries.sh` | nothing; scratch for a `git show` result | yes |
 
 ## The `Hand-editable` column is enforced
 
@@ -56,6 +59,18 @@ phase lock is off entirely.
 `RESULT=`, `FULL=` and this file's timestamp out of it to decide whether a phase's
 gate obligation was met, so writing `RESULT=pass` by hand forges precisely what
 law 3 exists to prevent. `bash scripts/gates.sh` is what writes it.
+
+**`attest.log` — not hand-editable.** It is read as evidence: `bash
+scripts/attest.sh check` answers from it whether a subagent's verification run
+was made on the tree as it is now, and the orchestrator skips its own re-run on
+that answer (HARNESS-084). A block written by hand is a run that never
+happened. It is machine-local and never read by CI. Deleting the whole file is
+safe - every `check` then answers `none` and the orchestrator runs the command
+itself - and is the way to prune it.
+
+`attest-logs/<run>.<pid>.log` is the full output of one attested run, named by
+the `log:` line of its record. Exhaust: delete them freely; a record whose log
+is gone still answers `check`, it just has nothing more to show.
 
 ## The exhaust
 

@@ -77,6 +77,20 @@ why. `check-boundaries.sh` fails a PR whose criteria differ from their last
 committed PLANNED state (else the base branch) without an entry. Omit when
 unused.
 
+## Suppressions - Lead PO, with the user
+
+The one way a GREEN or GATES commit may add a line that silences a tool - an
+`eslint-disable`, a `# noqa`, a `# type: ignore`, an `#[allow(...)]`, a coverage
+or mutation ignore. `check-boundaries.sh` (block 3j) refuses every such line
+added to a `source` or `config` path unless one line here, outside an HTML
+comment, carries the path, the rule id (`[noqa]`, or the bare id) and
+`approved by <who>`, with the reason this line is right and a fix is not:
+
+    - `src/legacy/parse.ts` [noqa] approved by <who>: <why this line, not a fix>
+
+One line discharges every added line of that path and rule id. It is read from
+the working tree, so it can be added at REVIEW. Omit when unused.
+
 ## Model guidance - Lead PO
 
 Optional, and written *before* the phase it applies to. Use it when one phase of

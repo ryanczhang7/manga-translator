@@ -38,7 +38,12 @@ stub to make the import resolve.
    the handful of paths a user genuinely walks.
 3. Write the tests. Name each one after the behaviour, not the function — a
    failure message should read like a bug report.
-4. **Run them.** Record the actual output. A test you have not watched fail is
+4. **Run them** as `bash scripts/attest.sh -- <test command>`. It records the run
+   against the tree it ran on, keeps the full output in a log and prints only
+   the tail; paste the record's `last:` line and the log path into the handoff
+   beside the verbatim failure, which you read from that log. The orchestrator
+   checks the record with `attest.sh check` instead of running the tests again,
+   so it has to be the run your handoff describes. A test you have not watched fail is
    not yet a test. The single exception - a regression guard for an invariant
    an earlier story established, green on arrival - has to earn its place with
    a probe or a negative control, and be flagged in the handoff.
@@ -48,8 +53,9 @@ stub to make the import resolve.
 6. Cover the edges the story implies: empty, one, many; boundary values;
    error paths; and the explicit non-goals in `## Out of scope` where they are
    cheap to pin down.
-7. Run `bash scripts/gates.sh --fast` before you finish. Not for a pass — the
-   test gates should be red, that is the story. Read it for the *shape* of the
+7. Run `bash scripts/attest.sh -- bash scripts/gates.sh --fast` before you finish.
+   Not for a pass — the test gates should be red, that is the story. Paste its
+   `last:` line and log path too. Read it for the *shape* of the
    failure: lint and typecheck green, test gates red with your assertion. A test
    gate that fails on a timeout, a config error or a lint rule your test file
    trips means the tests are not admissible to the gates that will judge them,

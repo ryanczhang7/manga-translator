@@ -177,7 +177,7 @@ if [ -d "$WFDIR" ] && ls "$WFDIR"/*.yml >/dev/null 2>&1; then
   printf 'Continuous integration\n'
   wf_all="$(cat "$WFDIR"/*.yml 2>/dev/null)"
   ci_missing=0
-  for want in selftest.sh gates.sh check-boundaries.sh check-sigpipe.sh check-grep-count.sh; do
+  for want in selftest.sh gates.sh check-boundaries.sh; do
     case "$wf_all" in
       *"scripts/$want"*) ;;
       *)
@@ -191,7 +191,7 @@ if [ -d "$WFDIR" ] && ls "$WFDIR"/*.yml >/dev/null 2>&1; then
     printf '  %-10s   cannot add them for you - add the steps from the template\n' ""
     missing=$((missing+ci_missing))
   else
-    printf '  ok       %-12s runs the self-test, the gates, the boundaries check and the SIGPIPE guard\n' "ci"
+    printf '  ok       %-12s runs the self-test, the gates and the boundaries check\n' "ci"
   fi
   printf '\n'
 fi

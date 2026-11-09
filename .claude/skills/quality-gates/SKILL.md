@@ -15,7 +15,21 @@ coverage gate"; the manifest knows whether that means `pytest --cov`,
     bash scripts/gates.sh --list       # what is configured
     bash scripts/gates.sh --gate unit  # one gate
     bash scripts/gates.sh --required   # required only
+    bash scripts/gates.sh --skip integration   # everything but that gate
     bash scripts/gates.sh --audit      # check the manifest itself, run nothing
+
+**Splitting one slow gate into its own CI job.** `--skip <id>` is the
+complement of `--gate <id>`: every gate a full run would run, minus the one it
+names. A workflow whose single gates job is creeping toward its timeout runs
+`bash scripts/gates.sh --skip integration` in one job and
+`bash scripts/gates.sh --gate integration` in another, and between them they
+run exactly what one full run did. Repeat it to leave out more
+(`--skip a --skip b`); it takes one id, never a comma list. An id `project.conf`
+does not declare is refused, exit 2, so a typo cannot quietly put the gate back
+in the first job. It refuses `--gate`, `--fast` and `--required`, and like them
+it is never recorded into a story: the record comes from a full local run.
+Prefer this to marking the gate `slow`, which also takes it out of the
+`--fast` runs RED and GREEN rely on.
 
 Failures write their output to `.claude/state/gate-logs/<gate>.log`.
 
@@ -212,6 +226,8 @@ A gate with no `evidence` line behaves exactly as before, so this is safe to
 adopt late; once `BOOTSTRAPPED=yes`, a required gate without one is reported as
 a warning. `bash scripts/gates.sh --audit` lists what is missing without running
 anything. Canonical regexes per ecosystem are in the `stack-profiles` skill.
+`--audit` and a run both refuse an `evidence` line with an **empty** regex (it
+matches every line) and a gate id declared twice.
 
 ### The gate that shrank
 
@@ -592,6 +608,24 @@ probe before moving on, and say in the story that you did.
    say so in the story. Removing the line is the gate equivalent of deleting a
    failing test. The same holds for lowering a `floor`, dropping a `discovery`
    line, or removing a gate from a story's `required_gates`.
+
+5a. **CI refuses it, too.** A GREEN or GATES commit that loosens a gate in
+   `.claude/harness/project.conf` - an `evidence`, `floor`, `covers` or
+   `discovery` line removed (an evidence regex replaced by `-` or emptied
+   counts, and so does an emptied floor), a floor or a threshold flag's number lowered (any
+   repeat of the flag lowered counts - first, last, lowest or highest - and the
+   refusal names the one that fell) or the flag deleted, `required`
+   turned into any other severity, a gate removed, `BOOTSTRAPPED=yes` turned
+   off (to `no`, emptied or the line removed), or a `slow`, `ondemand` or
+   `waiver` line added on a gate that was required - is refused by
+   `check-boundaries.sh` as
+   `[gate-loosened]`, naming the gate and what changed. When the loosening is
+   the right decision (a suite genuinely split in two), it is declared, never
+   done quietly: one `## Suppressions` line carrying
+   `.claude/harness/project.conf`, `[gate-loosened]` and `approved by <who>`,
+   with the reason. Tightening - a number raised, a gate added, or a line
+   added other than a `slow`, `ondemand` or `waiver` line on a required gate -
+   is never refused.
 
 6. Adding a `no-count` line to silence a floor that is failing honestly is the
    same move. The line is a statement about what the regex can measure, not an

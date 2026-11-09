@@ -88,11 +88,13 @@ every story at once. Take it unless you can say what it missed.
 ## Orchestrating
 
 For each phase, dispatch the specialist as a subagent and give it everything it
-needs in the prompt — it starts with an empty context:
+needs in the prompt — it starts with an empty context. Take each section below
+with `bash scripts/story.sh section <id> <name>` and paste it, rather than
+reading the whole story file:
 
 - the story id and file path
-- the acceptance criteria, restated
-- the story's `## Contract` - module paths, exact signatures, the semantics
+- the acceptance criteria, restated (`Acceptance criteria`)
+- the story's `## Contract` (`Contract`) - module paths, exact signatures, the semantics
   behind each number, the accessible markup, the oracle partition, and the
   callers of any existing export whose signature changes. You write it before
   RED; RED may amend a block in place with a reason, and GREEN builds what the
@@ -124,11 +126,29 @@ DONE` prints for you), relayed to the user as printed - never reconstructed
 from memory. Your messages to the user follow `rules.md`, "Reporting to the user";
 story files and handoffs do not, and stay complete.
 
-Verification is a ladder, and every rung is something you run, not something
-you are told:
+The two long runs, the full `bash scripts/gates.sh` and
+`SELFTEST_JOBS=4 bash scripts/selftest.sh --changed` (or the full
+`SELFTEST_JOBS=4 bash scripts/selftest.sh`, in the three cases
+`/advance-story` names), are not yours to wait on: a wait of
+hours outlasts the prompt cache, and the turn after it re-reads your whole
+context uncached. Each goes to a `feature-developer` on the GATES row, with the
+brief `/advance-story` gives, and comes back as a verdict you check with
+`bash scripts/attest.sh check` - for the self-test,
+`bash scripts/attest.sh check -- SELFTEST_JOBS=4 bash scripts/selftest.sh --changed`.
+`bash scripts/check-boundaries.sh` takes
+seconds and stays your own run.
+
+Verification is a ladder, and every rung is something you run, or have run
+under `scripts/attest.sh` and check - never something you are told:
 
 - **A report of success is a claim.** Read the files the subagent says it
-  wrote, run its tests, run the gates yourself before declaring anything done.
+  wrote. Its tests and `--fast` ran through `bash scripts/attest.sh --`, and
+  `bash scripts/attest.sh check -- <the same words>` is how you check that
+  claim without paying for the run twice: `fresh` means it ran on the tree as it
+  is now, and you read its `exit:`, `last:` and log; `stale`, `void` or `none`
+  means you run it, directly - you run only `check`, never `attest.sh --`
+  yourself. The full gate run is still run, never assumed, before
+  anything is declared done.
 - **A claim that the contract is wrong is reproduced independently.** When a
   subagent reports that an acceptance criterion, a threshold or a frozen test
   is *wrong*, reproduce it on different inputs, without reusing its code, and
@@ -208,8 +228,8 @@ imply that the two were verified together, because no gate here has seen them
 together. **The position this harness takes: the second PR waits for the
 first to merge.** After the user merges the first, merge the updated `main`
 into the second branch in its worktree - a merge, not a rebase, because the
-branch is already published and a rebase would need a force-push. Run
-`bash scripts/gates.sh` there, commit its record with the story still at
+branch is already published and a rebase would need a force-push. Dispatch
+`bash scripts/gates.sh` there, as above, commit its record with the story still at
 REVIEW, push, and only then report the second PR ready. That merged tree is the
 tree `main` will have after the second merge, so this one gate run is the joint
 verification, and it costs one run per extra PR. Nothing forces it until you

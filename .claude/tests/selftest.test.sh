@@ -527,31 +527,38 @@ while read -r n v; do
   got="$(floor_of "$n" "$REAL")"
   [ "$got" = "$v" ] || wrong="$wrong $n=${got:-<none>}(want $v)"
 done <<'COUNTS'
-boundaries 136
-ci-local 28
+attest 179
+boundaries 545
+briefs 31
+ci-local 32
 classify 55
-doctor 61
+dispatch 83
+doctor 69
 gate-reminder 32
-gates 682
+gates 1002
 grep-count 38
+host-load 72
 lib 324
-mutate 308
-new-story 53
+mutate 315
+new-story 58
 phase 73
 phase-guard 388
 plan 284
 policy 17
-procedure 37
+procedure 154
 profiles 132
 refresh 215
 reporting 27
-run-lock 140
+rules-trim 50
+run-lock 141
 security-audit 51
-selftest 268
+selftest 366
+selftest-needed 620
 settings 70
 shipped-docs 14
 sigpipe 91
 spawns 69
+story 97
 tidy 128
 worktree 73
 COUNTS
@@ -1529,6 +1536,354 @@ assert_eq "t2-held wrote its finished marker before the run exited" present "$(p
 assert_eq "the queued t3-queued never started" absent "$(present "$MK/started/t3-queued")"
 assert_eq "after TERM: no selftest.* and no run.lock or run.lock.* remain" "" "$(h_left)"
 
+# ===========================================================================
+# HARNESS-090: a parallel run that ends before its summary keeps what it has.
+# The EXIT handler prints every started suite's block it can, names what is
+# missing, and keeps the buffer directory when a result could not be printed;
+# a start the scheduler sees fail is reported as a block and the run goes on.
+# Every needle is a WHOLE LINE or a whole block, because the Contract pins the
+# strings byte for byte. Every hold is bounded (BOUND=60, and LONELY where a
+# hold waits on another suite), and every case releases all holds before it
+# waits for the run.
+#
+# THE RED SHAPE. The release-110 handler prints nothing, names nothing and
+# removes the buffer directory, and SELFTEST_FAIL_START does not exist, so the
+# named suite simply runs. The preconditions, status 143, h_left, the started
+# set, the "no ... line" absences, the twin and the AC-3 header order and
+# control already hold today; the blocks, the trailers, the kept directory and
+# the rest of AC-3 do not. Every assertion executes unconditionally, and the
+# one loop is a fixed list of three, so the executed count is the same in RED
+# and GREEN.
+# ===========================================================================
+
+# jrun_env <jobs> <VAR=value>... -- [args]   jrun with extra environment words
+# for the fixture's selftest.sh. jrun itself is left alone.
+jrun_env() {
+  local j="$1" e=()
+  shift
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do e[${#e[@]}]="$1"; shift; done
+  [ "$#" -gt 0 ] && shift
+  ( cd "$FIX" && env SELFTEST_JOBS="$j" VERBOSE= ${e[@]+"${e[@]}"} bash scripts/selftest.sh "$@" ) \
+    > "$HW/out" 2> "$HW/err"
+  JRC=$?
+}
+
+# h_block <name> <file>   The suite's block as selftest.sh printed it: from its
+# `=== <name> ===` line up to, not including, the next header, the early-end
+# trailer or the summary. The blank line that opens the next block is kept,
+# so two blocks followed by the same kind of thing compare byte for byte.
+h_block() {
+  awk -v h="=== $1 ===" '
+    $0 == h { on = 1; print; next }
+    on && (/^=== .* ===$/ || /^selftest: / || /^assertion floors: / || / harness suite\(s\) /) { exit }
+    on { print }' "$2"
+}
+
+# h_heads <file>   The names of its `=== <name> ===` lines, in order, space-joined.
+h_heads() {
+  awk '/^=== .* ===$/ { n = $0; sub(/^=== /, "", n); sub(/ ===$/, "", n); s = s (s == "" ? "" : " ") n }
+       END { print s }' "$1"
+}
+
+# h_tail <n> <file>   Its last <n> lines.
+h_tail() {
+  awk -v k="$1" '{ l[NR] = $0 } END { for (i = NR - k + 1; i <= NR; i++) if (i >= 1) print l[i] }' "$2"
+}
+
+# h_names <dir>   The entries of mk/<dir>, space-joined, in glob order.
+h_names() {
+  local s="" f
+  for f in "$MK/$1"/*; do [ -e "$f" ] && s="$s ${f##*/}"; done
+  printf '%s' "${s# }"
+}
+
+# h_count_re <ERE> <file>   How many lines of <file> match. grep -c prints 0.
+h_count_re() { grep -cE -- "$1" "$2"; }
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-090 AC-1 AC-2 AC-4  TERM with a finished, unprinted suite: every started block printed, the rest named, buffers removed"
+
+# SELFTEST_JOBS=2. e1-held holds, so nothing can be printed; e2-done finishes
+# as soon as e1-held has started and waits, unprinted, behind it; its slot
+# goes to e3-held, which holds. e4-queued and e5-queued are never started.
+reset_suites
+held e1-held   N=1 WAIT_REL=1 BOUND=60
+held e2-done   N=1 WAIT_START=e1-held LONELY=30 BOUND=60
+held e3-held   N=1 WAIT_REL=1 BOUND=60
+held e4-queued N=1
+held e5-queued N=1
+floors <<'FLOORS'
+floor | e1-held   | 2
+floor | e2-done   | 2
+floor | e3-held   | 2
+floor | e4-queued | 2
+floor | e5-queued | 2
+FLOORS
+mk_reset
+jstart 2
+assert_eq "precondition: e2-done has finished and e3-held has started in its slot" yes \
+  "$(yn h_wait "$MK/finished/e2-done" "$MK/started/e3-held")"
+assert_eq "precondition: e1-held is still holding, so nothing can be printed yet" absent \
+  "$(present "$MK/finished/e1-held")"
+assert_eq "precondition: e2-done's block is not in the output before the TERM" 0 \
+  "$(h_exact '=== e2-done ===' "$HW/out")"
+kill -TERM "$HP" 2>/dev/null
+sleep 2
+release all
+wait "$HP"; rc="$?"
+assert_eq "AC-2: the TERM still ends the run with 143" 143 "$rc"
+assert_eq "AC-1: only the three started suites ran (the TERM started no more)" "e1-held e2-done e3-held" \
+  "$(h_names started)"
+assert_eq "AC-1: every started suite's block is printed, once each, in glob order" "e1-held e2-done e3-held" \
+  "$(h_heads "$HW/out")"
+for s in e1-held e2-done e3-held; do
+  assert_eq "AC-1: $s's block carries its own summary line" 1 "$(h_exact "$s: 2 passed, 0 failed" "$HW/out")"
+done
+assert_eq "AC-2: the run ends with an empty line, the ended-before line and the never-started line" \
+  "
+selftest: ended before its summary: 3 of 5 suite(s) reported (status 143).
+selftest: never started: e4-queued e5-queued" "$(h_tail 3 "$HW/out")"
+assert_eq "AC-2: no unreported line when every started block was printed" 0 \
+  "$(h_count_re '^selftest: unreported:' "$HW/out")"
+assert_eq "AC-4: no buffers-kept line when every started block was printed" 0 \
+  "$(h_count_re '^selftest: buffers kept:' "$HW/out")"
+assert_eq "AC-2: nothing says the suites passed" 0 "$(h_count_re 'harness suite\(s\) passed\.' "$HW/out")"
+assert_eq "AC-2: no assertion floors line" 0 "$(h_count_re '^assertion floors:' "$HW/out")"
+assert_eq "AC-4: every block printed, so the buffer directory and the lock are gone" "" "$(h_left)"
+cp "$HW/out" "$HW/out.early"
+h_block e2-done "$HW/out.early" > "$HW/blk.early"
+
+# The twin: the same fixture, every hold released, run to its summary.
+mk_reset
+release all
+jrun 2
+assert_eq "twin: the same fixture with every hold released reaches its summary and exits 0" 0 "$JRC"
+h_block e2-done "$HW/out" > "$HW/blk.full"
+assert_eq "twin precondition: its e2-done block holds e2-done's summary line" 1 \
+  "$(h_exact 'e2-done: 2 passed, 0 failed' "$HW/blk.full")"
+assert_eq "AC-1: the block the early end printed for e2-done is byte for byte the summary run's" identical \
+  "$(h_same "$HW/blk.full" "$HW/blk.early")"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-090 AC-4 AC-2  a started suite whose buffer is not a readable file: named unreported, buffers kept"
+
+# SELFTEST_JOBS=2. k1-held, before it sources _held.sh, makes k3-later's
+# buffer path a DIRECTORY, then holds. k2-done waits for k1-held's started
+# marker (written after the mkdir), so k3-later cannot start before the
+# directory exists. When k3-later starts, its `> $BUF/k3-later.out` fails in
+# the child (Is a directory): its script never runs, the child exits non-zero,
+# and its buffer is a directory. Its slot goes to k4-held, which holds.
+reset_suites
+held k1-held   N=1 WAIT_REL=1 BOUND=60 \
+  'for d in "$REPO_ROOT"/.claude/state/selftest.*/; do mkdir "${d}k3-later.out"; done'
+held k2-done   N=1 WAIT_START=k1-held LONELY=30 BOUND=60
+held k3-later  N=1
+held k4-held   N=1 WAIT_REL=1 BOUND=60
+held k5-queued N=1
+floors <<'FLOORS'
+floor | k1-held   | 2
+floor | k2-done   | 2
+floor | k3-later  | 2
+floor | k4-held   | 2
+floor | k5-queued | 2
+FLOORS
+mk_reset
+jstart 2
+KBUF="$FIX/.claude/state/selftest.$HP"
+assert_eq "precondition: k2-done has finished and k4-held has started, after k3-later's turn" yes \
+  "$(yn h_wait "$MK/finished/k2-done" "$MK/started/k4-held")"
+assert_eq "precondition: k3-later's buffer is a directory" yes "$(yn test -d "$KBUF/k3-later.out")"
+assert_eq "precondition: k3-later's script never ran" absent "$(present "$MK/started/k3-later")"
+kill -TERM "$HP" 2>/dev/null
+sleep 2
+release all
+wait "$HP"; rc="$?"
+assert_eq "AC-2: the TERM still ends the run with 143" 143 "$rc"
+assert_eq "AC-1: the other started suites' blocks are printed, in glob order, and k3-later has none" \
+  "k1-held k2-done k4-held" "$(h_heads "$HW/out")"
+assert_eq "AC-2 AC-4: the run ends with the ended-before, never-started, unreported and buffers-kept lines" \
+  "
+selftest: ended before its summary: 3 of 5 suite(s) reported (status 143).
+selftest: never started: k5-queued
+selftest: unreported: k3-later
+selftest: buffers kept: .claude/state/selftest.$HP/" "$(h_tail 5 "$HW/out")"
+assert_eq "AC-4: the buffer directory is still there after the run exits" present "$(present "$KBUF")"
+rm -rf "$KBUF"
+assert_eq "AC-4: with the kept buffers removed by the test, nothing else is left (the lock was released)" \
+  "" "$(h_left)"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-090 AC-3  SELFTEST_FAIL_START: the named suite is reported not started, and the run goes on"
+
+# Four passing suites at SELFTEST_JOBS=2, the hook naming the second in glob
+# order. No holds: nothing here waits on anything.
+reset_suites
+held g1-first   N=1
+held g2-nostart N=1
+held g3-after   N=1
+held g4-after   N=1
+floors <<'FLOORS'
+floor | g1-first   | 2
+floor | g2-nostart | 2
+floor | g3-after   | 2
+floor | g4-after   | 2
+FLOORS
+mk_reset
+jrun_env 2 SELFTEST_FAIL_START=g2-nostart --
+assert_eq "AC-3: a suite whose start failed makes the run exit 1" 1 "$JRC"
+assert_eq "AC-3: all four blocks are printed, in glob order" "g1-first g2-nostart g3-after g4-after" \
+  "$(h_heads "$HW/out")"
+printf '=== g2-nostart ===\nFAIL g2-nostart  not started: fork: simulated by SELFTEST_FAIL_START\n\n' \
+  > "$HW/blk.want"
+h_block g2-nostart "$HW/out" > "$HW/blk.got"
+assert_eq "AC-3: g2-nostart's block is its header and the one not-started line" identical \
+  "$(h_same "$HW/blk.want" "$HW/blk.got")"
+assert_eq "AC-3: g2-nostart's start was not attempted" absent "$(present "$MK/started/g2-nostart")"
+assert_eq "AC-3: every other suite, the two after it included, started and finished" \
+  "g1-first g3-after g4-after" "$(h_names finished)"
+assert_eq "AC-3: the floors line counts the three that ran, and not the one that did not start" 1 \
+  "$(h_exact 'assertion floors: all 3 suite(s) met their declared floor (6 assertions executed, 6 declared).' "$HW/out")"
+assert_eq "AC-3: it counts as one failure among four suites" 1 \
+  "$(h_exact '1 of 4 harness suite(s) FAILED.' "$HW/out")"
+assert_eq "AC-3: and the run does not say the suites passed" 0 \
+  "$(h_count_re 'harness suite\(s\) passed\.' "$HW/out")"
+
+mk_reset
+jrun_env 2 SELFTEST_FAIL_START= --
+assert_eq "control: with SELFTEST_FAIL_START empty, the same fixture exits 0" 0 "$JRC"
+assert_eq "control: and all four passed" 1 "$(h_exact '4 harness suite(s) passed.' "$HW/out")"
+assert_eq "control: and g2-nostart started" present "$(present "$MK/started/g2-nostart")"
+
+# ---------------------------------------------------------------------------
+# R-1 (from GATES, diff review, 2026-11-06). Two cases the first review found
+# missing: a second signal while the handler drains (finding 2), and the
+# handler's failed-start branch (finding 3).
+
+# h_scrub   Removes whatever a run left in the fixture's .claude/state, so a
+# handler that died mid-drain (or a mutation that kept the buffers) cannot
+# leak a lock or a buffer directory into the next case. Called only AFTER the
+# case's own h_left assertion has read the state.
+h_scrub() {
+  rm -rf "$FIX"/.claude/state/selftest.* "$FIX"/.claude/state/run.lock \
+         "$FIX"/.claude/state/run.lock.* 2>/dev/null
+  return 0
+}
+
+# jstart_env <jobs> <VAR=value>... -- [args]   jstart with extra environment
+# words, exported to the backgrounded script only (local -x unwinds when the
+# function returns). Same `cd`-then-`bash ... &` shape as jstart, so $! is
+# still selftest.sh's own pid. jstart itself is left alone.
+jstart_env() {
+  local j="$1" here="$PWD" e=()
+  shift
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do e[${#e[@]}]="$1"; shift; done
+  [ "$#" -gt 0 ] && shift
+  [ "${#e[@]}" -gt 0 ] && local -x "${e[@]}"
+  cd "$FIX" || return 1
+  SELFTEST_JOBS="$j" VERBOSE= bash scripts/selftest.sh "$@" > "$HW/out" 2> "$HW/err" &
+  HP=$!
+  cd "$here" || return 1
+  BG="$BG $HP"
+}
+
+describe "HARNESS-090 AC-1 (R-1)  a second TERM while the handler drains does not end it: every started block printed, the lock released"
+
+# SELFTEST_JOBS=2, the first HARNESS-090 case's shape with four suites:
+# d1-held holds; d2-done finishes behind it, unprinted; d3-held holds in its
+# slot; d4-queued never starts. The first TERM puts the run in its EXIT
+# handler, waiting on d1-held; the second arrives during that wait.
+reset_suites
+held d1-held   N=1 WAIT_REL=1 BOUND=60
+held d2-done   N=1 WAIT_START=d1-held LONELY=30 BOUND=60
+held d3-held   N=1 WAIT_REL=1 BOUND=60
+held d4-queued N=1
+floors <<'FLOORS'
+floor | d1-held   | 2
+floor | d2-done   | 2
+floor | d3-held   | 2
+floor | d4-queued | 2
+FLOORS
+mk_reset
+jstart 2
+assert_eq "precondition: d2-done has finished and d3-held has started in its slot" yes \
+  "$(yn h_wait "$MK/finished/d2-done" "$MK/started/d3-held")"
+assert_eq "precondition: d1-held is still holding, so nothing can be printed yet" absent \
+  "$(present "$MK/finished/d1-held")"
+assert_eq "precondition: d2-done's block is not in the output before the TERM" 0 \
+  "$(h_exact '=== d2-done ===' "$HW/out")"
+kill -TERM "$HP" 2>/dev/null
+sleep 2
+kill -TERM "$HP" 2>/dev/null
+sleep 1
+release all
+wait "$HP"; rc="$?"
+# Whatever the handler did, let the held suites finish before the next case
+# resets the markers they write (bounded by h_wait's 60 s; not an assertion).
+h_wait "$MK/finished/d1-held" "$MK/finished/d3-held" || :
+assert_eq "AC-2: two TERMs still end the run with 143" 143 "$rc"
+assert_eq "AC-1: only the three started suites ran (neither TERM started more)" "d1-held d2-done d3-held" \
+  "$(h_names started)"
+assert_eq "AC-1: after a second TERM, every started suite's block is printed, once each, in glob order" \
+  "d1-held d2-done d3-held" "$(h_heads "$HW/out")"
+for s in d1-held d2-done d3-held; do
+  assert_eq "AC-1: after a second TERM, $s's block carries its own summary line" 1 \
+    "$(h_exact "$s: 2 passed, 0 failed" "$HW/out")"
+done
+assert_eq "AC-2: after a second TERM, the run ends with an empty line, the ended-before line and the never-started line" \
+  "
+selftest: ended before its summary: 3 of 4 suite(s) reported (status 143).
+selftest: never started: d4-queued" "$(h_tail 3 "$HW/out")"
+assert_eq "AC-4: after a second TERM, the buffer directory and the lock are gone" "" "$(h_left)"
+h_scrub
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-090 AC-3 (R-1)  a TERM after a failed start: the handler prints the not-started block in its place"
+
+# SELFTEST_JOBS=2. h1-held starts and holds; h2-nostart is named in
+# SELFTEST_FAIL_START, so its start fails and the scheduler refills the slot
+# in the same pass with h3-held, which holds. h4-queued never starts. The
+# main loop cannot print h2-nostart's block while h1-held, before it, is
+# unprinted, so the TERM leaves that block to the handler's STARTERR branch.
+reset_suites
+held h1-held    N=1 WAIT_REL=1 BOUND=60
+held h2-nostart N=1
+held h3-held    N=1 WAIT_REL=1 BOUND=60
+held h4-queued  N=1
+floors <<'FLOORS'
+floor | h1-held    | 2
+floor | h2-nostart | 2
+floor | h3-held    | 2
+floor | h4-queued  | 2
+FLOORS
+mk_reset
+jstart_env 2 SELFTEST_FAIL_START=h2-nostart --
+assert_eq "precondition: h1-held and h3-held have both started, h3-held in the slot h2-nostart failed to take" yes \
+  "$(yn h_wait "$MK/started/h1-held" "$MK/started/h3-held")"
+assert_eq "precondition: h2-nostart's start was not attempted" absent "$(present "$MK/started/h2-nostart")"
+assert_eq "precondition: h1-held is still holding, so nothing can be printed yet" 0 \
+  "$(h_exact '=== h1-held ===' "$HW/out")"
+kill -TERM "$HP" 2>/dev/null
+sleep 2
+release all
+wait "$HP"; rc="$?"
+h_wait "$MK/finished/h1-held" "$MK/finished/h3-held" || :
+assert_eq "AC-2: the TERM ends the run with 143" 143 "$rc"
+assert_eq "AC-1 AC-3: the handler prints all three started blocks, the failed start's in its glob place" \
+  "h1-held h2-nostart h3-held" "$(h_heads "$HW/out")"
+printf '=== h2-nostart ===\nFAIL h2-nostart  not started: fork: simulated by SELFTEST_FAIL_START\n\n' \
+  > "$HW/blk.want"
+h_block h2-nostart "$HW/out" > "$HW/blk.got"
+assert_eq "AC-3: the handler's h2-nostart block is its header and the one not-started line" identical \
+  "$(h_same "$HW/blk.want" "$HW/blk.got")"
+assert_eq "AC-2: the failed start's block counts as reported; h4-queued is named never started" \
+  "
+selftest: ended before its summary: 3 of 4 suite(s) reported (status 143).
+selftest: never started: h4-queued" "$(h_tail 3 "$HW/out")"
+assert_eq "AC-2: a failed start is not named unreported" 0 \
+  "$(h_count_re '^selftest: unreported:' "$HW/out")"
+assert_eq "AC-4: every block printed, so the buffer directory and the lock are gone" "" "$(h_left)"
+h_scrub
+
 # ---------------------------------------------------------------------------
 describe "HARNESS-036 AC-6  state, suite and portability hygiene, in this repository"
 
@@ -1568,5 +1923,284 @@ printf '%s\n' '  wait -n' '# wait -n, mapfile and coproc, in a comment' 'x=1  # 
   '  local -A seen' > "$HW/__probe_forbidden.sh"
 assert_eq "control: the same reader flags them on code lines and not in comments" "1: wait -n
 4: local -A" "$(forbidden "$HW/__probe_forbidden.sh")"
+
+# ===========================================================================
+# HARNESS-094: several suites by name (AC-6), and `--changed [base-ref]`
+# (AC-7), which asks `scripts/selftest-needed.sh --suites` what to run.
+#
+# AC-6 runs in $FIX with passing_suite and jrun, as the cases above do. AC-7
+# needs a git history the selection can diff - `main`, a story branch, a
+# change - and $FIX's working tree is full of untracked run artefacts (mk/,
+# w/, .claude/state), each of which would be a changed harness path. So every
+# AC-7 case builds its own fixture with cf_new: three passing suites committed
+# on main, .claude/state/ ignored, and the run's output kept in $HW, outside
+# it. In that fixture alpha and gamma mention .claude/harness/m.conf and beta
+# mentions nothing, so a new m.conf selects exactly alpha and gamma (R3).
+#
+# THE RED SHAPE. Today a second name is ignored (ONLY is $1) and `--changed`
+# is a suite name that matches nothing, so the multi-name cases run one suite
+# and every `--changed` run exits 1 with `No suites matched '--changed'`.
+# Nothing hangs, every assertion below is unconditional, and the executed
+# count is the same in RED and GREEN.
+# ===========================================================================
+
+CFS=""
+trap 'selftest_cleanup; for c in $CFS; do rm -rf "$c"; done' EXIT
+
+# cf_suite <name> <n> [path]   A passing suite in $CF, n assertions, whose
+# source mentions [path] in a comment when given.
+cf_suite() {
+  {
+    printf '#!/usr/bin/env bash\n'
+    [ -n "${3:-}" ] && printf '# reads %s\n' "$3"
+    printf '. "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"\n'
+    printf 'i=0\n'
+    printf 'while [ $i -lt %d ]; do\n' "$2"
+    printf '  assert_eq "case $i" x x\n'
+    printf '  i=$((i+1))\n'
+    printf 'done\n'
+    printf 'summary "%s"\n' "$1"
+  } > "$CF/.claude/tests/$1.test.sh"
+}
+
+cfgit() { git -C "$CF" -c user.email=t@t -c user.name=t "$@"; }
+
+# cf_new [beta-floor]   CF := a fresh project fixture on `main` holding the
+# real _lib.sh and alpha (3, mentions m.conf), beta (2) and gamma (1, mentions
+# m.conf), floored at 3, [beta-floor] (default 2) and 1, committed. Not yet on
+# a story branch: cf_story does that.
+cf_new() {
+  CF="$(make_project_fixture)"; CFS="$CFS $CF"
+  mkdir -p "$CF/.claude/tests"
+  cp "$REPO_ROOT/.claude/tests/_lib.sh" "$CF/.claude/tests/_lib.sh"
+  cf_suite alpha 3 .claude/harness/m.conf
+  cf_suite beta  2
+  cf_suite gamma 1 .claude/harness/m.conf
+  printf 'floor | alpha | 3\nfloor | beta  | %s\nfloor | gamma | 1\n' "${1:-2}" \
+    > "$CF/.claude/tests/floors.conf"
+  printf '.claude/state/\n' >> "$CF/.gitignore"
+  cfgit branch -M main >/dev/null 2>&1
+  cfgit add -A >/dev/null 2>&1
+  cfgit commit -qm "three suites" >/dev/null 2>&1
+}
+cf_story() { cfgit checkout -q -b story/T-1-fixture >/dev/null 2>&1; }
+
+# crun <jobs> [args]   $CF's selftest.sh, SELFTEST_JOBS=<jobs> or removed with
+# `-`, VERBOSE empty. stdout to $HW/c.out, stderr to $HW/c.err, status CRC.
+CRC=""
+crun() {
+  local j="$1"
+  shift
+  if [ "$j" = - ]; then
+    ( cd "$CF" && env -u SELFTEST_JOBS VERBOSE= bash scripts/selftest.sh "$@" ) > "$HW/c.out" 2> "$HW/c.err"
+  else
+    ( cd "$CF" && SELFTEST_JOBS="$j" VERBOSE= bash scripts/selftest.sh "$@" ) > "$HW/c.out" 2> "$HW/c.err"
+  fi
+  CRC=$?
+}
+ckeep() { cp "$HW/c.out" "$HW/c.out.$1"; cp "$HW/c.err" "$HW/c.err.$1"; }
+
+# c_reason <name> <path> <rule>   How many lines of $HW/c.err are `  <name>`,
+# spaces, then exactly `<path> (<rule>)` - a --suites reason line passed through.
+c_reason() {
+  awk -v n="$1" -v t="$2 ($3)" '
+    { sub(/\r$/, "") }
+    substr($0, 1, 2 + length(n)) == "  " n {
+      s = substr($0, 3 + length(n))
+      if (s ~ /^ +/) { sub(/^ +/, "", s); if (s == t) c++ }
+    }
+    END { print c + 0 }' "$HW/c.err"
+}
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-094 AC-6  two names run exactly those two, in glob order, with no whole-file audit"
+
+# beta has no floor line and the file holds a line that is not a floor line:
+# a full run fails on both before anything runs (the control below), and a
+# run naming alpha and gamma answers for neither.
+reset_suites
+passing_suite alpha 3
+passing_suite beta  7
+passing_suite gamma 1
+floors <<'FLOORS'
+floor | alpha | 3
+this is not a floor
+floor | gamma | 1
+FLOORS
+cat > "$HW/golden.ac6" <<'GOLDEN'
+
+=== alpha ===
+
+alpha: 3 passed, 0 failed
+
+=== gamma ===
+
+gamma: 1 passed, 0 failed
+
+assertion floors: all 2 suite(s) met their declared floor (4 assertions executed, 4 declared).
+2 harness suite(s) passed.
+GOLDEN
+mk_reset
+jrun - gamma alpha
+assert_eq "\`selftest.sh gamma alpha\` exits 0" 0 "$JRC"
+assert_eq "and its stdout is alpha's block then gamma's (glob order, not argument order), one floors line, 2 passed" \
+  identical "$(h_same "$HW/golden.ac6" "$HW/out")"
+assert_eq "and nothing on stderr: both named suites have a floor" "" "$(cat "$HW/err")"
+assert_eq "the control: beta, the suite not named, did not run" 0 "$(h_exact '=== beta ===' "$HW/out")"
+jrun -
+keep ac6-full
+assert_eq "the control: a full run over the same floors file exits 1" 1 "$JRC"
+assert_eq "because it audits the whole file: 2 faults, nothing run" \
+  "2 fault(s) in .claude/tests/floors.conf. Nothing was run." "$(h_last ac6-full)"
+
+describe "HARNESS-094 AC-6  each named suite gets the single-suite floor rule"
+
+jrun - alpha beta
+keep ac6-nofloor
+assert_eq "\`selftest.sh alpha beta\`, beta unfloored, exits 0" 0 "$JRC"
+assert_eq "stderr is exactly the single-suite WARNING for beta, and nothing else" \
+  "WARNING: no floor line for beta in .claude/tests/floors.conf or .claude/tests/project-floors.conf, so this run cannot tell
+WARNING: whether that suite did any work. Declare one before the full run." "$(cat "$HW/err")"
+assert_eq "the floors line counts the one floored suite" 1 \
+  "$(h_exact 'assertion floors: all 1 suite(s) met their declared floor (3 assertions executed, 3 declared).' "$HW/out")"
+assert_eq "and the last line counts both suites that ran" "2 harness suite(s) passed." "$(h_last ac6-nofloor)"
+
+floors <<'FLOORS'
+floor | alpha | 4
+floor | beta  | 7
+floor | gamma | 2
+FLOORS
+jrun - alpha gamma
+keep ac6-short
+assert_eq "\`selftest.sh alpha gamma\`, both below their floors, exits 1" 1 "$JRC"
+assert_eq "alpha's floor is enforced" 1 \
+  "$(h_exact 'FAIL alpha  did 3 units of work, below the floor of 4 in .claude/tests/floors.conf' "$HW/out")"
+assert_eq "and so is gamma's, the second name" 1 \
+  "$(h_exact 'FAIL gamma  did 1 units of work, below the floor of 2 in .claude/tests/floors.conf' "$HW/out")"
+assert_eq "and the last line counts both failures out of the two that ran" \
+  "2 of 2 harness suite(s) FAILED." "$(h_last ac6-short)"
+
+describe "HARNESS-094 AC-6  a name that matches nothing, among several, runs nothing"
+
+mk_reset
+jrun - alpha nosuch
+assert_eq "\`selftest.sh alpha nosuch\` exits 1" 1 "$JRC"
+assert_eq "with the shipped No suites matched line naming nosuch, alone, on stderr" \
+  "No suites matched 'nosuch'. Looked in .claude/tests/*.test.sh" "$(cat "$HW/err")"
+assert_eq "and nothing on stdout: alpha, which does exist, did not run" "" "$(cat "$HW/out")"
+assert_eq "and no run.lock or selftest.* is left" "" "$(h_left)"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-094 AC-7  --changed runs the selected suites after one header line"
+
+cf_new; cf_story
+printf 'm\n' > "$CF/.claude/harness/m.conf"
+cat > "$HW/golden.ac7" <<'GOLDEN'
+selftest: --changed — 2 of 3 suite(s) selected: alpha gamma
+
+=== alpha ===
+
+alpha: 3 passed, 0 failed
+
+=== gamma ===
+
+gamma: 1 passed, 0 failed
+
+assertion floors: all 2 suite(s) met their declared floor (4 assertions executed, 4 declared).
+2 harness suite(s) passed.
+GOLDEN
+crun - --changed
+ckeep ac7-1
+assert_eq "\`selftest.sh --changed\` with a new m.conf exits 0" 0 "$CRC"
+assert_eq "its stdout is the header line, then alpha's and gamma's blocks, the floors line and 2 passed" \
+  identical "$(h_same "$HW/golden.ac7" "$HW/c.out.ac7-1")"
+assert_eq "the control: beta, which does not mention m.conf, did not run" 0 \
+  "$(h_exact '=== beta ===' "$HW/c.out.ac7-1")"
+assert_eq "stderr passes through --suites' reason line for alpha" 1 \
+  "$(c_reason alpha .claude/harness/m.conf mentioned)"
+crun 3 --changed
+assert_eq "at SELFTEST_JOBS=3 it exits 0 too" 0 "$CRC"
+assert_eq "and its stdout is byte-identical to the serial run's" identical \
+  "$(h_same "$HW/c.out.ac7-1" "$HW/c.out")"
+
+describe "HARNESS-094 AC-7  --changed audits the whole floors file first"
+
+# beta's floor is not a number, and beta is NOT selected: the audit still
+# fails the run before any suite. The fault is committed on main, so the
+# story branch's only change is m.conf and the selection is a list, not all.
+cf_new lots; cf_story
+printf 'm\n' > "$CF/.claude/harness/m.conf"
+cat > "$HW/golden.ac7-audit" <<'GOLDEN'
+FAIL .claude/tests/floors.conf:2  floor for 'beta' is not a number: 'lots'
+FAIL beta  no floor line in .claude/tests/floors.conf or .claude/tests/project-floors.conf; every suite must declare one (a project's own suites go in project-floors.conf)
+
+2 fault(s) in .claude/tests/floors.conf. Nothing was run.
+GOLDEN
+crun - --changed
+ckeep ac7-audit
+assert_eq "the control: \`--changed\` over a floors fault in an UNSELECTED suite exits 1" 1 "$CRC"
+assert_eq "and its stdout is the full run's fault report and nothing else: no header, no suite" identical \
+  "$(h_same "$HW/golden.ac7-audit" "$HW/c.out.ac7-audit")"
+crun - alpha gamma
+assert_eq "while naming the same two suites does not audit, and exits 0" 0 "$CRC"
+
+describe "HARNESS-094 AC-7  --changed that resolves to all is a full run under one header line"
+
+cf_new; cf_story
+printf 'x\n' > "$CF/.claude/harness/x.conf"
+crun - --changed
+ckeep ac7-all; rc_all="$CRC"
+crun -
+ckeep ac7-full; rc_full="$CRC"
+awk 'NR > 1' "$HW/c.out.ac7-all" > "$HW/c.out.ac7-all-tail"
+assert_eq "precondition: a plain full run of the fixture exits 0" 0 "$rc_full"
+assert_eq "\`--changed\` with an unmapped x.conf exits 0" 0 "$rc_all"
+assert_eq "its first line is the every-suite header carrying --suites' reason" \
+  "selftest: --changed — every suite: .claude/harness/x.conf is mapped by no rule; defaulting to every suite" \
+  "$(awk 'NR == 1' "$HW/c.out.ac7-all")"
+assert_eq "and everything after it is byte for byte the full run's stdout" identical \
+  "$(h_same "$HW/c.out.ac7-full" "$HW/c.out.ac7-all-tail")"
+
+describe "HARNESS-094 AC-7  --changed with no harness change runs nothing, exit 1"
+
+cf_new; cf_story
+mkdir -p "$CF/src"; printf 'export const a = 1\n' > "$CF/src/app.ts"
+cfgit add -A >/dev/null 2>&1; cfgit commit -qm "source only" >/dev/null 2>&1
+crun - --changed
+assert_eq "\`--changed\` over a source-only diff exits 1" 1 "$CRC"
+assert_eq "and stdout is exactly the selected-no-suite line, the skip line appended" \
+  "selftest: --changed selected no suite — selftest-needed: skip — no harness path among 1 changed path(s) against main (merge-base $(cfgit rev-parse --short main 2>/dev/null)); CI runs the self-test on the PR" \
+  "$(tr -d '\r' < "$HW/c.out")"
+assert_eq "and no run.lock was left in the fixture" absent "$(present "$CF/.claude/state/run.lock")"
+
+describe "HARNESS-094 AC-7  --changed <ref> passes the base through"
+
+# release is main before a harness commit; the story branch, cut after it,
+# adds a source file. Against main nothing is selected; against release m.conf is.
+cf_new
+cfgit branch release >/dev/null 2>&1
+printf 'm\n' > "$CF/.claude/harness/m.conf"
+cfgit add -A >/dev/null 2>&1; cfgit commit -qm "m.conf on main" >/dev/null 2>&1
+cf_story
+mkdir -p "$CF/src"; printf 'export const a = 1\n' > "$CF/src/app.ts"
+cfgit add -A >/dev/null 2>&1; cfgit commit -qm "source" >/dev/null 2>&1
+crun - --changed release
+ckeep ac7-ref
+assert_eq "\`--changed release\` exits 0" 0 "$CRC"
+assert_eq "and its first line selects alpha and gamma" \
+  "selftest: --changed — 2 of 3 suite(s) selected: alpha gamma" "$(awk 'NR == 1' "$HW/c.out.ac7-ref")"
+assert_eq "and its last line counts the two that ran" "2 harness suite(s) passed." \
+  "$(awk 'END { print }' "$HW/c.out.ac7-ref")"
+crun - --changed
+assert_eq "control: \`--changed\` with no ref resolves main and selects nothing, exit 1" 1 "$CRC"
+
+describe "HARNESS-094 AC-7  --changed whose selection fails is exit 2"
+
+cf_new; cf_story
+crun - --changed -x
+assert_eq "\`--changed -x\` (a usage error from --suites) exits 2" 2 "$CRC"
+assert_eq "and prints nothing on stdout" "" "$(cat "$HW/c.out")"
+assert_eq "and stderr's first line says it cannot select" "selftest: --changed cannot select: " \
+  "$(awk 'NR == 1 { print substr($0, 1, length("selftest: --changed cannot select: ")) }' "$HW/c.err")"
 
 summary "selftest"

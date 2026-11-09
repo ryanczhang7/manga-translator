@@ -149,6 +149,14 @@ cat >> "$file" <<'TEMPLATE'
      inputs, not the subagent's code. That claim is also what an agent says
      when it wants to stop failing. -->
 
+## Suppressions
+
+<!-- One line per suppression this story's GREEN or GATES deliberately added:
+     the path, the rule id in brackets, `approved by <who>`, and why that line
+     and not a fix. check-boundaries.sh refuses any lint, type, coverage or
+     mutation suppression a GREEN or GATES commit adds to source or config
+     unless one line here names it. Omit the section if unused. -->
+
 ## Model guidance
 
 <!-- FILLED BY A TOOL, not by hand: `bash scripts/plan.sh write <id>`, as the
