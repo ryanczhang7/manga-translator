@@ -523,10 +523,23 @@ assert_eq "C-3: the guard scans exactly the harness shell files classify.sh list
 # caught only by the CI step - and that step is the one a consuming project has
 # to add by hand, because .github/workflows is project-owned. The guard failing
 # a PR was the whole point; a guard whose suite cannot fail is half of one.
-assert_eq "C-3: and the real tree has no findings at all" \
-  "0" "$(awk 'index($0, "check-sigpipe: scanned ") == 1 {
+#
+# HARNESS-073 made this the ONLY place CI learns of a finding - the workflow's
+# own guard step is gone - so its failure has to say WHERE, as the step did.
+# assert_eq would print "expected: 0 / actual: N" and nothing about which line.
+# The detail is the guard's output minus its census line: every finding line,
+# `<path>:<line>: ...`, verbatim. Still exactly one _ok or one _bad.
+REAL_FINDINGS="$(awk 'index($0, "check-sigpipe: scanned ") == 1 {
                 i = index($0, "pipefail, "); if (i == 0) next
                 print substr($0, i + 10) + 0; exit }' <<<"$REAL_OUT")"
+if [ "$REAL_FINDINGS" = "0" ]; then
+  _ok "C-3: and the real tree has no findings at all"
+else
+  _bad "C-3: and the real tree has no findings at all" \
+    "expected: 0 findings
+actual:   ${REAL_FINDINGS:-<no census line>}
+$(awk 'index($0, "check-sigpipe: ") != 1' <<<"$REAL_OUT")"
+fi
 assert_eq "C-3: so the guard exits 0 against it" "0" "$GUARD_RC"
 
 # The pipefail count is asserted as a FLOOR rather than an equality, because
@@ -558,14 +571,14 @@ describe "C-5: the twelve status-discarded lines in this tree are excluded by th
 # is vacuous, and vacuous is the failure mode this whole story is about: if the
 # line no longer holds the shape, this fails as a stale fixture rather than
 # reporting the guard correct.
-DISCARDED='scripts/check-boundaries.sh:394:res=$(printf
-scripts/check-boundaries.sh:433:rec=$(printf
-scripts/check-boundaries.sh:619:ph_at="$(git show
+DISCARDED='scripts/check-boundaries.sh:399:res=$(printf
+scripts/check-boundaries.sh:438:rec=$(printf
+scripts/check-boundaries.sh:630:ph_at="$(git show
 scripts/ci-local.sh:169:dirty="$(git status
 scripts/doctor.sh:68:v="$(grep
 scripts/doctor.sh:140:BOOTSTRAPPED="$(grep
-scripts/gates.sh:82:BOOTSTRAPPED="$(grep
-scripts/gates.sh:734:why="could not launch: $(
+scripts/gates.sh:93:BOOTSTRAPPED="$(grep
+scripts/gates.sh:801:why="could not launch: $(
 scripts/refresh-harness.sh:134:ph="$(sed
 scripts/refresh-harness.sh:135:sid="$(sed
 scripts/refresh-harness.sh:147:upstream_version="$(grep

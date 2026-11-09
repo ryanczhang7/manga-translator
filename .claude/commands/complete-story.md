@@ -2,7 +2,7 @@
 description: Drive one story from its current phase all the way to a merged-ready PR
 model: fable
 argument-hint: <story-id>
-allowed-tools: Bash(bash scripts/phase.sh:*), Bash(bash scripts/gates.sh:*), Bash(bash scripts/check-boundaries.sh:*), Bash(bash scripts/selftest.sh:*), Bash(bash scripts/ci-local.sh:*), Bash(bash scripts/task.sh:*), Bash(git:*), Read, Grep, Glob, Edit, Write, Task
+allowed-tools: Bash(bash scripts/phase.sh:*), Bash(bash scripts/gates.sh:*), Bash(bash scripts/attest.sh check:*), Bash(bash scripts/check-boundaries.sh:*), Bash(bash scripts/selftest.sh:*), Bash(bash scripts/selftest-needed.sh:*), Bash(SELFTEST_JOBS=4 bash scripts/selftest.sh:*), Bash(SELFTEST_JOBS=4 bash scripts/selftest.sh --changed:*), Bash(bash scripts/ci-local.sh:*), Bash(bash scripts/task.sh:*), Bash(bash scripts/story.sh:*), Bash(git:*), Read, Grep, Glob, Edit, Write, Task
 ---
 
 Story: $1
@@ -14,7 +14,9 @@ Act as the **lead-po** orchestrator and run this story through every phase to
 REVIEW without stopping for approval between phases. Follow exactly the same
 per-phase procedure as `/advance-story` — the phases, the dispatches, the
 verification and the rules are identical. The only difference is that you keep
-going.
+going. That includes how the story is read: never the whole file, but its
+frontmatter and the sections each phase needs, per `/advance-story`'s table,
+with `bash scripts/story.sh section $1 <name>`.
 
 Two steps in that procedure are ordered for a reason, and running without
 approval between phases is exactly when they get quietly reordered:
@@ -25,8 +27,28 @@ approval between phases is exactly when they get quietly reordered:
   tests instrumented, which is slower than the test command and slower again on
   CI. A suite can pass RED, pass GREEN, pass every local gate, and still fail a
   required gate in CI on a timeout nobody measured.
-- **GATES → REVIEW runs the full `bash scripts/selftest.sh` first**, detached
-  and alone, while the story is still at GATES. Then it sets the phase before
+- **The subagent runs them; you check the record.** RED and GREEN run the test
+  command and `--fast` through `bash scripts/attest.sh --`. When a dispatch
+  returns, `bash scripts/attest.sh check -- <the same words>` says whether that
+  run was made on the tree as it is now. You run only `check`; run the command
+  itself, directly, only when the answer is not `fresh`, and say in the story
+  which it was; `fresh` says it ran
+  here, not that it passed, so read `exit:`, `last:` and the log it names.
+- **GATES → REVIEW opens with a review of the diff and its callers**, by the
+  `diff-review` skill on a fresh feature-developer dispatch, and goes on only
+  on `Verdict: Ship.`; a fix it asks for changes the tree, so it comes before
+  the self-test. `bash scripts/selftest-needed.sh` decides whether
+  `SELFTEST_JOBS=4 bash scripts/selftest.sh --changed`, the suites the
+  diff can break, runs at all - only when the diff touches a `harness`
+  path; on `skip` its line goes into `## Notes` and CI runs the self-test
+  on the PR - and when it runs, it runs detached and alone, while the story
+  is still at GATES. The full run, `SELFTEST_JOBS=4 bash scripts/selftest.sh`,
+  takes its place only in the three cases advance-story's step 2 names.
+  The full gates and the self-test each run in a `feature-developer`
+  dispatch on the GATES row that returns a verdict you check with
+  `bash scripts/attest.sh check` - for the self-test,
+  `bash scripts/attest.sh check -- SELFTEST_JOBS=4 bash scripts/selftest.sh --changed`;
+  `bash scripts/check-boundaries.sh` stays your own run. Then it sets the phase before
   committing, runs `bash scripts/check-boundaries.sh`, and pushes and opens
   the PR. A suite the story never touched can fail on its change, and CI runs
   them all. `check-boundaries.sh` reads the phase out of the *committed*

@@ -498,6 +498,81 @@ EOF
 out="$(gates --audit)"
 assert_contains "no covers lines is noted by the audit" "no \`covers\` lines" "$out"
 
+# ---------------------------------------------------------------------------
+describe "covers (HARNESS-078): a changed path is seen by its real name, not git's quoted one"
+
+# The changed-path enumeration read `git diff --name-only` and `git ls-files
+# --others` under the default core.quotePath, so git printed a non-ASCII name
+# C-quoted - "src/render/caf\303\251.ts" - and the `[ -e ]` test beside it
+# found no such file and skipped it as DELETED. No FAIL, no WARN, and "All
+# required gates passed" over a file only an optional gate reads. The expected
+# lines are today's FAIL and WARN formats (the cases above), read out, not
+# derived; the paths are written with printf, never sed -i. Every case removes
+# its file after itself, so the next case sees the diff it expects.
+write_conf "$FIX" <<'EOF'
+gate     | unit        | required | . | printf 'Tests  47 passed (47)\n'
+gate     | integration | optional | . | printf 'Tests  25 passed (25)\n'
+evidence | unit        | Tests +[1-9][0-9]* passed
+evidence | integration | Tests +[1-9][0-9]* passed
+covers   | unit        | src/core/**
+covers   | integration | src/render/**
+EOF
+rm -f "$FIX/src/render/mesh.ts"
+
+# AC-1: the `git ls-files --others` half. An UNTRACKED src/render/café.ts.
+H78_CAFE_TS='src/render/café.ts'
+printf 'export const c = 1\n' > "$FIX/$H78_CAFE_TS"
+assert_eq "AC-1 precondition: git lists src/render/café.ts, and nothing else, as untracked under src/render" \
+  "$H78_CAFE_TS" "$(git -C "$FIX" ls-files -z --others --exclude-standard -- src/render | tr '\0' '\n')"
+out="$(gates)"
+assert_contains "AC-1: an UNTRACKED src/render/café.ts that only an optional gate reads FAILs, named unquoted" \
+  "FAIL         changes: src/render/café.ts is exercised only by optional gate(s): integration" "$out"
+assert_contains "AC-1: and the run fails" "required gate(s) failed" "$out"
+assert_not_contains "AC-1: and the run does not claim all required gates passed" "All required gates passed" "$out"
+rm -f "$FIX/$H78_CAFE_TS"
+
+# AC-2: the `git diff` half. A COMMITTED src/shaders/café.glsl no covers line
+# claims, on the story branch and not on main.
+H78_CAFE_GLSL='src/shaders/café.glsl'
+printf 'void main() {}\n' > "$FIX/$H78_CAFE_GLSL"
+git -C "$FIX" add -- "$H78_CAFE_GLSL" >/dev/null 2>&1
+git -C "$FIX" -c user.email=t@t -c user.name=t commit -qm "café shader" >/dev/null 2>&1
+assert_eq "AC-2 precondition: the story branch's commits against main hold src/shaders/café.glsl under its UTF-8 name, and it is not untracked" \
+  "$H78_CAFE_GLSL|" \
+  "$(git -C "$FIX" diff -z --name-only main HEAD -- src/shaders/ | tr '\0' '\n' | grep -vxF 'src/shaders/sky.glsl')|$(git -C "$FIX" ls-files -z --others --exclude-standard -- src/shaders/ | tr '\0' '\n')"
+out="$(gates)"
+assert_contains "AC-2: a COMMITTED src/shaders/café.glsl no covers line claims WARNs, named unquoted" \
+  "WARN         changes: src/shaders/café.glsl is exercised by no gate with a covers line" "$out"
+git -C "$FIX" rm -q -- "$H78_CAFE_GLSL" >/dev/null 2>&1
+git -C "$FIX" -c user.email=t@t -c user.name=t commit -qm "drop café shader" >/dev/null 2>&1
+
+# AC-3: names git C-quotes under ANY core.quotePath - `"`, `\` and a tab. These
+# tell `-z` from `core.quotePath=false`, which AC-1 and AC-2 cannot. Decision 3:
+# Git Bash cannot hold them (it maps `"` and a tab to private-use code points,
+# so git sees a non-ASCII name, and cannot create `\` at all), so on
+# MINGW/MSYS/CYGWIN they are not run, and one stdout line says so; a skip is not
+# counted as a pass. Everywhere else the fixture holding the name byte for byte
+# is itself an assert_eq, so a host that should run them cannot skip quietly.
+H78_TAB="$(printf '\t')"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    printf '    SKIP %s\n' "covers AC-3 (HARNESS-078 decision 3): the untracked src/render/a\"b.ts, src/render/a\\b.ts and src/render/a<TAB>b.ts cases are not run on $(uname -s): Git Bash maps \" and a tab to private-use code points and cannot create \\ at all; not counted as a pass"
+    ;;
+  *)
+    for h78_name in 'src/render/a"b.ts' 'src/render/a\b.ts' "src/render/a${H78_TAB}b.ts"; do
+      h78_label="$(printf '%s' "$h78_name" | sed "s/$H78_TAB/<TAB>/")"
+      printf 'export const q = 1\n' > "$FIX/$h78_name"
+      assert_eq "AC-3 precondition: git lists $h78_label, and nothing else, as untracked under src/render, byte for byte" \
+        "$h78_name" "$(git -C "$FIX" ls-files -z --others --exclude-standard -- src/render | tr '\0' '\n')"
+      out="$(gates)"
+      assert_contains "AC-3: an UNTRACKED $h78_label that only an optional gate reads FAILs, named byte for byte" \
+        "FAIL         changes: $h78_name is exercised only by optional gate(s): integration" "$out"
+      assert_contains "AC-3: $h78_label: and the run fails" "required gate(s) failed" "$out"
+      rm -f "$FIX/$h78_name"
+    done
+    ;;
+esac
+
 rm -f "$FIX/src/render/mesh.ts" "$FIX/tests/other.test.ts"
 set_phase "$FIX" ""
 git -C "$FIX" checkout -q -- . 2>/dev/null
@@ -3732,30 +3807,172 @@ assert_eq "AC-7 control: the blocked-when check this wording copies fires in thi
 # checkout is written. This repository ships no live keep-when line (PO-5):
 # only the documented format and a commented example.
 #
-# HARNESS-070: the first three assertions below are about the TEMPLATE's text.
-# In a project built on the harness project.conf is the project's own -
+# HARNESS-070: the template path's three assertions are about the TEMPLATE's
+# text. In a project built on the harness project.conf is the project's own -
 # refresh-harness.sh LEAVES it - and may carry live keep-when lines, which is
 # what the feature is for. "Is this the template" is check-boundaries.sh
 # 3a-bis's test: every real project sets BOOTSTRAPPED=yes; the template never does.
+#
+# HARNESS-099: and the block executes EXACTLY THREE assertions whichever the
+# manifest is. HARNESS-070 printed a `note:` in a bootstrapped tree and ran
+# nothing, and the `gates` floor - measured on the template - then failed in
+# every consumer with no assertion failing (981 against 984, manga-translator,
+# release 117). The rule for every suite: a suite may read the real tree, but
+# an assertion over a file refresh-harness.sh LEAVES (project.conf,
+# project-floors.conf, project-*.test.sh) must execute the same number of
+# assertions whatever that file says, because the floor is measured on the
+# template and a consumer cannot lower it. So the block is ship69, run once on
+# the real manifest and on fixtures below, and both counts are pinned on the
+# fixtures so the pins execute in every tree.
 SHIP69="$REPO_ROOT/.claude/harness/project.conf"
 live69() { tr -d '\r' < "$1" | grep -cE -- '^[[:space:]]*keep-when[[:space:]]*\|'; }
-if grep -qE '^BOOTSTRAPPED=yes' "$SHIP69"; then
-  printf '    note: %s\n' "project.conf is this project's own (BOOTSTRAPPED=yes), not the template; its keep-when text is not asserted (HARNESS-070)"
-else
-  _fmt="$(tr -d '\r' < "$SHIP69" | grep -nxF -- '# Format:  keep-when | <gate id> | <extended regex>' | cut -d: -f1 | tr '\n' ' ' | sed 's/ $//')"
-  _sfmt="$(tr -d '\r' < "$SHIP69" | grep -nxF -- '# Format:  skipped-when | <gate id> | <extended regex>' | cut -d: -f1)"
-  _boot="$(tr -d '\r' < "$SHIP69" | grep -nxE -- 'BOOTSTRAPPED=[a-z]+' | head -n 1 | cut -d: -f1)"
-  assert_eq "AC-7: the shipped project.conf holds the keep-when format line once, after skipped-when's and before BOOTSTRAPPED=" yes \
+# HARNESS-080: a consuming project's gates may run in a subdirectory - a Tauri
+# app's src-tauri - and the audit FAILs a cwd that does not exist. F69 holds
+# only scripts/ and .claude/hooks/, so the manifest is audited in a tree that
+# is not its own. cwds69 gives F69 every configured cwd that exists in the tree
+# the manifest came from, and only those: a cwd missing there still FAILs here.
+# An absolute cwd, or one with `..`, is not created, so nothing lands outside
+# the fixture; the audit then FAILs it, which is the right answer.
+#   cwds69 <conf> <source root> <fixture>
+cwds69() {
+  local _c
+  tr -d '\r' < "$1" \
+    | awk -F'|' '{ k = $1; gsub(/^[ \t]+|[ \t]+$/, "", k) }
+                 k == "gate" { c = $4; gsub(/^[ \t]+|[ \t]+$/, "", c); if (c != "" && c != ".") print c }' \
+    | while IFS= read -r _c; do
+        case "$_c" in /*|*..*) continue ;; esac
+        if [ -d "$2/$_c" ]; then mkdir -p "$3/$_c"; fi
+      done
+}
+# audit69 <conf> <source root>   audit <conf> in F69, shaped like <source root>
+audit69() { cp "$1" "$F69/.claude/harness/project.conf"; cwds69 "$1" "$2" "$F69"; g69 --audit; }
+# list69 <conf> <source root>    the same, for --list (HARNESS-099)
+list69() { cp "$1" "$F69/.claude/harness/project.conf"; cwds69 "$1" "$2" "$F69"; g69 --list; }
+# kw69 <conf>   the live keep-when lines live69 counts, as <id><TAB><pattern>,
+# both trimmed, manifest order. The pattern is everything after the SECOND
+# `|`, as gates.sh's `rest 3` reads it, so a pattern holding `|` survives.
+kw69() {
+  tr -d '\r' < "$1" | grep -E -- '^[[:space:]]*keep-when[[:space:]]*\|' \
+    | awk '{ s = $0; sub(/^[^|]*\|/, "", s); i = index(s, "|")
+             if (i) { id = substr(s, 1, i - 1); pat = substr(s, i + 1) } else { id = s; pat = "" }
+             gsub(/^[ \t]+|[ \t]+$/, "", id); gsub(/^[ \t]+|[ \t]+$/, "", pat)
+             printf "%s\t%s\n", id, pat }'
+}
+# kwlist69 <conf> <source root>   the same pairs as `gates.sh --list` prints
+# them: a gate row (column one is not a space) sets the id, and each
+# `<30 spaces>keep-when: <pattern>` line under it emits <id><TAB><pattern>.
+# stdout only - g69 discards stderr.
+kwlist69() {
+  list69 "$1" "$2" | tr -d '\r' \
+    | awk '/^[^ ]/ { id = $1 }
+           /^ +keep-when: / { t = $0; sub(/^ +keep-when: /, "", t); printf "%s\t%s\n", id, t }'
+}
+# badere69 <conf>   how many kw69 patterns make `grep -E` exit 2 (an invalid
+# ERE); `-e`, so a pattern starting with `-` is a pattern; exit 1 is "valid,
+# no match".
+badere69() {
+  local _n=0 _pat _rc
+  while IFS= read -r _pat; do
+    grep -E -e "$_pat" </dev/null >/dev/null 2>&1; _rc=$?
+    [ "$_rc" -eq 2 ] && _n=$((_n + 1))
+  done < <(kw69 "$1" | cut -f2-)
+  printf '%s' "$_n"
+}
+# boot69 <title prefix> <conf> <source root>   the bootstrapped path: three
+# assertions about the manifest's own live keep-when lines (HARNESS-099 C-3),
+# none a duplicate of the unconditional --audit trio further down.
+boot69() {
+  local _kw _kl _t
+  # R-1 (AM-1): --list groups the lines by gate, so both sides are stably
+  # sorted by gate id; manifest order within each gate is kept.
+  _t="$(printf '\t')"
+  _kw="$(kw69 "$2" | LC_ALL=C sort -s -t"$_t" -k1,1)"; _kl="$(kwlist69 "$2" "$3" | LC_ALL=C sort -s -t"$_t" -k1,1)"
+  assert_eq "$1 gates.sh --list attributes every live keep-when line to the gate it names, in manifest order within each gate" \
+    "$(printf '%s\n' "$_kw" | cut -f1)" "$(printf '%s\n' "$_kl" | cut -f1)"
+  assert_eq "$1 and prints every live keep-when pattern verbatim" \
+    "$(printf '%s\n' "$_kw" | cut -f2-)" "$(printf '%s\n' "$_kl" | cut -f2-)"
+  assert_eq "$1 every live keep-when pattern is a valid ERE for grep -E, the matcher gates.sh applies it with" \
+    0 "$(badere69 "$2")"
+}
+# ship69 <label> <conf> <source root>   EXACTLY three assertions on either
+# path. The path is decided as gates.sh 93-95 reads BOOTSTRAPPED - the first
+# ^BOOTSTRAPPED= line, the text after `=`, all whitespace removed, empty
+# meaning no - and left in SHIP69_PATH. Titles are `AC-7 (<label>): ...`; the
+# real manifest is called with an EMPTY label, so its titles stay `AC-7: ...`
+# exactly as HARNESS-099 AC-5 requires.
+ship69() {
+  local _b _p="AC-7${1:+ ($1)}:"
+  _b="$(tr -d '\r' < "$2" | grep -E '^BOOTSTRAPPED=' | head -n 1)"
+  _b="${_b#*=}"; _b="${_b//[[:space:]]/}"; [ -n "$_b" ] || _b=no
+  if [ "$_b" = yes ]; then SHIP69_PATH=bootstrapped; else SHIP69_PATH=template; fi
+  if [ "$SHIP69_PATH" = bootstrapped ]; then boot69 "$_p" "$2" "$3"; return 0; fi
+  _fmt="$(tr -d '\r' < "$2" | grep -nxF -- '# Format:  keep-when | <gate id> | <extended regex>' | cut -d: -f1 | tr '\n' ' ' | sed 's/ $//')"
+  _sfmt="$(tr -d '\r' < "$2" | grep -nxF -- '# Format:  skipped-when | <gate id> | <extended regex>' | cut -d: -f1)"
+  _boot="$(tr -d '\r' < "$2" | grep -nxE -- 'BOOTSTRAPPED=[a-z]+' | head -n 1 | cut -d: -f1)"
+  assert_eq "$_p the shipped project.conf holds the keep-when format line once, after skipped-when's and before BOOTSTRAPPED=" yes \
     "$([ -n "$_fmt" ] && [ "${_fmt#* }" = "$_fmt" ] && [ -n "$_sfmt" ] && [ -n "$_boot" ] && [ "$_sfmt" -lt "$_fmt" ] && [ "$_fmt" -lt "$_boot" ] && printf yes || printf "no (keep-when format at ${_fmt:-none}, skipped-when format at ${_sfmt:-none}, BOOTSTRAPPED at ${_boot:-none})")"
-  _ex="$(tr -d '\r' < "$SHIP69" | grep -nE -- '^#[[:space:]]+keep-when[[:space:]]*\|[[:space:]]*[a-z]' | head -n 1 | cut -d: -f1)"
-  assert_eq "AC-7: and an example keep-when line in a comment, between the format line and BOOTSTRAPPED=" yes \
+  _ex="$(tr -d '\r' < "$2" | grep -nE -- '^#[[:space:]]+keep-when[[:space:]]*\|[[:space:]]*[a-z]' | head -n 1 | cut -d: -f1)"
+  assert_eq "$_p and an example keep-when line in a comment, between the format line and BOOTSTRAPPED=" yes \
     "$([ -n "$_ex" ] && [ -n "$_fmt" ] && [ -n "$_boot" ] && [ "$_fmt" -lt "$_ex" ] && [ "$_ex" -lt "$_boot" ] && printf yes || printf "no (example at ${_ex:-none})")"
-  assert_eq "AC-7: the shipped project.conf carries no live keep-when line" 0 "$(live69 "$SHIP69")"
-fi
+  assert_eq "$_p the shipped project.conf carries no live keep-when line" 0 "$(live69 "$2")"
+}
+ship69 "" "$SHIP69" "$REPO_ROOT"
 printf 'BOOTSTRAPPED=yes\nkeep-when | unit | x\n  keep-when|unit|y\n# keep-when | unit | z\n' > "$M69/live.conf"
 assert_eq "AC-7 control: the live-line reader counts two live lines and not the comment" 2 "$(live69 "$M69/live.conf")"
-cp "$SHIP69" "$F69/.claude/harness/project.conf"
-out="$(g69 --audit)"; rc=$?
+# HARNESS-099 C-4: the block on fixture manifests, so both paths execute - and
+# both counts are pinned - in every tree, whichever path the real one takes.
+# The count is _lib.sh's own: _pass + _fail before and after one ship69 call.
+printf '%s\n' '# Format:  skipped-when | <gate id> | <extended regex>' \
+  '# Format:  keep-when | <gate id> | <extended regex>' \
+  '#   keep-when | integration | SEGFAULT in worker [0-9]+' \
+  'BOOTSTRAPPED=no' > "$M69/tmpl.conf"
+printf '%s\n' 'keep-when | unit | Windows fatal exception' \
+  'BOOTSTRAPPED=yes' \
+  'gate | unit | required | . | printf ok' \
+  'evidence | unit | -' \
+  'gate | cov | required | . | printf ok' \
+  'evidence | cov | -' \
+  '  keep-when|cov|Unknown C\+\+ exception' \
+  '# keep-when | unit | z' > "$M69/boot.conf"
+printf '%s\n' 'BOOTSTRAPPED=  yes  ' \
+  'gate | unit | required | . | printf ok' \
+  'evidence | unit | -' > "$M69/ws.conf"
+printf '%s\n' 'BOOTSTRAPPED=yes' 'keep-when | unit | (' > "$M69/bad.conf"
+n0=$((_pass + _fail)); ship69 template-fixture "$M69/tmpl.conf" "$M69"; n1=$((_pass + _fail))
+assert_eq "HARNESS-099 AC-2: the template path of the shipped-manifest block executes exactly three assertions" 3 "$((n1 - n0))"
+n0=$((_pass + _fail)); ship69 bootstrapped-fixture "$M69/boot.conf" "$M69"; n1=$((_pass + _fail))
+assert_eq "HARNESS-099 AC-2: the bootstrapped path of the shipped-manifest block executes exactly three assertions" 3 "$((n1 - n0))"
+# R-1 (AM-1): --list groups keep-when lines by gate, in gate-line order, so a
+# manifest whose live lines alternate between gates - manga-translator's shape
+# - is printed grouped. (a) and (b) compare in manifest order WITHIN each gate.
+printf '%s\n' 'BOOTSTRAPPED=yes' \
+  'gate | unit | required | . | printf ok' \
+  'evidence | unit | -' \
+  'gate | cov | required | . | printf ok' \
+  'evidence | cov | -' \
+  'keep-when | unit | Windows fatal exception' \
+  'keep-when | cov | Unknown C\+\+ exception' \
+  'keep-when | unit | Segmentation fault' > "$M69/alt.conf"
+n0=$((_pass + _fail)); ship69 alternating-fixture "$M69/alt.conf" "$M69"; n1=$((_pass + _fail))
+assert_eq "HARNESS-099 AC-2: the bootstrapped path executes exactly three assertions on a manifest whose keep-when lines alternate between gates" 3 "$((n1 - n0))"
+ship69 whitespace-yes "$M69/ws.conf" "$M69"
+assert_eq "HARNESS-099 AC-4: BOOTSTRAPPED=  yes  , read as gates.sh reads it, takes the bootstrapped path" bootstrapped "$SHIP69_PATH"
+assert_eq "HARNESS-099 AC-3 control: badere69 counts the invalid ERE ( once" 1 "$(badere69 "$M69/bad.conf")"
+assert_eq "HARNESS-099 AC-3 control: kw69 reads live.conf's two live lines trimmed and not the comment" \
+  "$(printf 'unit\tx\nunit\ty')" "$(kw69 "$M69/live.conf")"
+mkdir -p "$M69/src/sub"
+printf 'BOOTSTRAPPED=yes\ngate | sub | required | sub | printf ok\nevidence | sub | -\n' > "$M69/sub.conf"
+printf 'BOOTSTRAPPED=yes\ngate | gone | required | gone | printf ok\nevidence | gone | -\n' > "$M69/gone.conf"
+out="$(audit69 "$M69/sub.conf" "$M69/src")"; rc=$?
+assert_eq "HARNESS-080 AC-1: a bootstrapped manifest whose gate runs in a subdirectory of its tree audits clean in the fixture" 1 \
+  "$(count_line 'Manifest audit passed.' "$out")"
+assert_eq "HARNESS-080 AC-1: and exits 0" 0 "$rc"
+assert_eq "HARNESS-080 AC-1: with no FAIL line" 0 "$(count_re '^FAIL ' "$out")"
+out="$(audit69 "$M69/gone.conf" "$M69/src")"; rc=$?
+assert_eq "HARNESS-080 AC-2: a cwd its tree lacks still FAILs the audit in the fixture" 1 \
+  "$(count_re '^FAIL gone +cwd does not exist: gone$' "$out")"
+assert_eq "HARNESS-080 AC-2: and exits 1" 1 "$rc"
+out="$(audit69 "$SHIP69" "$REPO_ROOT")"; rc=$?
 assert_eq "AC-7: the shipped manifest's --audit still passes" 1 "$(count_line 'Manifest audit passed.' "$out")"
 assert_eq "AC-7: and exits 0" 0 "$rc"
 assert_eq "AC-7: with no FAIL line" 0 "$(count_re '^FAIL ' "$out")"
@@ -3778,5 +3995,399 @@ assert_eq "AC-11: configuring.md's kinds table has the keep-when row once, strai
   "$([ -n "$_kr" ] && [ "${_kr#*[!0-9]}" = "$_kr" ] && [ -n "$_sr" ] && [ "$_kr" = "$((_sr + 1))" ] && printf yes || printf "no (keep-when row at ${_kr:-none}, skipped-when row at ${_sr:-none})")"
 assert_eq "AC-11: and the count above the table says nine" 1 \
   "$(count_line 'Nine more kinds, each explained in the skill and in `project.conf`'"'"'s own' "$(tr -d '\r' < "$CFG69")")"
+
+# ---------------------------------------------------------------------------
+# HARNESS-079: --skip <id> runs every gate a full run would, minus the named
+# ones, so a CI workflow can split one slow gate into a job of its own:
+# `--skip integration` in one job, `--gate integration` in the other.
+#
+# Each gate command touches a MARKER under $M79, so "not executed" is a file
+# that does not exist rather than a word missing from the summary. `build` is
+# required AND slow, so a run that executes it is a full run minus one, and not
+# --fast under another name.
+F79="$(make_project_fixture)"
+trap '[ -n "$H30_SLEEP" ] && kill "$H30_SLEEP" 2>/dev/null; rm -rf "$FIX" "$H30W" "$F69" "$F79"' EXIT
+mkdir -p "$F79/.git/info"
+printf '%s\n' .claude/harness/project.conf .claude/state/ >> "$F79/.git/info/exclude"
+M79="$F79/.claude/state/m79"
+mkdir -p "$M79"
+write_conf "$F79" <<'EOF'
+gate     | lint        | required | . | : > .claude/state/m79/lint; printf 'Checked 12 files\n'
+gate     | unit        | required | . | : > .claude/state/m79/unit; printf 'Tests  47 passed (47)\n'
+gate     | integration | optional | . | : > .claude/state/m79/integration; printf 'Tests  9 passed (9)\n'
+gate     | build       | required | . | : > .claude/state/m79/build; printf 'Bundled 3 targets\n'
+evidence | lint        | Checked [1-9][0-9]* files
+evidence | unit        | Tests +[1-9][0-9]* passed
+evidence | integration | Tests +[1-9][0-9]* passed
+evidence | build       | Bundled [1-9][0-9]* targets
+slow     | integration | a real browser; minutes, not seconds
+slow     | build       | a release bundle
+EOF
+story "$F79" T-1 GATES </dev/null
+git -C "$F79" add -A >/dev/null 2>&1
+git -C "$F79" -c user.email=t@t -c user.name=t commit -qm "HARNESS-079 fixture story" >/dev/null 2>&1
+git -C "$F79" checkout -q -B story/T-1-fixture 2>/dev/null
+set_phase "$F79" ""
+
+g79()    { ( cd "$F79" && bash scripts/gates.sh "$@" 2>&1 ); }
+g79err() { ( cd "$F79" && bash scripts/gates.sh "$@" 2>&1 >/dev/null ); }
+# ran79   The gates whose command executed since the last reset79, in manifest
+# order, space-separated; `none` when nothing ran.
+ran79() {
+  local g r=""
+  for g in lint unit integration build; do [ -e "$M79/$g" ] && r="$r $g"; done
+  if [ -n "$r" ]; then printf '%s' "${r# }"; else printf none; fi
+}
+reset79() { rm -f "$M79"/*; }
+
+describe "HARNESS-079 AC-1: --skip runs every gate a full run would, minus the one it names"
+
+reset79
+out="$(g79 --skip integration)"; rc=$?
+assert_eq "AC-1: lint, unit and build executed; integration did not" "lint unit build" "$(ran79)"
+assert_eq "AC-1: lint is PASS"  1 "$(count_re '^PASS +lint( |$)'  "$out")"
+assert_eq "AC-1: unit is PASS"  1 "$(count_re '^PASS +unit( |$)'  "$out")"
+assert_eq "AC-1: build, slow and required, is PASS: a full run minus one, not --fast" 1 \
+  "$(count_re '^PASS +build( |$)' "$out")"
+assert_eq "AC-1: exactly one line reports integration SKIPPED" 1 \
+  "$(count_re '^SKIPPED      integration( |$)' "$out")"
+assert_eq "AC-1: and integration is reported nowhere as PASS" 0 "$(count_re '^PASS +integration' "$out")"
+assert_eq "AC-1: the run exits 0" 0 "$rc"
+# Control: without --skip the same manifest runs all four, so the absence above
+# is the flag's doing.
+reset79
+out="$(g79)"; rc=$?
+assert_eq "AC-1 control: a plain full run executes all four" "lint unit integration build" "$(ran79)"
+assert_eq "AC-1 control: and reports nothing SKIPPED" 0 "$(count_re '^SKIPPED ' "$out")"
+# Repeatable: one id per --skip.
+reset79
+out="$(g79 --skip integration --skip build)"; rc=$?
+assert_eq "AC-1: --skip twice leaves both out" "lint unit" "$(ran79)"
+assert_eq "AC-1: integration reported SKIPPED once" 1 "$(count_re '^SKIPPED      integration( |$)' "$out")"
+assert_eq "AC-1: build reported SKIPPED once"       1 "$(count_re '^SKIPPED      build( |$)' "$out")"
+assert_eq "AC-1: and exits 0" 0 "$rc"
+
+describe "HARNESS-079 AC-2: an id project.conf does not declare is refused before anything runs"
+
+for bad in intgration 'integration,build'; do
+  reset79
+  err="$(g79err --skip "$bad")"; rc=$?
+  assert_eq "AC-2 [$bad]: exits 2" 2 "$rc"
+  assert_contains "AC-2 [$bad]: stderr names the id" "'$bad'" "$err"
+  assert_eq "AC-2 [$bad]: no gate command executed" none "$(ran79)"
+done
+reset79
+err="$(g79err --skip)"; rc=$?
+assert_eq "AC-2 [no id]: --skip with nothing after it exits 2" 2 "$rc"
+assert_contains "AC-2 [no id]: and says --skip needs a gate id" "--skip needs a gate id" "$err"
+assert_eq "AC-2 [no id]: no gate command executed" none "$(ran79)"
+# An id with a space would match two adjacent ids in a space-joined list.
+reset79
+err="$(g79err --skip 'unit integration')"; rc=$?
+assert_eq "AC-2 [two words]: an id with a space is refused, exit 2" 2 "$rc"
+assert_contains "AC-2 [two words]: and named" "'unit integration'" "$err"
+assert_eq "AC-2 [two words]: no gate command executed" none "$(ran79)"
+
+describe "HARNESS-079 AC-3: --skip with --gate, --fast or --required is refused"
+
+h79_combo() { # <label> <the other option> <args...>
+  local label="$1" other="$2"; shift 2
+  reset79
+  err="$(g79err "$@")"; rc=$?
+  assert_eq "AC-3 [$label]: exits 2" 2 "$rc"
+  assert_contains "AC-3 [$label]: says it cannot be combined" "--skip cannot be combined with" "$err"
+  assert_contains "AC-3 [$label]: and names the other option" "combined with $other" "$err"
+  assert_eq "AC-3 [$label]: no gate command executed" none "$(ran79)"
+}
+h79_combo "--skip then --gate"     --gate     --skip integration --gate unit
+h79_combo "--gate then --skip"     --gate     --gate unit --skip integration
+h79_combo "--skip then --fast"     --fast     --skip integration --fast
+h79_combo "--fast then --skip"     --fast     --fast --skip integration
+h79_combo "--skip then --required" --required --skip integration --required
+
+describe "HARNESS-079 AC-4: a --skip run is never recorded, even with a required gate left out"
+
+set_phase "$F79" GATES
+cp "$F79/docs/backlog/stories/T-1.md" "$F79/.claude/state/T-1.before79"
+reset79
+out="$(g79 --skip unit)"; rc=$?
+assert_eq "AC-4: the gates it did not skip ran" "lint integration build" "$(ran79)"
+assert_eq "AC-4: the not-recorded line is printed, whole" 1 \
+  "$(count_line '(not recorded in the story: a partial run is not evidence of anything)' "$out")"
+assert_eq "AC-4: nothing claims to have recorded" 0 "$(count_re '^recorded in docs/backlog/stories/T-1\.md' "$out")"
+assert_eq "AC-4: the story file is byte-for-byte unchanged" yes \
+  "$(cmp -s "$F79/.claude/state/T-1.before79" "$F79/docs/backlog/stories/T-1.md" && printf yes || printf no)"
+assert_eq "AC-4: the stamp says FULL=no" 1 \
+  "$(count_re '^FULL=no$' "$(tr -d '\r' < "$F79/.claude/state/last-gate-run")")"
+assert_eq "AC-4: and the full-run note about check-boundaries.sh is absent" 0 \
+  "$(count_re '^CI runs one more script' "$out")"
+# Control: the same tree, the same story, a plain full run records.
+out="$(g79)"; rc=$?
+assert_eq "AC-4 control: a full run on the same tree records" 1 \
+  "$(count_re '^recorded in docs/backlog/stories/T-1\.md' "$out")"
+assert_eq "AC-4 control: and stamps FULL=yes" 1 \
+  "$(count_re '^FULL=yes$' "$(tr -d '\r' < "$F79/.claude/state/last-gate-run")")"
+set_phase "$F79" ""
+git -C "$F79" checkout -q -- docs/backlog/stories/T-1.md 2>/dev/null
+
+describe "HARNESS-079 AC-5: the summary names the gates --skip left out"
+
+reset79
+out="$(g79 --skip integration --skip build)"
+assert_eq "AC-5: one whole line names both, in manifest order" 1 \
+  "$(count_line '--skip skipped: integration build' "$out")"
+assert_eq "AC-5: followed by the subset caveat" 1 \
+  "$(printf '%s\n' "$out" | awk 'p && /^This is a subset, not a verdict/ { n++ } { p = ($0 == "--skip skipped: integration build") } END { print n + 0 }')"
+# Order is the manifest's, not the command line's.
+out="$(g79 --skip build --skip integration)"
+assert_eq "AC-5: given in the other order, the line is still in manifest order" 1 \
+  "$(count_line '--skip skipped: integration build' "$out")"
+# Control: a plain run prints no such line.
+out="$(g79)"
+assert_eq "AC-5 control: a full run prints no --skip line" 0 "$(count_re '^--skip skipped' "$out")"
+
+describe "HARNESS-079 AC-6: --list marks what --skip leaves out; --audit refuses an unknown id"
+
+reset79
+out="$(g79 --list --skip integration)"; rc=$?
+assert_eq "AC-6: --list --skip exits 0" 0 "$rc"
+assert_eq "AC-6: exactly one skip: line" 1 "$(count_re 'skip:     left out by --skip' "$out")"
+assert_eq "AC-6: and it sits in integration's entry" yes \
+  "$(printf '%s\n' "$out" | awk '/^[a-z]/ { g = $1 } /skip:     left out by --skip/ { s = g } END { print (s == "integration") ? "yes" : "no (under " s ")" }')"
+assert_eq "AC-6: --list runs nothing" none "$(ran79)"
+err="$(g79err --audit --skip intgration)"; rc=$?
+assert_eq "AC-6: --audit --skip <unknown> exits 2" 2 "$rc"
+assert_contains "AC-6: and names the id" "'intgration'" "$err"
+out="$(g79 --audit --skip integration)"; rc=$?
+assert_eq "AC-6: --audit --skip <known> exits 0" 0 "$rc"
+assert_eq "AC-6: and passes the manifest audit" 1 "$(count_line 'Manifest audit passed.' "$out")"
+
+describe "HARNESS-079 AC-7: --help documents --skip and the split it exists for"
+
+out="$(g79 --help)"; rc=$?
+assert_eq "AC-7: --help exits 0" 0 "$rc"
+assert_contains "AC-7: --help shows the --skip usage line" "bash scripts/gates.sh --skip integration" "$out"
+assert_contains "AC-7: and the other half of the split" "--gate integration" "$out"
+# Not "never recorded": --fast's paragraph already says that, so it could not fail.
+assert_contains "AC-7: and says leaving out a required gate is allowed, unrecorded" "Leaving out a required gate" "$out"
+# --help prints the whole header, not a range that stops short of it.
+assert_contains "AC-7: and reaches the header's last line" "Nobody pastes it." "$out"
+
+# ============================================================================
+# HARNESS-088: a duplicate gate id and an empty evidence regex are manifest
+# faults, under --audit and on a run (C-1)
+# ============================================================================
+#
+# Both are faults of the FILE, so they take the shape of the existing manifest
+# faults (`slow` with no reason, a broken `floor`): under --audit one
+# `FAIL <id>` line and `N manifest problem(s).`, exit 1; on a run one
+# `FAIL         <id> (<why>)` line counted in `N required gate(s) failed.`,
+# exit 1. The <why> texts are C-1's, byte for byte, and every needle below is a
+# WHOLE line or the whole list of FAIL lines, so a line that names the fault and
+# then says something else - or a FAIL for a different reason - does not
+# satisfy it.
+#
+# Every block resets the shared fixture to no active story, as the HARNESS-026
+# block does: a full run with a story active refuses to record over untracked
+# gated files, which is a refusal this story is not about.
+
+# h88_conf <line>...   project.conf from whole lines, with BOOTSTRAPPED=yes as
+# write_conf writes it. printf rather than a heredoc so that AC-3's third
+# spelling keeps its trailing spaces, which an editor would otherwise lose
+# without anyone noticing.
+h88_conf() { { printf 'BOOTSTRAPPED=yes\n'; printf '%s\n' "$@"; } > "$FIX/.claude/harness/project.conf"; }
+H88_GATE="gate     | unit | required | . | printf 'Tests  47 passed (47)\\n'"
+H88_EVID='evidence | unit | Tests +[1-9][0-9]* passed'
+H88_DUP_AUDIT="$(printf 'FAIL %-12s %s' unit 'declared twice: a second `gate` line for one id; gates.sh would run both and check-boundaries.sh judges only the first - keep one')"
+H88_DUP_RUN='FAIL         unit (declared twice: a second `gate` line for one id in project.conf; keep one)'
+H88_EMPTY_AUDIT="$(printf 'FAIL %-12s %s' unit 'evidence regex is empty: an empty regex matches every log line, so the gate would pass having checked nothing. Write the regex, or `evidence | unit | -` to declare that no evidence exists')"
+H88_EMPTY_RUN='FAIL         unit (evidence regex is empty in project.conf; an empty regex matches every log line)'
+# h88_fails <output>   Every line beginning FAIL, in order.
+h88_fails() { printf '%s\n' "$1" | grep '^FAIL'; }
+
+describe "HARNESS-088 AC-1/AC-2: a gate id declared twice is a manifest fault, under --audit and on a run"
+
+set_phase "$FIX" ""
+git -C "$FIX" checkout -q -- . 2>/dev/null
+
+# AC-1. Two `gate | unit` lines. The first is judged as today (`ok`), the
+# second is the fault, and it is the audit's only problem.
+h88_conf "$H88_GATE" "$H88_GATE" "$H88_EVID"
+out="$(gates --audit)"; rc=$?
+assert_eq "AC-1: --audit prints the duplicate's FAIL line, whole" 1 "$(count_line "$H88_DUP_AUDIT" "$out")"
+assert_eq "AC-1: and it is the audit's only FAIL line" "$H88_DUP_AUDIT" "$(h88_fails "$out")"
+assert_eq "AC-1: the first line is still judged as today" 1 \
+  "$(count_line "$(printf 'ok   %-12s evidence: %s' unit 'Tests +[1-9][0-9]* passed')" "$out")"
+assert_eq "AC-1: the audit ends with 1 manifest problem(s)." 1 "$(count_line '1 manifest problem(s).' "$out")"
+assert_eq "AC-1: and does not say it passed" 0 "$(count_line 'Manifest audit passed.' "$out")"
+assert_eq "AC-1: and exits 1" 1 "$rc"
+
+# AC-1 control: the second line deleted.
+h88_conf "$H88_GATE" "$H88_EVID"
+out="$(gates --audit)"; rc=$?
+assert_eq "AC-1 control: one gate | unit line passes the audit" 1 "$(count_line 'Manifest audit passed.' "$out")"
+assert_eq "AC-1 control: with no FAIL line" "" "$(h88_fails "$out")"
+assert_eq "AC-1 control: and exits 0" 0 "$rc"
+
+# AC-2. The same duplicate on a full run. Both lines print what the evidence
+# regex wants, so whatever they print cannot rescue the run: the first passes,
+# the second is the fault, and the run fails on it alone.
+h88_conf "$H88_GATE" "$H88_GATE" "$H88_EVID"
+out="$(gates)"; rc=$?
+assert_eq "AC-2: a full run reports the first line, then the duplicate's FAIL, then 1 failed - the whole summary" \
+"PASS         unit (Ns, observed 47)
+$H88_DUP_RUN
+1 required gate(s) failed." "$(verdict_of "$out")"
+assert_eq "AC-2: and exits 1" 1 "$rc"
+assert_eq "AC-2: the duplicate runs nothing - unit's command ran once" 1 \
+  "$(count_line "=== gate: unit (required) ===" "$out")"
+
+# The round-2 shape from HARNESS-083: the second line is an optional gate whose
+# command fails. Without the fault it was `WARN ... optional`, rc 0.
+h88_conf "$H88_GATE" "gate     | unit | optional | . | exit 1" "$H88_EVID"
+out="$(gates)"; rc=$?
+assert_eq "AC-2: an optional second line with a failing command is the same fault, not a WARN - the whole summary" \
+"PASS         unit (Ns, observed 47)
+$H88_DUP_RUN
+1 required gate(s) failed." "$(verdict_of "$out")"
+assert_eq "AC-2: and that run exits 1" 1 "$rc"
+
+# C-1: detected before the --gate filter, so naming the gate still reports it.
+h88_conf "$H88_GATE" "$H88_GATE" "$H88_EVID"
+out="$(gates --gate unit)"; rc=$?
+assert_eq "AC-2 (C-1): --gate unit on a duplicated id reports the fault too" 1 "$(count_line "$H88_DUP_RUN" "$out")"
+assert_eq "AC-2 (C-1): and exits 1" 1 "$rc"
+
+# AC-2 control: the duplicate deleted, the same run passes.
+h88_conf "$H88_GATE" "$H88_EVID"
+out="$(gates)"; rc=$?
+assert_eq "AC-2 control: one gate | unit line - the whole summary" \
+"PASS         unit (Ns, observed 47)
+All required gates passed (1 ran, 0 unconfigured, 0 known)." "$(verdict_of "$out")"
+assert_eq "AC-2 control: and exits 0" 0 "$rc"
+
+describe "HARNESS-088 AC-3/AC-4: an empty evidence regex is a manifest fault, under --audit and on a run"
+
+set_phase "$FIX" ""
+git -C "$FIX" checkout -q -- . 2>/dev/null
+
+# AC-3. Three spellings, one fault each: a bare `|`, no third field, and spaces
+# after the `|` (kept by h88_conf's printf).
+for h88_ev in 'evidence | unit |' 'evidence | unit' 'evidence | unit |   '; do
+  h88_conf "$H88_GATE" "$h88_ev"
+  out="$(gates --audit)"; rc=$?
+  assert_eq "AC-3: '$h88_ev' - --audit's only FAIL line is the empty-regex one, whole" "$H88_EMPTY_AUDIT" "$(h88_fails "$out")"
+  assert_eq "AC-3: '$h88_ev' - the audit ends with 1 manifest problem(s)." 1 "$(count_line '1 manifest problem(s).' "$out")"
+  assert_eq "AC-3: '$h88_ev' - and exits 1" 1 "$rc"
+done
+
+# AC-3 controls. `-` is today's declared-unassertable `ok`, and no evidence line
+# at all is today's WARN - neither is a FAIL.
+h88_conf "$H88_GATE" 'evidence | unit | -'
+out="$(gates --audit)"; rc=$?
+assert_eq "AC-3 control: evidence | unit | - is still ok, liveness declared unassertable" 1 \
+  "$(count_line "$(printf 'ok   %-12s (liveness declared unassertable)' unit)" "$out")"
+assert_eq "AC-3 control: '-' - no FAIL line, the audit passes, exit 0" "|1|0" \
+  "$(h88_fails "$out")|$(count_line 'Manifest audit passed.' "$out")|$rc"
+
+h88_conf "$H88_GATE"
+out="$(gates --audit)"; rc=$?
+assert_eq "AC-3 control: no evidence line at all is still today's WARN" 1 \
+  "$(count_line "$(printf 'WARN %-12s no evidence line; a vacuous pass would go unnoticed' unit)" "$out")"
+assert_eq "AC-3 control: no evidence line - no FAIL line, the audit passes, exit 0" "|1|0" \
+  "$(h88_fails "$out")|$(count_line 'Manifest audit passed.' "$out")|$rc"
+
+# C-1: every gate line, optional and unconfigured included, as a broken floor
+# is - a manifest fault is the file's, not the run's.
+h88_conf "gate     | unit | optional | . | printf 'Tests  47 passed (47)\\n'" 'evidence | unit |'
+out="$(gates --audit)"; rc=$?
+assert_eq "AC-3 (C-1): an OPTIONAL gate with an empty regex is the same FAIL - FAIL lines|rc" "$H88_EMPTY_AUDIT|1" "$(h88_fails "$out")|$rc"
+h88_conf 'gate     | unit | optional | . |' 'evidence | unit |'
+out="$(gates --audit)"; rc=$?
+assert_eq "AC-3 (C-1): an UNCONFIGURED gate with an empty regex is the same FAIL, not ok (unconfigured) - FAIL lines|rc" "$H88_EMPTY_AUDIT|1" "$(h88_fails "$out")|$rc"
+# C-1: table_get reads the FIRST evidence line, so an empty first line is the
+# fault even with a real regex below it - that is the line gates.sh matches with.
+h88_conf "$H88_GATE" 'evidence | unit |' "$H88_EVID"
+out="$(gates --audit)"; rc=$?
+assert_eq "AC-3 (C-1): an empty FIRST evidence line is the fault though a real regex follows - FAIL lines|rc" "$H88_EMPTY_AUDIT|1" "$(h88_fails "$out")|$rc"
+
+# AC-4. The command exits 0 and prints nothing a real regex would want. Today
+# `$0 ~ ""` matches its one line and it PASSes.
+h88_conf "gate     | unit | required | . | printf 'nothing here\\n'" 'evidence | unit |'
+out="$(gates)"; rc=$?
+assert_eq "AC-4: a full run - the whole summary is the empty-regex FAIL and 1 failed" \
+"$H88_EMPTY_RUN
+1 required gate(s) failed." "$(verdict_of "$out")"
+assert_eq "AC-4: no PASS line for unit" 0 "$(count_re '^PASS +unit' "$out")"
+assert_eq "AC-4: and the run exits 1" 1 "$rc"
+
+# AC-4 control: the same command under a real regex its output matches.
+h88_conf "gate     | unit | required | . | printf 'nothing here\\n'" 'evidence | unit | nothing here'
+out="$(gates)"; rc=$?
+assert_eq "AC-4 control: a real regex the output matches - the whole summary" \
+"PASS         unit (Ns)
+All required gates passed (1 ran, 0 unconfigured, 0 known)." "$(verdict_of "$out")"
+assert_eq "AC-4 control: and exits 0" 0 "$rc"
+
+# C-1, where the two faults meet: one fault per gate LINE, the first in source
+# order wins. The first `gate | unit` line has the empty regex; the second is
+# the duplicate. Both are reported, in that order, and they are two problems.
+h88_conf "$H88_GATE" "$H88_GATE" 'evidence | unit |'
+out="$(gates --audit)"; rc=$?
+assert_eq "C-1: duplicated id with an empty regex - the first line's empty-regex FAIL, then the second's duplicate FAIL" \
+"$H88_EMPTY_AUDIT
+$H88_DUP_AUDIT" "$(h88_fails "$out")"
+assert_eq "C-1: and that is 2 manifest problem(s)., exit 1" "1|1" "$(count_line '2 manifest problem(s).' "$out")|$rc"
+
+set_phase "$FIX" ""
+git -C "$FIX" checkout -q -- . 2>/dev/null
+
+describe "HARNESS-093 AC-1/AC-2: --list lists a duplicated id and an empty evidence regex, both lines, exit 0"
+
+# --list is not a judge (HARNESS-088 C-1): both faults are guarded by
+# `[ "$LIST" = 0 ]`, so it prints the duplicate's lines and an empty
+# `evidence: ` as they are. Drop either guard and the `continue` runs before
+# the row prints: a row vanishes, the exit stays 0. So the row COUNT is what
+# these pin, not the exit. Both needles are built with gates.sh's own --list
+# formats, so the evidence line's trailing space is in it by construction.
+set_phase "$FIX" ""
+git -C "$FIX" checkout -q -- . 2>/dev/null
+H93_ROW="$(printf '%-12s %-9s %-6s %s' unit required . "printf 'Tests  47 passed (47)\\n'")"
+H93_EVID="$(printf '%-12s %-9s %-6s evidence: %s' '' '' '' '')"
+
+# AC-1. Two identical `gate | unit` lines and an empty regex.
+h88_conf "$H88_GATE" "$H88_GATE" 'evidence | unit |'
+out="$(gates --list)"; rc=$?
+assert_eq "AC-1: --list on a duplicated id with an empty regex prints the row and its evidence line twice - the whole output" \
+"$H93_ROW
+$H93_EVID
+$H93_ROW
+$H93_EVID" "$out"
+assert_eq "AC-1: the unit row is listed twice, whole line" 2 "$(count_line "$H93_ROW" "$out")"
+assert_eq "AC-1: the empty 'evidence: ' line is listed twice, whole line" 2 "$(count_line "$H93_EVID" "$out")"
+assert_eq "AC-1: --list prints no FAIL line" "" "$(h88_fails "$out")"
+assert_eq "AC-1: --list prints no manifest problem line" 0 "$(count_re 'manifest problem' "$out")"
+assert_eq "AC-1: --list exits 0" 0 "$rc"
+
+# AC-1 control: the same file is the faulty one - --audit refuses it.
+out="$(gates --audit)"; rc=$?
+assert_eq "AC-1 control: --audit on the same file prints the empty-regex FAIL, then the duplicate FAIL" \
+"$H88_EMPTY_AUDIT
+$H88_DUP_AUDIT" "$(h88_fails "$out")"
+assert_eq "AC-1 control: and --audit exits 1" 1 "$rc"
+
+# AC-2. The second gate line deleted: each line once, so AC-1's two is the
+# duplicate being listed, not one line printed twice.
+h88_conf "$H88_GATE" 'evidence | unit |'
+out="$(gates --list)"; rc=$?
+assert_eq "AC-2: --list on one gate line with an empty regex prints the row and its evidence line once - the whole output" \
+"$H93_ROW
+$H93_EVID" "$out"
+assert_eq "AC-2: the unit row is listed once, whole line" 1 "$(count_line "$H93_ROW" "$out")"
+assert_eq "AC-2: the empty 'evidence: ' line is listed once, whole line" 1 "$(count_line "$H93_EVID" "$out")"
+assert_eq "AC-2: --list exits 0" 0 "$rc"
+
+set_phase "$FIX" ""
+git -C "$FIX" checkout -q -- . 2>/dev/null
 
 summary "gates"

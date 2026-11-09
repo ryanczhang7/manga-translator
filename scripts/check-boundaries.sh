@@ -27,6 +27,11 @@ fail=0
 note() { printf '  %s\n' "$1"; }
 problem() { printf 'FAIL  %s\n' "$1"; fail=1; }
 ok() { printf 'ok    %s\n' "$1"; }
+# Story copies and git show results go to a scratch file, never a here-string:
+# on Cygwin bash a here-string of 65,536 to 65,566 bytes blocks forever (HARNESS-089).
+mkdir -p "$ROOT/.claude/state/check-boundaries" || { problem "cannot create .claude/state/check-boundaries (something is in the way, a plain file at that path for instance): every story copy is read from a scratch file there, so without it the criteria would be judged against nothing"; exit 1; }
+cp="$ROOT/.claude/state/check-boundaries/copy-$$.md"; dp="$ROOT/.claude/state/check-boundaries/diff-$$.txt"
+trap 'rm -rf "$ROOT/.claude/state/check-boundaries/"*-$$.*' EXIT
 
 # section <file|-> <heading-prefix>   Body of "## <heading-prefix>..." up to the
 # next "## ". "-" reads stdin, so `git show ref:path | section - ...` works.
@@ -312,28 +317,28 @@ fi
 #                   with the base itself, as before
 #   open -          no state has left PLANNED; nothing is frozen yet
 #   none -          nothing to compare with
-# The states, oldest first, are the base copy, every commit of BASE..HEAD that
-# holds the file (not --first-parent: in CI HEAD is a merge whose first parent
-# is the base), and the working tree. Nothing after the first non-PLANNED state
-# is read, so a later return to PLANNED cannot move the baseline. Each copy is
-# read into a variable and fed by here-string: `git show | section -` was a
-# pipeline into an early-exiting awk (see has_content above).
+# The states, oldest first, are the base copy, every commit of BASE..HEAD that holds the
+# file (not --first-parent: in CI HEAD is a merge whose first parent is the base), and the
+# working tree. Nothing after the first non-PLANNED state is read, so a later return to
+# PLANNED cannot move the baseline. Each copy is written to the scratch file $cp and read
+# from there: a here-string of a story copy blocked on Cygwin bash near 64 KiB (HARNESS-089),
+# and `git show | section -` was a pipeline into an early-exiting awk (see has_content above).
 criteria_baseline() {
-  local f="$1" txt cph rev prev_kind="" prev_rev="" have_base=0
+  local f="$1" cph rev prev_kind="" prev_rev="" have_base=0
   git cat-file -e "$BASE:$f" 2>/dev/null && have_base=1
   if ! git merge-base "$BASE" HEAD >/dev/null 2>&1; then
     if [ "$have_base" = 1 ]; then printf 'unwalked %s\n' "$BASE"; else printf 'none -\n'; fi
     return 0
   fi
   if [ "$have_base" = 1 ]; then
-    txt="$(git show "$BASE:$f" 2>/dev/null)"
-    cph="$(frontmatter_value - phase <<< "$txt")"; cph="${cph//[[:space:]]/}"
+    git show "$BASE:$f" > "$cp" 2>/dev/null
+    cph="$(frontmatter_value "$cp" phase)"; cph="${cph//[[:space:]]/}"
     if [ "$cph" != PLANNED ]; then printf 'base %s\n' "$BASE"; return 0; fi
     prev_kind=base; prev_rev="$BASE"
   fi
   for rev in $(git rev-list --reverse --topo-order "$BASE"..HEAD 2>/dev/null); do
-    txt="$(git show "$rev:$f" 2>/dev/null)" || continue
-    cph="$(frontmatter_value - phase <<< "$txt")"; cph="${cph//[[:space:]]/}"
+    git show "$rev:$f" > "$cp" 2>/dev/null || continue
+    cph="$(frontmatter_value "$cp" phase)"; cph="${cph//[[:space:]]/}"
     if [ "$cph" != PLANNED ]; then
       case "$prev_kind" in
         "")   printf 'first %s\n' "$rev" ;;
@@ -354,7 +359,7 @@ criteria_baseline() {
 }
 crit_base="$(criteria_baseline "$sfile")"
 crit_kind="${crit_base%% *}"; crit_rev="${crit_base#* }"
-crit_label=""; crit_txt=""
+crit_label=""
 case "$crit_kind" in
   unwalked)
     note "no merge base with $BASE, so the branch's history cannot be walked; criteria compared with $BASE itself"
@@ -368,9 +373,8 @@ esac
 if [ "$crit_kind" = open ]; then
   note "story $sid has not left PLANNED in any committed state; its criteria are not frozen yet"
 elif [ -n "$crit_label" ] && git cat-file -e "$crit_rev:$sfile" 2>/dev/null; then
-  crit_txt="$(git show "$crit_rev:$sfile" 2>/dev/null)"
-  before="$(section - "Acceptance criteria" <<< "$crit_txt")"
-  before="$(sed 's/[[:space:]]*$//' <<< "$before")"
+  git show "$crit_rev:$sfile" > "$cp" 2>/dev/null
+  before="$(section "$cp" "Acceptance criteria" | sed 's/[[:space:]]*$//')"
   after=$(section "$sfile" "Acceptance criteria" | sed 's/[[:space:]]*$//')
   if [ "$before" = "$after" ]; then
     ok "acceptance criteria unchanged since $crit_label"
@@ -384,6 +388,7 @@ else
 fi
 
 # 3e. The gate record was written by gates.sh and matches the code being merged
+bgates=""
 case "$ph:$story_type" in
   REVIEW:spike|DONE:spike) note "spike story; gate record not required" ;;
   REVIEW:*|DONE:*)
@@ -455,11 +460,17 @@ esac
 # required_gates has claimed something needs checking), and outside the marker
 # test's else, so a story with no ## Gate results is told WHICH gate it did not
 # run.
+#
+# A gate is only BLOCKED because it is required, so one 3e judged BLOCKED is
+# deferred to 3e's pending-CI and CI-run checks (HARNESS-071); bgates is set only
+# by 3e's blocked arm, so a spike's BLOCKED gate is still owed a PASS here.
 case "$ph" in
   REVIEW|DONE)
     gr="$(section "$sfile" "Gate results")"
     for g in $(frontmatter_list "$sfile" required_gates); do
-      if awk 'BEGIN{r=ARGV[1];ARGV[1]=""} $0~r{h=1} END{exit !h}' "^[[:space:]]*PASS[[:space:]]+$g( |\(|$)" <<< "$gr"; then
+      if grep -qx -- "$g" <<< "$bgates"; then
+        ok "story-required gate '$g' was BLOCKED; judged as pending CI above"
+      elif awk 'BEGIN{r=ARGV[1];ARGV[1]=""} $0~r{h=1} END{exit !h}' "^[[:space:]]*PASS[[:space:]]+$g( |\(|$)" <<< "$gr"; then
         ok "story-required gate '$g' passed in the recorded run"
       else
         problem "story $sid: frontmatter requires gate '$g', but the recorded run has no PASS for it. Run 'bash scripts/gates.sh' again."
@@ -644,6 +655,478 @@ for c in $(git rev-list "$BASE"..HEAD 2>/dev/null); do
 done
 if [ "$red_manifest_checked" -gt 0 ] && [ "$red_manifest_problem" -eq 0 ]; then
   ok "RED touched only test dependencies ($red_manifest_checked manifest change(s))"
+fi
+
+# --- 3j. GREEN and GATES add no suppression -----------------------------------
+#
+# The lock freezes tests in GREEN and GATES, and 3i reads what RED puts in a
+# manifest. Nothing read what GREEN and GATES ADD to source, and GATES is the
+# phase whose job is making a lint, type or coverage failure go away - the
+# cheapest way to do which is one line that silences the tool. rules.md forbids
+# that in prose, and prose does not fail a build. So this walks every commit, as
+# 3i does, reads the phase the story was committed at alongside it, and refuses
+# an ADDED line of a `source` or `config` path that is a suppression directive,
+# unless the working-tree story's ## Suppressions declares it.
+#
+# Which paths count is classify's answer, never a regex here: docs, harness and
+# test paths are out by category, so a project that reclassifies a path moves it
+# in or out of this rule with no change to this block.
+#
+# The one exception is by path, and it is a second branch rather than a widened
+# category: `.claude/harness/project.conf`, where every gate's evidence, floor
+# and severity live, is compared before and after the commit for a gate
+# loosened (HARNESS-083; project_conf_loosenings, below), not scanned for
+# directives.
+#
+# suppression_needles   One `<rule id>|<ERE>` row per directive. Every ERE is
+# anchored on the comment opener, and the directive is the first thing after it,
+# so a comment that MENTIONS a directive is not one. The opener must begin the
+# line or follow whitespace or one of `;,)}` - `(^|[[:space:];,)}])`, spelled
+# out in every row - so `foo();// eslint-disable-line` and `x = eval(s)# noqa`
+# are caught. hadolint and shellcheck honour only a whole-line comment, so their
+# rows anchor to the start of the line instead.
+#
+# The anchor is a trade, not a free lunch. It keeps a `#` or `//` that follows a
+# quote or a `/` from counting, which is what keeps `"# noqa: S307"` and
+# `http://x/#noqa:frag` clean - and the same rule misses a real directive glued
+# to those characters or to a word. Known misses, each honoured by its tool:
+# after a closing quote (`s = "a"# noqa`), after an identifier or a digit
+# (`x=1# noqa`, `foo// eslint-disable-line`), after `]`
+# (`a[0]// eslint-disable-line`), and after `(` or `{`
+# (`fn f(#[allow(unused)] x: u32)`, `{// eslint-disable-line`). A miss is a
+# directive this rule does not see, not one it waves through; widen the class
+# only with a C-3-style control showing the string and URL cases stay clean.
+# The rows are data: a new directive is a new row and nothing else.
+#
+# The stub-* rows are a different kind: a stub stands in for an implementation,
+# and the claim it breaks is "full coverage of the behaviour the story claims",
+# not "the tests are frozen". A stub is an expression, not a comment, so it sits
+# after `(`, `=`, `>`, `,` or `|` as readily as after whitespace, and its anchor
+# is anything but an identifier character or a quote (double, single or
+# backtick), spelled out in every stub row - so `foo(todo!())` and
+# `_ => todo!()` are caught, and `"todo!()"` and `my_todo!(` are not. The rows read a line, not a token stream, so a COMMENT
+# quoting a stub is refused too; that false positive is accepted, and one
+# ## Suppressions line clears it. One example line each, verbatim, so a probe
+# that widens the category test below has a real line per rule:
+#   throw new Error("not implemented")
+#   todo!()
+#   unimplemented!("later")
+#   raise NotImplementedError
+#   push_error("not implemented")
+#   } catch (e) {}
+# stub-throw lets the message carry a prefix inside the quotes, so TypeScript's
+# own quick fix, `throw new Error("Method not implemented.")`, is caught, and so
+# are `not yet implemented` and `NOT IMPLEMENTED`; `"could not open the file"`
+# is not. stub-gd's `false` must end the identifier, so `assert(false_positives
+# == 0)` is clean.
+# `raise NotImplementedError` has one legitimate use, the abstract method, and
+# suppression_hits drops a stub-raise hit whose two previous ADDED lines in the
+# same hunk are a `def` and, above it, `@abstractmethod` or `@abc.abstractmethod`.
+# A decorator that is context is not in the diff, so it does not excuse the raise.
+#
+# An empty handler is usually two lines: an opener, and its closer as the very
+# next ADDED line in the same hunk. A row reads one line, so that shape is not a
+# row; suppression_hits keeps that window itself - see below. The two empty-handler
+# rows are the ONE-line shape the window cannot see, `} catch (e) {}` and
+# `except: pass`, under the same rule id, so one ## Suppressions line declares
+# either; a one-line handler with a body matches neither. The two opener shapes:
+#   } catch (e) {
+#   except Exception:
+# A brace opener must end in `{` and its closer begin with `}`, so `} finally {`
+# closes it too; a colon opener's closer is a lone `pass` or `...`. Allman braces
+# and `.catch(() => {` are not openers, and `catch (e) { log(e) }` has a body.
+# Under --unified=0 an opener that is context never reaches the awk, so a closer
+# added under an existing handler is not refused.
+#
+# The table reaches awk in its input stream, never through `awk -v`: -v
+# processes escapes, and gawk turns `\[` into `[` and dies on the bracket.
+suppression_needles() {
+  cat <<'NEEDLES'
+eslint-disable|(^|[[:space:];,)}])(//|/\*)[[:space:]]*eslint-disable([[:space:]]|-next-line|-line|$|\*/)
+ts-ignore|(^|[[:space:];,)}])//[[:space:]]*@ts-(ignore|nocheck|expect-error)([^A-Za-z-]|$)
+biome-ignore|(^|[[:space:];,)}])(//|/\*)[[:space:]]*biome-ignore[[:space:]]
+noqa|(^|[[:space:];,)}])#[[:space:]]*noqa([[:space:]:]|$)
+type-ignore|(^|[[:space:];,)}])#[[:space:]]*type:[[:space:]]*ignore([[:space:][]|$)
+rust-allow|(^|[[:space:];,)}])#!?\[(allow|expect)\(
+gd-warning-ignore|(^|[[:space:];,)}])@warning_ignore\(
+coverage-ignore|(^|[[:space:];,)}])(//|/\*)[[:space:]]*(istanbul|c8|v8)[[:space:]]+ignore([[:space:]]|$|\*/)
+no-cover|(^|[[:space:];,)}])#[[:space:]]*pragma:[[:space:]]*no[[:space:]]+(cover|branch)([^A-Za-z]|$)
+stryker-disable|(^|[[:space:];,)}])(//|/\*|#)[[:space:]]*Stryker[[:space:]]+disable([[:space:]]|$|\*/)
+hadolint-ignore|^[[:space:]]*#[[:space:]]*hadolint[[:space:]]+ignore=
+shellcheck-disable|^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]+disable=
+stub-throw|(^|[^A-Za-z0-9_"'`])throw[[:space:]]+(new[[:space:]]+)?(NotImplementedError[[:space:]]*\(|Error[[:space:]]*\([[:space:]]*["'`][^"'`]*([Nn]ot[[:space:]]*([Yy]et[[:space:]]*)?[Ii]mplemented|NOT[[:space:]]*IMPLEMENTED|TODO|[Uu]nimplemented))
+stub-todo|(^|[^A-Za-z0-9_"'`])(todo|unimplemented|unreachable)!\(
+stub-raise|(^|[^A-Za-z0-9_"'`])raise[[:space:]]+NotImplementedError([[:space:](]|$)
+stub-gd|(^|[^A-Za-z0-9_"'`])(push_error|assert)\([[:space:]]*(false([^A-Za-z0-9_]|$)|"[Nn]ot[[:space:]]+implemented)
+empty-handler|(^|[^A-Za-z0-9_"'`])catch([[:space:]]*\([^)]*\))?[[:space:]]*[{][[:space:]]*[}]
+empty-handler|^[[:space:]]*except([[:space:]]+[^:]+)?:[[:space:]]*(pass|\.\.\.)[[:space:]]*(#.*)?$
+NEEDLES
+}
+
+# suppression_hits   stdin: the needle table, a `--8<-- diff` line, then one
+# file's `git show --unified=0` diff. Prints `<line no>|<rule id>|<line, trimmed>`
+# per rule id an ADDED line matches, in table order; a second row of an id
+# already printed for the line prints nothing more. Only lines after the
+# first `@@` are hunk lines, so the `+++` header is skipped as a header and an
+# added line that happens to begin `++` is still read. The leading `+` is removed
+# before matching, or the `^` of every opener anchor would see it.
+#
+# It also keeps a window over the ADDED lines: the previous one's text (p1), the
+# one before it (p2), and, when p1 was a handler opener, its kind (pk), line
+# number and trimmed text. A hunk header or a `diff --git` line clears all of
+# it, and so does a context line; a `-` line or a `\ No newline` marker does
+# not, because neither sits between two added lines of one hunk. An added line
+# that is not the armed opener's closer disarms it. So an opener whose very
+# next added line is its closer prints `<opener line no>|empty-handler|<opener,
+# trimmed>`, once. A row hit on any line of a handler does not stand in for the
+# handler. The line is still tested as an opener and as a closer, so
+# `except:  # noqa: E722` over `pass` prints both `noqa` and `empty-handler` at
+# the opener's line, and `pass  # noqa: SIM105` under `except ValueError:` prints
+# `noqa` at its own line and `empty-handler` at the opener's. Every row is
+# tested, so a directive never hides what else the line is:
+# `} catch {} // eslint-disable-line no-empty` prints `eslint-disable`, then
+# `empty-handler`, and `raise NotImplementedError  # pragma: no cover` prints
+# `no-cover`, then `stub-raise`, each pair at that line; declaring one does not
+# declare the other. A line that reported empty-handler through a row gets no
+# second one from the window when it is also an opener, so
+# `} catch (A e) {} catch (B e) {` over `}` is refused once. A stub-raise
+# hit is dropped when p1 is a `def` and p2 an
+# `@abstractmethod` - three adjacent added lines, nothing looser - and only that
+# id: the line's other rows are still tested, so `# pragma: no cover` on an
+# abstract method's raise is refused as no-cover. The opener
+# anchor is the stub rows' anchor; its single quote is built from `%c` because
+# this program sits inside a single-quoted shell string.
+suppression_hits() {
+  awk '
+    BEGIN {
+      O = "(^|[^A-Za-z0-9_\"" sprintf("%c", 39) "`])"
+      bo = O "catch([[:space:]]*\\([^)]*\\))?[[:space:]]*[{][[:space:]]*$"
+    }
+    function clear() { p1 = ""; p2 = ""; pk = "" }
+    !d && $0 == "--8<-- diff" { d = 1; next }
+    !d { i = index($0, "|"); if (i) { n++; id[n] = substr($0, 1, i - 1); re[n] = substr($0, i + 1) }; next }
+    /^diff --git / { inh = 0; clear(); next }
+    /^@@ / { h = $0; sub(/^@@ -[0-9,]+ \+/, "", h); sub(/[^0-9].*$/, "", h); ln = h + 0; inh = 1; clear(); next }
+    !inh { next }
+    /^\+/ {
+      s = substr($0, 2); eh = 0; split("", seen)
+      t = s; gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+      for (k = 1; k <= n; k++) {
+        if ((id[k] in seen) || s !~ re[k]) continue
+        if (id[k] == "stub-raise" && p1 ~ /^[[:space:]]*(async[[:space:]]+)?def[[:space:]]/ && p2 ~ /^[[:space:]]*@(abc\.)?abstractmethod/) continue
+        printf "%d|%s|%s\n", ln, id[k], t
+        seen[id[k]] = 1
+        if (id[k] == "empty-handler") eh = 1
+      }
+      if (!peh && (pk == "brace" && s ~ /^[[:space:]]*[}]/ || pk == "colon" && s ~ /^[[:space:]]*(pass|\.\.\.)[[:space:]]*(#.*)?$/))
+        printf "%d|empty-handler|%s\n", pln, pt
+      pk = ""
+      if (s ~ bo) pk = "brace"
+      else if (s ~ /^[[:space:]]*except([[:space:]]+[^:]+)?:[[:space:]]*(#.*)?$/) pk = "colon"
+      if (pk != "") { pln = ln; peh = eh; pt = s; gsub(/^[[:space:]]+|[[:space:]]+$/, "", pt) }
+      p2 = p1; p1 = s
+      ln++; next
+    }
+    /^-/ || /^\\/ { next }
+    { clear(); ln++ }
+  '
+}
+
+# suppression_declared <path> <rule id>   stdin: the comment-stripped
+# ## Suppressions section. Prints `declared` when one line carries the path, the
+# rule id and `approved by`, all case-insensitive; otherwise what the first line
+# naming the path is missing; otherwise nothing. A line names the path only as a
+# whole token - split on whitespace and backticks, then `,;:()'"` trimmed from
+# each end of the token and never from inside it, so `app/(auth)/page.tsx`,
+# `'src/a.ts'` and `(src/a.ts)` all count - that comes before any other token
+# holding a `/`, so `src/a.ts.bak` and `src/b.ts ... same as src/a.ts` name
+# neither `src/a.ts`; the partial-entry answer uses the same rule.
+# The rule id counts as `[id]` anywhere, and as a bare word only on a line that
+# brackets no id, so `[noqa] ... not eslint-disable` declares only noqa. ARGV,
+# not -v, for the same reason as the table.
+suppression_declared() {
+  awk 'BEGIN { p = tolower(ARGV[1]); r = tolower(ARGV[2]); ARGV[1] = ""; ARGV[2] = "" }
+    {
+      l = tolower($0)
+      nt = split(l, tok, /[[:space:]`]+/); named = 0
+      for (j = 1; j <= nt; j++) {
+        gsub(/^[,;:()'\''"]+|[,;:()'\''"]+$/, "", tok[j])
+        if (tok[j] == p) { named = 1; break }
+        if (index(tok[j], "/")) break
+      }
+      if (!named) next
+      hr = index(l, "[" r "]") > 0
+      if (!hr && l !~ /\[[a-z-]+\]/) { x = l; while ((i = index(x, r)) > 0) {
+        b = (i == 1) ? "" : substr(x, i - 1, 1); a = substr(x, i + length(r), 1)
+        if (b !~ /[a-z0-9_-]/ && a !~ /[a-z0-9_-]/) { hr = 1; break }
+        x = substr(x, i + length(r)) } }
+      ha = index(l, "approved by") > 0
+      if (hr && ha) { print "declared"; found = 1; exit }
+      if (miss == "") miss = (!hr && !ha) ? "the rule id [" r "] and '\''approved by'\''" : (!hr ? "the rule id [" r "]" : "'\''approved by'\''")
+    }
+    END { if (!found && miss != "") print miss }' "$1" "$2"
+}
+
+# --- 3j, second branch: a gate loosened in project.conf (HARNESS-083) ---------
+#
+# A lowered floor or a deleted evidence line is not an ADDED line, so no needle
+# sees it, and project.conf classifies as `harness`, which the category test
+# above never reads. So the walk takes that one file by PATH, beside the
+# category test and not through it, and compares it before and after the
+# commit, as 3i reads a manifest. A finding is refused as [gate-loosened] and
+# declared through the same ## Suppressions hatch: one line names the path and
+# the id, and so covers every loosening in the file, because splitting a suite
+# in two lowers a floor and changes an evidence regex as one decision.
+#
+# project_conf_loosenings <before-file> <after-file>   Prints one
+# `<gate id>\t<what>\t<before>\t<after>` line per finding: a BOOTSTRAPPED
+# finding first, then the order of the BEFORE file's lines, then any
+# `slow`/`ondemand`/`waiver` line added on a gate that was required. Lines are
+# parsed as gates.sh parses them: BOOTSTRAPPED is read first, as gates.sh reads
+# it; then blank and `#` lines are skipped - so a commented example
+# `#   covers | ...` is a comment, never a covers line removed - then a line
+# with no `|`; kind and id are fields 1 and 2, trimmed, and the value is the
+# rest from field 3, its `|`s kept. A gate's severity is field 3 and its command
+# the rest from field 5.
+#
+#   BOOTSTRAPPED yes -> A      id BOOTSTRAPPED; each side is the first line
+#                              matching ^BOOTSTRAPPED= (none for `BOOTSTRAPPED =`),
+#                              the text after `=` with all whitespace removed,
+#                              empty or no line meaning `no`; before is `yes` and
+#                              after is anything else. `no -> yes` is silent
+#   evidence line removed      the gate's FIRST evidence line - the one gates.sh's
+#                              table_get uses - is a regex before and is `-`,
+#                              empty or absent after; `-` and an empty value are
+#                              no evidence on either side (gates.sh matches an
+#                              empty regex against every line), and a line added
+#                              below the first is no finding
+#   floor line removed         likewise, an empty value being no floor on either
+#                              side; `floor lowered B -> A` when both sides have
+#                              one and the first is lower AFTER, as numbers
+#                              (`40 -> 40.0` is no finding)
+#   covers line removed G      per glob; `discovery line removed` per discovery id
+#   required -> S              the gate was exactly `required` before and is
+#                              anything else after (`optional`, `advisory`,
+#                              `Required`, empty), since gates.sh treats every
+#                              such value as optional; S is printed as written
+#   gate removed               and nothing else for that id: its evidence, floor
+#                              and covers lines went with it. A deleted file is
+#                              an empty after side, so every gate is removed
+#   threshold lowered F B -> A / threshold removed F B   per threshold flag name
+#                              in the command of a gate on both sides: lowered
+#                              when the after side's FIRST, LAST, LOWEST or
+#                              HIGHEST value is below the before side's same one
+#                              - what a first-wins parser, a last-wins parser
+#                              (argparse), "any lower repeat" and a lowered
+#                              middle repeat each move - so an unchanged
+#                              `=10 =90` is silent. B -> A is the pair of the
+#                              first statistic that fell, in that order; removed
+#                              is `threshold removed F <HIGHEST before>` when no
+#                              occurrence is left after, and a flag only AFTER is
+#                              no finding
+#   K added on required gate   K is slow, ondemand or waiver, the line is new, and
+#                              the gate is required on the BEFORE side
+#
+# Tightening is silent by construction: every test above is "worse after". The
+# side is decided by file NAME, not `FNR == 1`: an empty before file has no first
+# record, and the after file would be read as the before side. The flag ERE uses
+# `[.]` rather than `\.`, which mawk and gawk do not read alike in a string.
+project_conf_loosenings() {
+  awk '
+    function trim(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+    function out(id, what, b, a) { printf "%s\t%s\t%s\t%s\n", id, what, b, a }
+    # flags <side> <id> <command>   Per side and threshold flag name, the
+    # HIGHEST (HI), LOWEST (LO), FIRST (FI) and LAST (LA) numbers; the first
+    # occurrence before also fixes the names order. The `in` test comes before
+    # any read of HI, which would create the element it asks about.
+    function flags(s, id, cmd,   m, k, nm, val) {
+      while (match(cmd, TF)) {
+        m = substr(cmd, RSTART, RLENGTH); cmd = substr(cmd, RSTART + RLENGTH)
+        k = match(m, /[ =]/); nm = substr(m, 1, k - 1); val = substr(m, k + 1)
+        if (!((s, id, nm) in HI)) {
+          HI[s, id, nm] = LO[s, id, nm] = FI[s, id, nm] = val
+          if (s == 1) { FN[id]++; FL[id, FN[id]] = nm }
+        } else {
+          if (val + 0 > HI[s, id, nm] + 0) HI[s, id, nm] = val
+          if (val + 0 < LO[s, id, nm] + 0) LO[s, id, nm] = val
+        }
+        LA[s, id, nm] = val
+      }
+    }
+    BEGIN { TF = "--(fail-under[-a-z]*|cov-fail-under|coverage[.]thresholds[.][a-z]*|min-coverage|threshold)[ =][0-9]+([.][0-9]+)?" }
+    {
+      s = (FILENAME == ARGV[1]) ? 1 : 2
+      sub(/\r$/, "")
+      # gates.sh: the first line matching ^BOOTSTRAPPED=, the text after the
+      # `=` with every whitespace character removed. Stripping the CR first
+      # changes nothing, since that removal would take it anyway.
+      if (!HB[s] && substr($0, 1, 13) == "BOOTSTRAPPED=") {
+        HB[s] = 1; BS[s] = substr($0, 14); gsub(/[[:space:]]/, "", BS[s])
+      }
+      t = trim($0)
+      if (t == "" || substr(t, 1, 1) == "#") next
+      if (!(i = index(t, "|"))) next
+      kind = trim(substr(t, 1, i - 1)); r = substr(t, i + 1)
+      j = index(r, "|"); id = trim(j ? substr(r, 1, j - 1) : r); v = j ? trim(substr(r, j + 1)) : ""
+      if (id == "") next
+      if (s == 1) { n++; K[n] = kind; I[n] = id; V[n] = v } else { na++; AK[na] = kind; AI[na] = id }
+      if (kind == "gate") {
+        if ((s, id) in G) next
+        G[s, id] = 1
+        j = index(v, "|"); SEV[s, id] = trim(j ? substr(v, 1, j - 1) : v)
+        cmd = ""; if (j) { r = substr(v, j + 1); j = index(r, "|"); if (j) cmd = substr(r, j + 1) }
+        flags(s, id, cmd)
+      }
+      else if (kind == "evidence") { if (!((s, id) in EV)) EV[s, id] = v }
+      else if (kind == "floor") { if (!((s, id) in FLR)) FLR[s, id] = v }
+      else if (kind == "covers") CV[s, id, v] = 1
+      else if (kind == "discovery") DS[s, id] = 1
+      else if (kind == "slow" || kind == "ondemand" || kind == "waiver") XL[s, kind, id] = 1
+    }
+    END {
+      b = (BS[1] == "") ? "no" : BS[1]; a = (BS[2] == "") ? "no" : BS[2]
+      if (b == "yes" && a != "yes") out("BOOTSTRAPPED", "BOOTSTRAPPED yes -> " a, b, a)
+      for (k = 1; k <= n; k++) {
+        kind = K[k]; id = I[k]; v = V[k]
+        gone = ((1, id) in G) && !((2, id) in G)
+        if (kind == "gate") {
+          if (SEEN["g", id]++) continue
+          if (gone) { out(id, "gate removed", "", ""); continue }
+          if (SEV[1, id] == "required" && SEV[2, id] != "required") out(id, "required -> " SEV[2, id], "required", SEV[2, id])
+          for (q = 1; q <= FN[id]; q++) {
+            nm = FL[id, q]; b = HI[1, id, nm]
+            if (!((2, id, nm) in HI)) out(id, "threshold removed " nm " " b, b, "")
+            else {
+              # Four statistics, judged in a fixed order; the refusal names
+              # the before and after of the first one that fell.
+              fb = fa = ""
+              if (FI[2, id, nm] + 0 < FI[1, id, nm] + 0) { fb = FI[1, id, nm]; fa = FI[2, id, nm] }
+              else if (LA[2, id, nm] + 0 < LA[1, id, nm] + 0) { fb = LA[1, id, nm]; fa = LA[2, id, nm] }
+              else if (LO[2, id, nm] + 0 < LO[1, id, nm] + 0) { fb = LO[1, id, nm]; fa = LO[2, id, nm] }
+              else if (HI[2, id, nm] + 0 < HI[1, id, nm] + 0) { fb = HI[1, id, nm]; fa = HI[2, id, nm] }
+              if (fb != "") out(id, "threshold lowered " nm " " fb " -> " fa, fb, fa)
+            }
+          }
+        }
+        else if (kind == "discovery") {
+          if (!SEEN["d", id]++ && !((2, id) in DS)) out(id, "discovery line removed", "", "")
+        }
+        else if (gone) continue
+        else if (kind == "evidence") {
+          if (SEEN["e", id]++ || EV[1, id] == "-" || EV[1, id] == "") continue
+          if (!((2, id) in EV) || EV[2, id] == "-" || EV[2, id] == "") out(id, "evidence line removed", "", "")
+        }
+        else if (kind == "floor") {
+          if (SEEN["f", id]++ || FLR[1, id] == "") continue
+          if (!((2, id) in FLR) || FLR[2, id] == "") out(id, "floor line removed", FLR[1, id], "")
+          else if (FLR[2, id] + 0 < FLR[1, id] + 0) out(id, "floor lowered " FLR[1, id] " -> " FLR[2, id], FLR[1, id], FLR[2, id])
+        }
+        else if (kind == "covers") {
+          if (!SEEN["c", id, v]++ && !((2, id, v) in CV)) out(id, "covers line removed " v, v, "")
+        }
+      }
+      for (k = 1; k <= na; k++) {
+        kind = AK[k]; id = AI[k]
+        if (kind != "slow" && kind != "ondemand" && kind != "waiver") continue
+        if (((1, kind, id) in XL) || SEEN["a", kind, id]++) continue
+        if (SEV[1, id] == "required") out(id, kind " added on required gate", "", "")
+      }
+    }' "$1" "$2"
+}
+
+# sup_verdict <path> <rule id> <refusal>   One finding of either branch: the
+# `ok` line once per path and id when ## Suppressions declares it, otherwise the
+# refusal, with what a partial entry naming the path is missing.
+sup_verdict() {
+  local st
+  st="$(suppression_declared "$1" "$2" <<< "$sup_decl")"
+  if [ "$st" = declared ]; then
+    case "$sup_declared_seen" in
+      *"|$2 $1|"*) ;;
+      *) sup_declared_seen="$sup_declared_seen|$2 $1|"
+         ok "suppression [$2] in '$1' is declared in ## Suppressions" ;;
+    esac
+    return 0
+  fi
+  sup_refused=1
+  sup_more=""
+  [ -n "$st" ] && sup_more=" The ## Suppressions line naming '$1' is missing $st."
+  problem "$3$sup_more"
+}
+
+sup_conf=.claude/harness/project.conf
+sup_table="$(suppression_needles)"
+sup_decl="$(section "$sfile" "Suppressions" | strip_comments)"
+sup_judged=0
+sup_refused=0
+sup_declared_seen=""
+for c in $(git rev-list "$BASE"..HEAD 2>/dev/null); do
+  c7="${c%${c#???????}}"
+  # The source and config paths this commit changed, and project.conf by path;
+  # a commit with none has nothing this rule could judge, in any phase.
+  sup_paths=""
+  for f in $(git diff-tree --no-commit-id --name-only -r "$c" 2>/dev/null); do
+    case "$(classify "$f")" in source|config) sup_paths="$sup_paths $f" ;; esac
+    if [ "$f" = "$sup_conf" ]; then
+      case "$sup_paths " in *" $f "*) ;; *) sup_paths="$sup_paths $f" ;; esac
+    fi
+  done
+  [ -n "$sup_paths" ] || continue
+  # 3i skips a commit whose story file it cannot read. This one says so: a
+  # commit the rule could not judge is never silently counted as clean.
+  if ! git show "$c:$sfile" > "$cp" 2>/dev/null; then
+    note "commit $c7: story file not readable at this commit; GREEN/GATES additions not judged"
+    continue
+  fi
+  ph_at="$(frontmatter_value "$cp" phase)"; ph_at="${ph_at//[[:space:]]/}"
+  # The documented GATES -> REVIEW step sets the phase and only then commits, so
+  # work done in GATES can land in a commit whose own story says REVIEW. Its
+  # first parent's committed phase says which phase the work was done in. A root
+  # commit, or a parent with no story file, has no parent phase.
+  case "$ph_at" in
+    GREEN|GATES) ;;
+    *) sup_pph=""
+       if git show "$c^:$sfile" > "$cp" 2>/dev/null; then
+         sup_pph="$(frontmatter_value "$cp" phase)"; sup_pph="${sup_pph//[[:space:]]/}"
+       fi
+       case "$sup_pph" in GREEN|GATES) ph_at="$ph_at, after $sup_pph" ;; *) continue ;; esac ;;
+  esac
+  sup_judged=$((sup_judged+1))
+  for f in $sup_paths; do
+    if [ "$f" = "$sup_conf" ]; then
+      # A commit that created the file has no before side, and no findings. One
+      # that deleted it is compared with an empty after side: every gate in it
+      # was removed. The texts reach awk as files, never through -v.
+      git cat-file -e "$c^:$f" 2>/dev/null || continue
+      if git cat-file -e "$c:$f" 2>/dev/null; then
+        sup_hits="$(project_conf_loosenings <(git show "$c^:$f" 2>/dev/null) <(git show "$c:$f" 2>/dev/null))"
+      else
+        sup_hits="$(project_conf_loosenings <(git show "$c^:$f" 2>/dev/null) /dev/null)"
+      fi
+      while IFS=$'\t' read -r sup_gid sup_what _; do
+        [ -n "$sup_gid" ] || continue
+        sup_verdict "$f" gate-loosened "story $sid: commit $c7 ($ph_at) loosened a gate in '$f' [gate-loosened]: $sup_gid: $sup_what. A gate is never loosened to reach green; if this is deliberate, declare it in ## Suppressions - one line carrying the path, the rule id and 'approved by <who>', with the reason."
+      done <<< "$sup_hits"
+      continue
+    fi
+    if ! git show --format= --unified=0 "$c" -- "$f" > "$dp" 2>/dev/null; then
+      sup_refused=1
+      problem "story $sid: commit $c7 ($ph_at) changed '$f', and its diff could not be read, so nothing can say the lines it added are not suppressions."
+      continue
+    fi
+    { printf '%s\n--8<-- diff\n' "$sup_table"; cat "$dp"; } > "$cp"
+    sup_hits="$(suppression_hits < "$cp")"
+    [ -n "$sup_hits" ] || continue
+    while IFS='|' read -r sup_n sup_rid sup_text; do
+      [ -n "$sup_n" ] || continue
+      sup_verdict "$f" "$sup_rid" "story $sid: commit $c7 ($ph_at) added a suppression to '$f' line $sup_n [$sup_rid]: $sup_text. GREEN and GATES may not silence a tool to reach green; if this one is needed, declare it in ## Suppressions - one line carrying the path, the rule id and 'approved by <who>', with the reason - and say why in that line."
+    done <<< "$sup_hits"
+  done
+done
+# Only over commits it actually judged, and only when it refused nothing: an ok
+# over zero commits is the vacuous pass, and an ok beside a FAIL is two answers.
+if [ "$sup_judged" -gt 0 ] && [ "$sup_refused" -eq 0 ]; then
+  ok "GREEN/GATES added no suppression ($sup_judged commit(s) judged)"
 fi
 
 exit $fail

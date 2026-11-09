@@ -3,6 +3,10 @@
 #
 #   bash scripts/selftest.sh            every suite in .claude/tests
 #   bash scripts/selftest.sh phase-guard one suite, by name
+#   bash scripts/selftest.sh a b ...    several suites, by name, in glob order
+#   bash scripts/selftest.sh --changed [base-ref]
+#                                       the suites this branch's diff can break,
+#                                       as `selftest-needed.sh --suites` names them
 #   VERBOSE=1 bash scripts/selftest.sh  name every assertion, not just failures
 #   SELFTEST_JOBS=4 bash scripts/selftest.sh   up to 4 suites at once
 #
@@ -19,6 +23,41 @@
 # DV-2, 2026-10-05): the full self-test took 1,135 s with it unset and 336 s
 # with SELFTEST_JOBS=4, with identical per-suite results. Suites start in suite
 # order, so the slowest one (phase-guard) still sets the floor.
+#
+# A parallel run that ends before its summary (HARNESS-090) - a signal, a fork
+# bash does not return from, an error in the scheduler - still prints, from the
+# EXIT handler, the block of every suite it started and could collect, in suite
+# order, then an empty line and `selftest: ended before its summary: <p> of <n>
+# suite(s) reported (status <s>).`, the suites never started, the started ones
+# whose block could not be printed, and, if there are any of those, the buffer
+# directory it kept for them. It never prints a summary or a floors line, and
+# exits <s>, or 1 if <s> is 0. A suite whose start the scheduler sees fail is
+# reported as `FAIL <name>  not started: <error>`, counts as a failure, and the
+# run goes on with the next suite.
+#
+# SELFTEST_FAIL_START is a TEST HOOK and nothing more: a space-separated list of
+# suite names whose start, on the parallel path, is not attempted and fails
+# with `fork: simulated by SELFTEST_FAIL_START`. It exists so that
+# .claude/tests/selftest.test.sh can execute the failed-start path without
+# exhausting the host's process table. Leave it unset.
+#
+# Other test runs on the host (HARNESS-074). Once the run lock is taken and
+# before the first suite, scripts/host-load.sh reads `ps -ef` and, if other
+# harness test runs (bash or sh running a selftest.sh, *.test.sh or gates.sh)
+# outside this run's own process tree are live - another worktree, another
+# project - says so on stderr: how many, and the first five by pid and
+# command. A slow run then arrives with its circumstances. It is a warning
+# only: it never refuses, never waits, and never changes the exit status or a
+# byte of stdout. A listing that cannot be read or parsed gets one line saying
+# so; an empty listing prints nothing; a missing host-load.sh gets one line and
+# the run proceeds. HARNESS_PS_LISTING=<file> replaces `ps -ef` with that
+# file's contents. .claude/tests/_lib.sh exports it as /dev/null, so every
+# selftest.sh a suite starts - each fixture run and the whole-run goldens, on
+# CI as anywhere - sees an empty listing and stays silent. The top-level run
+# does not source _lib.sh: CI's own `bash scripts/selftest.sh` reads the
+# runner's real `ps -ef`, where no other harness run is expected.
+# On Git Bash a process started outside the MSYS runtime (from PowerShell or
+# cmd) is not in `ps -ef`, so is not noticed either.
 #
 # These test the harness, not the project built with it: the phase lock, the
 # path classifier, the hooks. They need bash, git and coreutils and nothing
@@ -75,7 +114,10 @@
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ONLY="${1:-}"
+# ONLY is the one name of a one-name run, for its no-match message; the set of
+# suites a run selects is WANT, built below (HARNESS-094).
+ONLY=""
+[ "$#" -eq 1 ] && ONLY="$1"
 
 # SELFTEST_JOBS, read before anything else so that a bad value is refused
 # before the floors audit, the lock and any suite (HARNESS-036 C-3). Unset and
@@ -234,23 +276,117 @@ $2
 SUITE_OUTPUT
 }
 
+# --- which suites (HARNESS-094) ----------------------------------------------
+# WANT holds the selected names, each between newlines; empty means every
+# suite. Names come from the arguments, or - for `--changed [base-ref]` - from
+# `selftest-needed.sh --suites [base-ref]`, asked here, before the floors audit
+# and the lock: it takes no lock and is seconds. Its answer decides the run:
+#   names     the full-run floors audit (every suite floored, the file well
+#             formed), a header line, then exactly those suites, as a
+#             several-name run runs them
+#   `all`     a header line, then a full run
+#   nothing   (exit 1) one line saying so, the skip text appended; exit 1, no
+#             lock, nothing run
+#   else      `cannot select` on stderr, exit 2
+# A several-name run (two or more) applies the single-suite floor rule to each
+# named suite and audits nothing else; a name that matches no suite stops it
+# before the lock. One name is the one-name run it always was.
+NL='
+'
+D='—'
+WANT=""
+AUDIT=0          # 1: audit the whole floors file, as a full run does
+CHANGED_HDR=""   # --changed: the stdout line printed before the first suite
+CHECK_NAMES=0    # 1: refuse, before the lock, a selected name that is no suite
+selected() {
+  [ -z "$WANT" ] && return 0
+  case "$WANT" in *"$NL$1$NL"*) return 0 ;; esac
+  return 1
+}
+
+if [ "${1-}" = --changed ]; then
+  # stdout and stderr both captured without a temporary file, which no shipped
+  # script may depend on: stderr streams into the outer capture through fd 3,
+  # then one US, the status, a newline and stdout follow it, and a closing US
+  # so that the substitution cannot strip the newline after an empty stdout.
+  SEL="$( { o="$(cd "$ROOT" && bash scripts/selftest-needed.sh --suites "${@:2}" 2>&3)"; r=$?
+            printf '%s%s\n%s%s' "$US" "$r" "$o" "$US"; } 3>&1 )"
+  sel_err="${SEL%%"$US"*}"; sel_err="${sel_err%"$NL"}"
+  rest="${SEL#*"$US"}"; rest="${rest%"$US"}"
+  sel_rc="${rest%%"$NL"*}"; sel_out="${rest#*"$NL"}"
+  if [ "$sel_rc" = 0 ] && [ "$sel_out" = all ]; then
+    [ -z "$sel_err" ] || printf '%s\n' "$sel_err" >&2
+    line1="${sel_err%%"$NL"*}"
+    CHANGED_HDR="selftest: --changed $D every suite: ${line1#*all: }"
+    AUDIT=1
+  elif [ "$sel_rc" = 0 ] && [ -n "$sel_out" ]; then
+    [ -z "$sel_err" ] || printf '%s\n' "$sel_err" >&2
+    WANT="$NL$sel_out$NL"
+    AUDIT=1; CHECK_NAMES=1
+    CHANGED_HDR=list   # completed once the suites are counted, below
+  elif [ "$sel_rc" = 1 ] && [ -z "$sel_out" ]; then
+    printf 'selftest: --changed selected no suite %s %s\n' "$D" "$sel_err"
+    exit 1
+  else
+    printf 'selftest: --changed cannot select: %s\n' "$sel_err" >&2
+    exit 2
+  fi
+else
+  for a in "$@"; do
+    [ -n "$a" ] && WANT="${WANT:-$NL}$a$NL"
+  done
+  [ -n "$WANT" ] || AUDIT=1
+  [ "$#" -ge 2 ] && CHECK_NAMES=1
+fi
+
 # --- what this run is going to run ------------------------------------------
 # Names by parameter expansion rather than `basename`, for the reason above: a
 # fork per suite, twice over, is the whole cost of this mechanism on Windows.
 SUITES=""
+ALL_SUITES=""
+NALL=0
 for suite in "$TESTS_DIR"/*.test.sh; do
   [ -e "$suite" ] || continue
   name="${suite##*/}"; name="${name%.test.sh}"
-  [ -n "$ONLY" ] && [ "$ONLY" != "$name" ] && continue
+  ALL_SUITES="$ALL_SUITES$name
+"
+  NALL=$((NALL+1))
+  selected "$name" || continue
   SUITES="$SUITES$name
 "
 done
 
+if [ "$CHECK_NAMES" = 1 ]; then
+  unknown=0
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    case "$NL$ALL_SUITES" in
+      *"$NL$a$NL"*) ;;
+      *) printf "No suites matched '%s'. Looked in .claude/tests/*.test.sh\n" "$a" >&2
+         unknown=1 ;;
+    esac
+  done <<WANT_NAMES
+$WANT
+WANT_NAMES
+  [ "$unknown" = 0 ] || exit 1
+fi
+if [ "$CHANGED_HDR" = list ]; then
+  k=0; names=""
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    k=$((k+1)); names="${names:+$names }$a"
+  done <<WANT_COUNT
+$WANT
+WANT_COUNT
+  CHANGED_HDR="selftest: --changed $D $k of $NALL suite(s) selected: $names"
+fi
+
 # AC-6, on a full run only: a suite with no floor is a suite that can be
 # emptied. Reported before anything executes - a floors file that is wrong is
 # worth knowing about in a second rather than after the whole suite has run.
-if [ -z "$ONLY" ]; then
-  [ -f "$FLOORS_FILE" ] || [ -z "$SUITES" ] || \
+# `--changed` audits as a full run does, whatever it selected.
+if [ "$AUDIT" = 1 ]; then
+  [ -f "$FLOORS_FILE" ] || [ -z "$ALL_SUITES" ] || \
     FAULTS="$FAULTS$US$FLOORS_REL  does not exist; every suite must declare its assertion floor there
 "
   while IFS= read -r name; do
@@ -260,7 +396,7 @@ if [ -z "$ONLY" ]; then
       FAULTS="$FAULTS$name$US$name  no floor line in $FLOORS_REL or $PROJECT_FLOORS_REL; every suite must declare one (a project's own suites go in project-floors.conf)
 "
   done <<SUITE_NAMES
-$SUITES
+$ALL_SUITES
 SUITE_NAMES
 fi
 
@@ -271,7 +407,7 @@ fi
 faulted=0
 while IFS="$US" read -r fname fmsg; do
   [ -n "$fmsg" ] || continue
-  [ -n "$ONLY" ] && [ "$ONLY" != "$fname" ] && continue
+  [ "$AUDIT" = 1 ] || selected "$fname" || continue
   printf 'FAIL %s\n' "$fmsg"
   faulted=$((faulted+1))
 done <<FAULT_LINES
@@ -283,6 +419,7 @@ if [ "$faulted" -gt 0 ]; then
   printf '\n%d fault(s) in %s. Nothing was run.\n' "$faulted" "$where"
   exit 1
 fi
+[ -z "$CHANGED_HDR" ] || printf '%s\n' "$CHANGED_HDR"
 
 # --- the run lock (HARNESS-034) ----------------------------------------------
 # A self-test beside gates.sh, or beside another self-test, in one tree is how
@@ -301,23 +438,88 @@ fi
 # then releases the lock. On a one-at-a-time run there is nothing to wait for
 # and no directory, and it is the release it always was. A trapped TERM or INT
 # therefore starts no further suite and lets the running ones finish.
+#
+# A parallel run whose scheduler loop did not finish (BUF_MADE=1, LOOP_DONE=0)
+# is an early end (HARNESS-090): the handler collects the status of every suite
+# it waits for, prints each started suite's block it can, names what is missing,
+# keeps the buffer directory if any block could not be printed, and exits
+# non-zero. It prints no summary. Every array element is read with a default.
+# It covers every suite start_suite was entered for - every index below
+# ${#PIDS[@]}, which start_suite extends as its first act - not only those
+# `started` counts, because `started` moves only after start_suite returns.
+# Its second statement ignores INT and TERM, so a second signal cannot end it
+# before it has printed and released the lock.
 BUF="$ROOT/.claude/state/selftest.$$"
 BUF_MADE=0
+LOOP_DONE=0
+FAIL_START="${SELFTEST_FAIL_START-}"
 PIDS=()     # by suite index, glob order; emptied once a suite's status is collected
+STARTERR=() # by suite index; non-empty when that suite's start failed
 selftest_exit() {
-  local i=0
-  while [ "$i" -lt "${#PIDS[@]}" ]; do
-    [ -z "${PIDS[$i]}" ] || wait "${PIDS[$i]}" 2>/dev/null
+  local st=$?
+  trap '' INT TERM
+  local i=0 n="${#PIDS[@]}" pid name f kept=0 unreported="" never=""
+  while [ "$i" -lt "$n" ]; do
+    pid="${PIDS[$i]-}"
+    if [ -n "$pid" ]; then
+      suite_status "$pid" 2>/dev/null; RCS[$i]=$?
+      PIDS[$i]=""
+    fi
     i=$((i+1))
   done
-  [ "$BUF_MADE" = 1 ] && rm -rf "$BUF"
+  if [ "$BUF_MADE" != 1 ] || [ "$LOOP_DONE" = 1 ]; then
+    [ "$BUF_MADE" = 1 ] && rm -rf "$BUF"
+    run_lock_release
+    return
+  fi
+
+  printed="${printed:-0}"
+  i="$printed"
+  while [ "$i" -lt "$n" ]; do
+    name="${NAMES[$i]-}"
+    f="$BUF/$name.out"
+    if [ -n "${STARTERR[$i]-}" ]; then
+      report_unstarted "$name" "${STARTERR[$i]}"
+      printed=$((printed+1))
+    elif [ -n "${RCS[$i]-}" ] && [ -f "$f" ] && [ -r "$f" ] && out="$(cat "$f" 2>/dev/null)"; then
+      suite_header "$name"
+      report_suite "$name" "${RCS[$i]}"
+      printed=$((printed+1))
+    else
+      unreported="${unreported:+$unreported }$name"
+      kept=1
+    fi
+    i=$((i+1))
+  done
+  i="$n"
+  while [ "$i" -lt "${NSUITES:-0}" ]; do
+    never="${never:+$never }${NAMES[$i]-}"
+    i=$((i+1))
+  done
+  printf '\n'
+  printf 'selftest: ended before its summary: %s of %s suite(s) reported (status %s).\n' \
+    "$printed" "${NSUITES:-0}" "$st"
+  [ -z "$never" ] || printf 'selftest: never started: %s\n' "$never"
+  [ -z "$unreported" ] || printf 'selftest: unreported: %s\n' "$unreported"
+  [ "$kept" != 1 ] || printf 'selftest: buffers kept: .claude/state/selftest.%s/\n' "$$"
+
+  [ "$kept" = 1 ] || rm -rf "$BUF"
   run_lock_release
+  [ "$st" -eq 0 ] || exit "$st"
+  exit 1
 }
 . "$ROOT/scripts/run-lock.sh" || { printf 'run-lock: scripts/run-lock.sh is missing; nothing was run.\n' >&2; exit 2; }
 trap selftest_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 run_lock_acquire "$ROOT" "scripts/selftest.sh${*:+ $*}" || exit 2
+
+if [ -f "$ROOT/scripts/host-load.sh" ]; then
+  . "$ROOT/scripts/host-load.sh"
+  host_load_warn "$$" "${HARNESS_RUN_LOCK_PID:-$$}" >&2
+else
+  printf 'selftest: scripts/host-load.sh is missing; other test runs on this host were not checked.\n' >&2
+fi
 
 # --- run --------------------------------------------------------------------
 fails=0; ran=0; floored=0; met=0; executed=0; declared=0
@@ -365,10 +567,50 @@ report_suite() {
   return 0
 }
 
+# The block of a suite whose start failed (HARNESS-090): its header and one
+# line. One failure and one suite run; nothing for the floors.
+report_unstarted() {
+  suite_header "$1"
+  printf 'FAIL %s  not started: %s\n' "$1" "$2"
+  ran=$((ran+1))
+  fails=$((fails+1))
+}
+
 # A suite's exit status, collected by its own pid once it has exited. One line,
 # exactly: DV-1's mutation targets it. A pid the shell no longer knows makes
 # `wait` return 127, which counts as a failure - fail closed.
 suite_status() { wait "$1"; }
+
+# start_suite <index>   Start the suite at that index in the background, into
+# its buffer (HARNESS-090). Returns 1, with STARTERR[index] saying why, when the
+# start failed in a way this shell can see: the `&` reported failure, `$!` did
+# not change, or SELFTEST_FAIL_START names the suite (a test hook). Bash prints
+# its own fork error on the group's stderr, which is the `.start` file; the
+# suite's stderr still goes into its `.out`.
+LASTPID=""
+start_suite() {
+  local i="$1" name rc pid first=""
+  name="${NAMES[$i]}"
+  PIDS[$i]=""; RCS[$i]=""; STARTERR[$i]=""
+  case " ${FAIL_START//[[:space:]]/ } " in
+    *" $name "*)
+      STARTERR[$i]="fork: simulated by SELFTEST_FAIL_START"
+      return 1 ;;
+  esac
+  { bash "$TESTS_DIR/$name.test.sh" > "$BUF/$name.out" 2>&1 & } 2> "$BUF/$name.start"; rc=$?
+  pid="${!-}"
+  if [ "$rc" -ne 0 ] || [ -z "$pid" ] || [ "$pid" = "$LASTPID" ]; then
+    IFS= read -r first 2>/dev/null < "$BUF/$name.start"
+    STARTERR[$i]="${first:-start failed (status $rc)}"
+    return 1
+  fi
+  PIDS[$i]="$pid"
+  LASTPID="$pid"
+  # A child that failed its own redirection may still hold this open; a
+  # failed rm must not matter.
+  rm -f "$BUF/$name.start" 2>/dev/null
+  return 0
+}
 
 NSUITES=0
 while IFS= read -r name; do
@@ -383,7 +625,7 @@ if [ "$JOBS" -lt 2 ] || [ "$NSUITES" -lt 2 ]; then
   for suite in "$TESTS_DIR"/*.test.sh; do
     [ -e "$suite" ] || continue
     name="${suite##*/}"; name="${name%.test.sh}"
-    [ -n "$ONLY" ] && [ "$ONLY" != "$name" ] && continue
+    selected "$name" || continue
     suite_header "$name"
 
     # Captured rather than streamed, because the count is read back out of it -
@@ -421,16 +663,15 @@ SUITE_LIST
   while [ "$printed" -lt "$NSUITES" ]; do
     changed=0
     while [ "$running" -lt "$JOBS" ] && [ "$started" -lt "$NSUITES" ]; do
-      name="${NAMES[$started]}"
-      bash "$TESTS_DIR/$name.test.sh" > "$BUF/$name.out" 2>&1 &
-      PIDS[$started]=$!
-      RCS[$started]=""
-      started=$((started+1)); running=$((running+1))
+      if start_suite "$started"; then
+        running=$((running+1))
+      fi
+      started=$((started+1))
     done
 
     i="$printed"
     while [ "$i" -lt "$started" ]; do
-      if [ -n "${PIDS[$i]}" ] && ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
+      if [ -n "${PIDS[$i]-}" ] && ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
         suite_status "${PIDS[$i]}"; RCS[$i]=$?
         PIDS[$i]=""
         running=$((running-1)); changed=1
@@ -438,11 +679,17 @@ SUITE_LIST
       i=$((i+1))
     done
 
-    while [ "$printed" -lt "$started" ] && [ -n "${RCS[$printed]}" ]; do
+    while [ "$printed" -lt "$started" ]; do
       name="${NAMES[$printed]}"
-      suite_header "$name"
-      out="$(cat "$BUF/$name.out")"
-      report_suite "$name" "${RCS[$printed]}"
+      if [ -n "${STARTERR[$printed]-}" ]; then
+        report_unstarted "$name" "${STARTERR[$printed]}"
+      elif [ -n "${RCS[$printed]-}" ]; then
+        suite_header "$name"
+        out="$(cat "$BUF/$name.out")"
+        report_suite "$name" "${RCS[$printed]}"
+      else
+        break
+      fi
       printed=$((printed+1))
     done
 
@@ -454,6 +701,7 @@ SUITE_LIST
       sleep "$delay"
     fi
   done
+  LOOP_DONE=1
 fi
 
 if [ "$ran" -eq 0 ]; then

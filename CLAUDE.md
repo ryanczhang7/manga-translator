@@ -157,9 +157,13 @@ Never guess a build command. Every project-specific command lives in
 ```bash
 bash scripts/doctor.sh           # is the toolchain installed?
 bash scripts/selftest.sh         # the harness's own tests (bash + git only)
+bash scripts/selftest-needed.sh  # does this story's diff touch a harness path? exit 0 run / 1 skip
+bash scripts/selftest-needed.sh --suites   # which suites that diff can break, one per line, or `all`
+SELFTEST_JOBS=4 bash scripts/selftest.sh --changed   # run exactly those; the local self-test before a PR (HARNESS-095 switches the procedure to it)
 bash scripts/gates.sh            # all gates
 bash scripts/gates.sh --fast     # every gate not marked `slow` — for RED and GREEN
 bash scripts/gates.sh --gate unit
+bash scripts/attest.sh -- CMD        # run CMD, record it against the tree; `check -- CMD` instead of a re-run
 bash scripts/check-boundaries.sh # the other half of CI: the commit, not the code
 bash scripts/check-sigpipe.sh   # refuse a pipefail SIGPIPE matcher, tree-wide
 bash scripts/check-grep-count.sh # refuse a printing `grep -c` fallback
@@ -168,6 +172,7 @@ bash scripts/plan.sh ID          advance-story or complete-story, and why
 bash scripts/plan.sh write ID    put the per-phase model plan in the story
 bash scripts/plan.sh conflicts   which startable stories share a declared file
 bash scripts/plan.sh after ID    what to run next, and what can run alongside it
+bash scripts/story.sh section ID NAME   # one section of a story, as check-boundaries reads it
 bash scripts/classify.sh --list source src   # what the lock thinks a path is
 bash scripts/refresh-harness.sh ../agentic-dev-harness  # pull a newer harness in
 bash scripts/tidy.sh [--apply]   # finished worktrees and merged branches
@@ -181,6 +186,10 @@ phase that freezes it. It backs the file up to an explicit path, applies a `sed`
 expression, runs the command, restores the file, verifies the restore with `cmp`
 and logs it — so it is allowed in every phase, and the phase lock knows it.
 Anything else, `sed -i` included, is working around the lock (law 5).
+
+`--suites` maps a changed path to every suite whose source names it, ending
+where the path ends, comments and test data included. A path a suite names
+only as test data counts as mentioned, never as unmapped (which gives `all`).
 
 `gates.sh` judges the **code**; `check-boundaries.sh` judges the **commit** —
 the phase in the committed frontmatter, the acceptance criteria against the base

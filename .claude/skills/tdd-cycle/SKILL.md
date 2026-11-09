@@ -489,6 +489,7 @@ So:
 - `reference/red-phase.md` - choosing the test level, naming, what to cover
 - `reference/green-phase.md` - implementing without over-building, refactoring
 - `reference/handoff.md` - what crosses the context boundary, and the template
+- `reference/cases.md` - the worked cases behind rules in `rules.md`, by rule
 
 ## Why the lock exists
 

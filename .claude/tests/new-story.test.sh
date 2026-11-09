@@ -80,7 +80,7 @@ describe "every section the harness reads by name is present"
 # heading. A template missing one produces stories the tooling cannot find its
 # evidence in.
 for h in "## Acceptance criteria" "## Contract" "## Deferred verifications" \
-         "## Amendments" "## Model guidance" "## Test plan" \
+         "## Amendments" "## Suppressions" "## Model guidance" "## Test plan" \
          "## Handoff: RED -> GREEN" "## Regressions" "## Gate results" \
          "## Gate probes" "## Scaffold inventory" "## Notes"; do
   if grep -qF -- "$h" "$STORY"; then _ok "has $h"; else _bad "has $h" "not in the generated story"; fi
@@ -215,6 +215,38 @@ assert_eq "a fresh story's Contract mentions **Writes:** only inside the comment
   "commented 0" \
   "$([ "$in_comment" -ge 1 ] && printf commented || printf absent) $(grep -c '^\*\*Writes:\*\*' <<<"$uncommented")"
 
+
+# ---------------------------------------------------------------------------
+describe "a new story carries ## Suppressions, between ## Amendments and ## Model guidance (HARNESS-081, C-4)"
+
+# check-boundaries.sh block 3j refuses a suppression directive that a GREEN or
+# GATES commit adds to source, unless the story's ## Suppressions declares it on
+# one line carrying the path, the rule id and `approved by`. The template is where
+# an author learns the section exists. It is ONE heading and ONE HTML comment: an
+# entry emitted into every fresh story would be a declaration nobody made, and
+# 3j reads the section after stripping comments for exactly that reason.
+assert_eq "the generated story has exactly one ## Suppressions heading line" 1 \
+  "$(grep -cx -- '## Suppressions' "$STORY")"
+# The headings in order, as one string, so a heading in the wrong place or a
+# second one in between is named rather than counted.
+headings="$(awk '/^## / { printf "%s|", $0 }' "$STORY")"
+assert_contains "it sits between ## Amendments and ## Model guidance, with nothing between" \
+  "## Amendments|## Suppressions|## Model guidance|" "$headings"
+sup="$(awk '/^## Suppressions$/ { on = 1; next } on && /^## / { exit } on { print }' "$STORY")"
+sup_bare="$(awk '{ s = s $0 "\n" }
+  END {
+    while ((i = index(s, "<!--")) > 0) {
+      r = substr(s, i); j = index(r, "-->")
+      if (j == 0) { s = substr(s, 1, i - 1); break }
+      s = substr(s, 1, i - 1) substr(r, j + 3)
+    }
+    printf "%s", s
+  }' <<<"$sup")"
+# Both halves in one assertion: a comment exists, and nothing survives outside it.
+assert_eq "its body is one HTML comment and nothing outside it" "comment|" \
+  "$(grep -qF -- '<!--' <<<"$sup" && printf comment || printf none)|$(tr -d '[:space:]' <<<"$sup_bare")"
+assert_contains "and the comment asks for 'approved by', which 3j requires on the line" \
+  "approved by" "$sup"
 
 # ---------------------------------------------------------------------------
 describe "HARNESS-046 AC-1: an id that is not one path component is refused, and nothing is written"

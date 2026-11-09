@@ -2,7 +2,7 @@
 description: Move one story forward by exactly one phase
 model: fable
 argument-hint: <story-id>
-allowed-tools: Bash(bash scripts/phase.sh:*), Bash(bash scripts/gates.sh:*), Bash(bash scripts/check-boundaries.sh:*), Bash(bash scripts/selftest.sh:*), Bash(bash scripts/ci-local.sh:*), Bash(bash scripts/task.sh:*), Bash(git:*), Read, Grep, Glob, Edit, Write, Task
+allowed-tools: Bash(bash scripts/phase.sh:*), Bash(bash scripts/gates.sh:*), Bash(bash scripts/attest.sh check:*), Bash(bash scripts/check-boundaries.sh:*), Bash(bash scripts/selftest.sh:*), Bash(bash scripts/selftest-needed.sh:*), Bash(SELFTEST_JOBS=4 bash scripts/selftest.sh:*), Bash(SELFTEST_JOBS=4 bash scripts/selftest.sh --changed:*), Bash(bash scripts/ci-local.sh:*), Bash(bash scripts/task.sh:*), Bash(bash scripts/story.sh:*), Bash(git:*), Read, Grep, Glob, Edit, Write, Task
 ---
 
 Story: $1
@@ -14,7 +14,31 @@ Act as the **lead-po** orchestrator and advance this story by **one phase only**
 then stop and report. The user chose this command over `/complete-story`
 because they want to inspect the result before the next phase runs.
 
-Read `docs/backlog/stories/$1.md` first. Then, based on its current phase:
+Do not read the whole story file: it grows as the story runs, and every turn
+re-sends it. Read the frontmatter with `bash scripts/story.sh frontmatter $1`,
+then each section the current phase needs with
+`bash scripts/story.sh section $1 <name>` (`bash scripts/story.sh sections $1`
+lists the names, with their lengths):
+
+| Phase | Read with `bash scripts/story.sh section $1 <name>` |
+|---|---|
+| PLANNED → RED | Context, Acceptance criteria, Contract, Deferred verifications, Model guidance, Out of scope |
+| RED → GREEN | Acceptance criteria, Contract, Handoff: RED -> GREEN, Deferred verifications, Regressions, Model guidance |
+| GREEN → GATES | Deferred verifications, Gate results, Gate probes, Model guidance, Notes |
+| GATES → REVIEW | Diff review, Gate results, Gate probes, Deferred verifications, Acceptance criteria, Test plan, Model guidance, Notes |
+| REVIEW → DONE | Notes |
+
+A dispatch prompt is built from those sections, pasted, not from the file; a
+`## Handoff` section is pasted whole, because it is the channel between phases.
+A `## ` line inside a fenced block is read as a heading, because that is
+`check-boundaries.sh`'s reading, so in a story that has one `section` can
+return the wrong lines - a section cut short, stray fenced lines, or the stray
+lines in place of the real section - and still exit 0. When
+`bash scripts/story.sh sections $1` lists a name twice, or a heading the story
+should not have, list the real boundaries with
+``grep -n -e '^## ' -e '^```' -e '^~~~'`` on the story file and read that
+section by line range.
+Then, based on the story's current phase:
 
 **PLANNED → RED.** Confirm the acceptance criteria are testable; fix them with
 the user if they are not — this is the last phase in which they may change
@@ -89,9 +113,16 @@ and **partitioned by oracle** — which carry a settled number to read out, whic
 are oracle-free and need an invented metric with a negative control, which are
 mechanical and want exact pinning (see `story-authoring`, "Brief RED by
 oracle") — the relevant constraints from `docs/wiki/`, and the exact test
-command from `.claude/harness/project.conf`. When it returns, verify: read the test files it
-wrote and run the tests yourself. Confirm they fail, and fail for the right
-reason. If they pass, or fail on an unrelated error, send it back.
+command from `.claude/harness/project.conf`, and tell it to run that command
+and `--fast` through `bash scripts/attest.sh --`. When it returns, verify: read
+the test files it wrote, then run `bash scripts/attest.sh check -- <test command>`
+with the exact words it ran. **Run the command yourself only when the answer is
+not `fresh`** (`stale`, `void` or `none`), directly rather than through
+`attest.sh` (you run only its `check`), and say in the story which it was.
+`fresh` says the run was made on this tree, not that it failed the right way:
+read `exit:` and `last:`, and the log the record names, and confirm from that
+log that the tests fail, and fail for the right reason. If they pass, or fail on
+an unrelated error, send it back.
 
 **Unless the runner did not start at all** — no test in the repository ran and
 `gates.sh` failed outright. That is a real state, it is sometimes the correct
@@ -108,8 +139,9 @@ contract obliges GREEN to write. Then say so in the commit and paste the error
 into the handoff. An agent arriving at that tree otherwise cannot tell a
 deliberate dark suite from a broken repository, and will debug the wrong thing.
 
-Then run `bash scripts/gates.sh --fast` and read it before leaving RED. This is
-not a pass/fail check — the test gates are *supposed* to be red here. It asks a
+Then check `bash scripts/attest.sh check -- bash scripts/gates.sh --fast` the
+same way - running it yourself, directly, only when the answer is not `fresh` - and read
+its log before leaving RED. This is not a pass/fail check — the test gates are *supposed* to be red here. It asks a
 different question: are these tests **admissible** to the gates that will judge
 them? Expect lint and typecheck to pass, and the test gates to fail with the
 assertion the story is about. A test gate failing for any other reason — a
@@ -126,9 +158,13 @@ carry their **expected values**, not just the fact that they exist: in RED the
 suite failed at import, so no assertion in the file ran and every control is an
 unverified claim. Set the phase, then dispatch the **feature-developer** subagent
 with the story path, the handoff, and the test command, and tell it to confirm
-each recorded control value against the shipped module. When it returns, run the
-tests yourself, then `bash scripts/gates.sh --fast` — the same admissibility
-question, now expecting green.
+each recorded control value against the shipped module and to run the test
+command and `--fast` through `bash scripts/attest.sh --`. When it returns, read
+the files it wrote, then `bash scripts/attest.sh check -- <test command>` and
+`bash scripts/attest.sh check -- bash scripts/gates.sh --fast` — the same
+admissibility question, now expecting green. Run a command yourself, directly,
+only when its answer is not `fresh`, and say in the story which it was; a `fresh` record
+still has to show `exit: 0` and a passing `last:` line.
 
 **GREEN → GATES.** Set the phase, then — **before** `gates.sh` — run every entry
 in `## Deferred verifications` that names GATES as its owner, and paste what
@@ -144,9 +180,30 @@ arrival — is `/audit-mutations`' work, not this phase's. If an entry can no
 longer run, write `WAIVED` and the reason; leaving it silent is what
 `check-boundaries.sh` refuses.
 
-Then run `bash scripts/gates.sh`. It writes
-its own summary into the story's `## Gate results`; never paste or edit one.
-On failure, dispatch the **feature-developer** to fix it, unless the failure
+Then dispatch a **feature-developer** on the GATES row of `models.conf` to run
+the full gates, with the brief below. It runs
+`bash scripts/attest.sh -- bash scripts/gates.sh` and returns its verdict: the
+exit status, last line, duration and log path (the record's `exit:`, `last:`,
+`duration:` and `log:`), and the model it resolved to. Check it with
+`bash scripts/attest.sh check -- bash scripts/gates.sh`: require `fresh`, read
+`exit:` (0 passed, 1 failed or not recorded, 3 BLOCKED, the paragraph below)
+and the verdict line in the log it names, `All required gates passed ...` or
+`N required gate(s) failed.`, and record the resolved model under
+`## Model guidance`. For this command `last:` is the check-boundaries tip
+printed after the verdict, not the verdict.
+`stale`, `void` or `none` means it did not run that command on this tree: send
+it back, and say so in `## Notes`.
+
+The brief, here and for the self-test at GATES → REVIEW: the worktree's
+absolute path and "run every command from there"; the one command, through
+`bash scripts/attest.sh --`; "run nothing else in this worktree while it runs";
+and "change nothing, unless the command is `bash scripts/gates.sh` and a
+required gate fails: then fix it under your GATES rules and run it again".
+While it is out, you run nothing in that worktree either.
+
+`gates.sh` writes its own summary into the story's `## Gate results`, whoever
+runs it; never paste or edit one. A failure the dispatch could not fix goes
+back to the **feature-developer**, unless the failure
 means a test is wrong — in which case return the story to RED (see below). A
 `WARN` on an optional gate is read, not skipped; a known permanent failure gets
 a `waiver` line with its reason.
@@ -194,28 +251,90 @@ without it is the point.
 
 Then, **in this order**:
 
-1. `bash scripts/selftest.sh` — the whole harness self-test, every suite,
-   once, while the story is still at GATES. CI runs every suite, and one the
-   story never touched can still fail on its change: a line number another
-   suite pins, a floor, a value an upstream suite asserts. Run it detached
-   (the Bash tool's `run_in_background` with its longest timeout, or `nohup`
-   from a shell), so that a tool timeout cannot kill it, and run nothing else
-   in this worktree until it exits: not `gates.sh`, not a second self-test.
-   CI's whole job takes about 2 minutes; on a Windows host the self-test
-   alone has taken about 25. That is slow, not wrong. Do not swap in named
-   suites because the host is slow. If a run goes far past the last duration
-   a story recorded, look for an orphaned self-test or gate run before
-   blaming the host; one run stalled past an hour beside an orphan and passed
-   alone. Judge it by its exit status and its last line, `N harness suite(s)
-   passed.`, and paste both, with the duration, into `## Notes`. A failure
+1. Review the story's diff and its callers with the `diff-review` skill.
+   Dispatch a **fresh** `feature-developer`, not the one that wrote the code,
+   on the GATES row of `models.conf`; it changes no file and returns its
+   report. Paste that report into a `## Diff review` section of the story,
+   directly above `## Gate results`, and record the model the dispatch
+   resolved to. A Must fix in the code is made in GATES by a feature-developer
+   dispatch; the tree has changed, so `bash scripts/gates.sh` runs again and
+   these steps start over, with a review of the fix. A finding that needs a
+   test added or changed is a return to RED, with a `## Regressions` entry. A
+   finding that an acceptance criterion is wrong is an `## Amendments` question
+   for the user. Go on only once the report's last line is `Verdict: Ship.`.
+   It comes before the self-test because a fix changes the tree, and a fix
+   found after the self-test wastes that run.
+2. `bash scripts/selftest-needed.sh` — it answers `run` (exit 0) when the
+   story's changes, committed or not, include a path `classify.sh` calls
+   `harness` - the files the harness suites read - and `skip` (exit 1)
+   otherwise. When it cannot compute the diff (for example no base to compare
+   against, no merge base, git failing, or its own library or `paths.conf`
+   not loading) it says why and answers `run`. On `skip`,
+   paste its line into `## Notes` as
+   `- Self-test skipped at GATES → REVIEW (<date>): selftest-needed: skip — ...`
+   and go on to step 3. CI runs the self-test on the PR either way, so a
+   skipped run is deferred to CI, not lost. On `run`,
+   `SELFTEST_JOBS=4 bash scripts/selftest.sh --changed` — the suites this
+   story's diff can break, once, while the story is still at GATES.
+   `selftest-needed.sh --suites` chooses them: a suite that mentions a
+   changed path, a changed suite itself, the five tree-scanning suites for
+   the paths they scan, and every suite when a path cannot be placed or the
+   library changed; the full run's floors audit runs first. CI runs every
+   suite, and one the story never touched can still fail on its change: a
+   line number another suite pins, a floor, a value an upstream suite
+   asserts. Dispatch it to a `feature-developer` on the GATES row, with the
+   GREEN → GATES brief: it runs
+   `bash scripts/attest.sh -- SELFTEST_JOBS=4 bash scripts/selftest.sh --changed`
+   detached (the Bash tool's `run_in_background` with its longest timeout,
+   or `nohup` from a shell), so that a tool timeout cannot kill it, and
+   alone: nothing else runs in this worktree until it exits, not
+   `gates.sh`, not a second self-test, nothing of yours. It returns the
+   verdict, and you check it with
+   `bash scripts/attest.sh check -- SELFTEST_JOBS=4 bash scripts/selftest.sh --changed`,
+   requiring `fresh`. Give it the expectation: CI's whole job takes about 2-4
+   minutes. On the Windows host this harness is developed on, the full
+   self-test took 336 s at `SELFTEST_JOBS=4` against 1,135 s serial
+   (HARNESS-036), 2,894-17,015 s serial while other test runs shared the
+   host (HARNESS-050..068), and 3,845-11,419 s in HARNESS-086..088.
+   HARNESS-094 measured `--changed` once: it selected
+   21 of 34 suites and took 6,444 s, where the full run had taken 12,502 s
+   just before it on the same loaded host. That is one observation, not a
+   ratio to plan by. A slow run is slower, not wrong, most often because
+   other test runs share the host: keep the value, do not swap in named
+   suites. If a run
+   goes far past the last duration a story recorded, look for an orphaned
+   self-test or gate run before blaming the host; one run stalled past an
+   hour beside an orphan and passed alone. Judge it by the record's `exit:`
+   and its `last:` line, `N harness suite(s) passed.`, and paste both, with
+   the `duration:` and the header line the run prints first,
+   `selftest: --changed — ...` (either `every suite: <reason>` or
+   `<k> of <n> suite(s) selected: <names>`), into `## Notes`. A failure
    takes GATES' own routes: the feature-developer, or RED if a test is
    wrong. A fix changes the tree, so `bash scripts/gates.sh` runs again and
    these steps start over.
-2. `bash scripts/phase.sh set $1 REVIEW`
-3. Commit, with a message that names the story and what it does.
-4. `bash scripts/check-boundaries.sh` — the second script CI runs, and the one
+   The full run, `SELFTEST_JOBS=4 bash scripts/selftest.sh`, is still the
+   option, dispatched, attested and checked the same way in place of the
+   `--changed` run, in exactly three cases. (a) The `--changed` header says
+   `every suite`: the run already is the full one, and there is nothing to
+   decide. (b) The story changed a script that other scripts invoke, and
+   you cannot name the suite that exercises the caller: `--suites` places a
+   path by the suites that mention it, not by who calls it, which is
+   HARNESS-094's declared limit. (c) CI's self-test failed on the PR in a
+   suite the local `--changed` run had not selected. That failure is seen
+   at REVIEW, so go back to this step with
+   `bash scripts/phase.sh set $1 GATES`, fix, run `bash scripts/gates.sh`,
+   and start these steps over from the review of the fix, with the full
+   run in place of `--changed` at this step, before pushing again; leaving
+   REVIEW follows the ordering rule below. Record in `## Notes` which
+   suite the selection missed. The orphan and host-load advice above
+   applies to it unchanged. CI runs every suite on the PR either way; in
+   this repository its `gates` check is not required on `main`, so the
+   merge is where the user reads CI's full run.
+3. `bash scripts/phase.sh set $1 REVIEW`
+4. Commit, with a message that names the story and what it does.
+5. `bash scripts/check-boundaries.sh` — the second script CI runs, and the one
    `gates.sh` cannot stand in for. Fix anything it reports before pushing.
-5. Push the branch and open a PR whose body links the story file and lists the
+6. Push the branch and open a PR whose body links the story file and lists the
    acceptance criteria with the test that covers each.
 
 The phase is set **before** the commit, and the order is not cosmetic:
@@ -226,10 +345,10 @@ job runs, which makes it fail intermittently rather than every time — the wors
 of the two. Do not reorder these to be helpful.
 
 `bash scripts/ci-local.sh` runs that self-test and every other step CI runs,
-read from the workflow files, and ends with step 4's check. It judges the
-commit, so it can only run after step 3. It runs the self-test twice and the
+read from the workflow files, and ends with step 5's check. It judges the
+commit, so it can only run after step 4. It runs the self-test twice and the
 gates again, so it is the better check where it is fast and never a
-substitute for step 1 where it is not.
+substitute for step 2 where it is not.
 
 **REVIEW → DONE.** Only once the PR is merged. Set the phase to DONE, clear the
 lock with `bash scripts/phase.sh clear`, and relay the report that

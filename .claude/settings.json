@@ -26,6 +26,7 @@
       "Read(./**/secrets/**)",
       "Edit(./.claude/state/current-story.env)",
       "Edit(./.claude/state/last-gate-run)",
+      "Edit(./.claude/state/attest.log)",
       "Bash(git log *--output*)",
       "Bash(git diff *--output*)"
     ]

@@ -64,11 +64,8 @@ bash scripts/classify.sh --only test PATH...   # filter a list you already have
 It enumerates through git, so a module written five minutes ago and not yet
 committed is still returned, and build output is not. The alternative is each
 guard carrying its own regex for "a source module", and that is not
-hypothetical: four private copies in one project drifted apart and spent six
-stories returning **probe artifacts** as production source - deliberately
-offending files a guard writes to test a lint rule - asserting real properties
-over files written to violate a rule, and passing only because the rule violated
-was not the rule being asserted.
+hypothetical (the case: `tdd-cycle`, `reference/cases.md`, "Four private copies
+of "a source module"").
 
 Probes are why `paths.conf` has a `__probe_` convention. A guard that tests a
 *rule* rather than today's code has to write an offending module and run the real
@@ -100,10 +97,9 @@ to prevent, reaching green by weakening a test.
 
 Change it deliberately, per role, and record the decision and the outcome. What
 you may not do is leave it unstated: a session setting or an explicit override
-can still win, and the orchestrator cannot see which did. Two stories once
-compared "the default model" against a stronger one, and neither could say what
-"default" had resolved to - so the comparison may have been the stronger model
-against itself. Hence the other half of the rule: **`lead-po` records the
+can still win, and the orchestrator cannot see which did (the case: `tdd-cycle`,
+`reference/cases.md`, ""The default model" against itself"). Hence the other
+half of the rule: **`lead-po` records the
 resolved model of every dispatch, by name, in the story.**
 
 **The per-phase plan is `.claude/harness/models.conf`, not a judgement made
@@ -208,18 +204,8 @@ inspect.
   fail is a test that cannot fail.** The corollary of the first rule at the
   level of the string, and it does not announce itself: the assertion has a
   sharp name, runs, and passes, and what it matched is not what it claims.
-  Four in one day, across two repositories:
-  - `"a lockfile is permitted unchecked"` asserted the **absence** of one
-    message, so a lockfile refused with a *different* message satisfied it.
-  - `"the base ref expression is resolved"` was satisfied by the skip note
-    **announcing that resolution had failed** - the note quotes the unresolved
-    command, so the needle appeared precisely because the substitution broke.
-  - a needle of `PLAUSIBLE: sed -i option` is satisfied by
-    `IMPLAUSIBLE: sed -i option` - the string that means the opposite.
-  - `grep '^ci-local:'`, used to detect a CI run finishing, matched
-    `ci-local: 15 passed, 0 failed` - that **suite's** result inside the run,
-    not the **script's** verdict. It was one line of shell in a waiting loop
-    and its failure mode was to report a run green.
+  Four in one day, across two repositories (the case: `tdd-cycle`,
+  `reference/cases.md`, "Four needles that could not fail").
   Three defences, cheapest first: anchor the match (`grep -cx`, `^…$`) rather
   than letting it float; prefer a needle whose negation is not also a match;
   and where neither is available, probe it by mutating the thing it claims to
@@ -236,18 +222,9 @@ inspect.
   reading of the problem, usually from the worked example in its own header. So
   it encodes the same blind spot twice and agrees with itself: every assertion
   passes while the rule cannot see the spelling the real tree actually uses.
-  Three in one round, in this repository, all in guards whose suites were green:
-  - `check-grep-count.sh` was probed with `y=$(grep -c …)` throughout, because
-    that is the shape its header explains. It could not see
-    `x="$(grep -c …)"` - which is how every real instance in the tree is
-    written - and the suite had nothing to say about it.
-  - the same guard could not see `cat f | grep -c x || printf 0`, judging `cat`
-    rather than the grep. A consuming project had wired it into CI where all
-    three uses are pipelines: the run was green and meant nothing.
-  - `check-sigpipe.sh` read a here-string as a heredoc opener and went blind
-    from that line to the end of the file - past line 108 of `plan.sh`, and in
-    18 of this tree's 38 harness shell files. Its census line kept reporting
-    the honest file count while the coverage behind it was partial.
+  Three in one round, in this repository, all in guards whose suites were green
+  (the case: `tdd-cycle`, `reference/cases.md`, "Three guards green over a tree
+  they could not see").
   None of the three was reachable from the fixtures. All three were found the
   same way: **mutate a REAL line of the tree with `scripts/mutate.sh` and watch
   whether the guard fires.** The first of them broke the phase lock, and the
@@ -266,15 +243,18 @@ inspect.
   is right about what is there. A fixture corpus that has never met the real
   tree is a statement about your own understanding, and it is always green.
   **This is law rather than a comment beside the mechanism for a measured
-  reason.** The warning about it was written into `lib.sh` in release 38, next
-  to the helper it was about - and its author then committed the same defect in
-  release 40, in the guard that note describes. Writing a caveat where the
+  reason** (the case: `tdd-cycle`, `reference/cases.md`, "Three guards green
+  over a tree they could not see"). Writing a caveat where the
   mechanism lives does not make the next person check the right property, and
   the next person includes whoever wrote the caveat.
 - Do not weaken an assertion, add a `skip`, widen a tolerance, or delete a case
   to reach green. Any of these means going back to RED. The same applies to a
   gate: do not delete an `evidence` line, drop `--workspace`, or add
   `--passWithNoTests` to make a gate stop complaining.
+  Nor add a line that silences the tool: `check-boundaries.sh` (block 3j)
+  refuses a lint, type, coverage or mutation suppression that a GREEN or GATES
+  commit adds to a `source` or `config` path, unless the story's
+  `## Suppressions` names its path and rule id with `approved by <who>`.
 - **Narrowing an input domain can be correct; loosening a comparison is always a
   weakening.** In a property test the input lives in a generator, not in the
   assertion, so a fifth move exists that is none of the four above: change what
@@ -282,15 +262,12 @@ inspect.
   criterion claims to hold over - and narrowing it is legitimate exactly when the
   design cannot represent what was excluded, named against the document that
   fixes that. "The test was failing" is not a reason. The two moves are one line
-  each and look identical in a diff: a round-trip property failing on a negative
-  zero is fixed either by keeping `-0` out of the coordinate generator (correct -
-  JSON cannot carry it) or by making the comparison treat `-0` and `0` as equal
-  (which stops it distinguishing values for **every number in the document**, and
-  is easier, because it is a one-line edit in the file the failure is reported
-  in). So a narrowing carries three things: the design clause that excludes the
-  value, the limit recorded in the architecture document rather than only in a
-  comment, and a mutation showing the property still fails against a lossy
-  implementation. `tdd-cycle` has the worked case.
+  each and look identical in a diff. So a narrowing carries three things: the
+  design clause that excludes the value, the limit recorded in the architecture
+  document rather than only in a comment, and a mutation showing the property
+  still fails against a lossy implementation (the case: `tdd-cycle`,
+  `reference/cases.md`, "Negative zero: narrow the generator, not the
+  comparison").
 - Acceptance criteria are frozen once a story leaves PLANNED, for the same
   reason tests are frozen during GREEN: they are what the tests are for. If one
   is wrong or unsatisfiable, stop, put it to the product owner, and record the
@@ -318,20 +295,17 @@ inspect.
   `.bak` left behind under `mutations/` means a
   restore failed and `mutate.sh` exited 90 saying so; everything else it cleans
   up. A `.active` left behind means a mutation was killed or not restored, and
-  `gates.sh` refuses to run until `bash scripts/mutate.sh --check` is clean.
-  The backup path is explicit rather than `$TMPDIR` because that variable is
-  unset in some of the shells this harness runs in, and a mutation whose backup
-  went nowhere once left its restore depending on the `sed` expression happening
-  to be an exact inverse of a single-occurrence match.
+  `gates.sh` refuses to run until `bash scripts/mutate.sh --check` is clean
+  (why the backup path is explicit, the case: `tdd-cycle`, `reference/cases.md`,
+  "A backup that went to an unset $TMPDIR").
 - Agentic scaffolding (`.claude/`, `docs/`, `scripts/`, `.github/`) never ships
   in a production image. Keep `.dockerignore` honest.
 
 # Mutation work per story
 
 The non-negotiables above say when a mutation is *owed*. This says how much a
-story spends by default, because nothing else bounds it: on HARNESS-014 the
-mutation work was 18 mutations, about 27 full-suite runs and 2h20 of a 7.5h
-story, and none of the 18 found a defect. This section is the one place the
+story spends by default, because nothing else bounds it (the case: `tdd-cycle`,
+`reference/cases.md`, "HARNESS-014: eighteen mutations, no defect"). This section is the one place the
 budget is stated; every command, skill and template defers to it.
 
 - **Required per story.** One mutation that earns each test written or

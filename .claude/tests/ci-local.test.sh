@@ -369,4 +369,48 @@ else
 fi
 rm -rf "$OFIX"
 
+# ---------------------------------------------------------------------------
+describe "HARNESS-079 AC-8: a gates.yml split into two jobs is replayed, both halves, in order"
+
+# The split `gates.sh --skip` exists for: one slow gate in a job of its own.
+# Nothing in ci-local.sh knows about jobs - it reads every `run:` line in file
+# order - so this should already hold. The test is here so that it is a fact
+# rather than a claim: a parser that learned to stop at the first job, or to
+# keep one `scripts/gates.sh` step per file, would replay half of CI and call
+# it green.
+SFIX="$(make_project_fixture)"
+mkdir -p "$SFIX/.github/workflows"
+cat > "$SFIX/.github/workflows/gates.yml" <<'YML'
+name: gates
+on: [pull_request]
+jobs:
+  gates:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run gates, all but integration
+        run: bash scripts/gates.sh --skip integration
+  integration:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run the integration gate
+        run: bash scripts/gates.sh --gate integration
+YML
+sout="$( cd "$SFIX" && bash scripts/ci-local.sh --dry-run 2>/dev/null )"; src=$?
+assert_eq "AC-8: --dry-run over a two-job gates.yml exits 0" 0 "$src"
+assert_eq "AC-8: the first job's step is printed, once" 1 \
+  "$(printf '%s\n' "$sout" | grep -cxF -- 'bash scripts/gates.sh --skip integration')"
+assert_eq "AC-8: the second job's step is printed, once" 1 \
+  "$(printf '%s\n' "$sout" | grep -cxF -- 'bash scripts/gates.sh --gate integration')"
+s_at="$(printf '%s\n' "$sout" | grep -nxF -- 'bash scripts/gates.sh --skip integration' | head -1 | cut -d: -f1)"
+i_at="$(printf '%s\n' "$sout" | grep -nxF -- 'bash scripts/gates.sh --gate integration' | head -1 | cut -d: -f1)"
+if [ -n "$s_at" ] && [ -n "$i_at" ] && [ "$s_at" -lt "$i_at" ]; then
+  _ok "AC-8: in file order, the --skip job first"
+else
+  _bad "AC-8: in file order, the --skip job first" "--skip at line ${s_at:-none}, --gate at ${i_at:-none}: $sout"
+fi
+rm -rf "$SFIX"
+
 summary "ci-local"

@@ -210,14 +210,62 @@ jobs:
 YML
 run_doctor
 # check-sigpipe.sh joined the want-list in release 36 and check-grep-count.sh in
-# 37, so this pair is no longer complete - and that is the assertion, not an
-# inconvenience. .github/workflows is project-owned and a refresh cannot add
-# the step, so doctor naming it is the ONLY way a consuming project learns a
-# guard is not running there.
-assert_contains "a set missing a guard is named" \
-  "no workflow runs scripts/check-sigpipe.sh" "$out"
-assert_eq "and exits non-zero without it" 1 "$rc"
+# 37, and HARNESS-073 took them out again. Not because the guards stopped
+# mattering: because the self-test now carries their verdict. sigpipe.test.sh
+# (C-3) and grep-count.test.sh (AC-4) run each guard over the whole checkout and
+# assert zero findings, so a workflow that runs scripts/selftest.sh already fails
+# on any finding the guard step would have failed on - and selftest.sh is on the
+# want-list. Asking for the guard steps as well was the same check twice, one
+# level up. So this three-script set, with neither guard, is COMPLETE.
+#
+# The ok line is pinned whole and anchored: a substring would also be satisfied
+# by the old wording's longer line, or by any later line that appends to it.
+ci_ok_line='  ok       ci           runs the self-test, the gates and the boundaries check'
+exact_lines() { printf '%s\n' "$2" | awk -v l="$1" '$0 == l { n++ } END { print n+0 }'; }
+assert_eq "the self-test, the gates and the boundaries check, with neither guard, is a complete set" \
+  1 "$(exact_lines "$ci_ok_line" "$out")"
+assert_not_contains "and it prints no MISSING ci line for either guard" "MISSING  ci" "$out"
+assert_eq "and a set without the guards exits 0" 0 "$rc"
 
+# The controls for the three above. Without them, a want-list emptied to
+# nothing passes all three: an empty list is always complete. Each of the two
+# remaining scripts that the guards' departure could plausibly have taken with
+# it is removed in turn, and has to be named, and has to fail doctor.
+cat > "$FIX/.github/workflows/gates.yml" <<'YML'
+name: gates
+on: [pull_request]
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm install --frozen-lockfile
+      - run: bash scripts/gates.sh
+YML
+run_doctor
+assert_eq "control: the same set without the self-test names it" 1 \
+  "$(exact_lines '  MISSING  ci           no workflow runs scripts/selftest.sh' "$out")"
+assert_eq "control: and exits non-zero without the self-test" 1 "$rc"
+
+cat > "$FIX/.github/workflows/gates.yml" <<'YML'
+name: gates
+on: [pull_request]
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm install --frozen-lockfile
+      - run: bash scripts/selftest.sh
+      - run: bash scripts/gates.sh
+YML
+mv "$FIX/.github/workflows/boundaries.yml" "$FIX/boundaries.yml.aside"
+run_doctor
+mv "$FIX/boundaries.yml.aside" "$FIX/.github/workflows/boundaries.yml"
+assert_eq "control: the same set without the boundaries check names it" 1 \
+  "$(exact_lines '  MISSING  ci           no workflow runs scripts/check-boundaries.sh' "$out")"
+assert_eq "control: and exits non-zero without the boundaries check" 1 "$rc"
+
+# A workflow may run more than doctor asks for: the guard-bearing set that was
+# complete before this story is still complete after it.
 cat > "$FIX/.github/workflows/gates.yml" <<'YML'
 name: gates
 on: [pull_request]
