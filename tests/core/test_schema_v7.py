@@ -253,7 +253,7 @@ def _migrated(source_dir: Path, mask: bytes) -> Path:
 
     # 8 since MT-118 C-2: opening a v6 file runs the v7 -> v8 step as well;
     # 9 since MT-119 C-4 (v8 -> v9).
-    assert _user_version(db_path) == 12, (
+    assert _user_version(db_path) == 13, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -276,9 +276,9 @@ def test_this_build_writes_and_reads_the_current_schema_version(
 
     # MT-118 C-2 takes it to 8: `region.excluded`. `test_schema_v8.py` owns it.
     # MT-119 C-4 takes it to 9: `cleaned_page.erased`. `test_schema_v9.py` owns it.
-    assert SCHEMA_VERSION == 12
-    assert _user_version(db_path) == 12
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(12,)]
+    assert SCHEMA_VERSION == 13
+    assert _user_version(db_path) == 13
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
 
 
 def test_the_cleaned_page_ddl_is_its_own_exported_string_appended_last() -> None:
@@ -288,12 +288,14 @@ def test_the_cleaned_page_ddl_is_its_own_exported_string_appended_last() -> None
     import mangatl.store.schema as module
 
     # MT-119 C-4 adds `CLEANED_ERASED_DDL`, shared by a fresh file and the v9 step.
+    # MT-146 C-1 adds `REGION_DDL`, shared by a fresh file and the v13 rebuild.
     assert module.__all__ == [
         "CHAPTER_DDL",
         "CLEANED_ERASED_DDL",
         "CLEANED_PAGE_DDL",
         "DDL",
         "LLM_CALL_DDL",
+        "REGION_DDL",
     ]
     assert "CREATE TABLE cleaned_page" in module.CLEANED_PAGE_DDL
     # MT-119 C-4 appends `CLEANED_ERASED_DDL` directly after it: the table is
@@ -377,7 +379,7 @@ def test_a_version_six_file_is_migrated_to_seven_with_an_empty_cleaned_page_tabl
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _migrated(source_dir, mask)
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(12,)]  # MT-103 PO-3, MT-137
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]  # MT-103, MT-137, MT-146
     assert _raw(db_path, _SHAPE_V7_COLUMNS) == _CLEANED_PAGE_SHAPE
     assert _raw(db_path, "SELECT count(*) FROM cleaned_page") == [(0,)]
     with open_project(project_dir_for(source_dir)) as project:
@@ -425,7 +427,7 @@ def test_the_v7_step_adds_only_cleaned_page(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 12
+    assert _user_version(db_path) == 13
     after = _raw(db_path, query)
     added = [row[:3] for row in after if row not in before]
     assert added == [("table", "cleaned_page", "cleaned_page")], (

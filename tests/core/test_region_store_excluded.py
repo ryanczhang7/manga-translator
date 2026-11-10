@@ -25,6 +25,7 @@ no cleaned image, so that rule never fires in them.
 from __future__ import annotations
 
 import dataclasses
+import re
 import sqlite3
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -349,6 +350,62 @@ def test_set_excluded_refuses_a_caller_already_holding_a_transaction(
 
     with pytest.raises(RuntimeError, match="reentrant"), project.transaction():
         project.set_excluded(_ORDINAL, 1, "user")
+
+
+# -- MT-146 AC-2: `art`, the third reason, through the store ---------------------------
+
+
+def test_set_excluded_with_art_reads_back_art_from_a_reopened_project(
+    source_dir: Path, one_bit_png: Callable[..., bytes]
+) -> None:
+    """MT-146 AC-2: on a fresh project, `set_excluded(ordinal, i, "art")`, then
+    the regions read back - by a reopened store, with the writer closed first,
+    and by a plain `SELECT` - hold `"art"` on that region and nothing else
+    moves. The bystander page 0 stays included."""
+    with create_project(read_chapter(source_dir), project_dir_for(source_dir)) as writer:
+        _seed(writer, _three(one_bit_png))
+        writer.set_excluded(_ORDINAL, 1, "art")
+
+    with open_project(project_dir_for(source_dir)) as reopened:
+        assert [r.excluded for r in reopened.read_regions(_ORDINAL)] == [None, "art", None]
+    assert _excluded_column(_db(source_dir), _ORDINAL) == [None, "art", None]
+    assert _excluded_column(_db(source_dir), 0) == [None, None, None], "the bystander page"
+
+
+def test_write_regions_stores_an_art_exclusion_as_art(
+    source_dir: Path, one_bit_png: Callable[..., bytes]
+) -> None:
+    """The other writer: a region built `excluded="art"` is stored as `'art'`
+    and reads back equal - so `"art"` is not only a `set_excluded` value."""
+    regions = _three(one_bit_png, excluded="art")
+    with create_project(read_chapter(source_dir), project_dir_for(source_dir)) as writer:
+        writer.write_regions(_ORDINAL, regions)
+
+    assert _excluded_column(_db(source_dir), _ORDINAL) == [None, "art", None]
+    with open_project(project_dir_for(source_dir)) as reopened:
+        assert reopened.read_regions(_ORDINAL) == regions
+
+
+@pytest.mark.parametrize("reason", ["artwork", "Art", "art text"])
+def test_a_near_miss_of_art_is_refused_before_the_file_is_touched(
+    project: Project, source_dir: Path, one_bit_png: Callable[..., bytes], reason: str
+) -> None:
+    """MT-146 AC-2: "writing `"artwork"` raises before touching the file" - a
+    `ValueError` from the store's own check (the CHECK would raise
+    `sqlite3.IntegrityError` instead), with the file's bytes, every region row
+    and every line row exactly as they were."""
+    _seed(project, _three(one_bit_png))
+    db_path = _db(source_dir)
+    bytes_before = db_path.read_bytes()
+    regions_before = _every_region_row(db_path)
+    lines_before = _every_line_row(db_path)
+
+    with pytest.raises(ValueError, match=re.escape(repr(reason))):
+        project.set_excluded(_ORDINAL, 1, reason)  # type: ignore[arg-type]
+
+    assert db_path.read_bytes() == bytes_before
+    assert _every_region_row(db_path) == regions_before
+    assert _every_line_row(db_path) == lines_before
 
 
 # -- MT-119 AC-5: what a toggle does to the cleaned image ------------------------------

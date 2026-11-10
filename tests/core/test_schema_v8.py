@@ -83,9 +83,11 @@ _REGION_COLUMNS_V8: tuple[str, ...] = (
 )
 
 #: C-2's column declaration, whitespace collapsed to single spaces. The one
-#: literal both stored declarations are compared against.
+#: literal both stored declarations are compared against. **The current
+#: declaration, not version 8's**: a v7 file opened today walks on to the
+#: current version, so MT-146 (v13, which rebuilds `region`) adds `'art'` here.
 _EXCLUDED_DECLARATION = (
-    "excluded TEXT CHECK (excluded IS NULL OR excluded IN ('watermark', 'user'))"
+    "excluded TEXT CHECK (excluded IS NULL OR excluded IN ('watermark', 'user', 'art'))"
 )
 
 _SHAPE = "SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info('region')"
@@ -329,7 +331,7 @@ def _migrated(source_dir: Path, mask: bytes) -> Path:
         pass
 
     # 9 since MT-119 C-4: opening a v7 file runs the v8 -> v9 step as well.
-    assert _user_version(db_path) == 12, (
+    assert _user_version(db_path) == 13, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -368,9 +370,9 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"), mask)
 
     # MT-119 C-4 takes it to 9: `cleaned_page.erased`. `test_schema_v9.py` owns it.
-    assert SCHEMA_VERSION == 12
-    assert _user_version(db_path) == 12
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(12,)]
+    assert SCHEMA_VERSION == 13
+    assert _user_version(db_path) == 13
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
 
 
 def test_a_fresh_region_table_has_a_nullable_excluded_column_declared_last(
@@ -416,7 +418,7 @@ def test_a_version_seven_file_is_migrated_to_eight_when_it_is_opened(
     """AC-4: "`schema_version` is 8" - in both records of it."""
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"), mask)
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(12,)]  # MT-103 PO-3, MT-137
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]  # MT-103, MT-137, MT-146
     assert _columns(db_path) == _REGION_COLUMNS_V8
 
 
@@ -468,7 +470,7 @@ def test_every_region_a_version_seven_file_held_reads_back_included_and_unchange
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 12  # MT-103 PO-3, MT-137
+    assert _user_version(db_path) == 13  # MT-103 PO-3, MT-137, MT-146
     assert _raw(db_path, f"SELECT {v7_columns} FROM region ORDER BY id") == before
     assert _raw(db_path, "SELECT excluded FROM region ORDER BY id") == [(None,)] * 3
 
@@ -536,7 +538,7 @@ def test_the_v8_step_changes_only_the_region_table(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 12  # MT-103 PO-3, MT-137
+    assert _user_version(db_path) == 13  # MT-103 PO-3, MT-137, MT-146
     assert _raw(db_path, schema) == schema_before
     rows_after = rows()
     # The chapter row's `schema_version` is the one cell the step must change.

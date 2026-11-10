@@ -423,7 +423,7 @@ def _migrated(source_dir: Path) -> Path:
         pass
 
     # 11 since MT-137: opening a v9 file runs the v10 -> v11 step as well.
-    assert _user_version(db_path) == 12, (
+    assert _user_version(db_path) == 13, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -453,9 +453,10 @@ def test_this_build_writes_and_reads_the_current_schema_version(
 
     # MT-137 takes it to 11: `batch_job` holds its pages (`first_ordinal`, `last_ordinal`).
     # MT-115 takes it to 12: `chapter.consistency_run_id`, the consistency pass's marker.
-    assert SCHEMA_VERSION == 12
-    assert _user_version(db_path) == 12
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(12,)]
+    # MT-146 takes it to 13: `region.excluded` admits `art` (the table is rebuilt).
+    assert SCHEMA_VERSION == 13
+    assert _user_version(db_path) == 13
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
 
 
 def test_a_fresh_ledger_has_a_nullable_page_and_a_not_null_standard_pricing_column(
@@ -512,7 +513,7 @@ def test_a_version_nine_file_is_migrated_to_ten_when_it_is_opened(
     MT-137, whose v10 -> v11 step runs in the same open."""
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"))
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(12,)]  # MT-137
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]  # MT-137, MT-146
 
 
 def test_both_calls_a_version_nine_file_held_read_back_standard_on_their_page_at_their_cost(
@@ -661,10 +662,15 @@ def test_the_v10_step_changes_nothing_outside_the_objects_it_owns(
 ) -> None:
     """The step rebuilds `llm_call`, alters `chapter` and creates two tables.
     No other schema object changes, no row of any other table changes, and the
-    ledger's rows keep every v9 column's value."""
+    ledger's rows keep every v9 column's value.
+
+    Since MT-146 the open walks on to 13, whose step rebuilds `region` with a
+    third reason (C-1): its declaration is excluded from the comparison for
+    that reason, and `test_schema_v13.py` owns what that step does. Its rows
+    are still compared below."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _build_v9_file(source_dir)
-    owned = ", ".join(f"'{name}'" for name in _V10_OBJECTS)
+    owned = ", ".join(f"'{name}'" for name in (*_V10_OBJECTS, "region"))
     schema = f"SELECT type, name, sql FROM sqlite_master WHERE name NOT IN ({owned}) ORDER BY name"
     tables = ("page", "region", "line", "run", "glossary", "cleaned_page")
     v9_ledger = (
@@ -686,7 +692,7 @@ def test_the_v10_step_changes_nothing_outside_the_objects_it_owns(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 12  # MT-137: the v10 -> v11 step runs too
+    assert _user_version(db_path) == 13  # MT-137, MT-146: the v10 -> v11 step runs too
     assert _raw(db_path, schema) == before[0]
     assert rows() == before[1]
     assert _raw(db_path, v9_ledger) == before[2]
@@ -711,7 +717,7 @@ def test_a_version_two_file_migrates_all_the_way_to_the_current_version(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 12  # MT-137
+    assert _user_version(db_path) == 13  # MT-137, MT-146
     fresh = _fresh(_sources(tmp_path, png_bytes, "fresh", pages))
     for name in _V10_OBJECTS:
         assert _declaration(db_path, name) == _declaration(fresh, name), name
@@ -723,17 +729,17 @@ def test_a_version_two_file_migrates_all_the_way_to_the_current_version(
 # -- AC-1: a file one version newer than this build ----------------------------------
 
 
-def test_a_file_one_version_newer_than_twelve_is_refused(
+def test_a_file_one_version_newer_than_the_current_one_is_refused(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
-    """**AC-1** (MT-103), re-pinned by MT-137 and MT-115: a file one version
-    newer than this build - 13 now, 11 when MT-103 wrote it - raises
-    `SchemaTooNew` naming both numbers, and is left at 13 - the refusal
+    """**AC-1** (MT-103), re-pinned by MT-137, MT-115 and MT-146: a file one
+    version newer than this build - 14 now, 11 when MT-103 wrote it - raises
+    `SchemaTooNew` naming both numbers, and is left at 14 - the refusal
     migrates nothing."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _fresh(source_dir)
-    _raw(db_path, "PRAGMA user_version = 13")
-    assert _user_version(db_path) == 13
+    _raw(db_path, "PRAGMA user_version = 14")
+    assert _user_version(db_path) == 14
 
     with pytest.raises(SchemaTooNew) as excinfo:
         open_project(project_dir_for(source_dir))
@@ -741,20 +747,20 @@ def test_a_file_one_version_newer_than_twelve_is_refused(
     # Anchored to the words around each number: the message also carries the
     # file's path, and a bare `11` or `12` can match a pytest temp dir.
     message = str(excinfo.value)
-    assert re.search(r"\bversion 13\b", message), message
-    assert re.search(r"\bsupports 12\b", message), message
-    assert _user_version(db_path) == 13
+    assert re.search(r"\bversion 14\b", message), message
+    assert re.search(r"\bsupports 13\b", message), message
+    assert _user_version(db_path) == 14
 
 
 def test_the_same_file_at_the_current_version_opens(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
     """The control for the refusal above: a store that raised `SchemaTooNew`
-    for every file - or for every file at the current version, 12 since
-    MT-115 - would pass it."""
+    for every file - or for every file at the current version, 13 since
+    MT-146 - would pass it."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _fresh(source_dir)
-    assert _user_version(db_path) == 12
+    assert _user_version(db_path) == 13
 
     with open_project(project_dir_for(source_dir)) as project:
         assert len(project.pages()) == len(_SOURCE_PAGES)

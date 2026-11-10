@@ -452,9 +452,10 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     # MT-103 PO-3 takes it to 10: chapter-level ledger rows, `pricing`, two tables.
     # MT-137 takes it to 11: `batch_job` holds its pages (`first_ordinal`, `last_ordinal`).
     # MT-115 takes it to 12: `chapter.consistency_run_id`, the consistency pass's marker.
-    assert SCHEMA_VERSION == 12
-    assert _user_version(db_path) == 12
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(12,)]
+    # MT-146 takes it to 13: `region.excluded` admits `art` (the table is rebuilt).
+    assert SCHEMA_VERSION == 13
+    assert _user_version(db_path) == 13
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
 
 
 def test_the_ledger_stores_integer_micro_dollars_and_carries_no_real_cost_column(

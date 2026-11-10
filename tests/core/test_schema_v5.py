@@ -263,7 +263,7 @@ def _migrated(source_dir: Path) -> Path:
     # 6 since MT-017 C-5: opening a v4 file runs the v5 -> v6 step as well;
     # 7 since MT-065 C-2, which adds the v6 -> v7 step; 8 since MT-118 C-2,
     # which adds the v7 -> v8 step; 9 since MT-119 C-4 (v8 -> v9).
-    assert _user_version(db_path) == 12, (
+    assert _user_version(db_path) == 13, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -305,9 +305,9 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     # MT-065 C-2 takes it to 7: `cleaned_page`.
     # MT-118 C-2 takes it to 8: `region.excluded`.
     # MT-119 C-4 takes it to 9: `cleaned_page.erased`.
-    assert SCHEMA_VERSION == 12
-    assert _user_version(db_path) == 12
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(12,)]
+    assert SCHEMA_VERSION == 13
+    assert _user_version(db_path) == 13
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
 
 
 def test_a_fresh_glossary_table_has_the_two_new_columns_last_and_typed_as_c7_says(
@@ -342,7 +342,7 @@ def test_a_version_four_file_is_migrated_to_five_when_it_is_opened(
     """In place, on open, with no separate command - the fifth time."""
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"))
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(12,)]  # MT-103 PO-3, MT-137
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]  # MT-103, MT-137, MT-146
     assert _columns(db_path) == _GLOSSARY_COLUMNS_V5
 
 
@@ -429,5 +429,5 @@ def test_the_v5_step_leaves_every_other_table_alone(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 12
+    assert _user_version(db_path) == 13
     assert _raw(db_path, query) == before
