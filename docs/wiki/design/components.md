@@ -1049,6 +1049,14 @@ above. The High Contrast form is §10.4.
 > "edited, then returned to the proposal" | "translation failed: {reason}" |
 > "text will not fit the bubble" | "removed from translation".
 
+**A region the pipeline left as art text** *(MT-146)* reads `removed from
+translation, read as art text` in place of `removed from translation`, and its
+row shows the caption `Left as drawn: read as art text` in the row's caption
+slot (where a failed row's error text goes). Glyph, colour, marker and actions
+are the excluded row's, unchanged: only the caption says who left it out.
+Restore makes it an ordinary included region; Remove after that is the user's
+own act and is recorded as `user`.
+
 ### Row actions
 
 Always visible on the row when applicable — **never hover-only**:
