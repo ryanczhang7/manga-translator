@@ -2,7 +2,7 @@
 id: EPIC-02
 title: A chapter goes in and a chapter comes out
 status: todo
-stories: [MT-004, MT-005, MT-006, MT-064]
+stories: [MT-004, MT-005, MT-006, MT-064, MT-157]
 ---
 
 ## Goal
