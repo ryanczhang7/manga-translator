@@ -71,6 +71,7 @@ from mangatl.store.schema import (
     CORRECTION_DDL,
     DDL,
     LLM_CALL_DDL,
+    REGION_DDL,
 )
 
 __all__ = [
@@ -144,7 +145,11 @@ __all__ = [
 #: consistency pass completed, appended by `ALTER TABLE ... ADD COLUMN`. Every
 #: migrated chapter reads NULL, "the pass has not run" - the truth about a file
 #: no earlier version could run it on.
-SCHEMA_VERSION: int = 12
+#:
+#: Version 13 is MT-146's: `region.excluded` admits `art`, text drawn into the
+#: artwork that the pipeline leaves as drawn. The table is rebuilt for the
+#: CHECK; every row, and every reason it held, comes through unchanged.
+SCHEMA_VERSION: int = 13
 
 #: `page.status` as `create_project` writes it: read, hashed, nothing done yet.
 PAGE_PENDING: str = "pending"
@@ -569,6 +574,43 @@ DROP TABLE batch_job_v10;
 #: same `chapter` declaration. Every migrated chapter reads NULL.
 _MIGRATE_TO_V12: str = CHAPTER_CONSISTENCY_RUN_DDL
 
+#: Version 12 to version 13 (MT-146 C-1): `region.excluded`'s CHECK admits
+#: `art`. A rebuild, because SQLite cannot change a CHECK in place, from
+#: `schema.REGION_DDL` - the string a fresh file runs - so the migrated table is
+#: declared exactly as a fresh one.
+#:
+#: **`_MIGRATE_TO_V4`'s recipe, not `_MIGRATE_TO_V10`'s**: `region` is a
+#: *parent*. `line.region_id` references it `ON DELETE CASCADE`, so the plain
+#: rename-copy-drop that is safe for `llm_call` and `batch_job` would, without
+#: `foreign_keys = OFF`, repoint `line` at `region_v12` and cascade-delete every
+#: line on the `DROP` - with `foreign_key_check` clean afterwards - and, without
+#: `legacy_alter_table = ON`, leave `line` naming a table that no longer exists.
+#: `_MIGRATE_TO_V4`'s note has the measurement; both pragmas are the first
+#: statements inside the script for its reason, and `_migrate_to_current` puts
+#: them back after its commit.
+#:
+#: Every column is copied by name and every `id` kept, so `line.region_id` still
+#: points at the same rows. `region` has no index beyond its `UNIQUE` key's, which
+#: the shared string recreates.
+_MIGRATE_TO_V13 = (
+    """
+PRAGMA foreign_keys = OFF;
+PRAGMA legacy_alter_table = ON;
+
+ALTER TABLE region RENAME TO region_v12;
+"""
+    + REGION_DDL
+    + """
+INSERT INTO region (id, page_id, reading_index, polygon, mask_blob, kind,
+                    confidence, merged_from, excluded)
+SELECT id, page_id, reading_index, polygon, mask_blob, kind,
+       confidence, merged_from, excluded
+FROM region_v12;
+
+DROP TABLE region_v12;
+"""
+)
+
 #: The migration chain, in order, each step keyed on the version it *produces*.
 #: A step runs when the file found on disk is older than that.
 #:
@@ -590,6 +632,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (10, _MIGRATE_TO_V10),
     (11, _MIGRATE_TO_V11),
     (12, _MIGRATE_TO_V12),
+    (13, _MIGRATE_TO_V13),
 )
 
 

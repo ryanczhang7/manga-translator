@@ -454,7 +454,8 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     # MT-103 PO-3 takes it to 10: chapter-level ledger rows, `pricing`, two tables.
     # MT-137 takes it to 11: `batch_job` holds its pages (`first_ordinal`, `last_ordinal`).
     # MT-115 takes it to 12: `chapter.consistency_run_id`, the consistency pass's marker.
-    assert SCHEMA_VERSION == 12
+    # MT-146 takes it to 13: `region.excluded` admits `art` (the table is rebuilt).
+    assert SCHEMA_VERSION == 13
     assert _user_version(db_path) == SCHEMA_VERSION
     assert _raw(db_path, "SELECT schema_version FROM chapter") == [(SCHEMA_VERSION,)]
 
@@ -492,12 +493,14 @@ def test_the_chapter_ddl_is_its_own_string_with_two_callers(fresh: Project) -> N
 
     # MT-065 C-2 adds `CLEANED_PAGE_DDL`, the second shared definition.
     # MT-119 C-4 adds `CLEANED_ERASED_DDL`, shared by a fresh file and the v9 step.
+    # MT-146 C-1 adds `REGION_DDL`, shared by a fresh file and the v13 rebuild.
     assert module.__all__ == [
         "CHAPTER_DDL",
         "CLEANED_ERASED_DDL",
         "CLEANED_PAGE_DDL",
         "DDL",
         "LLM_CALL_DDL",
+        "REGION_DDL",
     ]
     assert "budget_ceiling_micro_usd" in module.CHAPTER_DDL
     assert "budget_ceiling_usd" not in module.DDL, (

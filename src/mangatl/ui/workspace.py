@@ -261,6 +261,11 @@ _STATUS_PHRASES: dict[LineStatus, str] = {
     "excluded": "removed from translation",
 }
 
+#: MT-146: the phrase that replaces "removed from translation" for a region the
+#: pipeline left as art text, and the caption its row shows (Design notes D-1).
+_ART_PHRASE = "removed from translation, read as art text"
+_ART_CAPTION = "Left as drawn: read as art text"
+
 #: `components.md` §3's primary footer action, and its §1 loading state.
 _RENDER_TEXT = "Render pages"
 _RENDER_LOADING_TEXT = "\N{MIDDLE DOT}" * 3
@@ -647,6 +652,11 @@ class PageStrip(QListWidget):
             self.item(index).setSizeHint(row.sizeHint())
 
 
+def _left_as_art(line: Line) -> bool:
+    """MT-146 C-2: the line is out of translation because it was read as art."""
+    return line.status == "excluded" and line.excluded == "art"
+
+
 def _row_accessible_text(ordinal: int, total: int, japanese: str | None, line: Line) -> str:
     """`components.md` §5: the row's accessible name, ordinal first, status last.
 
@@ -660,7 +670,12 @@ def _row_accessible_text(ordinal: int, total: int, japanese: str | None, line: L
     else:
         en = effective_text(line)
     reason = failure_reason(line)
-    phrase = f"translation failed: {reason}" if reason is not None else _STATUS_PHRASES[line.status]
+    if reason is not None:
+        phrase = f"translation failed: {reason}"
+    elif _left_as_art(line):
+        phrase = _ART_PHRASE
+    else:
+        phrase = _STATUS_PHRASES[line.status]
     return f"Bubble {ordinal} of {total}. Japanese: {ja}. English: {en}. {phrase}."
 
 
@@ -822,7 +837,12 @@ class TranslationRow(QWidget):
         self.retry_button.setVisible(status == "failed")
         self.exclude_button.setVisible(not excluded)
         self.restore_button.setVisible(excluded)
-        caption = self._save_error or failure_reason(self.editor.line)
+        line = self.editor.line
+        caption = (
+            self._save_error
+            or failure_reason(line)
+            or (_ART_CAPTION if _left_as_art(line) else None)
+        )
         self.error_caption.setText(caption or "")
         self.error_caption.setVisible(caption is not None)
         self.rendered.emit()

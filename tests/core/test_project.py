@@ -482,7 +482,8 @@ def test_the_schema_version_and_the_two_page_status_values_are_the_pinned_ones()
     # MT-103 PO-3 takes it to 10: chapter-level ledger rows, `pricing`, two tables.
     # MT-137 takes it to 11: `batch_job` holds its pages (`first_ordinal`, `last_ordinal`).
     # MT-115 takes it to 12: `chapter.consistency_run_id`, the consistency pass's marker.
-    assert SCHEMA_VERSION == 12
+    # MT-146 takes it to 13: `region.excluded` admits `art` (the table is rebuilt).
+    assert SCHEMA_VERSION == 13
     assert PAGE_PENDING == "pending"
     assert PAGE_STALE == "stale"
     assert PAGE_PENDING != PAGE_STALE

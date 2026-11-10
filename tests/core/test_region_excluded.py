@@ -6,7 +6,8 @@ this story adds one field and pins it here, beside its own round trip
 and so that, while the field does not exist, the older suites keep running.
 
 `None` is "included". `"watermark"` is the detector's rule (MT-121) and `"user"`
-the workspace's (MT-120); nothing else is a reason, and the store's CHECK
+the workspace's (MT-120); MT-146 adds `"art"`, the page answer's call that a
+region is drawn art text (MT-147). Nothing else is a reason, and the store's CHECK
 (`test_schema_v8.py`) refuses anything else too. The domain refuses it first, so
 the error names the field rather than surfacing as an `IntegrityError` two
 layers away from its cause - `region.py`'s own reason for validating.
@@ -21,6 +22,7 @@ anything the architecture forbids it, and a test of it should not either.
 from __future__ import annotations
 
 import dataclasses
+import re
 from collections.abc import Callable
 from typing import get_args
 
@@ -45,17 +47,20 @@ def _region(one_bit_png: Callable[..., bytes], **overrides: object) -> RawRegion
 # -- the exported names (C-1) ------------------------------------------------------
 
 
-def test_the_two_exclusion_reasons_are_exported_as_a_constant_and_a_literal_type() -> None:
+def test_the_exclusion_reasons_are_exported_as_a_constant_and_a_literal_type() -> None:
     """C-1: `EXCLUSION_REASONS` is the tuple the validation and the store's
     `set_excluded` both check against, in this order, and `ExclusionReason` is
-    the `Literal` naming the same two values. `__all__` names both.
+    the `Literal` naming the same values. `__all__` names both.
+
+    MT-146 AC-1 appends `"art"` - the page answer's call that a region is
+    drawn art text (MT-147 writes it) - keeping the order of the first two.
 
     Imported inside the test so that, while the names do not exist, only this
     test fails at the import and every other test here fails on its own line."""
     import mangatl.domain.region as module
 
-    assert module.EXCLUSION_REASONS == ("watermark", "user")
-    assert get_args(module.ExclusionReason) == ("watermark", "user")
+    assert module.EXCLUSION_REASONS == ("watermark", "user", "art")
+    assert get_args(module.ExclusionReason) == ("watermark", "user", "art")
     # MT-119 C-1 adds `included`, the one filter; `test_region.py` pins it.
     assert sorted(module.__all__) == [
         "EXCLUSION_REASONS",
@@ -82,11 +87,12 @@ def test_an_explicit_none_is_accepted_as_included(one_bit_png: Callable[..., byt
     assert _region(one_bit_png, excluded=None).excluded is None
 
 
-@pytest.mark.parametrize("reason", ["watermark", "user"])
+@pytest.mark.parametrize("reason", ["watermark", "user", "art"])
 def test_each_exclusion_reason_is_accepted_and_reads_back_as_given(
     one_bit_png: Callable[..., bytes], reason: str
 ) -> None:
-    """AC-1: both reasons, each read back exactly."""
+    """AC-1: every reason, each read back exactly. `"art"` is MT-146's
+    (`RawRegion(..., excluded="art")` constructs)."""
     assert _region(one_bit_png, excluded=reason).excluded == reason
 
 
@@ -104,6 +110,12 @@ def test_each_exclusion_reason_is_accepted_and_reads_back_as_given(
         "none",  # the word, not the value
         "bubble",  # a `kind`, not a reason
         "excluded",
+        # MT-146: the third reason's near misses - a check widened to a prefix
+        # or made case-blind rather than to the one value admits these.
+        "artwork",
+        "Art",
+        "art ",
+        "art text",
     ],
 )
 def test_a_reason_outside_the_two_is_refused_naming_the_field(
@@ -112,6 +124,14 @@ def test_a_reason_outside_the_two_is_refused_naming_the_field(
     """AC-1: "given any other string, then `ValueError` names `excluded`"."""
     with pytest.raises(ValueError, match=r"\bexcluded\b"):
         _region(one_bit_png, excluded=reason)
+
+
+def test_the_refusal_names_every_allowed_reason(one_bit_png: Callable[..., bytes]) -> None:
+    """MT-146 AC-1: "any other string still raises naming the allowed values" -
+    all three, in `EXCLUSION_REASONS`' order, so a message still spelling the
+    old pair is caught."""
+    with pytest.raises(ValueError, match=re.escape("('watermark', 'user', 'art')")):
+        _region(one_bit_png, excluded="artwork")
 
 
 def test_the_refusal_quotes_the_value_it_refused(one_bit_png: Callable[..., bytes]) -> None:

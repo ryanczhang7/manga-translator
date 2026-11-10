@@ -885,3 +885,146 @@ def test_enter_on_the_canvas_lands_on_a_removed_row_without_beginning_to_edit(
     assert current == SECOND
     assert row.editor.text() == "Fine.", "typing after Enter changed a removed line"
     assert row.editor.status == "excluded"
+
+
+# =============================================================================
+# MT-146 - an `art` exclusion: the pipeline's call, shown as excluded with a
+# caption that says who made it (Design notes D-1..D-3, components.md §5)
+# =============================================================================
+
+#: Settled by the Lead Designer (MT-146 D-1, D-2; C-2): read out, never designed here.
+ART_CAPTION = "Left as drawn: read as art text"
+ART_PHRASE = "removed from translation, read as art text"
+
+
+def _art_page(qtbot, project: Project) -> Workspace:  # type: ignore[no-untyped-def]
+    """Bubble 2 excluded as `art` through the store BEFORE the workspace loads -
+    the pipeline's write is MT-147's, so the store stands in for it (C-4)."""
+    project.set_excluded(0, SECOND, "art")
+    return _showing(qtbot, project)
+
+
+def test_an_art_excluded_region_shows_the_excluded_state_mt120_designed(
+    qtbot,  # type: ignore[no-untyped-def]
+    project: Project,
+    chapter_dir: Path,
+) -> None:
+    """AC-5: an excluded row in every respect - status, glyph, read-only
+    editor, Restore the only action, the canvas marker - with `art` on disk."""
+    window = _art_page(qtbot, project)
+    row = _row(window, SECOND)
+
+    assert _excluded_on_disk(chapter_dir, 0) == [None, "art", None, None]
+    assert row.editor.status == "excluded"
+    assert row.editor.isReadOnly(), "an art-excluded line's editor still accepts typing"
+    assert row.gutter.text() == EXCLUDED_GLYPH
+    assert row.gutter.property("status") == "excluded"
+    assert _visible_actions(row) == {RESTORE}
+    assert window.page_canvas.markers[SECOND].state() == MarkerState.EXCLUDED
+
+
+def test_an_art_excluded_row_shows_the_left_as_drawn_caption(
+    qtbot,  # type: ignore[no-untyped-def]
+    project: Project,
+) -> None:
+    """AC-5: the row's caption slot reads exactly `Left as drawn: read as art
+    text`, and is shown - a caption set but hidden says nothing to anyone."""
+    window = _art_page(qtbot, project)
+    row = _row(window, SECOND)
+
+    assert row.error_caption.text() == ART_CAPTION
+    assert row.error_caption.isVisibleTo(row), "the art caption is set but not shown"
+
+
+def test_an_art_excluded_rows_accessible_name_ends_read_as_art_text(
+    qtbot,  # type: ignore[no-untyped-def]
+    project: Project,
+) -> None:
+    """AC-5: "its accessible name ends `removed from translation, read as art
+    text.`" - anchored on the `. ` before it, so the status phrase is the whole
+    last sentence and not a tail of something longer."""
+    window = _art_page(qtbot, project)
+
+    name = _accessible_name(window, SECOND)
+
+    assert name.startswith("Bubble 2 of 4. "), name
+    assert name.endswith(f". {ART_PHRASE}."), name
+
+
+@pytest.mark.parametrize("reason", ["user", "watermark"])
+def test_a_user_or_watermark_exclusion_shows_no_caption_and_the_plain_phrase(
+    qtbot,  # type: ignore[no-untyped-def]
+    project: Project,
+    reason: str,
+) -> None:
+    """AC-5's control (C-2): only `art` carries the caption and the longer
+    phrase. A row that captioned every exclusion, or read every one as art,
+    fails here."""
+    project.set_excluded(0, SECOND, reason)  # type: ignore[arg-type]
+    window = _showing(qtbot, project)
+    row = _row(window, SECOND)
+
+    assert row.editor.status == "excluded", "precondition: the region is not excluded"
+    assert not row.error_caption.isVisibleTo(row), f"a {reason} exclusion shows a caption"
+    assert row.error_caption.text() == ""
+    name = _accessible_name(window, SECOND)
+    assert name.endswith(f". {EXCLUDED_PHRASE}."), name
+    assert "art text" not in name, name
+
+
+def test_a_standalone_row_for_an_art_excluded_line_shows_the_caption(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """The rendering on its own, without the store: the shape
+    `read_review_lines` gives an art-excluded proposal (C-1, C-2). Its control
+    is `_excluded_line()`, a `user` exclusion, which shows no caption."""
+    art = _standalone(qtbot, Line(0, "二", "Fine.", None, "excluded", None, excluded="art"))
+    user = _standalone(qtbot, _excluded_line())
+
+    assert (art.error_caption.text(), art.error_caption.isVisibleTo(art)) == (ART_CAPTION, True)
+    assert user.error_caption.isVisibleTo(user) is False
+
+
+def test_restoring_an_art_region_clears_it_to_included_exactly_as_for_user(
+    qtbot,  # type: ignore[no-untyped-def]
+    project: Project,
+    chapter_dir: Path,
+) -> None:
+    """AC-5's last sentence: Restore clears `art` to included - stored NULL -
+    and the row is the proposal it was, with no caption left behind and the
+    name `test_a_removed_rows_accessible_name_ends_with_removed_from_translation`
+    pins for a restored `user` exclusion, character for character."""
+    window = _art_page(qtbot, project)
+    row = _row(window, SECOND)
+
+    _restore(window, SECOND)
+
+    assert project.read_regions(0)[SECOND].excluded is None
+    assert _excluded_on_disk(chapter_dir, 0) == [None, None, None, None]
+    assert row.editor.status == "proposed"
+    assert not row.editor.isReadOnly()
+    assert _visible_actions(row) == {"Accept", REMOVE}
+    assert window.page_canvas.markers[SECOND].state() == MarkerState.IDLE
+    assert not row.error_caption.isVisibleTo(row), "the art caption outlived the Restore"
+    assert _accessible_name(window, SECOND) == (
+        "Bubble 2 of 4. Japanese: 二. English: Fine.. machine proposal."
+    )
+
+
+def test_remove_after_restoring_an_art_region_records_the_users_exclusion(
+    qtbot,  # type: ignore[no-untyped-def]
+    project: Project,
+    chapter_dir: Path,
+) -> None:
+    """AC-6 / D-3: after a Restore the region is the user's, and removing it
+    again is the user's act - stored `user`, never `art` (only the pipeline
+    writes `art`) - so the row shows the plain removed state with no caption."""
+    window = _art_page(qtbot, project)
+    _restore(window, SECOND)
+    row = _row(window, SECOND)
+
+    _remove(window, SECOND)
+
+    assert project.read_regions(0)[SECOND].excluded == "user"
+    assert _excluded_on_disk(chapter_dir, 0) == [None, "user", None, None]
+    assert row.editor.status == "excluded"
+    assert not row.error_caption.isVisibleTo(row), "a user's Remove shows the art caption"
+    assert _accessible_name(window, SECOND).endswith(f". {EXCLUDED_PHRASE}.")
