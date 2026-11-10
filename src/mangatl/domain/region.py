@@ -29,15 +29,16 @@ from typing import Literal
 __all__ = ["EXCLUSION_REASONS", "ExclusionReason", "RawRegion", "included"]
 
 #: Why a region is out of translation, cleaning and typesetting (MT-118 C-1).
-#: `watermark` is the detector's rule (MT-121), `user` the workspace's (MT-120).
+#: `watermark` is the detector's rule (MT-121), `user` the workspace's (MT-120),
+#: `art` the pipeline's for text drawn into the artwork (MT-146).
 #: A plain assignment, not a PEP 695 `type` statement: `typing.get_args` sees
 #: through this spelling and returns `()` for the other.
-ExclusionReason = Literal["watermark", "user"]
+ExclusionReason = Literal["watermark", "user", "art"]
 
 #: The values `RawRegion.excluded` may take besides `None`, in this order. The
 #: domain validation and `store.project.Project.set_excluded` both check against
-#: it, and `store/schema.py`'s CHECK spells the same two.
-EXCLUSION_REASONS: tuple[ExclusionReason, ...] = ("watermark", "user")
+#: it, and `store/schema.py`'s CHECK spells the same three.
+EXCLUSION_REASONS: tuple[ExclusionReason, ...] = ("watermark", "user", "art")
 
 #: The 8 bytes every PNG file begins with. A mask that does not start with them
 #: is not an image, whatever else it may be.

@@ -61,7 +61,14 @@ supplies it, because a writer forced to invent a value stores a lie:
 
 from __future__ import annotations
 
-__all__ = ["CHAPTER_DDL", "CLEANED_ERASED_DDL", "CLEANED_PAGE_DDL", "DDL", "LLM_CALL_DDL"]
+__all__ = [
+    "CHAPTER_DDL",
+    "CLEANED_ERASED_DDL",
+    "CLEANED_PAGE_DDL",
+    "DDL",
+    "LLM_CALL_DDL",
+    "REGION_DDL",
+]
 
 #: The chapter table, as its own string because **two** callers create it
 #: (MT-044 C-12, for MT-012 RED-A5's reason): `DDL` below, for a fresh file, and
@@ -279,6 +286,33 @@ CREATE TABLE correction (
 );
 """
 
+#: The region table, as its own string because **two** callers create it
+#: (MT-146 C-1, `CHAPTER_DDL`'s reason): `DDL` below, for a fresh file, and
+#: `store.project._MIGRATE_TO_V13`, which rebuilds it in a version 12 file so
+#: that its CHECK admits `art`. One definition, so a migrated `region` is
+#: declared exactly as a fresh one. Its comment block travels with it.
+REGION_DDL: str = """
+-- `UNIQUE (page_id, reading_index)` is a schema dependency of the region
+-- writer, not only a constraint: the upsert form
+-- `INSERT ... ON CONFLICT (page_id, reading_index) DO UPDATE` raises
+-- `OperationalError: ON CONFLICT clause does not match any PRIMARY KEY or
+-- UNIQUE constraint` unless a unique key covers exactly these columns
+-- (measured, including against a key on the wrong columns). A later story that
+-- "tidies" this into a plain index breaks the writer, not just the constraint.
+CREATE TABLE region (
+    id            INTEGER PRIMARY KEY,
+    page_id       INTEGER NOT NULL REFERENCES page(id) ON DELETE CASCADE,
+    reading_index INTEGER NOT NULL,
+    polygon       TEXT    NOT NULL,
+    mask_blob     BLOB    NOT NULL,
+    kind          TEXT    NOT NULL,
+    confidence    REAL    NOT NULL,
+    merged_from   TEXT,
+    excluded      TEXT CHECK (excluded IS NULL OR excluded IN ('watermark', 'user', 'art')),
+    UNIQUE (page_id, reading_index)
+);
+"""
+
 #: Every table of `architecture.md` §4, its foreign keys, and the UNIQUE keys
 #: `store.project` and the stage writers depend on. Executed with
 #: `Connection.executescript`, so statements are separated by semicolons and
@@ -313,27 +347,9 @@ CREATE TABLE page (
     UNIQUE (chapter_id, ordinal),
     UNIQUE (chapter_id, filename)
 );
-
--- `UNIQUE (page_id, reading_index)` is a schema dependency of the region
--- writer, not only a constraint: the upsert form
--- `INSERT ... ON CONFLICT (page_id, reading_index) DO UPDATE` raises
--- `OperationalError: ON CONFLICT clause does not match any PRIMARY KEY or
--- UNIQUE constraint` unless a unique key covers exactly these columns
--- (measured, including against a key on the wrong columns). A later story that
--- "tidies" this into a plain index breaks the writer, not just the constraint.
-CREATE TABLE region (
-    id            INTEGER PRIMARY KEY,
-    page_id       INTEGER NOT NULL REFERENCES page(id) ON DELETE CASCADE,
-    reading_index INTEGER NOT NULL,
-    polygon       TEXT    NOT NULL,
-    mask_blob     BLOB    NOT NULL,
-    kind          TEXT    NOT NULL,
-    confidence    REAL    NOT NULL,
-    merged_from   TEXT,
-    excluded      TEXT CHECK (excluded IS NULL OR excluded IN ('watermark', 'user')),
-    UNIQUE (page_id, reading_index)
-);
-
+"""
+    + REGION_DDL
+    + """
 -- `ocr_empty` is MT-010's column and the reason this schema is at version 2. It
 -- means "the model emitted no tokens", NOT "source_ja is empty" (MT-010 C-5):
 -- a specials-only decode is a successful read of nothing printable and stores
