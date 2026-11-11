@@ -43,11 +43,11 @@ not exist, so no assertion here has run against it):
 
 **Entry 6 is the case AC-4 describes**: regions 5 and 6 carry the same
 Japanese, so the slipped entry 6 echoes its own listing exactly and keeps its
-English - which is "It hurts!!", correct for region 6. AC-3 as written says
-regions 4-7 all lose their proposal; with p017's Japanese no echo check can
-drop region 6 without also breaking AC-4. That clause is **escalated** in the
-handoff rather than resolved here: the AC-3 test below asserts regions 4, 5
-and 7 dropped and 0-3 and 8 kept, and says nothing about region 6.
+English - which is "It hurts!!", correct for region 6. AC-3 as first written
+said regions 4-7 all lose their proposal; with p017's Japanese no echo check
+can drop region 6 without also breaking AC-4. Amendment A-1 settled it: AC-3
+now says regions 4, 5 and 7 have no proposal and region 6 keeps the English it
+carries. The AC-3 tests below assert exactly that, region 6 included.
 
 **The module is read lazily** (`_LazyModule`, the `test_gemini_batch.py`
 pattern): a top-level import of a module that does not exist is a collection
@@ -447,9 +447,9 @@ def test_regions_0_to_3_and_8_whose_echoes_match_keep_their_english(echo: Any) -
 
 
 def test_the_shifted_entries_4_5_and_7_have_no_proposal_and_are_misaligned(echo: Any) -> None:
-    """AC-3, the part C-1a can satisfy: the three shifted entries whose echo is
-    another region's text lose their English and are reported misaligned.
-    Region 6 is the escalated clause - see the module docstring."""
+    """AC-3 (as amended, A-1): the three shifted entries whose echo is another
+    region's text lose their English and are reported misaligned. Region 6 is
+    pinned separately, by the test that follows."""
     checked = echo.checked_lines(_slipped_p017(echo), list(_P017))
 
     assert not {4, 5, 7} & set(checked.lines), f"kept: {sorted(checked.lines)}"
@@ -457,8 +457,22 @@ def test_the_shifted_entries_4_5_and_7_have_no_proposal_and_are_misaligned(echo:
     assert not {0, 1, 2, 3, 8} & checked.misaligned
 
 
+def test_the_slipped_region_6_keeps_the_english_its_entry_carries_and_is_not_misaligned(
+    echo: Any,
+) -> None:
+    """AC-3 (as amended, A-1): entry 6 carries region 5's `ja` and English, and
+    that `ja` is region 6's own listing, so region 6 keeps exactly "It hurts!!"
+    - region 5's English, correct for it - and is not reported misaligned."""
+    checked = echo.checked_lines(_slipped_p017(echo), list(_P017))
+
+    assert checked.lines.get(6) == _P017_EN[5] == "It hurts!!", (
+        f"region 6 got {checked.lines.get(6)!r}"
+    )
+    assert 6 not in checked.misaligned, f"misaligned: {sorted(checked.misaligned)}"
+
+
 def test_in_the_fixture_the_slipped_entry_6_echoes_its_own_regions_text() -> None:
-    """The fact behind the escalation, asserted on the fixture alone: entry 6
+    """The fact behind amendment A-1, asserted on the fixture alone: entry 6
     carries region 5's `ja`, which is region 6's listing character for
     character, so no comparison of `ja` with the listing can see the slip
     there - and the English it carries is the right English for region 6."""
