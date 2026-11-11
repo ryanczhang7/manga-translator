@@ -384,7 +384,7 @@ def _migrated(source_dir: Path) -> Path:
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 13, (
+    assert _user_version(db_path) == 14, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -399,9 +399,9 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     """MT-115's bump, in both records of it (MT-005 PO-7)."""
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"))
 
-    assert SCHEMA_VERSION == 13
-    assert _user_version(db_path) == 13
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
+    assert SCHEMA_VERSION == 14
+    assert _user_version(db_path) == 14
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(14,)]
 
 
 def test_a_fresh_chapter_has_a_nullable_consistency_run_id_last(
@@ -518,7 +518,7 @@ def test_a_version_eleven_file_is_migrated_to_twelve_when_it_is_opened(
 ) -> None:
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"))
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(14,)]
 
 
 def test_a_fresh_file_and_a_migrated_one_store_the_same_schema(
@@ -587,13 +587,13 @@ def test_the_v12_step_changes_nothing_but_the_new_column_and_the_version(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 13
+    assert _user_version(db_path) == 14
     assert _raw(db_path, schema) == before[0]
     assert rows() == before[1]
     assert _raw(db_path, chapter) == before[2]
 
 
-# -- a file one version newer (13 when written; MT-146 moved it to 14) ----------------
+# -- a file one version newer (13 when written; MT-146 moved it to 14, MT-149 to 15) ---
 
 
 def test_a_file_one_version_newer_than_the_current_one_is_refused(
@@ -601,15 +601,15 @@ def test_a_file_one_version_newer_than_the_current_one_is_refused(
 ) -> None:
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _fresh(source_dir)
-    _raw(db_path, "PRAGMA user_version = 14")
+    _raw(db_path, "PRAGMA user_version = 15")
 
     with pytest.raises(SchemaTooNew) as excinfo:
         open_project(project_dir_for(source_dir))
 
     message = str(excinfo.value)
-    assert re.search(r"\bversion 14(?!\d)", message), message
-    assert re.search(r"\bsupports 13(?!\d)", message), message
-    assert _user_version(db_path) == 14
+    assert re.search(r"\bversion 15(?!\d)", message), message
+    assert re.search(r"\bsupports 14(?!\d)", message), message
+    assert _user_version(db_path) == 15
 
 
 def test_the_same_file_at_the_current_version_opens(
@@ -617,8 +617,8 @@ def test_the_same_file_at_the_current_version_opens(
 ) -> None:
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _fresh(source_dir)
-    assert _user_version(db_path) == 13
+    assert _user_version(db_path) == 14
 
     with open_project(project_dir_for(source_dir)) as project:
         assert len(project.pages()) == len(_SOURCE_PAGES)
-    assert _user_version(db_path) == 13
+    assert _user_version(db_path) == 14

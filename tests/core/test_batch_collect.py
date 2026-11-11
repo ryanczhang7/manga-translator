@@ -1024,3 +1024,62 @@ def test_a_postlude_failure_does_not_escape_collect_volume(world: _World) -> Non
         _collect_with(world, job, _Collector(_all_answered()), _Step(RuntimeError("boom")))
     except RuntimeError as error:  # pragma: no cover - the failure being pinned
         pytest.fail(f"the postlude's exception escaped collect_volume: {error!r}")
+
+
+# -- MT-149 AC-5: a batch page whose answer did not line up ----------------------
+
+
+def _one_misaligned() -> Any:
+    """Page 0's answer with its region 1 found misaligned by the adapter's
+    check: the English kept only for region 0, region 1 in `misaligned`. Both
+    keyed by reading index already (MT-110 PO-2, C-1a). Built here, not at
+    module level, so in RED the missing field fails these tests and not the
+    file's collection."""
+    result_0 = dataclasses.replace(_RESULTS[0], lines={0: "Kenji, wait"}, misaligned=frozenset({1}))
+    return _results({0: result_0, 1: _RESULTS[1], 2: _RESULTS[2]})
+
+
+def test_a_collected_page_stores_only_the_accepted_lines_of_a_misaligned_answer(
+    world: _World,
+) -> None:
+    """AC-5, the batch case: `pipeline/batch.py` passes `result.lines` and
+    `result.misaligned` to `write_proposed` - region 1's English never reaches
+    the store, and the other pages are written as before."""
+    job = world.job()
+
+    world.collect(job, _Collector(_one_misaligned()))
+
+    assert world.proposed() == {**_PROPOSED_AFTER_ALL, 0: ("Kenji, wait", None)}
+
+
+def test_a_misaligned_batch_region_reads_failed_with_the_line_up_reason(world: _World) -> None:
+    """AC-5: once the page is done, region 1 of page 0 reads `failed` with
+    `the translation did not line up with this bubble`; page 2's omitted
+    `ocr_empty` region keeps its own reason, so the two are told apart."""
+    job = world.job()
+
+    world.collect(job, _Collector(_one_misaligned()))
+
+    page_0 = [line for line in read_review_lines(world.project, 0) if line is not None]
+    assert [(line.status, line.misaligned) for line in page_0] == [
+        ("proposed", False),
+        ("failed", True),
+    ]
+    assert failure_reason(page_0[1]) == "the translation did not line up with this bubble"
+    page_2 = [line for line in read_review_lines(world.project, 2) if line is not None]
+    assert failure_reason(page_2[1]) == "no text was read in this bubble"
+
+
+def test_a_batch_page_with_nothing_misaligned_flags_nothing(world: _World) -> None:
+    """The control: the unchanged answers flag no line on any page."""
+    job = world.job()
+
+    world.collect(job, _Collector(_all_answered()))
+
+    flags = [
+        line.misaligned
+        for n in range(len(_SOURCE_PAGES))
+        for line in read_review_lines(world.project, n)
+        if line is not None
+    ]
+    assert flags == [False] * 5

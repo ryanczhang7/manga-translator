@@ -44,23 +44,54 @@ from mangatl.translate.parse import UnknownRegionIndex, parse_lines
 #: actual reading indices"), and `fixtures/translate/README.md` tabulates them.
 _REGION_INDICES: tuple[int, ...] = (0, 1, 2, 3)
 
-#: What a correct parser returns for `well-formed.json`: **int** keys (C-4).
-_EXPECTED: dict[int, str] = {
-    0: "As if a demon would move at a human's say-so.",
-    1: "...I see.",
-    2: "Why are you here?",
-    3: "Let's go.",
+#: The fixture page's listing (`fixtures/translate/README.md`), which every
+#: entry of the recorded answers echoes as its `ja` (MT-149).
+_JA: dict[int, str] = {
+    0: "醜鬼が人間の言う通りに動いたりね",
+    1: "……なるほど",
+    2: "どうして君がここに",
+    3: "行くぞ",
+}
+
+#: What a correct parser returns for `well-formed.json`: **int** keys (C-4),
+#: each an answer entry, read here as its `(ja, en)` pair (MT-149 C-1: the
+#: return type is `dict[int, AnswerEntry]`; see `_pairs`).
+_EXPECTED: dict[int, tuple[str, str]] = {
+    0: (_JA[0], "As if a demon would move at a human's say-so."),
+    1: (_JA[1], "...I see."),
+    2: (_JA[2], "Why are you here?"),
+    3: (_JA[3], "Let's go."),
 }
 
 #: What the position bug returns for the same fixture, whose keys arrive in the
 #: order 2, 0, 3, 1. Written out so the failure says which corruption happened
 #: rather than only that two dicts differ.
-_POSITION_BUG: dict[int, str] = {
-    0: "Why are you here?",
-    1: "As if a demon would move at a human's say-so.",
-    2: "Let's go.",
-    3: "...I see.",
+_POSITION_BUG: dict[int, tuple[str, str]] = {
+    0: (_JA[2], "Why are you here?"),
+    1: (_JA[0], "As if a demon would move at a human's say-so."),
+    2: (_JA[3], "Let's go."),
+    3: (_JA[1], "...I see."),
 }
+
+
+def _pairs(lines: object) -> dict[object, tuple[object, object]]:
+    """`{key: (entry.ja, entry.en)}` - what MT-149's `dict[int, AnswerEntry]`
+    says, without importing `AnswerEntry` at the top of this file (in RED
+    `mangatl.domain.echo` does not exist, and a top-level import would be a
+    collection error that takes the whole session dark). `getattr` with a
+    default, so a parser still returning bare strings fails on the assertion,
+    showing `(None, None)`, rather than on an `AttributeError`.
+    `test_each_parsed_entry_is_an_answer_entry` pins the type itself."""
+    assert isinstance(lines, dict), f"parse returned a {type(lines).__name__}, not a dict"
+    return {
+        key: (getattr(entry, "ja", None), getattr(entry, "en", None))
+        for key, entry in lines.items()
+    }
+
+
+def _entry(ja: str, en: str) -> str:
+    """One answer entry as JSON text, Japanese unescaped."""
+    return json.dumps({"ja": ja, "en": en}, ensure_ascii=False)
 
 
 # -- AC-4 ----------------------------------------------------------------------
@@ -78,7 +109,7 @@ def test_each_region_gets_the_line_keyed_by_its_own_index_not_its_position(
     the region order can distinguish a parser that honours it from one that
     zips. This fixture's does, on all four regions.
     """
-    lines = parse_lines(fake_message(response_body("well-formed")), _REGION_INDICES)
+    lines = _pairs(parse_lines(fake_message(response_body("well-formed")), _REGION_INDICES))
 
     assert lines == _EXPECTED
     assert lines != _POSITION_BUG, (
@@ -98,7 +129,7 @@ def test_the_returned_keys_are_ints_and_not_the_strings_json_carries(
     region would read as untranslated and AC-5 would appear to hold for the
     whole page. Silent, and indistinguishable from "the model omitted them all".
     """
-    lines = parse_lines(fake_message(response_body("well-formed")), _REGION_INDICES)
+    lines = _pairs(parse_lines(fake_message(response_body("well-formed")), _REGION_INDICES))
 
     assert all(isinstance(key, int) for key in lines), f"got keys {sorted(map(str, lines))}"
     assert set(lines) == set(_REGION_INDICES)
@@ -115,7 +146,7 @@ def test_a_thinking_block_in_front_of_the_json_does_not_hide_it(
     the failure arrives in MT-037, with a credential, after spending money."""
     message = fake_message(response_body("well-formed"), leading_thinking=True)
 
-    assert parse_lines(message, _REGION_INDICES) == _EXPECTED
+    assert _pairs(parse_lines(message, _REGION_INDICES)) == _EXPECTED
 
 
 @pytest.mark.parametrize(
@@ -144,11 +175,11 @@ def test_a_redacted_thinking_block_in_front_of_the_json_does_not_hide_it(
     assert first.type == "redacted_thinking", "precondition: the redacted block must come first"
     assert not hasattr(first, "text"), "precondition: a redacted block carries no `text`"
 
-    assert parse_lines(message, _REGION_INDICES) == {
-        0: "As if a demon would move at a human's say-so.",
-        1: "...I see.",
-        2: "Why are you here?",
-        3: "Let's go.",
+    assert _pairs(parse_lines(message, _REGION_INDICES)) == {
+        0: (_JA[0], "As if a demon would move at a human's say-so."),
+        1: (_JA[1], "...I see."),
+        2: (_JA[2], "Why are you here?"),
+        3: (_JA[3], "Let's go."),
     }
 
 
@@ -167,7 +198,7 @@ def test_a_region_the_response_omitted_is_simply_absent_from_the_result(
     The page is **not** discarded - the other three regions come back - which is
     the clause AC-5 exists for.
     """
-    lines = parse_lines(fake_message(response_body("omits-region-3")), _REGION_INDICES)
+    lines = _pairs(parse_lines(fake_message(response_body("omits-region-3")), _REGION_INDICES))
 
     assert 3 not in lines
     assert lines == {index: _EXPECTED[index] for index in (0, 1, 2)}
@@ -187,8 +218,41 @@ def test_a_single_named_region_comes_back_on_its_own(
 ) -> None:
     """The one of zero-one-many, at an index that is neither the first nor the
     last of the page - so a parser that special-cased either end is caught."""
-    assert parse_lines(fake_message('{"2": "Why are you here?"}'), _REGION_INDICES) == {
-        2: "Why are you here?"
+    body = '{"2": ' + _entry(_JA[2], "Why are you here?") + "}"
+
+    assert _pairs(parse_lines(fake_message(body), _REGION_INDICES)) == {
+        2: (_JA[2], "Why are you here?")
+    }
+
+
+# -- MT-149 C-1: an entry is an `AnswerEntry` ---------------------------------
+
+
+def test_each_parsed_entry_is_an_answer_entry_carrying_the_echo_and_the_english(
+    response_body: Callable[[str], str],
+) -> None:
+    """MT-149 C-1: `parse_lines_text(...) -> dict[int, AnswerEntry]`, the value
+    `domain.echo.checked_lines` consumes. Imported here rather than at the top
+    so that in RED this test fails on the named absence alone."""
+    from mangatl.domain.echo import AnswerEntry
+
+    lines = parse.parse_lines_text(response_body("well-formed"), _REGION_INDICES)
+
+    assert lines == {index: AnswerEntry(ja=ja, en=en) for index, (ja, en) in _EXPECTED.items()}
+    assert all(type(entry) is AnswerEntry for entry in lines.values())
+
+
+def test_the_echoed_japanese_is_carried_exactly_as_the_model_wrote_it() -> None:
+    """The parser reads; it does not normalise. Whitespace and full-width forms
+    in `ja` reach `checked_lines` untouched, so the comparison's NFKC and
+    whitespace rules (AC-2) live in one place - `domain/echo.py` - and a
+    second, silent normalisation here cannot widen or narrow them."""
+    # An ideographic space (U+3000), a newline and full-width "!!" (U+FF01).
+    echoed = " どうして\u3000君が\nここに\uff01\uff01 "
+    body = '{"2": ' + _entry(echoed, "Why are you here?") + "}"
+
+    assert _pairs(parse.parse_lines_text(body, _REGION_INDICES)) == {
+        2: (echoed, "Why are you here?")
     }
 
 
@@ -241,7 +305,9 @@ def test_an_index_one_past_the_end_of_the_page_is_rejected_like_any_other(
     when it counts from one, and it is the value a bounds check written as
     `index > len(region_indices)` lets through."""
     with pytest.raises(UnknownRegionIndex, match=r"\b4\b"):
-        parse_lines(fake_message('{"4": "A line for a fifth bubble."}'), _REGION_INDICES)
+        parse_lines(
+            fake_message('{"4": {"ja": "x", "en": "A line for a fifth bubble."}}'), _REGION_INDICES
+        )
 
 
 def test_a_negative_index_is_rejected_rather_than_wrapping_round(
@@ -253,7 +319,7 @@ def test_a_negative_index_is_rejected_rather_than_wrapping_round(
     bubble on the page."""
     with pytest.raises(UnknownRegionIndex, match="-1"):
         parse_lines(
-            fake_message('{"-1": "A line for a bubble before the first."}'), _REGION_INDICES
+            fake_message('{"-1": {"ja": "x", "en": "A line before the first."}}'), _REGION_INDICES
         )
 
 
@@ -263,7 +329,7 @@ def test_a_page_with_no_regions_rejects_every_index(
     """The zero of zero-one-many on the *other* argument: a page the detector
     found nothing on has no index a response could legitimately name."""
     with pytest.raises(UnknownRegionIndex, match=r"\b0\b"):
-        parse_lines(fake_message('{"0": "A line for a bubble that is not there."}'), ())
+        parse_lines(fake_message('{"0": {"ja": "x", "en": "A line for no bubble."}}'), ())
 
 
 # -- Out of scope, pinned where it is cheap: refusals --------------------------
@@ -302,11 +368,15 @@ def test_the_glossary_key_is_skipped_rather_than_read_as_a_region(
     the page's lines are lost over an advisory field - which is exactly the
     wrong trade C-4 names."""
     body = (
-        '{"0": "Sakura!", "glossary": '
-        '[{"term_ja": "さくら", "term_en": "Sakura", "note": "name"}], "2": "Why?"}'
+        '{"0": {"ja": "さくら", "en": "Sakura!"}, "glossary": '
+        '[{"term_ja": "さくら", "term_en": "Sakura", "note": "name"}],'
+        ' "2": {"ja": "なぜ", "en": "Why?"}}'
     )
 
-    assert parse_lines(fake_message(body), _REGION_INDICES) == {0: "Sakura!", 2: "Why?"}
+    assert _pairs(parse_lines(fake_message(body), _REGION_INDICES)) == {
+        0: ("さくら", "Sakura!"),
+        2: ("なぜ", "Why?"),
+    }
 
 
 def test_an_empty_glossary_beside_no_lines_is_an_empty_page_and_not_an_error(
@@ -324,7 +394,7 @@ def test_only_the_exact_glossary_key_is_skipped_and_its_neighbours_still_raise(
     `"glossary"` is skipped. A skip written as "any non-integer key" or as a
     case-folded or prefix match passes the two tests above and silently turns
     every malformed key into a dropped one."""
-    body = f'{{"0": "Sakura!", "{key}": []}}'
+    body = f'{{"0": {{"ja": "さくら", "en": "Sakura!"}}, "{key}": []}}'
 
     with pytest.raises(UnknownRegionIndex, match=key.strip()):
         parse_lines(fake_message(body), _REGION_INDICES)
@@ -344,7 +414,7 @@ def test_only_the_exact_glossary_key_is_skipped_and_its_neighbours_still_raise(
 # returning string keys from `parse_lines_text` (owner: GATES).
 
 _WELL_FORMED_TERMS = (
-    '{"0": "Sakura!", "glossary": ['
+    '{"0": {"ja": "さくら", "en": "Sakura!"}, "glossary": ['
     '{"term_ja": "さくら", "term_en": "Sakura", "note": "name"}, '
     '{"term_ja": "先輩", "term_en": "senpai", "note": "honorific"}]}'
 )
@@ -373,9 +443,9 @@ def test_parse_lines_text_returns_what_parse_lines_returns_for_the_same_body(
     body = response_body(fixture)
     expected = _EXPECTED if fixture == "well-formed" else {i: _EXPECTED[i] for i in (0, 1, 2)}
 
-    lines = parse.parse_lines_text(body, _REGION_INDICES)
+    lines = _pairs(parse.parse_lines_text(body, _REGION_INDICES))
 
-    assert lines == parse_lines(fake_message(body), _REGION_INDICES)
+    assert lines == _pairs(parse_lines(fake_message(body), _REGION_INDICES))
     assert lines == expected
     assert lines != _POSITION_BUG
 
@@ -395,9 +465,9 @@ def test_parse_lines_text_returns_int_keys_not_the_strings_json_carries(
 @pytest.mark.parametrize(
     ("body", "named"),
     [
-        ('{"7": "A line for no bubble."}', r"\b7\b"),
-        ('{"first": "A line keyed by a word."}', "first"),
-        ('{"-1": "A line before the first bubble."}', "-1"),
+        ('{"7": {"ja": "x", "en": "A line for no bubble."}}', r"\b7\b"),
+        ('{"first": {"ja": "x", "en": "A line keyed by a word."}}', "first"),
+        ('{"-1": {"ja": "x", "en": "A line before the first."}}', "-1"),
     ],
     ids=["out-of-range", "non-integer", "negative"],
 )
@@ -414,7 +484,9 @@ def test_parse_lines_text_raises_unknown_region_index_where_parse_lines_does(
 
 def test_parse_lines_text_skips_the_glossary_key() -> None:
     """MT-014 C-4 through the text entry point: `"glossary"` is not a region."""
-    assert parse.parse_lines_text(_WELL_FORMED_TERMS, _REGION_INDICES) == {0: "Sakura!"}
+    assert _pairs(parse.parse_lines_text(_WELL_FORMED_TERMS, _REGION_INDICES)) == {
+        0: ("さくら", "Sakura!")
+    }
 
 
 def test_parse_lines_text_on_a_non_json_body_is_loud() -> None:

@@ -515,6 +515,11 @@ def test_the_response_schema_names_the_pages_indices_and_requires_none_of_them()
         " (MT-106: no `glossary` property)"
     )
     assert not schema.get("required"), "AC-5 turns on no region being required"
+    # MT-149 AC-1: each index's answer is `{ja, en}`, both required, nothing else.
+    for key, entry in schema["properties"].items():
+        assert entry["type"] == "object", f"region {key}'s answer is not an object"
+        assert sorted(entry["required"]) == ["en", "ja"]
+        assert entry["additionalProperties"] is False
 
 
 # -- MT-014 C-3: the glossary and the rolling context --------------------------

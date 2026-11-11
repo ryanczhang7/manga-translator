@@ -18,6 +18,15 @@ MT-011 RED on 2026-09-18. Nothing here came off the wire: MT-011 PO-1 records
 that this machine has no `ANTHROPIC_API_KEY`, and no test in MT-011 makes a
 network call. The live measurement is MT-037.
 
+**The answer shape (MT-149).** Every entry is an object, `{"ja": ..., "en":
+...}`: `ja` is the region's Japanese echoed back exactly as it was listed, `en`
+is the English. Each fixture's `ja` is its region's `source_ja` from the table
+below, verbatim, so these are *aligned* answers and the echo check
+(`domain/echo.py`) keeps every line in them; a key naming a region the page
+does not have carries some other region's Japanese, because it raises before
+any comparison. `tests/core/test_translate_fixtures.py` asserts both the shape
+and the echoes. Before MT-149 each entry was a bare English string.
+
 ## The page these fixtures are about
 
 Four regions in reading order. The Japanese is what OCR read; the English is

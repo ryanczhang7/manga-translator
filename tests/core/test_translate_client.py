@@ -27,6 +27,7 @@ at real page sizes in `test_translate_prompt.py`, not here.
 
 from __future__ import annotations
 
+import json
 import struct
 import zlib
 from collections.abc import Callable, Sequence
@@ -192,7 +193,9 @@ def test_a_page_with_a_single_region_that_read_something_does_make_the_call(
 
     One region carrying text is the smallest page that must cost money.
     """
-    client = _FakeClient(fake_message('{"0": "Why are you here?"}'))
+    client = _FakeClient(
+        fake_message('{"0": {"ja": "どうして君がここに", "en": "Why are you here?"}}')
+    )
 
     result = translate_page(client, _page(), (_OCR_RESULTS[2],), EMPTY_CONTEXT)
 
@@ -208,7 +211,7 @@ def test_a_page_where_only_some_regions_read_empty_is_still_sent(
     page with one readable bubble among three blank ones is an ordinary page and
     must be translated. A guard written as `any(r.ocr_empty ...)` passes every
     test above and silently stops translating most of the chapter."""
-    client = _FakeClient(fake_message('{"1": "...I see."}'))
+    client = _FakeClient(fake_message('{"1": {"ja": "……なるほど", "en": "...I see."}}'))
 
     mixed = (
         OcrResult(text="", ocr_empty=True),
@@ -411,7 +414,7 @@ def test_a_claude_page_that_returns_a_glossary_anyway_proposes_no_terms(
     still parsed the array fails here on content, not on a malformed item
     being skipped."""
     body = (
-        '{"1": "Sakura!", "glossary": ['
+        '{"1": {"ja": "……なるほど", "en": "Sakura!"}, "glossary": ['
         '{"term_ja": "さくら", "term_en": "Sakura", "note": "name"},'
         '{"term_ja": "先輩", "term_en": "senpai", "note": "honorific"}]}'
     )
@@ -518,3 +521,94 @@ def test_cache_counts_the_response_left_absent_are_recorded_as_zero(
         cache_read_tokens=0,
         cache_write_tokens=0,
     )
+
+
+# -- MT-149 AC-6: the answer is checked through `checked_lines` ---------------
+
+#: A slipped answer for `_OCR_RESULTS`: entries 1 and 2 echo the Japanese of
+#: regions 0 and 1 (the English shifted with them), entries 0 and 3 their own.
+#: Every mismatched pair here is a wholly different string (edit ratio 1.0), so
+#: the outcome does not depend on where `ECHO_MAX_EDIT_RATIO` sits in its band.
+_SLIPPED = json.dumps(
+    {
+        "0": {"ja": _OCR_RESULTS[0].text, "en": _EXPECTED[0]},
+        "1": {"ja": _OCR_RESULTS[0].text, "en": "A demon, obeying a human."},
+        "2": {"ja": _OCR_RESULTS[1].text, "en": _EXPECTED[1]},
+        "3": {"ja": _OCR_RESULTS[3].text, "en": _EXPECTED[3]},
+    },
+    ensure_ascii=False,
+)
+
+
+def test_a_slipped_answer_comes_back_with_its_misaligned_regions_and_without_their_english(
+    fake_message: Callable[..., object],
+) -> None:
+    """AC-6, Claude's adapter: the entries whose echo does not match their own
+    listing are reported in `misaligned` and absent from `lines`; the two that
+    match keep their English."""
+    client = _FakeClient(fake_message(_SLIPPED))
+
+    result = translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+    assert result.lines == {0: _EXPECTED[0], 3: _EXPECTED[3]}
+    assert result.misaligned == frozenset({1, 2})
+
+
+def test_an_aligned_answer_reports_nothing_misaligned(
+    response_body: Callable[[str], str],
+    fake_message: Callable[..., object],
+) -> None:
+    """The control: the recorded aligned answer keeps all four lines and
+    flags none, so the test above is about the slip and not about the adapter
+    dropping lines in general."""
+    client = _FakeClient(fake_message(response_body("well-formed")))
+
+    result = translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+    assert result.lines == _EXPECTED
+    assert result.misaligned == frozenset()
+
+
+def test_the_adapter_hands_the_parsed_entries_and_the_listing_it_sent_to_checked_lines(
+    monkeypatch: pytest.MonkeyPatch,
+    response_body: Callable[[str], str],
+    fake_message: Callable[..., object],
+) -> None:
+    """AC-6's "no adapter compares on its own" and C-1a's "who calls it":
+    `checked_lines(parse_lines(...), [r.text for r in ocr_results])`, and the
+    result carries exactly what it returned. Observed with a recorder bound
+    in place of `client.checked_lines`; an adapter with its own comparison
+    never calls it, and one that re-filtered its answer would not return the
+    recorder's sentinel lines."""
+    from mangatl.domain.echo import AnswerEntry, CheckedLines
+    from mangatl.translate import client as client_module
+
+    calls: list[tuple[object, list[str]]] = []
+    sentinel = CheckedLines(lines={2: "recorded"}, misaligned=frozenset({0}))
+
+    def recorder(entries: object, listed: object) -> CheckedLines:
+        calls.append((entries, list(listed)))  # type: ignore[call-overload]
+        return sentinel
+
+    monkeypatch.setattr(client_module, "checked_lines", recorder)
+
+    result = translate_page(
+        _FakeClient(fake_message(response_body("well-formed"))),
+        _page(),
+        _OCR_RESULTS,
+        EMPTY_CONTEXT,
+    )
+
+    assert calls == [
+        (
+            {
+                0: AnswerEntry(_OCR_RESULTS[0].text, _EXPECTED[0]),
+                1: AnswerEntry(_OCR_RESULTS[1].text, _EXPECTED[1]),
+                2: AnswerEntry(_OCR_RESULTS[2].text, _EXPECTED[2]),
+                3: AnswerEntry(_OCR_RESULTS[3].text, _EXPECTED[3]),
+            },
+            [ocr.text for ocr in _OCR_RESULTS],
+        )
+    ], "translate_page did not check its parsed answer through checked_lines"
+    assert result.lines == {2: "recorded"}
+    assert result.misaligned == frozenset({0})

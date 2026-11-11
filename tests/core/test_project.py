@@ -483,7 +483,8 @@ def test_the_schema_version_and_the_two_page_status_values_are_the_pinned_ones()
     # MT-137 takes it to 11: `batch_job` holds its pages (`first_ordinal`, `last_ordinal`).
     # MT-115 takes it to 12: `chapter.consistency_run_id`, the consistency pass's marker.
     # MT-146 takes it to 13: `region.excluded` admits `art` (the table is rebuilt).
-    assert SCHEMA_VERSION == 13
+    # MT-149 takes it to 14: `line.misaligned`, the echo check's flag.
+    assert SCHEMA_VERSION == 14
     assert PAGE_PENDING == "pending"
     assert PAGE_STALE == "stale"
     assert PAGE_PENDING != PAGE_STALE

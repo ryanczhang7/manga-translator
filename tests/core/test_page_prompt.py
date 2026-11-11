@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -61,7 +62,13 @@ from mangatl.translate import page_prompt, prompt
 #: it, and not one other character changed. The pre-MT-106 text is this one
 #: plus that bullet; `_SYSTEM_PROMPT_PRE_MT106_LAST_BULLET` below holds it so
 #: the "nothing else changed" half of AC-6 is a comparison, not a reading.
-_SYSTEM_PROMPT_GOLDEN = """You translate Japanese manga into natural English.
+#:
+#: **Re-pinned by MT-149** (AC-1, PO-1, and the story's `## Contract` C-1b): the
+#: last "Guidance" bullet, `_ANSWER_PRE_MT149`, is replaced by `_ANSWER_MT149`,
+#: and not one other character changes. This literal is the pre-MT-149 text;
+#: `_SYSTEM_PROMPT_GOLDEN` below is derived from it by that one replacement, so
+#: "nothing else changed" is again a comparison.
+_SYSTEM_PROMPT_PRE_MT149 = """You translate Japanese manga into natural English.
 
 You are given one page image and the text OCR read from each of its regions, \
 listed in reading order (right to left, top to bottom). Translate every region \
@@ -84,8 +91,28 @@ chapter has already settled on, and the previous page's English in reading \
 order. Use the glossary's renderings exactly, every time, and read the previous \
 page for who is speaking and what is being continued."""
 
+#: MT-149: the answer-format bullet before this story, verbatim.
+_ANSWER_PRE_MT149 = "- Answer with one entry per region, keyed by the region's reading index.\n"
+
+#: MT-149 C-1b: what replaces it. Three bullets: the entry's shape; `ja` is a
+#: copy of the listing even where the model believes the listing was misread,
+#: and the model's own reading only where the listing is empty (PO-1); `en`
+#: may still come from the image.
+_ANSWER_MT149 = """\
+- Answer with one entry per region, keyed by the region's reading index. Each \
+entry is an object with two fields, "ja" and "en".
+- In "ja", copy the region's Japanese exactly as it is listed above, even where \
+you believe the listing was misread. Only when a region's listing is empty, \
+write in "ja" the Japanese you read in that bubble on the page image.
+- In "en", write the English for that region. Where the listing looks misread, \
+you may translate from the page image instead; "ja" stays a copy of the listing.
+"""
+
+#: The system prompt this story pins, to the character.
+_SYSTEM_PROMPT_GOLDEN = _SYSTEM_PROMPT_PRE_MT149.replace(_ANSWER_PRE_MT149, _ANSWER_MT149)
+
 #: The bullet MT-106 removed, verbatim, with the newline that preceded it. The
-#: pre-MT-106 prompt was exactly `_SYSTEM_PROMPT_GOLDEN + this`.
+#: pre-MT-106 prompt was exactly `_SYSTEM_PROMPT_PRE_MT149 + this`.
 _SYSTEM_PROMPT_PRE_MT106_LAST_BULLET = """
 - When a character name, an honorific or a place name appears on this page that \
 the glossary does not have, add it under the "glossary" key: its Japanese as \
@@ -132,17 +159,29 @@ _CONTEXT = PromptContext(
 )
 
 
-def _region_property(index: int) -> dict[str, str]:
-    """One region's schema property exactly as the pre-story inline schema
-    wrote it - `description` included, which is part of what Claude is sent."""
+def _region_property(index: int) -> dict[str, Any]:
+    """One region's schema property, written out - `description`s included,
+    which are part of what Claude is sent.
+
+    MT-149 AC-1 and C-1b: an object with required string fields `ja` and `en`
+    and `additionalProperties: False` (it was one string before MT-149)."""
     return {
-        "type": "string",
-        "description": f"The English for the region at reading index {index}.",
+        "type": "object",
+        "description": f"The region at reading index {index}.",
+        "properties": {
+            "ja": {
+                "type": "string",
+                "description": "The region's Japanese, copied exactly as listed.",
+            },
+            "en": {"type": "string", "description": "The English for the region."},
+        },
+        "required": ["ja", "en"],
+        "additionalProperties": False,
     }
 
 
 def _expected_schema(region_count: int) -> dict[str, Any]:
-    """MT-106 AC-1's page schema, literally: one string per reading index, no
+    """MT-106 AC-1's page schema, literally: one `{ja, en}` object per reading index (MT-149), no
     `glossary` property, no `required`, `additionalProperties: False`."""
     return {
         "type": "object",
@@ -227,6 +266,60 @@ def test_the_system_prompt_no_longer_asks_pages_to_add_glossary_terms() -> None:
     )
     assert 'under the "glossary" key' not in page_prompt.SYSTEM_PROMPT
     assert "Use the glossary's renderings exactly, every time" in page_prompt.SYSTEM_PROMPT
+
+
+# -- MT-149 AC-1: the echo instruction -----------------------------------------
+
+
+def test_the_pinned_prompt_differs_from_the_pre_story_one_only_in_the_answer_bullets() -> None:
+    """The golden's own precondition: the old answer bullet occurs exactly once
+    in the pre-MT-149 text, so the replacement that derives the golden changes
+    that bullet and nothing else."""
+    assert _SYSTEM_PROMPT_PRE_MT149.count(_ANSWER_PRE_MT149) == 1
+    assert _SYSTEM_PROMPT_GOLDEN != _SYSTEM_PROMPT_PRE_MT149
+    head, tail = _SYSTEM_PROMPT_PRE_MT149.split(_ANSWER_PRE_MT149)
+    assert head + _ANSWER_MT149 + tail == _SYSTEM_PROMPT_GOLDEN
+
+
+def test_the_prompt_tells_the_model_to_copy_each_listing_into_ja_even_where_it_looks_misread() -> (
+    None
+):
+    """AC-1 / PO-1: `ja` is a copy of the listing and nothing else, so a
+    mismatch means a slip. The needle is the whole instruction, anchored at its
+    imperative: a prompt saying *not* to copy, or to copy only where the listing
+    looks right, does not contain it."""
+    assert (
+        '- In "ja", copy the region\'s Japanese exactly as it is listed above, even where'
+        " you believe the listing was misread." in page_prompt.SYSTEM_PROMPT
+    ), "SYSTEM_PROMPT does not tell the model to copy the listing into `ja` as listed"
+
+
+def test_the_prompt_lets_the_model_write_its_own_reading_into_ja_only_for_an_empty_listing() -> (
+    None
+):
+    """AC-1: "write what it reads in the image only when the listing for that
+    region is empty"."""
+    assert (
+        'Only when a region\'s listing is empty, write in "ja" the Japanese you read'
+        " in that bubble on the page image." in page_prompt.SYSTEM_PROMPT
+    )
+
+
+def test_the_prompt_no_longer_lets_the_model_rewrite_a_listing_it_thinks_is_wrong() -> None:
+    """PO-1: AC-1's first draft let the model write what it reads "when the
+    listing is empty or wrong", which pulls against the check - a corrected
+    echo of a hallucinated listing drops a correctly keyed line. Neither that
+    permission nor any instruction to correct the listing may survive."""
+    prompt_text = page_prompt.SYSTEM_PROMPT
+    # Control: the needles fire on the wording PO-1 withdrew, so passing below
+    # is a statement about the prompt and not about a regex that matches nothing.
+    withdrawn = "write what you read in the image when the listing is empty or wrong"
+    assert re.search(r"\bempty or wrong\b", withdrawn) is not None
+    assert re.search(r"\bcorrect(ing)? the listing\b", "Correct the listing.", re.I) is not None
+
+    assert re.search(r"\bempty or wrong\b", prompt_text) is None
+    assert re.search(r"\bcorrect(ing)? the listing\b", prompt_text, re.IGNORECASE) is None
+    assert re.search(r"\bfix(ing)? the listing\b", prompt_text, re.IGNORECASE) is None
 
 
 @pytest.mark.parametrize(
@@ -385,6 +478,26 @@ def test_the_response_schema_names_every_region_and_nothing_else_and_requires_no
 def test_a_page_with_no_regions_has_an_empty_properties_mapping() -> None:
     """MT-106 AC-1's zero: no region, no glossary, nothing at all."""
     assert page_prompt.response_schema(0)["properties"] == {}
+
+
+@pytest.mark.parametrize("region_count", [1, 3, 20])
+def test_each_region_is_an_object_requiring_its_echoed_japanese_and_its_english(
+    region_count: int,
+) -> None:
+    """MT-149 AC-1, structurally - the reading a failure should give, beside the
+    literal equality above: every index property is an object whose required
+    fields are exactly the strings `ja` and `en`, with `additionalProperties:
+    False`, and the index properties themselves are still not required."""
+    schema = page_prompt.response_schema(region_count)
+
+    for key, entry in schema["properties"].items():
+        assert entry["type"] == "object", f"region {key} is a {entry['type']}, not an object"
+        assert sorted(entry["required"]) == ["en", "ja"], f"region {key}: {entry['required']}"
+        assert set(entry["properties"]) == {"ja", "en"}, f"region {key}: {entry['properties']}"
+        assert entry["properties"]["ja"]["type"] == "string"
+        assert entry["properties"]["en"]["type"] == "string"
+        assert entry["additionalProperties"] is False
+    assert "required" not in schema
 
 
 # -- AC-5: no SDK --------------------------------------------------------------
