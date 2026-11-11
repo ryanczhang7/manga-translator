@@ -5,52 +5,76 @@ on:
   push:
     branches: [main]
 
+# A new push to a PR makes the run already going for it worthless, and on this
+# workflow that run is ~20 Windows minutes per job. Cancel it. Pushes to main
+# are never cancelled: each merge keeps its own record.
+concurrency:
+  group: gates-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Shared by every job below.
+defaults:
+  run:
+    # Every harness script is bash. Without this the runner would use pwsh
+    # and each step would have to spell out `bash ...` anyway.
+    shell: bash
+
+env:
+  # Every gate command begins `uv run`, which installs the locked
+  # environment on first use - so there is deliberately NO separate
+  # `uv sync` step. That is not laziness: `.claude/tests/ci-local.test.sh`
+  # derives ci-local.sh's step list from the `run:` lines in this file, and
+  # a project-level install step there would run inside the bare fixtures
+  # the harness self-test builds. Keeping the workflow to harness scripts
+  # keeps that check honest.
+  #
+  # UV_FROZEN is what a `uv sync --frozen` step would have bought, and more:
+  # it applies to EVERY `uv run` in the job, so a `uv.lock` that does not
+  # match `pyproject.toml` fails here instead of being silently re-resolved
+  # on the runner.
+  UV_FROZEN: "1"
+
+# WHY FOUR JOBS. One job running `gates.sh` took ~60 min (run 43091043396,
+# 2026-11-11), and 51 of those were the same pytest suite run three times in a
+# row: unit 19 min, coverage 19 min, coverage-core 12.6 min. Everything else
+# together is ~8 min. So each of those three gates gets a job of its own, and
+# the first job runs everything else, using the split the harness provides
+# (`--skip` here, `--gate` there; quality-gates skill, "Splitting one slow gate
+# into its own CI job"). Between them the four jobs run exactly the gates one
+# full run did. A gate added to project.conf lands in the first job by default,
+# because `--skip` names what it leaves out, never what it keeps.
+#
+# The `run:` lines are written out per job rather than through a matrix:
+# ci-local.sh replays them in file order and skips any step holding a `${{ }}`
+# expression it cannot resolve, so a matrix would quietly drop all four gate
+# runs from the local replay.
+#
+# windows-latest, not ubuntu-latest, in every job. Decided by the user on
+# 2026-09-12 and recorded as PO-3 in docs/backlog/stories/MT-001.md: the
+# `build` gate is PyInstaller, and on Linux it would freeze an ELF - a required
+# gate verifying an artefact this product never ships. docs/wiki/stack.md §7
+# (the Microsoft Store Python alias) is also only exercised on the platform it
+# describes. Costs 2x GitHub minutes; accepted. The split adds ~1-2 min of
+# setup per extra job, not new test time.
+#
+# The interpreter comes from `.python-version` and uv.lock, not from a
+# setup-python step: uv manages the interpreter as well as the venv, which is
+# the whole reason the stack chose it (stack.md §3).
+#
+# The harness self-test and its two guards (check-sigpipe.sh,
+# check-grep-count.sh) are NOT here: they run in boundaries.yml, on
+# ubuntu-latest. They need only bash and git, and these jobs are Windows for
+# PyInstaller's sake, where the self-test is ~21-27 min of process spawn
+# against ~31 s on Linux. Do not move them back.
+
 jobs:
   gates:
-    # windows-latest, not ubuntu-latest. Decided by the user on 2026-09-12 and
-    # recorded as PO-3 in docs/backlog/stories/MT-001.md: the `build` gate is
-    # PyInstaller, and on Linux it would freeze an ELF - a required gate
-    # verifying an artefact this product never ships. docs/wiki/stack.md §7 (the
-    # Microsoft Store Python alias) is also only exercised on the platform it
-    # describes. Costs 2x GitHub minutes; accepted.
     runs-on: windows-latest
-
-    defaults:
-      run:
-        # Every harness script is bash. Without this the runner would use pwsh
-        # and each step would have to spell out `bash ...` anyway.
-        shell: bash
-
-    env:
-      # Every gate command begins `uv run`, which installs the locked
-      # environment on first use - so there is deliberately NO separate
-      # `uv sync` step. That is not laziness: `.claude/tests/ci-local.test.sh`
-      # derives ci-local.sh's step list from the `run:` lines in this file, and
-      # a project-level install step there would run inside the bare fixtures
-      # the harness self-test builds. Keeping the workflow to harness scripts
-      # keeps that check honest.
-      #
-      # UV_FROZEN is what a `uv sync --frozen` step would have bought, and more:
-      # it applies to EVERY `uv run` in the job, so a `uv.lock` that does not
-      # match `pyproject.toml` fails here instead of being silently re-resolved
-      # on the runner.
-      UV_FROZEN: "1"
-
     steps:
       - uses: actions/checkout@v5
-
-      # The interpreter comes from `.python-version` and uv.lock, not from a
-      # setup-python step: uv manages the interpreter as well as the venv, which
-      # is the whole reason the stack chose it (stack.md §3).
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-
-      # The harness self-test and its two guards (check-sigpipe.sh,
-      # check-grep-count.sh) are NOT here: they run in boundaries.yml, on
-      # ubuntu-latest. They need only bash and git, and this job is Windows for
-      # PyInstaller's sake, where the self-test is ~21-27 min of process spawn
-      # against ~31 s on Linux. Do not move them back.
 
       - name: Show configured gates
         run: bash scripts/gates.sh --list
@@ -61,13 +85,70 @@ jobs:
       - name: Audit the gate manifest
         run: bash scripts/gates.sh --audit
 
-      - name: Run gates
-        run: bash scripts/gates.sh
+      - name: Run every gate but the three test-suite gates
+        run: bash scripts/gates.sh --skip unit --skip coverage --skip coverage-core
 
       - name: Upload gate logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: gate-logs
+          path: .claude/state/gate-logs/
+          if-no-files-found: ignore
+
+  unit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run the unit gate
+        run: bash scripts/gates.sh --gate unit
+
+      - name: Upload gate logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-logs-unit
+          path: .claude/state/gate-logs/
+          if-no-files-found: ignore
+
+  coverage:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run the coverage gate
+        run: bash scripts/gates.sh --gate coverage
+
+      - name: Upload gate logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-logs-coverage
+          path: .claude/state/gate-logs/
+          if-no-files-found: ignore
+
+  coverage-core:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run the coverage-core gate
+        run: bash scripts/gates.sh --gate coverage-core
+
+      - name: Upload gate logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-logs-coverage-core
           path: .claude/state/gate-logs/
           if-no-files-found: ignore
