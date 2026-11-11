@@ -8,6 +8,11 @@ name: boundaries
 on:
   pull_request:
 
+# A new push to a PR supersedes the run already going for it.
+concurrency:
+  group: boundaries-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   boundaries:
     runs-on: ubuntu-latest
