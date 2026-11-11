@@ -808,7 +808,7 @@ def test_the_default_window_setup_prices_with_selected_model(
 ) -> None:
     """MT-100 C-5: `build_window`'s default `RunSetup` carries `selected_model`,
     so a window built with no setup of its own prices on the environment's
-    model. A Gemini key alone: two pages at $0.03."""
+    model. A Gemini key alone: two pages at $0.04 (MT-149 R-2b)."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv(GEMINI, ENV_KEY)
     folder = _chapter_folder(tmp_path)
@@ -819,7 +819,7 @@ def test_the_default_window_setup_prices_with_selected_model(
     summary = window.centralWidget()
     assert isinstance(summary, ChapterSummary)
     assert summary.cost_estimate.lines[0] == (
-        "Estimated for 2 pages with gemini-3.1-pro-preview: $0.06."
+        "Estimated for 2 pages with gemini-3.1-pro-preview: $0.08."
     )
     window.close()
 
@@ -1283,7 +1283,7 @@ def test_build_batch_collects_one_job_through_collect_volume_at_the_batch_estima
     assert [e.ordinal for e in priced] == [0, 1]
     assert priced[0].projection.next_call == Usd.from_micro(BATCH_ESTIMATE_MICRO), (
         f"the collection projected {priced[0].projection.next_call}; C-6 binds the BATCH-tier"
-        " estimate, $0.02 (the standard tier is $0.03)"
+        " estimate, $0.02 (the standard tier is $0.04)"
     )
     assert events[-1] == BatchCollected(job.id, 2, 0, ())
 

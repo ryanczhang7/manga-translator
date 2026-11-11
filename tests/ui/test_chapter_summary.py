@@ -653,7 +653,7 @@ def test_the_scroll_area_is_named_chapter_summary_and_described_by_its_visible_l
             "3 pages",
             "First page: page 9.png",
             "Last page: page 11.png",
-            "Estimated for 3 pages with claude-opus-5: $0.18.",
+            "Estimated for 3 pages with claude-opus-5: $0.21.",
             "Budget $2.00.",
             LEAD,
             AC1_NATURAL,
@@ -667,7 +667,7 @@ def test_a_one_page_summary_is_described_without_first_last_or_notice(qtbot) -> 
 
     assert _scroll(summary).accessibleDescription() == (
         "One shot\n1 page\nOnly page: cover.png\n"
-        "Estimated for 1 page with claude-opus-5: $0.06.\nBudget $2.00."
+        "Estimated for 1 page with claude-opus-5: $0.07.\nBudget $2.00."
     )
 
 

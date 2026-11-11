@@ -36,6 +36,7 @@ from collections.abc import Callable
 
 import pytest
 
+from mangatl.domain.echo import AnswerEntry
 from mangatl.domain.glossary import ProposedTerm
 from mangatl.translate import parse
 from mangatl.translate.parse import UnknownRegionIndex, parse_lines
@@ -254,6 +255,110 @@ def test_the_echoed_japanese_is_carried_exactly_as_the_model_wrote_it() -> None:
     assert _pairs(parse.parse_lines_text(body, _REGION_INDICES)) == {
         2: (echoed, "Why are you here?")
     }
+
+
+# -- MT-149 R-2a (PO-4): a malformed entry is `None`, not an exception -----------
+#
+# An entry that is not an object with a string `ja` and a string `en` - the old
+# schema's bare string above all - parses to `None` under its key, and
+# `checked_lines` files that key as misaligned. The page's other entries still
+# parse, and the page is still written. Before R-2a the parser indexed
+# `entry["ja"]` unguarded, so these shapes raised `TypeError` / `KeyError` and
+# a batch page became a `BatchItemFailure` whose spend never reached the
+# ledger. What still raises is unchanged: a body that is not a JSON object, and
+# a key that is not one of the page's reading indices - checked before the
+# entry's shape, so a malformed value cannot hide a bad key.
+
+#: A valid entry beside each malformed one, so "the other keys still parse"
+#: is part of every case's expected value.
+_VALID_2 = (2, "Why are you here?")
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        pytest.param("Hello", id="bare-string"),
+        pytest.param({"en": "Hello"}, id="missing-ja"),
+        pytest.param({"ja": _JA[0]}, id="missing-en"),
+        pytest.param({}, id="empty-object"),
+        pytest.param(None, id="null"),
+        pytest.param([_JA[0], "Hello"], id="list"),
+        pytest.param(7, id="number"),
+        pytest.param({"ja": 7, "en": "Hello"}, id="non-string-ja"),
+        pytest.param({"ja": _JA[0], "en": None}, id="non-string-en"),
+        pytest.param({"ja": _JA[0], "en": ["Hello"]}, id="list-en"),
+    ],
+)
+def test_a_malformed_entry_parses_to_none_and_its_neighbours_still_parse(
+    malformed: object,
+) -> None:
+    """R-2a: the malformed key maps to `None` - present, so `checked_lines`
+    can name it misaligned, rather than absent (which would read as "no
+    translation was returned") - and region 2's valid entry is unaffected."""
+    body = json.dumps({"0": malformed, "2": json.loads(_entry(_JA[2], _VALID_2[1]))})
+
+    lines = parse.parse_lines_text(body, _REGION_INDICES)
+
+    assert lines == {0: None, 2: AnswerEntry(_JA[2], _VALID_2[1])}, (
+        f"{malformed!r} under key 0 parsed to {lines!r}"
+    )
+
+
+def test_an_old_schema_answer_of_bare_strings_is_every_key_none_through_parse_lines(
+    fake_message: Callable[..., object],
+) -> None:
+    """R-2a through the `Message` entry point: a whole answer in the pre-MT-149
+    shape, `{"0": "...", "1": "..."}`, is two `None`s - not a `TypeError`."""
+    body = '{"0": "As if a demon would move.", "1": "...I see."}'
+
+    assert parse_lines(fake_message(body), _REGION_INDICES) == {0: None, 1: None}
+
+
+def test_extra_fields_on_a_valid_entry_are_ignored() -> None:
+    """R-2a: a well-formed entry with fields the schema does not ask for is
+    still that entry - the extras are dropped, not a reason to reject it."""
+    entry = {"ja": _JA[0], "en": "Hello.", "note": "extra", "confidence": 0.5}
+    body = json.dumps({"0": entry}, ensure_ascii=False)
+
+    assert parse.parse_lines_text(body, _REGION_INDICES) == {0: AnswerEntry(_JA[0], "Hello.")}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("[]", id="empty-list"),
+        pytest.param('[{"ja": "x", "en": "y"}]', id="list-of-entries"),
+        pytest.param('"Hello"', id="string"),
+        pytest.param("null", id="null"),
+        pytest.param("7", id="number"),
+    ],
+)
+def test_a_body_that_is_json_but_not_an_object_still_raises(body: str) -> None:
+    """R-2a leaves MT-011's answer for the body itself: JSON that is not an
+    object is loud. Only an *entry* degrades to `None`; a body never degrades
+    to an empty page, which would mark every bubble untranslated."""
+    with pytest.raises((AttributeError, TypeError, ValueError)):
+        parse.parse_lines_text(body, _REGION_INDICES)
+
+
+@pytest.mark.parametrize(
+    ("body", "named"),
+    [
+        pytest.param('{"first": "Hello"}', "first", id="non-integer-key-bare-string"),
+        pytest.param('{"first": null}', "first", id="non-integer-key-null"),
+        pytest.param('{"7": "Hello"}', r"\b7\b", id="out-of-range-key-bare-string"),
+        pytest.param('{"-1": {"en": "Hello"}}', "-1", id="negative-key-missing-ja"),
+    ],
+)
+def test_a_bad_key_still_raises_unknown_region_index_whatever_its_value(
+    body: str, named: str
+) -> None:
+    """R-2a: the key is judged before the entry's shape. A malformed value
+    under a key the page does not have is still `UnknownRegionIndex` naming
+    the key - never a `None` filed under a region that does not exist, and
+    never silently dropped."""
+    with pytest.raises(UnknownRegionIndex, match=named):
+        parse.parse_lines_text(body, _REGION_INDICES)
 
 
 # -- AC-6 ----------------------------------------------------------------------

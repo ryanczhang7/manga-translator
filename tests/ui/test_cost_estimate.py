@@ -22,9 +22,10 @@ Oracle partition (MT-058 and MT-100 `## Contract` C-8):
   `mangatl.domain.budget` (`DEFAULT_CEILING`, `page_estimate`, `Budget.project`),
   read through `_estimate` / `_ceiling` below, which import nothing from the
   module under test. The worked examples are spelled out as a second, literal
-  oracle: on claude-opus-5 $0.06 for one page, $1.20 for 20, $1.98/$2.04 for
-  33/34, $12.00/$12.06 for 200/201; on gemini-3.1-pro-preview (MT-100 AC-1/AC-2)
-  $6.00 for 200, $1.98/$2.01 for 66/67. Every string is spelled out here.
+  oracle: on claude-opus-5 $0.07 for one page, $1.40 for 20, $1.96/$2.03 for
+  28/29, $14.00/$14.07 for 200/201; on gemini-3.1-pro-preview (MT-100 AC-1/AC-2)
+  $8.00 for 200, $2.00/$2.04 for 50/51 (MT-149 R-2b's figures; MT-100 had $0.06
+  and $0.03 a page). Every string is spelled out here.
 - **Control demanded:** each model's boundary, both sides; the inclusive
   ceiling, reached on a test model priced at $0.10 a page (20 pages exactly
   $2.00, normal; 21 over); 200/201; never `$0.00` over 1..250 pages, on both
@@ -156,7 +157,7 @@ def _ceiling() -> Usd:
 
 
 def _last_page_inside_budget(model: str = OPUS) -> int:
-    """MT-058 AC-3's boundary on `model` (33 on opus, 66 on gemini)."""
+    """MT-058 AC-3's boundary on `model` (28 on opus, 50 on gemini; MT-149 R-2b)."""
     return budget.DEFAULT_CEILING.micro() // _per_page(model).micro()
 
 
@@ -180,7 +181,7 @@ def _no_provider(reason: str) -> object:
 
 def _with_model(monkeypatch: pytest.MonkeyPatch, model_id: str, output_rate: str) -> str:
     """Add `model_id` to the rate table, priced on output only at `output_rate`
-    dollars per million tokens. Design A's page has 1,500 output tokens, so the
+    dollars per million tokens. Design A's page has 2,000 output tokens (MT-149 R-2b), so the
     exact per-page cost is `1500 x output_rate` micro-dollars."""
     table = dict(rates_module.RATES)
     table[model_id] = ModelRates(
@@ -410,14 +411,14 @@ def test_the_summary_gains_the_estimate_and_the_start_button_but_no_field(qtbot)
 @pytest.mark.parametrize(
     ("pages", "line"),
     [
-        (1, "Estimated for 1 page with claude-opus-5: $0.06."),
-        (2, "Estimated for 2 pages with claude-opus-5: $0.12."),
-        (20, "Estimated for 20 pages with claude-opus-5: $1.20."),
-        (33, "Estimated for 33 pages with claude-opus-5: $1.98."),
-        (34, "Estimated for 34 pages with claude-opus-5: $2.04."),
-        (200, "Estimated for 200 pages with claude-opus-5: $12.00."),
+        (1, "Estimated for 1 page with claude-opus-5: $0.07."),
+        (2, "Estimated for 2 pages with claude-opus-5: $0.14."),
+        (20, "Estimated for 20 pages with claude-opus-5: $1.40."),
+        (28, "Estimated for 28 pages with claude-opus-5: $1.96."),
+        (29, "Estimated for 29 pages with claude-opus-5: $2.03."),
+        (200, "Estimated for 200 pages with claude-opus-5: $14.00."),
     ],
-    ids=["one", "two", "twenty", "33", "34", "200"],
+    ids=["one", "two", "twenty", "28", "29", "200"],
 )
 def test_the_estimate_line_reads_the_page_count_the_model_and_its_figure(
     qtbot,  # type: ignore[no-untyped-def]
@@ -442,14 +443,15 @@ def test_the_shown_figure_follows_the_models_per_page_estimate(
     qtbot,  # type: ignore[no-untyped-def]
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Read, not re-typed: a test model at 69,000 micro-dollars a page rounds up
-    to $0.07, so 20 pages are $1.40 - neither opus's $1.20 nor gemini's $0.60."""
-    model = _with_model(monkeypatch, "test-seven-cents", "46")
-    assert _per_page(model) == Usd(Decimal("0.07")), "precondition: 1500 x $46/M, rounded up"
+    """Read, not re-typed: a test model at 89,000 micro-dollars a page rounds up
+    to $0.09, so 20 pages are $1.80 - neither opus's $1.40 nor gemini's $0.80
+    (MT-149 R-2b's figures; the test model was $0.07 when opus was $0.06)."""
+    model = _with_model(monkeypatch, "test-nine-cents", "44.5")
+    assert _per_page(model) == Usd(Decimal("0.09")), "precondition: 2000 x $44.5/M, rounded up"
 
     cost = _cost(qtbot, 20, model)
 
-    assert _label(cost, ESTIMATE).text() == "Estimated for 20 pages with test-seven-cents: $1.40."
+    assert _label(cost, ESTIMATE).text() == "Estimated for 20 pages with test-nine-cents: $1.80."
     assert _label(cost, ESTIMATE).text() == _estimate_line(
         20, format_usd(_estimate(20, model)), model
     )
@@ -461,49 +463,52 @@ def test_the_shown_figure_follows_the_models_per_page_estimate(
 # =============================================================================
 
 
-def test_two_hundred_pages_on_gemini_are_six_dollars_and_over_budget(qtbot) -> None:  # type: ignore[no-untyped-def]
-    """**MT-100 AC-1** at the widget: $6.00, not Claude's $12.00."""
+def test_two_hundred_pages_on_gemini_are_eight_dollars_and_over_budget(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """**MT-100 AC-1** at the widget: $8.00, not Claude's $14.00 (MT-149 R-2b's
+    figures; MT-100 recorded $6.00 and $12.00)."""
     cost = _cost(qtbot, 200, GEMINI)
 
     assert _label(cost, ESTIMATE).text() == (
-        "Estimated for 200 pages with gemini-3.1-pro-preview: $6.00."
-    ), "the Gemini estimate is not $6.00 - is it still priced at Claude's $0.06 a page?"
+        "Estimated for 200 pages with gemini-3.1-pro-preview: $8.00."
+    ), "the Gemini estimate is not $8.00 - is it still priced at Claude's $0.07 a page?"
     assert _label(cost, BUDGET).text() == f"Budget $2.00. {OVER}"
     assert cost.over_budget is True
 
 
-def test_two_hundred_pages_on_claude_are_twelve_dollars(qtbot) -> None:  # type: ignore[no-untyped-def]
+def test_two_hundred_pages_on_claude_are_fourteen_dollars(qtbot) -> None:  # type: ignore[no-untyped-def]
     """**MT-100 AC-3**: Claude keeps Claude's figure."""
     cost = _cost(qtbot, 200, OPUS)
 
-    assert _label(cost, ESTIMATE).text() == "Estimated for 200 pages with claude-opus-5: $12.00."
+    assert _label(cost, ESTIMATE).text() == "Estimated for 200 pages with claude-opus-5: $14.00."
     assert cost.over_budget is True
 
 
-def test_the_gemini_boundary_is_sixty_six_pages_read_from_the_domain() -> None:
-    """MT-100 AC-2's second, literal oracle for the computed boundary."""
-    assert _last_page_inside_budget(GEMINI) == 66
-    assert format_usd(_estimate(66, GEMINI)) == "$1.98"
-    assert format_usd(_estimate(67, GEMINI)) == "$2.01"
+def test_the_gemini_boundary_is_fifty_pages_read_from_the_domain() -> None:
+    """MT-100 AC-2's second, literal oracle for the computed boundary. At
+    $0.04 a page the 50th page lands exactly on the $2.00 ceiling, which is
+    inside (the comparison is inclusive)."""
+    assert _last_page_inside_budget(GEMINI) == 50
+    assert format_usd(_estimate(50, GEMINI)) == "$2.00"
+    assert format_usd(_estimate(51, GEMINI)) == "$2.04"
 
 
-def test_sixty_six_pages_on_gemini_are_within_budget_and_sixty_seven_are_over(qtbot) -> None:  # type: ignore[no-untyped-def]
-    """**MT-100 AC-2**: on Claude 34 pages are already over; on Gemini 66 fit."""
-    inside = _cost(qtbot, 66, GEMINI)
-    over = _cost(qtbot, 67, GEMINI)
+def test_fifty_pages_on_gemini_are_within_budget_and_fifty_one_are_over(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """**MT-100 AC-2**: on Claude 29 pages are already over; on Gemini 50 fit."""
+    inside = _cost(qtbot, 50, GEMINI)
+    over = _cost(qtbot, 51, GEMINI)
 
     assert _label(inside, ESTIMATE).text() == (
-        "Estimated for 66 pages with gemini-3.1-pro-preview: $1.98."
+        "Estimated for 50 pages with gemini-3.1-pro-preview: $2.00."
     )
-    _assert_normal(inside, 66)
+    _assert_normal(inside, 50)
     assert _label(over, ESTIMATE).text() == (
-        "Estimated for 67 pages with gemini-3.1-pro-preview: $2.01."
+        "Estimated for 51 pages with gemini-3.1-pro-preview: $2.04."
     )
-    _assert_over(over, 67)
+    _assert_over(over, 51)
 
 
 # =============================================================================
-# AC-3 (MT-058): over the budget -> the over-budget state (control: 33 / 34)
+# AC-3 (MT-058): over the budget -> the over-budget state (control: 28 / 29)
 # =============================================================================
 
 
@@ -532,11 +537,12 @@ def _assert_over(cost: CostEstimate, pages: int) -> None:
     _assert_styled_by_the_sheet_alone(cost, pages, over=True)
 
 
-def test_the_boundary_read_from_the_domain_is_thirty_three_pages_on_claude() -> None:
-    """The second, literal oracle for the computed boundary."""
-    assert _last_page_inside_budget(OPUS) == 33
-    assert format_usd(_estimate(33, OPUS)) == "$1.98"
-    assert format_usd(_estimate(34, OPUS)) == "$2.04"
+def test_the_boundary_read_from_the_domain_is_twenty_eight_pages_on_claude() -> None:
+    """The second, literal oracle for the computed boundary (33 at MT-058's
+    $0.06; 28 at MT-149 R-2b's $0.07)."""
+    assert _last_page_inside_budget(OPUS) == 28
+    assert format_usd(_estimate(28, OPUS)) == "$1.96"
+    assert format_usd(_estimate(29, OPUS)) == "$2.03"
 
 
 @pytest.mark.parametrize("model", [OPUS, GEMINI])
@@ -558,10 +564,11 @@ def test_one_page_more_than_the_budget_holds_shows_the_over_budget_state(
     _assert_over(_cost(qtbot, pages, model), pages)
 
 
-def test_thirty_three_pages_are_normal_and_thirty_four_are_over_budget_on_claude(qtbot) -> None:  # type: ignore[no-untyped-def]
-    """The design's worked example, literally."""
-    _assert_normal(_cost(qtbot, 33, OPUS), 33)
-    _assert_over(_cost(qtbot, 34, OPUS), 34)
+def test_twenty_eight_pages_are_normal_and_twenty_nine_are_over_budget_on_claude(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """The design's worked example, literally, at MT-149 R-2b's $0.07 a page
+    (the design tabulated 33 / 34 at $0.06)."""
+    _assert_normal(_cost(qtbot, 28, OPUS), 28)
+    _assert_over(_cost(qtbot, 29, OPUS), 29)
 
 
 def test_an_estimate_exactly_on_the_ceiling_is_within_budget(
@@ -570,8 +577,9 @@ def test_an_estimate_exactly_on_the_ceiling_is_within_budget(
 ) -> None:
     """DV-2, isolated: the ceiling is inclusive, as `Budget.check`. A test model
     at 99,000 micro-dollars a page rounds up to $0.10, so 20 pages are exactly
-    $2.00 - normal. A `>=` fails only this."""
-    model = _with_model(monkeypatch, "test-ten-cents", "66")
+    $2.00 - normal. A `>=` fails only this. (2,000 output tokens at $49.50/M
+    since MT-149 R-2b; it was 1,500 at $66/M.)"""
+    model = _with_model(monkeypatch, "test-ten-cents", "49.5")
     assert _estimate(20, model) == _ceiling(), "precondition: 20 pages land on the ceiling"
 
     cost = _cost(qtbot, 20, model)
@@ -584,7 +592,7 @@ def test_one_cent_past_an_exact_ceiling_is_over_budget(
     qtbot,  # type: ignore[no-untyped-def]
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model = _with_model(monkeypatch, "test-ten-cents", "66")
+    model = _with_model(monkeypatch, "test-ten-cents", "49.5")
 
     cost = _cost(qtbot, 21, model)
 
@@ -613,23 +621,23 @@ def test_two_hundred_and_one_pages_warn_with_the_estimated_cost(qtbot) -> None: 
 
     text = _label(cost, PAGE_WARNING).text()
     assert text == _warning_line(format_usd(_estimate(201, OPUS)))
-    assert text == "That is more pages than a chapter. Estimated cost is $12.06."
+    assert text == "That is more pages than a chapter. Estimated cost is $14.07."
 
 
 def test_two_hundred_and_one_pages_on_gemini_warn_with_gemini_s_figure(qtbot) -> None:  # type: ignore[no-untyped-def]
-    """The warning's figure is the same model's: 201 x $0.03 = $6.03."""
+    """The warning's figure is the same model's: 201 x $0.04 = $8.04."""
     cost = _cost(qtbot, 201, GEMINI)
 
-    assert _label(cost, PAGE_WARNING).text() == _warning_line("$6.03")
+    assert _label(cost, PAGE_WARNING).text() == _warning_line("$8.04")
 
 
 def test_two_hundred_and_one_pages_show_all_three_lines_over_budget(qtbot) -> None:  # type: ignore[no-untyped-def]
     cost = _cost(qtbot, 201, OPUS)
 
     assert _lines(cost) == [
-        "Estimated for 201 pages with claude-opus-5: $12.06.",
+        "Estimated for 201 pages with claude-opus-5: $14.07.",
         f"Budget $2.00. {OVER}",
-        "That is more pages than a chapter. Estimated cost is $12.06.",
+        "That is more pages than a chapter. Estimated cost is $14.07.",
     ]
     assert cost.over_budget
 
@@ -652,7 +660,7 @@ def test_the_page_count_warning_does_not_set_the_over_budget_state(
 def test_a_summary_of_more_than_two_hundred_pages_blocks_nothing(qtbot) -> None:  # type: ignore[no-untyped-def]
     summary = _summary(qtbot, _chapter(201), OPUS)
 
-    assert _label(summary, PAGE_WARNING).text() == _warning_line("$12.06")
+    assert _label(summary, PAGE_WARNING).text() == _warning_line("$14.07")
     choose = summary.findChild(QPushButton, "summary-choose")
     assert choose is not None and choose.isEnabled(), "the way out is blocked"
     assert _label(summary, "summary-count").text() == "201 pages"
@@ -686,7 +694,7 @@ def test_a_model_costing_a_fraction_of_a_cent_a_page_never_reads_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The control with teeth: a test model whose exact page cost is 2
-    micro-dollars (1,500 tokens at $0.001/M, rounded half-up by `price`).
+    micro-dollars (2,000 tokens at $0.001/M; it was 1,500, rounded half-up by `price`).
     Priced to the nearest cent it is $0.00 a page, and every line reads $0.00;
     rounded up (MT-100 C-1) it is $0.01."""
     model = _with_model(monkeypatch, "test-two-micro", "0.001")
@@ -827,12 +835,12 @@ def test_a_window_with_no_run_setup_shows_no_estimate_for_want_of_models(qtbot) 
 @pytest.mark.parametrize(
     ("model", "pages", "line", "start"),
     [
-        (GEMINI, 66, "Estimated for 66 pages with gemini-3.1-pro-preview: $1.98.", START),
-        (GEMINI, 67, "Estimated for 67 pages with gemini-3.1-pro-preview: $2.01.", START_ANYWAY),
-        (OPUS, 33, "Estimated for 33 pages with claude-opus-5: $1.98.", START),
-        (OPUS, 34, "Estimated for 34 pages with claude-opus-5: $2.04.", START_ANYWAY),
+        (GEMINI, 50, "Estimated for 50 pages with gemini-3.1-pro-preview: $2.00.", START),
+        (GEMINI, 51, "Estimated for 51 pages with gemini-3.1-pro-preview: $2.04.", START_ANYWAY),
+        (OPUS, 28, "Estimated for 28 pages with claude-opus-5: $1.96.", START),
+        (OPUS, 29, "Estimated for 29 pages with claude-opus-5: $2.03.", START_ANYWAY),
     ],
-    ids=["gemini-66", "gemini-67", "claude-33", "claude-34"],
+    ids=["gemini-50", "gemini-51", "claude-28", "claude-29"],
 )
 def test_a_window_prices_the_summary_on_the_model_its_setup_selects(
     qtbot,  # type: ignore[no-untyped-def]
@@ -869,7 +877,7 @@ def _app_summary(qtbot, folder: Path) -> ChapterSummary:  # type: ignore[no-unty
     return summary
 
 
-def test_a_gemini_only_environment_prices_two_hundred_pages_at_six_dollars(
+def test_a_gemini_only_environment_prices_two_hundred_pages_at_eight_dollars(
     qtbot,  # type: ignore[no-untyped-def]
     monkeypatch: pytest.MonkeyPatch,
     two_hundred_pages: Path,
@@ -881,13 +889,13 @@ def test_a_gemini_only_environment_prices_two_hundred_pages_at_six_dollars(
     summary = _app_summary(qtbot, two_hundred_pages)
 
     assert _lines(summary.cost_estimate)[:2] == [
-        "Estimated for 200 pages with gemini-3.1-pro-preview: $6.00.",
+        "Estimated for 200 pages with gemini-3.1-pro-preview: $8.00.",
         f"Budget $2.00. {OVER}",
     ]
     assert _start_button(summary).text() == START_ANYWAY
 
 
-def test_an_anthropic_only_environment_prices_two_hundred_pages_at_twelve_dollars(
+def test_an_anthropic_only_environment_prices_two_hundred_pages_at_fourteen_dollars(
     qtbot,  # type: ignore[no-untyped-def]
     monkeypatch: pytest.MonkeyPatch,
     two_hundred_pages: Path,
@@ -898,7 +906,7 @@ def test_an_anthropic_only_environment_prices_two_hundred_pages_at_twelve_dollar
     summary = _app_summary(qtbot, two_hundred_pages)
 
     assert _label(summary.cost_estimate, ESTIMATE).text() == (
-        "Estimated for 200 pages with claude-opus-5: $12.00."
+        "Estimated for 200 pages with claude-opus-5: $14.00."
     )
 
 
@@ -1016,7 +1024,7 @@ def test_the_summary_shows_the_guards_own_first_projection_for_the_providers_mod
 # `#chapter-summary`, so the frame is measured inside a real summary built by
 # `app.build_window` from a folder of real PNGs; a standalone `CostEstimate`
 # gets none of them (Design notes, "Theme (MT-061 rule)"). MT-100: the window
-# is given a `RunSetup` answering claude-opus-5, so the 33/34 boundary is
+# is given a `RunSetup` answering claude-opus-5, so the 28/29 boundary is
 # Claude's and nothing reads the machine's environment.
 
 #: components.md section 2 CostEstimate, "How it is rendered": edge per state.
@@ -1113,7 +1121,7 @@ def test_an_over_budget_summary_paints_the_estimates_edge_in_the_warning_colour(
     application_sheet: Callable[[str], None],
     tmp_path: Path,
 ) -> None:
-    """AC-3: 34 pages ($2.04) - every edge of the frame is color.status.warning."""
+    """AC-3: 29 pages ($2.03) - every edge of the frame is color.status.warning."""
     application_sheet(_packaged("theme.qss"))
     pages = _last_page_inside_budget(OPUS) + 1
 
@@ -1130,7 +1138,7 @@ def test_a_summary_within_budget_paints_the_estimates_edge_in_the_subtle_border(
     application_sheet: Callable[[str], None],
     tmp_path: Path,
 ) -> None:
-    """AC-3's control: 33 pages ($1.98) - every edge is color.border.subtle."""
+    """AC-3's control: 28 pages ($1.96) - every edge is color.border.subtle."""
     application_sheet(_packaged("theme.qss"))
     pages = _last_page_inside_budget(OPUS)
 
@@ -1148,7 +1156,7 @@ def test_control_without_the_sheet_an_over_budget_edge_is_not_the_warning_colour
     tmp_path: Path,
 ) -> None:
     """The warning colour comes from theme.qss: with no application sheet the
-    34-page frame shows Qt's default, not color.status.warning."""
+    29-page frame shows Qt's default, not color.status.warning."""
     application_sheet("")
     pages = _last_page_inside_budget(OPUS) + 1
 
@@ -1202,25 +1210,25 @@ def test_the_estimate_is_a_frame_named_summary_cost_estimate(qtbot) -> None:  # 
 
 def test_the_frame_is_named_by_its_visible_lines(qtbot) -> None:  # type: ignore[no-untyped-def]
     for pages, model, lines in (
-        (1, OPUS, ["Estimated for 1 page with claude-opus-5: $0.06.", "Budget $2.00."]),
+        (1, OPUS, ["Estimated for 1 page with claude-opus-5: $0.07.", "Budget $2.00."]),
         (
             34,
             OPUS,
-            ["Estimated for 34 pages with claude-opus-5: $2.04.", f"Budget $2.00. {OVER}"],
+            ["Estimated for 34 pages with claude-opus-5: $2.38.", f"Budget $2.00. {OVER}"],
         ),
         (
             201,
             OPUS,
             [
-                "Estimated for 201 pages with claude-opus-5: $12.06.",
+                "Estimated for 201 pages with claude-opus-5: $14.07.",
                 f"Budget $2.00. {OVER}",
-                "That is more pages than a chapter. Estimated cost is $12.06.",
+                "That is more pages than a chapter. Estimated cost is $14.07.",
             ],
         ),
         (
             1,
             GEMINI,
-            ["Estimated for 1 page with gemini-3.1-pro-preview: $0.03.", "Budget $2.00."],
+            ["Estimated for 1 page with gemini-3.1-pro-preview: $0.04.", "Budget $2.00."],
         ),
     ):
         cost = _cost(qtbot, pages, model)
@@ -1268,7 +1276,7 @@ def test_the_summary_carries_a_cost_estimate_of_its_page_count_on_its_model(qtbo
     assert isinstance(cost, CostEstimate)
     assert summary.findChild(CostEstimate, FRAME) is cost
     assert _label(cost, ESTIMATE).text() == (
-        "Estimated for 20 pages with gemini-3.1-pro-preview: $0.60."
+        "Estimated for 20 pages with gemini-3.1-pro-preview: $0.80."
     )
     assert _label(cost, BUDGET).text() == "Budget $2.00."
 
@@ -1319,7 +1327,7 @@ def test_the_scroll_description_puts_the_estimate_after_the_page_facts_and_befor
         "12 pages",
         "First page: p1.png",
         "Last page: p12.png",
-        "Estimated for 12 pages with claude-opus-5: $0.72.",
+        "Estimated for 12 pages with claude-opus-5: $0.84.",
         "Budget $2.00.",
     ]
     assert lines[6] == (
@@ -1336,7 +1344,7 @@ def test_an_over_budget_summary_describes_the_over_budget_sentence(qtbot) -> Non
     lines = scroll.accessibleDescription().split("\n")
 
     assert lines[4:6] == [
-        "Estimated for 34 pages with claude-opus-5: $2.04.",
+        "Estimated for 34 pages with claude-opus-5: $2.38.",
         f"Budget $2.00. {OVER}",
     ]
 
@@ -1361,7 +1369,7 @@ def test_a_folder_of_pages_opened_by_the_app_shows_its_estimate_on_the_selected_
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The user's environment again, at three pages: $0.09 on Gemini."""
+    """The user's environment again, at three pages: $0.12 on Gemini."""
     _provider_env(monkeypatch, GEMINI_API_KEY="g-dummy-key-0000")
     folder = tmp_path / "Chapter 3"
     folder.mkdir()
@@ -1376,7 +1384,7 @@ def test_a_folder_of_pages_opened_by_the_app_shows_its_estimate_on_the_selected_
     assert isinstance(central, ChapterSummary), f"central widget is {type(central).__name__}"
     cost = central.cost_estimate
     assert _label(cost, ESTIMATE).text() == (
-        "Estimated for 3 pages with gemini-3.1-pro-preview: $0.09."
+        "Estimated for 3 pages with gemini-3.1-pro-preview: $0.12."
     )
     assert _label(cost, BUDGET).text() == "Budget $2.00."
     assert cost.over_budget is False

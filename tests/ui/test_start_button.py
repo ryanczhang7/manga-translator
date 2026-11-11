@@ -4,7 +4,8 @@
 before `summary-choose`, with the new signal `start_requested`. Its text is
 **settled** (AC-1, `components.md` §2): `Start run`, or `Start run anyway`
 exactly when `summary.cost_estimate.over_budget` (MT-058's estimate, whose
-boundary is read from the domain - 33 pages fit $2.00 at $0.06, 34 do not).
+boundary is read from the domain - 28 pages fit $2.00 at $0.07, 29 do not;
+MT-149 R-2b moved it from 33 / 34 at $0.06).
 
 The rest is D-1, read out: object name, the `variant="primary"` property,
 accessible name = text, placement (one row at the scroll area's foot,
@@ -25,9 +26,9 @@ the window's `#1c1c1c` (surface.base). Recorded in the story's `## Handoff`.
 
 **MT-100:** a summary now prices a named model (`ChapterSummary(..., model=)`),
 and a window learns it from `RunSetup.select_model`. These tests name
-claude-opus-5, so the 33/34 boundary they read is Claude's; the one test that
+claude-opus-5, so the 28/29 boundary they read is Claude's; the one test that
 moves the boundary does it by choosing the model through the window's
-`RunSetup` (Gemini: 66/67), and every window built here is given a setup, so
+`RunSetup` (Gemini: 50/51), and every window built here is given a setup, so
 nothing reads the machine's provider keys.
 
 **RED:** the summary has no Start button, so every test here fails on
@@ -64,14 +65,14 @@ CHOOSE = "Choose a different folder"
 
 
 #: MT-100 C-6: a summary prices a named model. These tests are about the button,
-#: so they name Claude's, whose boundary MT-058 tabulates (33 / 34).
+#: so they name Claude's, whose boundary MT-058 tabulates (28 / 29 since MT-149 R-2b).
 OPUS = "claude-opus-5"
 GEMINI = "gemini-3.1-pro-preview"
 
 
 def _last_page_inside_budget(model: str = OPUS) -> int:
-    """MT-058 AC-3's boundary on `model`, read from the domain (33 on Claude,
-    66 on Gemini - MT-100 AC-2)."""
+    """MT-058 AC-3's boundary on `model`, read from the domain (28 on Claude,
+    50 on Gemini - MT-100 AC-2, at MT-149 R-2b's figures)."""
     return budget.DEFAULT_CEILING.micro() // budget.page_estimate(model).micro()
 
 
@@ -134,14 +135,14 @@ def _settle() -> None:
 # =============================================================================
 
 
-def test_the_boundary_is_33_pages_at_today_s_rates() -> None:
-    assert _last_page_inside_budget() == 33
+def test_the_boundary_is_28_pages_at_today_s_rates() -> None:
+    assert _last_page_inside_budget() == 28
 
 
 @pytest.mark.parametrize(
     ("model", "offset", "text"),
     [(GEMINI, 0, START), (GEMINI, 1, START_ANYWAY), (OPUS, 0, START), (OPUS, 1, START_ANYWAY)],
-    ids=["gemini-66", "gemini-67", "claude-33", "claude-34"],
+    ids=["gemini-50", "gemini-51", "claude-28", "claude-29"],
 )
 def test_through_the_window_the_start_label_follows_the_selected_models_boundary(
     qtbot,  # type: ignore[no-untyped-def]
@@ -150,7 +151,7 @@ def test_through_the_window_the_start_label_follows_the_selected_models_boundary
     text: str,
 ) -> None:
     """MT-100 AC-1/AC-2 at the button: the window's `RunSetup.select_model`
-    decides which boundary Start's label moves at - 66/67 on Gemini, 33/34 on
+    decides which boundary Start's label moves at - 50/51 on Gemini, 28/29 on
     Claude. Before MT-100 a 66-page Gemini chapter read `Start run anyway`."""
     window = MainWindow(open_folder=app_module.open_folder, run_setup=_selecting(model))
     qtbot.addWidget(window)
@@ -166,7 +167,7 @@ def test_through_the_window_the_start_label_follows_the_selected_models_boundary
 @pytest.mark.parametrize(
     ("offset", "text"),
     [(0, START), (1, START_ANYWAY)],
-    ids=["33-inside", "34-over"],
+    ids=["28-inside", "29-over"],
 )
 def test_the_start_button_reads_start_run_unless_the_estimate_is_over_budget(
     qtbot,  # type: ignore[no-untyped-def]

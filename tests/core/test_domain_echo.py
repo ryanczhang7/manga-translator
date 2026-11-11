@@ -394,6 +394,28 @@ def test_a_key_the_answer_omitted_is_in_neither(echo: Any) -> None:
     assert 1 not in checked.misaligned
 
 
+def test_a_malformed_entry_is_misaligned_and_has_no_english(echo: Any) -> None:
+    """R-2a (PO-4): the parser maps a malformed entry to `None`, and
+    `checked_lines` files its key as misaligned - it is answered, so not
+    "omitted", and it carries nothing that could be accepted. Its neighbour
+    is checked as usual."""
+    entries = {0: echo.AnswerEntry("行くぞ", "Let's go."), 1: None}
+
+    checked = echo.checked_lines(entries, ["行くぞ", "待て"])
+
+    assert checked == echo.CheckedLines(lines={0: "Let's go."}, misaligned=frozenset({1}))
+
+
+def test_a_malformed_entry_is_misaligned_even_where_the_listing_is_empty(echo: Any) -> None:
+    """R-2a: no listing match is consulted for a `None` entry. An empty
+    listing matches *any* echo (AC-2), so an implementation that ran the echo
+    check first, or read an empty string for a missing `ja`, would accept
+    nothing as English here; the key must still read misaligned."""
+    checked = echo.checked_lines({1: None}, ["行くぞ", ""])
+
+    assert checked == echo.CheckedLines(lines={}, misaligned=frozenset({1}))
+
+
 def test_no_entries_check_to_nothing(echo: Any) -> None:
     """The zero: a page of wordless art, or a model that answered nothing."""
     checked = echo.checked_lines({}, ["行くぞ"])

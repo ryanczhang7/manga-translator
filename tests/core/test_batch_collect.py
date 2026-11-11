@@ -1083,3 +1083,154 @@ def test_a_batch_page_with_nothing_misaligned_flags_nothing(world: _World) -> No
         if line is not None
     ]
     assert flags == [False] * 5
+
+
+# -- MT-149 R-2a (PO-4): an old-shape answer is misaligned, not a failed item ----
+#
+# Through the REAL collector: `compose.build_batch_collector` around a fake
+# `GeminiClient` whose `batches.get` answers a succeeded job, so the item text
+# goes through `gemini_batch`'s parse and echo check exactly as in production.
+# Page 0 answers in the pre-MT-149 shape - bare strings, no `ja` - and pages 1
+# and 2 in the `{ja, en}` shape, each `ja` the page's own OCR text. Before R-2a
+# the parser raised `TypeError` on page 0's bare strings, `gemini_batch` turned
+# that into a `BatchItemError`, and page 0 was neither written nor billed.
+#
+# Each item's usage is `_USAGE[n]` on the wire (`prompt` = input, `candidates`
+# = output, nothing cached, no thoughts), so the ledger, the `CallPriced`
+# events and the proposals are exactly AC-2's written-out figures for pages 1
+# and 2, and page 0 differs only in having no English.
+
+_OLD_SHAPE_PAGE_0 = '{"0": "Kenji, wait", "1": "Senpai..."}'
+
+_ANSWER_TEXT: dict[int, str] = {
+    0: _OLD_SHAPE_PAGE_0,
+    1: '{"0": {"ja": "どこへ行くの", "en": "Where are you going"}}',
+    2: '{"0": {"ja": "ケンジ先輩", "en": "Kenji-senpai"}}',
+}
+
+
+class _FakeBatches:
+    def __init__(self, job: object) -> None:
+        self.job = job
+
+    def get(self, **kwargs: Any) -> object:
+        return self.job
+
+    def create(self, **kwargs: Any) -> object:
+        raise AssertionError("the collector submitted a batch job")
+
+
+class _FakeGeminiClient:
+    def __init__(self, job: object) -> None:
+        self.batches = _FakeBatches(job)
+
+
+def _succeeded_job(texts: Mapping[int, str]) -> Any:
+    """A succeeded `types.BatchJob`, one inlined response per page keyed by
+    ordinal, each carrying `texts[n]` and `_USAGE[n]`."""
+    from google.genai import types
+
+    def item(n: int) -> Any:
+        usage = _USAGE[n]
+        return types.InlinedResponse(
+            response=types.GenerateContentResponse(
+                candidates=[
+                    types.Candidate(
+                        content=types.Content(role="model", parts=[types.Part(text=texts[n])])
+                    )
+                ],
+                usage_metadata=types.GenerateContentResponseUsageMetadata(
+                    prompt_token_count=usage.input_tokens,
+                    candidates_token_count=usage.output_tokens,
+                ),
+                model_version=_MODEL,
+            ),
+            metadata={"key": str(n)},
+        )
+
+    return types.BatchJob(
+        name=_JOB,
+        state=types.JobState.JOB_STATE_SUCCEEDED,
+        dest=types.BatchJobDestination(inlined_responses=[item(n) for n in sorted(texts)]),
+    )
+
+
+def _real_collector(monkeypatch: pytest.MonkeyPatch, texts: Mapping[int, str]) -> Any:
+    """`compose.build_batch_collector` for a Gemini selection, its client
+    replaced by one answering `_succeeded_job(texts)`."""
+    from mangatl import compose
+    from mangatl.translate.provider import Selection
+
+    job = _succeeded_job(texts)
+    monkeypatch.setattr(compose, "GeminiClient", lambda *a, **k: _FakeGeminiClient(job))
+    return compose.build_batch_collector(Selection("gemini", "test-key"))
+
+
+def test_an_old_shape_answer_is_written_and_reported_as_collected_not_as_a_failed_page(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-2a: page 0's bare-string answer is a page with no English, not a
+    `BatchItemFailure` - three pages done, none failed - and pages 1 and 2
+    are written as usual."""
+    job = world.job()
+
+    world.collect(job, _real_collector(monkeypatch, _ANSWER_TEXT))
+
+    assert world.events == [*_PRICED_ALL, _collected(job.id, 3, 0, ())], f"emitted {world.events}"
+    assert world.proposed() == {**_PROPOSED_AFTER_ALL, 0: (None, None)}
+    assert world.statuses() == [PAGE_DONE] * 3
+
+
+def test_an_old_shape_answers_call_is_billed_to_the_ledger(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-2a: the call that answered page 0 was paid for, so its row is in the
+    ledger - one batch row per page, page 0's included."""
+    job = world.job()
+
+    world.collect(job, _real_collector(monkeypatch, _ANSWER_TEXT))
+
+    assert world.ledger() == [_row(world, 0), _row(world, 1), _row(world, 2)], (
+        f"ledger rows {world.ledger()}"
+    )
+
+
+def test_an_old_shape_answers_regions_read_misaligned(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-2a: both of page 0's regions read `failed`, flagged misaligned, with
+    the line-up reason; every other page's lines are unflagged."""
+    job = world.job()
+
+    world.collect(job, _real_collector(monkeypatch, _ANSWER_TEXT))
+
+    lines = {
+        n: [line for line in read_review_lines(world.project, n) if line is not None]
+        for n in range(len(_SOURCE_PAGES))
+    }
+    assert [(line.status, line.misaligned, failure_reason(line)) for line in lines[0]] == [
+        ("failed", True, "the translation did not line up with this bubble"),
+        ("failed", True, "the translation did not line up with this bubble"),
+    ]
+    assert [line.misaligned for n in (1, 2) for line in lines[n]] == [False, False, False]
+
+
+def test_the_real_collector_writes_the_new_shape_exactly_as_the_double_does(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control for the three tests above: with page 0 answered in the
+    `{ja, en}` shape, the real collector produces AC-2's written-out
+    proposals, ledger and events - so what they observe for page 0 is the
+    old shape, not something the fake client does."""
+    texts = {
+        **_ANSWER_TEXT,
+        0: '{"0": {"ja": "ケンジ、待って", "en": "Kenji, wait"},'
+        ' "1": {"ja": "先輩…", "en": "Senpai..."}}',
+    }
+    job = world.job()
+
+    world.collect(job, _real_collector(monkeypatch, texts))
+
+    assert world.proposed() == _PROPOSED_AFTER_ALL
+    assert world.ledger() == [_row(world, 0), _row(world, 1), _row(world, 2)]
+    assert world.events == [*_PRICED_ALL, _collected(job.id, 3, 0, ())], f"emitted {world.events}"
