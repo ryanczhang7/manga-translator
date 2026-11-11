@@ -47,6 +47,7 @@ from typing import Literal
 
 from google.genai import Client, types
 
+from mangatl.domain.echo import checked_lines
 from mangatl.domain.glossary import PromptContext
 from mangatl.domain.line import OcrResult
 from mangatl.domain.translation import CallInfo, TranslationResult
@@ -217,14 +218,19 @@ def _result_of(
         # response, which fails its page in `json.loads` like any empty body.
         response = item.response or types.GenerateContentResponse()
         text = response.text or ""
+        checked = checked_lines(
+            parse_lines_text(text, range(len(page.ocr_results))),
+            [r.text for r in page.ocr_results],
+        )
         return TranslationResult(
-            lines=parse_lines_text(text, range(len(page.ocr_results))),
+            lines=checked.lines,
             usage=_usage_of(response.usage_metadata),
             call=CallInfo(
                 request_id=f"{job_name}#{page.ordinal}",
                 model_id=response.model_version or MODEL_ID,
             ),
             proposed_terms=(),
+            misaligned=checked.misaligned,
         )
     except Exception as exc:
         return BatchItemError(page.ordinal, f"{type(exc).__name__}: {exc}")

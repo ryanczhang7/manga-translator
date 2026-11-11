@@ -229,6 +229,16 @@ CHAPTER_CONSISTENCY_RUN_DDL: str = (
     "ALTER TABLE chapter ADD COLUMN consistency_run_id INTEGER REFERENCES run(id);\n"
 )
 
+#: `line.misaligned` (MT-149, schema version 14): the model's answer entry for
+#: this region echoed Japanese that is not its listing, so its English was
+#: dropped and the review row says the translation did not line up. A
+#: **separate** `ALTER`, appended directly after `CREATE TABLE line` in `DDL`
+#: and run by `store.project._MIGRATE_TO_V14`, so a fresh file and a migrated
+#: one store the same `line` declaration: SQLite writes an altered table's
+#: `sqlite_master.sql` differently from one created with the column. Outside
+#: `__all__` for `CHAPTER_GLOSSARY_PROPOSED_DDL`'s reason.
+LINE_MISALIGNED_DDL: str = "ALTER TABLE line ADD COLUMN misaligned INTEGER NOT NULL DEFAULT 0;\n"
+
 #: One provider Batch API job (MT-103 AC-4; MT-111, MT-112), so a closed app can
 #: find the job it left running and resume collecting it. `provider_job_id` is
 #: the provider's name for the job (`batches/...`). `collected_at` and
@@ -383,6 +393,11 @@ CREATE TABLE line (
     status      TEXT CHECK (status IS NULL OR status IN ('accepted', 'edited', 'reverted'))
 );
 
+-- `misaligned` is MT-149's and the reason this schema is at version 14:
+-- `LINE_MISALIGNED_DDL`, appended after the table as the migration appends it.
+"""
+    + LINE_MISALIGNED_DDL
+    + """
 CREATE TABLE run (
     id             INTEGER PRIMARY KEY,
     chapter_id     INTEGER NOT NULL REFERENCES chapter(id) ON DELETE CASCADE,

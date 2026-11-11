@@ -76,6 +76,7 @@ from typing import Any
 from google.genai import Client, types
 
 from mangatl.domain.correction import ConsistencyResult
+from mangatl.domain.echo import checked_lines
 from mangatl.domain.glossary import PromptContext, estimate_tokens
 from mangatl.domain.line import OcrResult
 from mangatl.domain.translation import (
@@ -182,14 +183,18 @@ def translate_page(
     response = client.models.generate_content(**build_request(page_image, ocr_results, context))
     text = response.text or ""
 
+    checked = checked_lines(
+        parse_lines_text(text, range(len(ocr_results))), [r.text for r in ocr_results]
+    )
     return TranslationResult(
-        lines=parse_lines_text(text, range(len(ocr_results))),
+        lines=checked.lines,
         usage=_usage_of(response.usage_metadata),
         call=CallInfo(
             request_id=response.response_id or "",
             model_id=response.model_version or MODEL_ID,
         ),
         proposed_terms=(),
+        misaligned=checked.misaligned,
     )
 
 

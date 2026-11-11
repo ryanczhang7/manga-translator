@@ -79,6 +79,7 @@ COMMITTED_STATUSES: frozenset[LineStatus] = frozenset({"accepted", "edited", "re
 
 _REASON_OCR_EMPTY = "no text was read in this bubble"
 _REASON_UNTRANSLATED = "no translation was returned"
+_REASON_MISALIGNED = "the translation did not line up with this bubble"
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,9 @@ class Line:
     #: Why the region is out of translation, or `None` (MT-120 C-1). The row
     #: renders from `status`, which `derive_status` already folded this into.
     excluded: ExclusionReason | None = None
+    #: The model's answer entry for this region echoed another region's
+    #: Japanese, so its English was dropped (MT-149 C-1a).
+    misaligned: bool = False
 
 
 def normalise(text: str) -> str:
@@ -168,7 +172,9 @@ def failure_reason(line: Line) -> str | None:
     """Why a `failed` line failed, in the row's words; `None` for any other status."""
     if line.status != "failed":
         return None
-    return _REASON_OCR_EMPTY if line.ocr_empty else _REASON_UNTRANSLATED
+    if line.ocr_empty:
+        return _REASON_OCR_EMPTY
+    return _REASON_MISALIGNED if line.misaligned else _REASON_UNTRANSLATED
 
 
 @dataclass(frozen=True)

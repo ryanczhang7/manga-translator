@@ -105,6 +105,12 @@ class TranslationResult:
     usage: TokenUsage
     call: CallInfo | None
     proposed_terms: tuple[ProposedTerm, ...]
+    #: The keys whose answer entry echoed another region's Japanese, so their
+    #: English is not in `lines` (MT-149 C-1a); same key space as `lines`. The
+    #: one field with a default: most construction sites are fakes that never
+    #: answer through the parser, and AC-6's per-adapter tests close the
+    #: vacuous "never checks" implementation the default would allow.
+    misaligned: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)

@@ -34,7 +34,8 @@ __all__ = ["commit_line", "read_review_lines"]
 # the reason `project._SELECT_PAGES` gives.
 _SELECT_REVIEW = (
     "SELECT region.reading_index, line.id, line.source_ja, line.proposed_en,"
-    " line.final_en, line.status, line.edited_at, line.ocr_empty, region.excluded"
+    " line.final_en, line.status, line.edited_at, line.ocr_empty, region.excluded,"
+    " line.misaligned"
     " FROM region LEFT JOIN line ON line.region_id = region.id"
     " JOIN page ON page.id = region.page_id"
     " WHERE page.ordinal = ? ORDER BY region.reading_index"
@@ -83,6 +84,7 @@ def read_review_lines(project: Project, page_ordinal: int) -> tuple[Line | None,
             edited_at=None if edited_at is None else datetime.fromisoformat(str(edited_at)),
             ocr_empty=bool(ocr_empty),
             excluded=None if excluded is None else cast(ExclusionReason, str(excluded)),
+            misaligned=bool(misaligned),
         )
         for (
             reading_index,
@@ -94,6 +96,7 @@ def read_review_lines(project: Project, page_ordinal: int) -> tuple[Line | None,
             edited_at,
             ocr_empty,
             excluded,
+            misaligned,
         ) in rows
     )
 

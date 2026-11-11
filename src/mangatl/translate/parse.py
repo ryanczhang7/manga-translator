@@ -54,6 +54,7 @@ from typing import Any
 
 from anthropic.types import Message
 
+from mangatl.domain.echo import AnswerEntry
 from mangatl.domain.glossary import ProposedTerm
 from mangatl.translate.page_prompt import GLOSSARY_KEY
 
@@ -90,8 +91,8 @@ def first_text_block(response: Message) -> str:
     raise ValueError("the response has no text block to read the JSON answer from")
 
 
-def parse_lines(response: Message, region_indices: Sequence[int]) -> dict[int, str]:
-    """The page's proposed English, keyed by reading index: `parse_lines_text`
+def parse_lines(response: Message, region_indices: Sequence[int]) -> dict[int, AnswerEntry]:
+    """The page's answer entries, keyed by reading index: `parse_lines_text`
     over the response's first text block."""
     return parse_lines_text(first_text_block(response), region_indices)
 
@@ -102,8 +103,12 @@ def parse_terms(response: Message) -> tuple[ProposedTerm, ...]:
     return parse_terms_text(first_text_block(response))
 
 
-def parse_lines_text(text: str, region_indices: Sequence[int]) -> dict[int, str]:
-    """The page's proposed English, keyed by reading index.
+def parse_lines_text(text: str, region_indices: Sequence[int]) -> dict[int, AnswerEntry]:
+    """The page's answer entries, keyed by reading index.
+
+    Each entry is the `{ja, en}` object MT-149 asks for, carried byte for byte:
+    the parser does not compare `ja` with the listing - that is
+    `domain.echo.checked_lines`, which every adapter calls next.
 
     Sparse: a region the model omitted is simply absent, which is AC-5's
     untranslated region and is what `Project.write_proposed` leaves NULL. The
@@ -116,8 +121,8 @@ def parse_lines_text(text: str, region_indices: Sequence[int]) -> dict[int, str]
     """
     known = set(region_indices)
 
-    lines: dict[int, str] = {}
-    for key, english in _body(text).items():
+    lines: dict[int, AnswerEntry] = {}
+    for key, entry in _body(text).items():
         # MT-014 C-4: exactly this key and no other - a case-folded or prefix
         # match would silently turn a malformed key into a dropped one.
         if key == GLOSSARY_KEY:
@@ -128,7 +133,7 @@ def parse_lines_text(text: str, region_indices: Sequence[int]) -> dict[int, str]
             raise _unknown(key, known) from None
         if reading_index not in known:
             raise _unknown(reading_index, known)
-        lines[reading_index] = english
+        lines[reading_index] = AnswerEntry(entry["ja"], entry["en"])
     return lines
 
 
