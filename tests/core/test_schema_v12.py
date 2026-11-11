@@ -557,15 +557,23 @@ def test_the_v12_step_changes_nothing_but_the_new_column_and_the_version(
     Since MT-146 the open walks on to 13, whose step rebuilds `region` with a
     third reason (C-1): its declaration is excluded from the comparison for
     that reason, and `test_schema_v13.py` owns what that step does. Its rows
-    are still compared below."""
+    are still compared below.
+
+    Since MT-149 it walks on to 14, whose step ALTERs `line` to add
+    `misaligned` (C-1): its declaration is excluded for the same reason,
+    `test_schema_v14.py` owns that step, and its rows are compared on their
+    pre-v14 columns."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _build_v11_file(source_dir)
     schema = "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name != 'chapter'"
-    schema += " AND name != 'region' ORDER BY name"
+    schema += " AND name != 'region' AND name != 'line' ORDER BY name"
+    pre_v14_line = (
+        "SELECT id, region_id, source_ja, proposed_en, final_en, edited_at, viewed_at,"
+        " ocr_empty, status FROM line ORDER BY rowid"
+    )
     tables = (
         "page",
         "region",
-        "line",
         "run",
         "llm_call",
         "batch_job",
@@ -579,10 +587,12 @@ def test_the_v12_step_changes_nothing_but_the_new_column_and_the_version(
     )
 
     def rows() -> dict[str, list[tuple[object, ...]]]:
-        return {table: _raw(db_path, f"SELECT * FROM {table} ORDER BY rowid") for table in tables}
+        found = {table: _raw(db_path, f"SELECT * FROM {table} ORDER BY rowid") for table in tables}
+        found["line"] = _raw(db_path, pre_v14_line)
+        return found
 
     before = (_raw(db_path, schema), rows(), _raw(db_path, chapter))
-    assert all(before[1][table] for table in tables), "the v11 fixture has an empty table"
+    assert all(before[1].values()), "the v11 fixture has an empty table"
 
     with open_project(project_dir_for(source_dir)):
         pass

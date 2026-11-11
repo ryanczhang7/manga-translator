@@ -668,12 +668,21 @@ def test_the_v10_step_changes_nothing_outside_the_objects_it_owns(
     Since MT-146 the open walks on to 13, whose step rebuilds `region` with a
     third reason (C-1): its declaration is excluded from the comparison for
     that reason, and `test_schema_v13.py` owns what that step does. Its rows
-    are still compared below."""
+    are still compared below.
+
+    Since MT-149 it walks on to 14, whose step ALTERs `line` to add
+    `misaligned` (C-1): its declaration is excluded for the same reason,
+    `test_schema_v14.py` owns that step, and its rows are compared on their
+    pre-v14 columns."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _build_v9_file(source_dir)
-    owned = ", ".join(f"'{name}'" for name in (*_V10_OBJECTS, "region"))
+    owned = ", ".join(f"'{name}'" for name in (*_V10_OBJECTS, "region", "line"))
     schema = f"SELECT type, name, sql FROM sqlite_master WHERE name NOT IN ({owned}) ORDER BY name"
-    tables = ("page", "region", "line", "run", "glossary", "cleaned_page")
+    tables = ("page", "region", "run", "glossary", "cleaned_page")
+    pre_v14_line = (
+        "SELECT id, region_id, source_ja, proposed_en, final_en, edited_at, viewed_at,"
+        " ocr_empty, status FROM line ORDER BY rowid"
+    )
     v9_ledger = (
         "SELECT id, run_id, page_id, request_id, model_id, input_tokens, output_tokens,"
         " cache_write_tokens, cache_read_tokens, cost_micro_usd, rate_table_version, at"
@@ -685,7 +694,9 @@ def test_the_v10_step_changes_nothing_outside_the_objects_it_owns(
     )
 
     def rows() -> dict[str, list[tuple[object, ...]]]:
-        return {table: _raw(db_path, f"SELECT * FROM {table} ORDER BY rowid") for table in tables}
+        found = {table: _raw(db_path, f"SELECT * FROM {table} ORDER BY rowid") for table in tables}
+        found["line"] = _raw(db_path, pre_v14_line)
+        return found
 
     before = (_raw(db_path, schema), rows(), _raw(db_path, v9_ledger), _raw(db_path, v9_chapter))
     assert before[1]["region"] != [], "the v9 fixture has no regions to preserve"

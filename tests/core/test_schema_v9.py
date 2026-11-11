@@ -428,12 +428,20 @@ def test_the_v9_step_changes_only_the_cleaned_page_erased_column(
     # `test_schema_v11.py` owns that step. `region` excluded since MT-146: the
     # v12 -> v13 step rebuilds it with a third reason on purpose (C-1);
     # `test_schema_v13.py` owns that step. Its rows are still compared below.
+    # `line` excluded since MT-149: the v13 -> v14 step ALTERs `line` on purpose
+    # (C-1, `line.misaligned`) and so rewrites its stored DDL and gives every row
+    # a `misaligned` cell; `test_schema_v14.py` owns what that step does. Its
+    # pre-v14 columns are still compared below.
     schema = (
         "SELECT type, name, sql FROM sqlite_master"
         " WHERE name NOT IN ('batch_job', 'chapter', 'cleaned_page', 'correction',"
-        " 'llm_call', 'region') ORDER BY name"
+        " 'line', 'llm_call', 'region') ORDER BY name"
     )
-    tables = ("page", "region", "line", "run", "glossary")
+    tables = ("page", "region", "run", "glossary")
+    pre_v14_line = (
+        "SELECT id, region_id, source_ja, proposed_en, final_en, edited_at, viewed_at,"
+        " ocr_empty, status FROM line ORDER BY rowid"
+    )
 
     def rows() -> dict[str, list[tuple[object, ...]]]:
         found = {t: _raw(db_path, f"SELECT * FROM {t} ORDER BY rowid") for t in tables}
@@ -450,6 +458,7 @@ def test_the_v9_step_changes_only_the_cleaned_page_erased_column(
             " cache_write_tokens, cache_read_tokens, cost_micro_usd, rate_table_version, at"
             " FROM llm_call ORDER BY rowid",
         )
+        found["line"] = _raw(db_path, pre_v14_line)
         return found
 
     def images() -> list[tuple[object, ...]]:

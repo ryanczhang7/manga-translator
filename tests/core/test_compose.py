@@ -2125,12 +2125,19 @@ def _inlined(key: str, text: str, usage: tuple[Any, ...], model_version: str | N
 
 
 def _succeeded_items() -> list[Any]:
-    """Pages 2, 0, 1 - out of order, paired by key. Page 1's item is an error."""
+    """Pages 2, 0, 1 - out of order, paired by key. Page 1's item is an error.
+    Each entry is `{ja, en}` since MT-149 (C-1), `ja` echoing the OCR text
+    `_collect_pages()` lists for that region, so it passes the echo check."""
     from google.genai import types
 
     return [
-        _inlined("2", '{"0": "Run!"}', (700, 0, 90, 10), None),
-        _inlined("0", '{"0": "Kenji"}', (1000, None, 500, None), "gemini-3.1-pro-preview"),
+        _inlined("2", '{"0": {"ja": "走れ", "en": "Run!"}}', (700, 0, 90, 10), None),
+        _inlined(
+            "0",
+            '{"0": {"ja": "ケンジ", "en": "Kenji"}}',
+            (1000, None, 500, None),
+            "gemini-3.1-pro-preview",
+        ),
         types.InlinedResponse(error=types.JobError(code=3, message="quota"), metadata={"key": "1"}),
     ]
 

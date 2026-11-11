@@ -552,23 +552,33 @@ def test_the_v11_step_changes_nothing_outside_batch_job(
     `test_schema_v12.py` owns what that step does. Its rows are still
     compared, column by column, below. Since MT-146 it walks on to 13, whose
     step rebuilds `region` (C-1): its declaration is excluded for the same
-    reason, `test_schema_v13.py` owns that step, and its rows are compared."""
+    reason, `test_schema_v13.py` owns that step, and its rows are compared.
+    Since MT-149 it walks on to 14, whose step ALTERs `line` to add
+    `misaligned` (C-1): its declaration is excluded for the same reason,
+    `test_schema_v14.py` owns that step, and its rows are compared on their
+    pre-v14 columns."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _build_v10_file(source_dir)
     schema = "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name != 'batch_job'"
     schema += " AND tbl_name != 'batch_job' AND name != 'chapter' AND name != 'region'"
-    schema += " ORDER BY name"
-    tables = ("page", "region", "line", "run", "llm_call", "correction", "glossary", "cleaned_page")
+    schema += " AND name != 'line' ORDER BY name"
+    tables = ("page", "region", "run", "llm_call", "correction", "glossary", "cleaned_page")
+    pre_v14_line = (
+        "SELECT id, region_id, source_ja, proposed_en, final_en, edited_at, viewed_at,"
+        " ocr_empty, status FROM line ORDER BY rowid"
+    )
     chapter = (
         "SELECT id, source_dir, output_dir, created_at, budget_ceiling_micro_usd, model_id,"
         " rate_table_version, glossary_proposed_at FROM chapter"
     )
 
     def rows() -> dict[str, list[tuple[object, ...]]]:
-        return {table: _raw(db_path, f"SELECT * FROM {table} ORDER BY rowid") for table in tables}
+        found = {table: _raw(db_path, f"SELECT * FROM {table} ORDER BY rowid") for table in tables}
+        found["line"] = _raw(db_path, pre_v14_line)
+        return found
 
     before = (_raw(db_path, schema), rows(), _raw(db_path, chapter))
-    assert all(before[1][table] for table in tables), "the v10 fixture has an empty table"
+    assert all(before[1].values()), "the v10 fixture has an empty table"
 
     with open_project(project_dir_for(source_dir)):
         pass

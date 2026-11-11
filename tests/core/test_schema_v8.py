@@ -503,12 +503,20 @@ def test_the_v8_step_changes_only_the_region_table(
     # `llm_call` on purpose; `test_schema_v10.py` owns what that step does.
     # MT-137's v10 -> v11 step rebuilds `batch_job` again: still excluded, and
     # `test_schema_v11.py` owns that step.
+    # `line` excluded since MT-149: the v13 -> v14 step ALTERs `line` on purpose
+    # (C-1, `line.misaligned`) and so rewrites its stored DDL and gives every row
+    # a `misaligned` cell; `test_schema_v14.py` owns what that step does. Its
+    # pre-v14 columns are still compared, below.
     schema = (
         "SELECT type, name, sql FROM sqlite_master"
         " WHERE name NOT IN ('batch_job', 'chapter', 'cleaned_page', 'correction',"
-        " 'llm_call', 'region') ORDER BY name"
+        " 'line', 'llm_call', 'region') ORDER BY name"
     )
-    tables = ("page", "line", "run", "glossary")
+    tables = ("page", "run", "glossary")
+    pre_v14_line = (
+        "SELECT id, region_id, source_ja, proposed_en, final_en, edited_at, viewed_at,"
+        " ocr_empty, status FROM line ORDER BY rowid"
+    )
 
     def rows() -> dict[str, list[tuple[object, ...]]]:
         found = {t: _raw(db_path, f"SELECT * FROM {t} ORDER BY rowid") for t in tables}
@@ -528,6 +536,7 @@ def test_the_v8_step_changes_only_the_region_table(
         found["cleaned_page"] = _raw(
             db_path, "SELECT page_id, image_blob FROM cleaned_page ORDER BY rowid"
         )
+        found["line"] = _raw(db_path, pre_v14_line)
         return found
 
     schema_before = _raw(db_path, schema)

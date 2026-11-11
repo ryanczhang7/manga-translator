@@ -417,10 +417,13 @@ def test_the_v7_step_adds_only_cleaned_page(
     # `llm_call` on purpose; `test_schema_v10.py` owns what that step does.
     # MT-137's v10 -> v11 step rebuilds `batch_job` again: still excluded, and
     # `test_schema_v11.py` owns that step.
+    # `line` excluded since MT-149: the v13 -> v14 step ALTERs `line` on purpose
+    # (C-1, `line.misaligned`) and so rewrites its stored DDL;
+    # `test_schema_v14.py` owns what that step does.
     query = (
         "SELECT type, name, tbl_name, sql FROM sqlite_master"
-        " WHERE name NOT IN ('batch_job', 'chapter', 'correction', 'llm_call', 'region')"
-        " ORDER BY type, name"
+        " WHERE name NOT IN ('batch_job', 'chapter', 'correction', 'line', 'llm_call',"
+        " 'region') ORDER BY type, name"
     )
     before = _raw(db_path, query)
 
