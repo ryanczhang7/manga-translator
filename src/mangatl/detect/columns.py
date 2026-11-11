@@ -6,20 +6,26 @@ the detector fences come back as two regions - the vertical columns of one text
 block - so one sentence becomes two review lines and two translations. This
 module puts them back together.
 
-**The rule, and both geometric halves of it are necessary** (MT-008 C-5). Two
-regions merge when all three hold:
+**The rule, and both geometric halves of each clause are necessary** (MT-008
+C-5, MT-145). Two regions merge when they lie in the **same fence box** - the
+box head's own judgement that they are one text block - and either clause
+holds:
 
-1. they lie in the **same fence box** - the box head's own judgement that they
-   are one text block;
-2. the **gap** between their extents across the run direction is at most
-   `COLUMN_MAX_GAP_PX`;
-3. their **overlap** along the run direction is at least `COLUMN_MIN_OVERLAP`
-   of the shorter of the two.
+- **side by side** (adjacent columns): the **gap** between their extents
+  across the run direction is at most `COLUMN_MAX_GAP_PX`, and their
+  **overlap** along the run direction is at least `COLUMN_MIN_OVERLAP` of the
+  shorter of the two;
+- **stacked** (pieces of one column, MT-145): the **gap** between their
+  extents along the run direction is at most `COLUMN_MAX_RUN_GAP_PX`, and
+  their **overlap** across the run direction is at least `COLUMN_MIN_OVERLAP`
+  of the narrower of the two.
 
-Neither geometric clause suffices alone, and the corpus holds a counter-example
+Neither geometric half suffices alone, and the corpora hold a counter-example
 to each: `011.jpg` box 4 fences two separate bubbles 3px apart, which only the
-overlap clause rejects, and box 7 of the same page fences a separate bubble
-whose overlap is complete, which only the gap clause rejects.
+overlap rejects, and box 7 of the same page fences a separate bubble whose
+overlap is complete, which only the gap rejects; on the MT-143 development set,
+p075 fences two balloons that touch (gap 0 both ways) and share too little in
+either direction, which only the overlaps reject.
 
 **Every quantity here is half-open**, the convention `regions_from_detection`
 already uses for box membership (MT-007 amendment A-6). A region's *extent* is
@@ -30,8 +36,11 @@ the half-open bounding box `(x0, y0, x1, y1)` of its set mask pixels, covering
     overlap = max(0, min(ay1, by1) - max(ay0, by0))     shared pixel ROWS
               as a fraction of min(ay1 - ay0, by1 - by0), the SHORTER height
 
-so extents that touch and extents that overlap both score gap 0.
-`axis="horizontal"` transposes the two axes and nothing else.
+and the stacked clause is the same two quantities with x and y exchanged
+(`run gap` in empty ROWS, `run overlap` in shared COLUMNS of the NARROWER
+width). Extents that touch and extents that overlap both score gap 0.
+`axis="horizontal"` transposes the two axes and nothing else, so both clauses
+are written once, for vertical text.
 
 **Run direction is a parameter, not an inference** (C-3). The corpus is 100%
 vertical text and carries no evidence for any inference rule; aspect ratio in
@@ -60,24 +69,46 @@ from PIL import Image
 from mangatl.detect.postprocess import _encode_one_bit_png
 from mangatl.domain.region import RawRegion
 
-__all__ = ["COLUMN_MAX_GAP_PX", "COLUMN_MIN_OVERLAP", "merge_columns"]
+__all__ = ["COLUMN_MAX_GAP_PX", "COLUMN_MAX_RUN_GAP_PX", "COLUMN_MIN_OVERLAP", "merge_columns"]
 
-#: The widest empty channel between two column extents that is still one
-#: utterance, in **page pixels at a scan width of 1125** (MT-008 C-4).
+#: The widest empty channel ACROSS the run between two side-by-side column
+#: extents that is still one utterance, in page pixels (MT-008 C-4, re-derived
+#: in MT-145).
 #:
-#: Measured over every same-box region pair of `011/012/014.jpg`, in this
-#: module's half-open convention: the merges run from gap 1 to gap 8, and the
-#: nearest thing that must stay apart is the separate bubble of `011` box 7 at
-#: gap 54 - so the admissible band is `8 <= value <= 53` and the separation is
-#: 6.1x. 12 sits in that band at the end the evidence is on: raising it towards
-#: 53 buys nothing the corpus asks for and walks towards the one measured
-#: negative.
+#: Re-derived on the MT-143 development set (`blackjack-v1-ep02-03`, 46 pages
+#: at 1414 px wide; never the benchmark), in this module's half-open
+#: convention. Adjacent columns of one balloon in one fence box sit 12, 13, 14,
+#: 14, 20 and 25 px apart, plus one at 38 (p104); different balloons in one
+#: fence box sit 37-71 px apart (median 53). MT-008's corpus (`011/012/014.jpg`,
+#: 1125 px wide) adds merges at 1-8 and a separate bubble at 54, and the chain
+#: test in `test_detect_page.py` keeps a pair 42 px apart. So the admissible
+#: band is `25 <= value <= 36`, and p104's 38 px pair stays split by choice.
+#: Swept over 25..36 with `COLUMN_MAX_RUN_GAP_PX` (MT-145 `## Notes`): no value
+#: in the band joins two user-confirmed regions; 26 is the smallest that, with
+#: the run limit below it, leaves the fewest balloon pieces. Separation from
+#: the nearest different balloon is 37 / 25 = 1.5x; it was 6.1x on MT-008's
+#: corpus alone.
 #:
-#: **It is a pixel count and therefore scales with scan resolution.** The corpus
-#: is single-resolution (1125x1600, three pages, one artist), so there is no
-#: evidence for expressing it as a fraction of page width and none against it;
-#: MT-008 `## Notes` records that as a limitation rather than resolving it.
-COLUMN_MAX_GAP_PX: int = 12
+#: **It is a pixel count and therefore scales with scan resolution.** Two
+#: corpora at two widths are not evidence for expressing it as a fraction of
+#: page width, nor against it; MT-008 `## Notes` records that as a limitation.
+COLUMN_MAX_GAP_PX: int = 26
+
+#: The widest empty gap ALONG the run between two pieces stacked in one column
+#: that is still one utterance, in page pixels (MT-145). A pixel count, with
+#: the same resolution limit as `COLUMN_MAX_GAP_PX`.
+#:
+#: Measured on the MT-143 development set: adjacent pieces of one balloon along
+#: one column sit 0-17 px apart (57 of 65 pairs), then 24, 25, 26, 29, 29, 59
+#: and 116. The one different-utterance pair stacked in a fence box (p075 seeds
+#: 2/3) touches, gap 0, sharing 0.156 of the narrower width - the overlap
+#: clause separates it, not the gap, so no measured negative bounds the gap
+#: from above: the band is `25 <= value < COLUMN_MAX_GAP_PX`, the lower end
+#: being where the balloon pieces bottom out and the upper end MT-145 A-1's
+#: pin, which keeps the axis readable between the two limits. Swept over 6..35:
+#: no value joins two user-confirmed regions; 25 is the smallest that leaves
+#: the fewest balloon pieces (10 of MT-143's 41, against 11 at 10-24).
+COLUMN_MAX_RUN_GAP_PX: int = 25
 
 #: How much of the shorter extent two columns must share along the run
 #: direction to be one utterance (MT-008 C-4).
@@ -162,11 +193,17 @@ def _oriented(extent: Rect, axis: Literal["vertical", "horizontal"]) -> Rect:
 
 
 def _is_one_utterance(a: Rect, b: Rect) -> bool:
-    """Both geometric clauses, on extents already oriented for vertical text."""
+    """Side by side or stacked, on extents already oriented for vertical text."""
     gap = max(0, max(a[0], b[0]) - min(a[2], b[2]))
     shared = max(0, min(a[3], b[3]) - max(a[1], b[1]))
     shorter = min(a[3] - a[1], b[3] - b[1])
-    return gap <= COLUMN_MAX_GAP_PX and shared / shorter >= COLUMN_MIN_OVERLAP
+    side_by_side = gap <= COLUMN_MAX_GAP_PX and shared / shorter >= COLUMN_MIN_OVERLAP
+
+    run_gap = max(0, max(a[1], b[1]) - min(a[3], b[3]))
+    run_shared = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    narrower = min(a[2] - a[0], b[2] - b[0])
+    stacked = run_gap <= COLUMN_MAX_RUN_GAP_PX and run_shared / narrower >= COLUMN_MIN_OVERLAP
+    return side_by_side or stacked
 
 
 def _fence_of(extent: Rect, fences: Sequence[Rect]) -> int | None:

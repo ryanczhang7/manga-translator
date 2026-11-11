@@ -43,10 +43,18 @@ MERGE/KEEP decision, the 6.1x and 3.2x separations and the admissible band for
 each constant are unchanged by that - `9 <= gap <= 54` inclusive is the same set
 of pixel distances as `8 <= gap <= 53` half-open. See the story's `## Handoff`
 for the pair-by-pair comparison.
+
+**MT-145** adds the stacked clause - pieces of one column, one under the
+other - and its constant `COLUMN_MAX_RUN_GAP_PX`, in the section at the end of
+this file, and re-fixtures MT-008's two axis tests to a gap between the two
+limits (MT-145 amendment A-1). Its AC-8 ("at the side-by-side limit merges, one
+past it does not") is the pair of MT-008 boundary tests already written relative
+to `COLUMN_MAX_GAP_PX`, below.
 """
 
 from __future__ import annotations
 
+import itertools
 import struct
 from collections.abc import Callable
 from io import BytesIO
@@ -196,6 +204,18 @@ def _rows_at_least(height: int) -> int:
         f"COLUMN_MIN_OVERLAP is {COLUMN_MIN_OVERLAP}, which no overlap of a"
         f" {height}px extent can reach; C-4 bounds it at or below 1.0"
     )
+
+
+def _run_gap() -> int:
+    """`COLUMN_MAX_RUN_GAP_PX`, imported where it is needed (MT-145).
+
+    Imported here rather than at the top of the module so that, while the
+    constant does not exist, each test that needs it fails on that named
+    absence and every other test in the file still runs.
+    """
+    from mangatl.detect.columns import COLUMN_MAX_RUN_GAP_PX
+
+    return COLUMN_MAX_RUN_GAP_PX
 
 
 def _kept_apart(result: list[RawRegion], first: RawRegion, second: RawRegion) -> None:
@@ -676,10 +696,15 @@ def test_a_pair_that_merges_vertically_is_left_alone_on_the_horizontal_axis(
     one_bit_png: Callable[..., bytes],
 ) -> None:
     """AC-7, and the transposition detector. These two columns sit side by side:
-    on the vertical axis the gap is 1 and the overlap is complete, and on the
-    horizontal axis the gap is 0 and the overlap is nil. A `merge_columns` that
-    read `y` where it should read `x` would merge them here."""
-    first, second = _column_pair(one_bit_png, gap=1, overlap=200)
+    on the vertical axis the gap is `COLUMN_MAX_GAP_PX` and the overlap is
+    complete, and on the horizontal axis the gap is 0 and the overlap is nil. A
+    `merge_columns` that read `y` where it should read `x` would merge them here.
+    MT-145 A-1 re-fixtured the gap from 1 to `COLUMN_MAX_GAP_PX`, a gap in
+    `(COLUMN_MAX_RUN_GAP_PX, COLUMN_MAX_GAP_PX]`, because at 1 the stacked clause
+    merges the pair on the horizontal axis too and the axis would go unread."""
+    gap = COLUMN_MAX_GAP_PX
+    assert _run_gap() < gap <= COLUMN_MAX_GAP_PX, "A-1: the gap must lie between the two limits"
+    first, second = _column_pair(one_bit_png, gap=gap, overlap=200)
 
     assert len(merge_columns([first, second], [_fence_around(first, second)])) == 1
 
@@ -692,8 +717,14 @@ def test_a_pair_that_merges_horizontally_is_left_alone_on_the_default_axis(
     one_bit_png: Callable[..., bytes],
 ) -> None:
     """AC-7's mirror, so that neither direction of the transposition passes. The
-    default is `vertical`, which is what the pipeline passes."""
-    first, second = _row_pair(one_bit_png, gap=1, overlap=200)
+    default is `vertical`, which is what the pipeline passes. MT-145 A-1
+    re-fixtured the gap from 1 to `COLUMN_MAX_GAP_PX`, a gap in
+    `(COLUMN_MAX_RUN_GAP_PX, COLUMN_MAX_GAP_PX]`, because at 1 the stacked clause
+    merges these two stacked rows on the vertical axis and the axis would go
+    unread."""
+    gap = COLUMN_MAX_GAP_PX
+    assert _run_gap() < gap <= COLUMN_MAX_GAP_PX, "A-1: the gap must lie between the two limits"
+    first, second = _row_pair(one_bit_png, gap=gap, overlap=200)
 
     result = merge_columns([first, second], [_fence_around(first, second)])
 
@@ -766,3 +797,300 @@ def test_the_boxes_the_detector_fences_with_are_the_rectangles_this_function_tak
     assert "integer_boxes" in postprocess.__all__
     assert fences == [(10, 20, 50, 80), (0, 0, 1125, 90)]
     assert all(isinstance(value, int) for fence in fences for value in fence)
+
+
+# -- MT-145: pieces stacked in one column come back as one region --------------
+#
+# MT-145 adds a second clause to "is one utterance": two pieces in one fence box
+# whose gap ALONG the run is at most `COLUMN_MAX_RUN_GAP_PX` and whose extents
+# share at least `COLUMN_MIN_OVERLAP` of the narrower one ACROSS the run. With
+# `axis="vertical"`, along the run is `y` and across it is `x`:
+#
+#     along gap = max(0, max(ay0, by0) - min(ay1, by1))     empty pixel ROWS
+#     shared    = max(0, min(ax1, bx1) - max(ax0, bx0))     shared pixel COLUMNS
+#                 as a fraction of min(ax1 - ax0, bx1 - bx0), the NARROWER width
+#
+# Every stacked fixture below has an across-run gap of 0 and an along-run
+# overlap of 0, so MT-008's side-by-side clause can never be what merges it:
+# when one of these pairs comes back as one region, the stacked clause did it.
+
+
+def _stacked_pair(
+    one_bit_png: Callable[..., bytes],
+    *,
+    gap: int,
+    shared: int = _COL_W,
+    width_a: int = _COL_W,
+    width_b: int = _COL_W,
+    height: int = 200,
+) -> tuple[RawRegion, RawRegion]:
+    """Two pieces of one vertical column: B starts `gap` empty ROWS below the
+    end of A, and the two share `shared` pixel COLUMNS across the run."""
+    ax1 = _LEFT_X + width_a
+    ay1 = _TOP_Y + height
+    bx0 = ax1 - shared
+    return (
+        _rect_region(one_bit_png, _PAGE, (_LEFT_X, _TOP_Y, ax1, ay1)),
+        _rect_region(one_bit_png, _PAGE, (bx0, ay1 + gap, bx0 + width_b, ay1 + gap + height)),
+    )
+
+
+def _rows_side_by_side(
+    one_bit_png: Callable[..., bytes], *, gap: int
+) -> tuple[RawRegion, RawRegion]:
+    """`_stacked_pair` transposed, for `axis="horizontal"`: two pieces of one
+    horizontal row, B starting `gap` empty COLUMNS to the right of the end of A,
+    and the two sharing all `_ROW_H` pixel ROWS."""
+    ax1 = _LEFT_X + 200
+    ay1 = _TOP_Y + _ROW_H
+    return (
+        _rect_region(one_bit_png, _WIDE, (_LEFT_X, _TOP_Y, ax1, ay1)),
+        _rect_region(one_bit_png, _WIDE, (ax1 + gap, _TOP_Y, ax1 + gap + 200, ay1)),
+    )
+
+
+def _clauses(first: RawRegion, second: RawRegion) -> tuple[int, float]:
+    """`(along-run gap, across-run shared fraction)` for a vertical pair,
+    re-derived from the masks so that a fixture which does not have the shape
+    its test names is reported as that, not as a broken rule."""
+    a, b = _mask_bbox(first), _mask_bbox(second)
+    gap = max(0, max(a[1], b[1]) - min(a[3], b[3]))
+    shared = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    return gap, shared / min(a[2] - a[0], b[2] - b[0])
+
+
+def test_two_pieces_of_one_column_six_pixels_apart_come_back_as_one_region(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """AC-1. Two pieces one column wide, the second starting 6px below the end
+    of the first, in one fence box: one region, `merged_from == (0, 1)`, its
+    mask and polygon spanning both. 6 is the criterion's literal, so this needs
+    `COLUMN_MAX_RUN_GAP_PX >= 6`."""
+    first, second = _stacked_pair(one_bit_png, gap=6)
+    assert _clauses(first, second) == (6, 1.0)
+
+    result = merge_columns([first, second], [_fence_around(first, second)])
+
+    assert len(result) == 1, (
+        f"two pieces of one column 6px apart came back as {len(result)} regions,"
+        " so one utterance is two review lines"
+    )
+    assert result[0].merged_from == (0, 1)
+    both = _union(_polygon_bbox(first), _polygon_bbox(second))
+    assert _polygon_bbox(result[0]) == both
+    assert _mask_bbox(result[0]) == both
+    assert _set_pixels(result[0]) == _set_pixels(first) | _set_pixels(second)
+
+
+def test_five_stacked_pieces_of_one_column_become_one_region_in_every_input_order(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """AC-2. Five pieces of one column, every gap at or under
+    `COLUMN_MAX_RUN_GAP_PX` (0, the limit, 1, the limit), so the outer pieces
+    are much further apart than the limit and only the transitive closure joins
+    them. All 120 input orders must give one region naming all five indices;
+    violations are collected and asserted once."""
+    run = _run_gap()
+    height = 60
+    rects: list[Rect] = []
+    y0 = _TOP_Y
+    for gap in (0, 0, run, 1, run):
+        y0 += gap
+        rects.append((_LEFT_X, y0, _LEFT_X + _COL_W, y0 + height))
+        y0 += height
+    assert rects[-1][3] <= _PAGE[1], "the five pieces do not fit on the fixture page"
+    assert rects[-1][1] - rects[0][3] > run, "the outer pieces must not be adjacent"
+    pieces = [_rect_region(one_bit_png, _PAGE, rect) for rect in rects]
+    fence = _fence_around(*pieces)
+    whole = _union(*rects)
+
+    wrong: dict[tuple[int, ...], object] = {}
+    for order in itertools.permutations(range(5)):
+        result = merge_columns([pieces[index] for index in order], [fence])
+        got = [(region.merged_from, _mask_bbox(region)) for region in result]
+        if got != [((0, 1, 2, 3, 4), whole)]:
+            wrong[order] = got
+
+    assert wrong == {}, (
+        f"{len(wrong)} of 120 input orders did not give one region covering {whole}:"
+        f" {dict(list(wrong.items())[:3])}"
+    )
+
+
+@pytest.mark.parametrize("delta", [-1, 0])
+def test_a_stacked_gap_at_or_below_the_run_limit_merges(
+    delta: int, one_bit_png: Callable[..., bytes]
+) -> None:
+    """AC-3's legal side: *at most* `COLUMN_MAX_RUN_GAP_PX`, so the limit itself
+    merges and so does one row inside it."""
+    gap = _run_gap() + delta
+    first, second = _stacked_pair(one_bit_png, gap=gap)
+
+    result = merge_columns([first, second], [_fence_around(first, second)])
+
+    assert len(result) == 1, f"stacked gap {gap} <= {_run_gap()} must merge"
+    assert result[0].merged_from == (0, 1)
+
+
+def test_two_stacked_pieces_one_row_past_the_run_limit_stay_two_regions(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """AC-3, the control on the run gap: `COLUMN_MAX_RUN_GAP_PX + 1` with the
+    across-run overlap complete, so only the run gap can keep them apart."""
+    first, second = _stacked_pair(one_bit_png, gap=_run_gap() + 1)
+    assert _clauses(first, second) == (_run_gap() + 1, 1.0)
+
+    result = merge_columns([first, second], [_fence_around(first, second)])
+
+    _kept_apart(result, first, second)
+
+
+def test_staggered_stacked_pieces_sharing_too_little_width_stay_two_regions(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """AC-4, the control on the across-run overlap: one row apart, but sharing
+    one pixel column less than `COLUMN_MIN_OVERLAP` of the narrower piece - a
+    staggered layout, two utterances one under the other."""
+    width = 100
+    shared = _rows_at_least(width) - 1
+    first, second = _stacked_pair(one_bit_png, gap=1, shared=shared, width_a=width, width_b=width)
+    gap, fraction = _clauses(first, second)
+    assert gap <= _run_gap(), "the run gap must allow the merge, or this is not the control"
+    assert fraction < COLUMN_MIN_OVERLAP
+
+    result = merge_columns([first, second], [_fence_around(first, second)])
+
+    _kept_apart(result, first, second)
+
+
+def test_stacked_pieces_sharing_exactly_the_minimum_width_merge(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """AC-4's twin on the legal side: *at least* `COLUMN_MIN_OVERLAP` of the
+    narrower piece. Without it the control above passes against a
+    `merge_columns` that never merges a stacked pair at all."""
+    width = 100
+    shared = _rows_at_least(width)
+    first, second = _stacked_pair(one_bit_png, gap=1, shared=shared, width_a=width, width_b=width)
+
+    result = merge_columns([first, second], [_fence_around(first, second)])
+
+    assert len(result) == 1, f"{shared}/{width} is at least COLUMN_MIN_OVERLAP"
+    assert result[0].merged_from == (0, 1)
+
+
+def test_the_stacked_overlap_is_a_fraction_of_the_narrower_piece_not_the_wider(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """AC-4. A narrow piece wholly under a wide one shares all of its own
+    width, 1.0; measured against the wider piece the same pair scores 0.25,
+    below the minimum, so this tells "narrower" from "wider"."""
+    first, second = _stacked_pair(one_bit_png, gap=1, shared=40, width_a=160, width_b=40)
+    assert COLUMN_MIN_OVERLAP > 40 / 160, "measured against the wider piece it must not merge"
+
+    result = merge_columns([first, second], [_fence_around(first, second)])
+
+    assert len(result) == 1
+    assert result[0].merged_from == (0, 1)
+
+
+def test_stacked_pieces_two_pixels_apart_in_different_fence_boxes_stay_two_regions(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """AC-5, the control on the fence: the geometry says one column, the box
+    head says two text blocks, and the box head wins for stacked pieces as it
+    does for side-by-side columns."""
+    first, second = _stacked_pair(one_bit_png, gap=2)
+    assert _run_gap() >= 2, "the run gap must allow the merge, or this is not the control"
+
+    result = merge_columns([first, second], [_polygon_bbox(first), _polygon_bbox(second)])
+
+    _kept_apart(result, first, second)
+
+
+def test_the_same_stacked_pieces_under_one_fence_box_do_merge(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """AC-5's twin: the pair above in one fence is one region, so the control
+    does not pass against a `merge_columns` that never merges stacked pieces."""
+    first, second = _stacked_pair(one_bit_png, gap=2)
+
+    result = merge_columns([first, second], [_fence_around(first, second)])
+
+    assert len(result) == 1
+    assert result[0].merged_from == (0, 1)
+
+
+def test_two_pieces_of_one_row_six_pixels_apart_merge_on_the_horizontal_axis(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """AC-7: AC-1 transposed. Along the run is `x` now and across it is `y`."""
+    first, second = _rows_side_by_side(one_bit_png, gap=6)
+
+    result = merge_columns([first, second], [_fence_around(first, second)], axis="horizontal")
+
+    assert len(result) == 1, (
+        f"two pieces of one horizontal row 6px apart came back as {len(result)} regions"
+    )
+    assert result[0].merged_from == (0, 1)
+    assert _mask_bbox(result[0]) == _union(_mask_bbox(first), _mask_bbox(second))
+
+
+def test_two_pieces_of_one_row_past_the_run_limit_stay_apart_on_the_horizontal_axis(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """AC-7, AC-3 transposed: `COLUMN_MAX_RUN_GAP_PX + 1` along `x` keeps them
+    apart."""
+    first, second = _rows_side_by_side(one_bit_png, gap=_run_gap() + 1)
+
+    result = merge_columns([first, second], [_fence_around(first, second)], axis="horizontal")
+
+    _kept_apart(result, first, second)
+
+
+def test_two_balloons_that_touch_at_a_corner_stay_two_regions(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """AC-9, the p075 shape: two regions in one fence box that touch - gap 0
+    both ways - but share 10 of the narrower one's 64 columns (0.156) and 20 of
+    the shorter one's 73 rows (0.274). Below `COLUMN_MIN_OVERLAP` in both
+    directions, so neither clause may merge them: touching is not one
+    utterance."""
+    first = _rect_region(one_bit_png, _PAGE, (40, 60, 140, 200))
+    second = _rect_region(one_bit_png, _PAGE, (130, 180, 194, 253))
+    a, b = _mask_bbox(first), _mask_bbox(second)
+    across_gap = max(0, max(a[0], b[0]) - min(a[2], b[2]))
+    along_gap = max(0, max(a[1], b[1]) - min(a[3], b[3]))
+    columns = (min(a[2], b[2]) - max(a[0], b[0])) / min(a[2] - a[0], b[2] - b[0])
+    rows = (min(a[3], b[3]) - max(a[1], b[1])) / min(a[3] - a[1], b[3] - b[1])
+    assert (across_gap, along_gap) == (0, 0)
+    assert columns == pytest.approx(0.156, abs=5e-4)
+    assert rows == pytest.approx(0.274, abs=5e-4)
+    assert max(columns, rows) < COLUMN_MIN_OVERLAP
+
+    result = merge_columns([first, second], [_fence_around(first, second)])
+
+    _kept_apart(result, first, second)
+
+
+def test_the_side_by_side_limit_sits_in_the_band_the_development_set_measured() -> None:
+    """MT-145's re-derived `COLUMN_MAX_GAP_PX`. At least 25, which covers every
+    adjacent-column pair of one balloon on MT-143's development set but p104's
+    38; at most 36, one below the nearest separate pair across (37). MT-008's
+    bounds (`8 <= ... <= 53`) stay pinned above, and AC-10's chain test keeps
+    the 42px pair separate."""
+    assert 25 <= COLUMN_MAX_GAP_PX <= 36, (
+        f"COLUMN_MAX_GAP_PX is {COLUMN_MAX_GAP_PX}, outside the development band [25, 36]"
+    )
+
+
+def test_the_stacked_limit_is_a_pixel_count_below_the_side_by_side_limit() -> None:
+    """AC-6 as amended (A-1). The two axis tests above prove the axis is read
+    only for gaps between the two limits, so the run limit must be strictly
+    the smaller; and it is a pixel count, like `COLUMN_MAX_GAP_PX`."""
+    run = _run_gap()
+
+    assert type(run) is int, f"COLUMN_MAX_RUN_GAP_PX is a {type(run).__name__}, not an int"
+    assert 0 <= run < COLUMN_MAX_GAP_PX, (
+        f"COLUMN_MAX_RUN_GAP_PX = {run} is not below COLUMN_MAX_GAP_PX = {COLUMN_MAX_GAP_PX}"
+    )

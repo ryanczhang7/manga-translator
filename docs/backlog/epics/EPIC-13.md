@@ -97,6 +97,14 @@ epic, as the release measurement.
   balloon found on the source page**. The column rule stays for text with no
   closed balloon (narration on art, captions), and MT-145 extends it to
   pieces stacked in one column.
+  *Amended 2026-11-11 (the user, in MT-144's GREEN):* on the MT-143
+  development set, balloons that are drawn joined or overlapping share one
+  patch of paper with no outline between them (p063, p089), and the user
+  decided they **stay separate**. No setting of the closed-balloon rule kept
+  them apart (MT-144 `## Notes`), so MT-144 was not built and its job folded
+  into MT-145: merging is decided by the gaps between pieces in one fence box,
+  both along a column and across columns, with the limits re-derived on the
+  development set.
 - **PO-2 - `art` is a new exclusion reason, not `user` and not `watermark`.**
   The store, the review row and the bench must be able to tell the model's
   judgement from the user's act. It needs a schema migration: SQLite cannot
@@ -126,7 +134,7 @@ epic, as the release measurement.
   English number words up to twenty and the tens. Kanji numerals (`三万八千`) are
   a documented limit.
 - **PO-6 - MT-155 (one block per shared balloon) is conditional.** After
-  MT-144 and MT-145 have merged what they can, MT-155 re-counts the regions
+  MT-145 has merged what it can, MT-155 re-counts the regions
   that share a balloon interior on the development set. If the count is zero,
   it closes as a no-op with the count cited, as MT-121 did.
 
@@ -194,9 +202,10 @@ Enablers:
   residual and tall-region counts every later story moves.
 
 1. Split balloons:
-   - **MT-144** - pieces of one closed balloon come back as one region.
-   - **MT-145** - pieces stacked in one column come back as one region (text
-     outside closed balloons).
+   - **MT-144** - *not built: folded into MT-145, the user's decision of
+     2026-11-11* (see PO-1's amendment).
+   - **MT-145** - pieces of one utterance come back as one region, stacked or
+     side by side, decided by the gaps between them in one fence box.
 2. Art text:
    - **MT-146** - `art` is an exclusion reason the project file, the domain and
      the review row know (schema v13).
