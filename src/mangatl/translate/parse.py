@@ -24,7 +24,11 @@ are got wrong, which is why each is pinned by its own test:
 **Validation is this function's own, independent of the response schema.** The
 schema in `output_config.format` is the server's job and a fixture can say
 anything; an index outside the page raises `UnknownRegionIndex` **naming it**,
-because a user told only that a page failed has nothing to look at.
+because a user told only that a page failed has nothing to look at. An entry
+under a valid index that is not a `{ja, en}` object of two strings is parsed to
+`None` rather than raised (MT-149 PO-4): the page's answer is
+`dict[int, AnswerEntry | None]`, and `domain.echo.checked_lines` reports a
+`None` entry as misaligned, so the page is written and its call recorded.
 
 `UnknownRegionIndex` derives from `Exception` **directly** and that is
 load-bearing: a non-integer key must raise it rather than letting a `ValueError`
@@ -91,9 +95,9 @@ def first_text_block(response: Message) -> str:
     raise ValueError("the response has no text block to read the JSON answer from")
 
 
-def parse_lines(response: Message, region_indices: Sequence[int]) -> dict[int, AnswerEntry]:
-    """The page's answer entries, keyed by reading index: `parse_lines_text`
-    over the response's first text block."""
+def parse_lines(response: Message, region_indices: Sequence[int]) -> dict[int, AnswerEntry | None]:
+    """The page's answer entries, keyed by reading index (`None` for a
+    malformed one): `parse_lines_text` over the response's first text block."""
     return parse_lines_text(first_text_block(response), region_indices)
 
 
@@ -103,12 +107,20 @@ def parse_terms(response: Message) -> tuple[ProposedTerm, ...]:
     return parse_terms_text(first_text_block(response))
 
 
-def parse_lines_text(text: str, region_indices: Sequence[int]) -> dict[int, AnswerEntry]:
+def parse_lines_text(text: str, region_indices: Sequence[int]) -> dict[int, AnswerEntry | None]:
     """The page's answer entries, keyed by reading index.
 
     Each entry is the `{ja, en}` object MT-149 asks for, carried byte for byte:
     the parser does not compare `ja` with the listing - that is
     `domain.echo.checked_lines`, which every adapter calls next.
+
+    **A malformed entry is `None`, not an exception** (MT-149 PO-4): a value
+    that is not an object with a string `ja` and a string `en` - an old-schema
+    bare string, `null`, a list, a number, a missing or non-string field - is
+    kept under its key as `None`, which `checked_lines` reports as misaligned.
+    The page is still written and its call still billed. Extra fields on an
+    otherwise valid entry are ignored. A body that is not a JSON object still
+    raises.
 
     Sparse: a region the model omitted is simply absent, which is AC-5's
     untranslated region and is what `Project.write_proposed` leaves NULL. The
@@ -117,11 +129,12 @@ def parse_lines_text(text: str, region_indices: Sequence[int]) -> dict[int, Answ
     Raises `UnknownRegionIndex`, naming the key, for anything outside
     `region_indices` - including a key that is not an integer, and including a
     negative one, which a check written as an index into the sequence would
-    silently file under the last bubble on the page.
+    silently file under the last bubble on the page. The key is checked before
+    the value, so a bad key raises whatever its value is.
     """
     known = set(region_indices)
 
-    lines: dict[int, AnswerEntry] = {}
+    lines: dict[int, AnswerEntry | None] = {}
     for key, entry in _body(text).items():
         # MT-014 C-4: exactly this key and no other - a case-folded or prefix
         # match would silently turn a malformed key into a dropped one.
@@ -133,8 +146,19 @@ def parse_lines_text(text: str, region_indices: Sequence[int]) -> dict[int, Answ
             raise _unknown(key, known) from None
         if reading_index not in known:
             raise _unknown(reading_index, known)
-        lines[reading_index] = AnswerEntry(entry["ja"], entry["en"])
+        lines[reading_index] = _entry(entry)
     return lines
+
+
+def _entry(value: object) -> AnswerEntry | None:
+    """`value` as an `AnswerEntry` when it is an object with string `ja` and
+    string `en` (other fields ignored), otherwise `None` (MT-149 PO-4)."""
+    if not isinstance(value, dict):
+        return None
+    ja, en = value.get("ja"), value.get("en")
+    if isinstance(ja, str) and isinstance(en, str):
+        return AnswerEntry(ja, en)
+    return None
 
 
 def parse_terms_text(text: str) -> tuple[ProposedTerm, ...]:

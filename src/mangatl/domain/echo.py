@@ -85,12 +85,17 @@ def echo_matches(listed: str, echoed: str) -> bool:
     return ratio <= ECHO_MAX_EDIT_RATIO
 
 
-def checked_lines(entries: Mapping[int, AnswerEntry], listed: Sequence[str]) -> CheckedLines:
-    """Keep each entry whose `ja` echoes `listed[key]`; name the others."""
+def checked_lines(entries: Mapping[int, AnswerEntry | None], listed: Sequence[str]) -> CheckedLines:
+    """Keep each entry whose `ja` echoes `listed[key]`; name the others.
+
+    A `None` entry - one the parser found malformed (MT-149 PO-4) - is
+    misaligned without consulting the listing, so even an empty listing, which
+    matches any echo, does not accept it.
+    """
     lines: dict[int, str] = {}
     misaligned: set[int] = set()
     for key, entry in entries.items():
-        if echo_matches(listed[key], entry.ja):
+        if entry is not None and echo_matches(listed[key], entry.ja):
             lines[key] = entry.en
         else:
             misaligned.add(key)
