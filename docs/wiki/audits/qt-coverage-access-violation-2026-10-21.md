@@ -114,3 +114,51 @@ behind it is MT-073's `grabWindow` reading. A story could replace
 through the platform screen. Its success condition would have to be a crash
 rate measured over enough full runs to tell 1-in-30 from zero, which is
 roughly 100. That costs about 7 hours of machine time, so the dump comes first.
+
+## Addendum, 2026-11-12: MT-149 made it reliable, and garbage collection is the lead
+
+PR #166 (MT-149) crashed the `coverage` job in all three of its CI runs. The
+sites varied as before: an access violation in `test_canvas_keys`, then
+`Fatal Python error: Aborted` in `test_canvas_keys`, then in
+`test_batch_start`. No `qt-message: FATAL/CRITICAL` line appeared. Each
+experiment below ran the coverage command, with no fail-under, on two
+`windows-latest` lanes, up to three attempts per lane. The workflow is
+`.github/workflows/exp-covcrash.yml` on the `exp/covcrash-*` branches, which
+are not for merge.
+
+| Tree | Clean runs | Crashed |
+|---|---|---|
+| MT-149 tip (`exp/covcrash-mt149`, two runs) | 0 | 4 of 4 lanes, attempt 1 |
+| `main` (`exp/covcrash-main`) | 3 on lane b | none seen |
+| before R-2 (69fb0df, `exp/covcrash-pre-r2`) | 6 of 6 | none |
+| tip, R-2b estimate reverted (59 tests fail) | 6 of 6 | none |
+| tip, the 59 tip-only test ids deselected | 6 of 6 | none |
+| tip, only the 38 new core ids deselected | 3 of 3 | none |
+| tip, only the 21 new UI ids deselected | 0 | attempt 1 (`test_canvas_keys`) |
+| tip, running only the 23 new parse/echo core tests | 3 of 3 | none |
+| tip, running only the 15 new budget/batch/compose core tests | 3 of 3 | none |
+| tip, `gc.collect()` on the main thread after every test | 2 of 2 (the third was cut off by the 120-minute job timeout) | none |
+| same run, control lane, tip unchanged | 0 | attempt 1, access violation |
+
+What this supports:
+
+- The trigger is the *count* of extra core tests running before the Qt
+  tests, not anything one of them does. Neither half of the 38 crashes alone,
+  and none of them imports Qt.
+- Forcing a collection on the main thread after every test removes the crash
+  that the unchanged control still shows. That fits Python's cyclic GC running
+  at an arbitrary moment, possibly on a worker thread such as `mangatl-batch`,
+  and finalizing a Qt object there. Adding tests upstream shifts when
+  collections land. This is a strong lead, not a proof: no dump has been
+  symbolized to the freeing frame, and the gc lane completed two runs, not
+  three.
+- A local per-test thread-leak check (`threading.enumerate()` before and after
+  each test, probed with a deliberate leak) found no test in `tests/ui` that
+  leaves a thread alive, on either the tip or the tree before R-2.
+
+Cost: collecting after every test took each run from about 25 to about
+41 minutes on CI. A fix should collect at a safe point more cheaply, for
+example only around Qt tests, and has to show the same before/after contrast.
+The only WER dump captured came from the deliberate child probe
+`tests/ui/__probe_qt_fatal.py`, not from the crash. The main process exits
+with no dump.
