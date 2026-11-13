@@ -23,7 +23,10 @@ Not autouse: only the files that opt in with
    torn down;
 3. fixtures are torn down, each before the fixtures it requested:
    ``every_built_window_is_closed`` first, then
-   ``every_opened_project_is_closed``.
+   ``every_opened_project_is_closed``;
+4. this module's own ``pytest_runtest_teardown`` wrapper (MT-149 R-3)
+   collects garbage, inside pytest-qt's wrapper, which then processes events
+   once more and checks for exceptions raised during teardown.
 
 **The close mechanism, `every_built_window_is_closed`.** One for both files: it
 wraps `mangatl.app.build_window` and holds every window it returns in a list, so
@@ -46,7 +49,7 @@ from __future__ import annotations
 
 import gc
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -200,20 +203,36 @@ def every_built_window_is_closed(
     built.clear()
 
 
-@pytest.hookimpl(trylast=True)
-def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> None:
+@pytest.hookimpl(wrapper=True, trylast=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> Generator[None]:
     """MT-149 R-3: collect garbage on the main thread after every UI test.
 
-    `trylast`, so it runs after pytest-qt's teardown hook and after pytest's
-    own, which tears the test's fixtures down. Every widget, window and
-    `Project` the test dropped is unreferenced by then, and any of them caught
-    in a reference cycle is freed here, on the GUI thread, between tests.
-    Otherwise the cyclic collector frees them whenever an allocation trips its
-    threshold. That can be mid-way through the next test, between two Qt
-    events, or on a worker thread such as `mangatl-batch`. The coverage job
-    then dies natively: `docs/wiki/audits/qt-coverage-access-violation-2026-10-21.md`,
-    2026-11-12 addendum, and MT-149 `## Regressions` R-3 have the experiments.
+    **Where it runs.** pytest-qt's teardown hook is itself a wrapper
+    (`wrapper=True, trylast=True`). A `trylast` wrapper registered by this
+    conftest sits inside it, and outside pytest's own teardown impl, which
+    tears the test's fixtures down. So the order is: pytest-qt processes events
+    and closes the test's widgets; the fixtures are torn down; this collects;
+    then pytest-qt processes events once more and runs its teardown exception
+    check. An exception a Qt slot raises while objects are freed here, and any
+    `deleteLater` the collection posts, are still handled within this test.
+
+    **Why.** Every widget, window and `Project` the test dropped is unreferenced
+    by now, and any caught in a reference cycle is freed here, on the GUI
+    thread, between tests. Otherwise the cyclic collector frees them whenever an
+    allocation trips its threshold. That can be mid-way through the next test,
+    between two Qt events, or on a worker thread such as `mangatl-batch`. The
+    coverage job then dies natively:
+    `docs/wiki/audits/qt-coverage-access-violation-2026-10-21.md`, 2026-11-12
+    addendum, and MT-149 `## Regressions` R-3 have the experiments.
+
+    **A wrapper, with `finally` (R-4).** As a plain impl it would be skipped
+    whenever a fixture's teardown raised - `every_opened_project_is_closed`,
+    say - and that test's leftovers would be freed at a random point in the
+    next one.
 
     A hook in this conftest runs only for items under `tests/ui`, so the core
     suite pays nothing."""
-    gc.collect()
+    try:
+        return (yield)
+    finally:
+        gc.collect()
