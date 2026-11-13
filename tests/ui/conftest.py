@@ -44,6 +44,7 @@ run. A failure is reported as an ERROR at teardown of the test that opened it.
 
 from __future__ import annotations
 
+import gc
 import sqlite3
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -197,3 +198,22 @@ def every_built_window_is_closed(
     for window in built:
         window.close()
     built.clear()
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> None:
+    """MT-149 R-3: collect garbage on the main thread after every UI test.
+
+    `trylast`, so it runs after pytest-qt's teardown hook and after pytest's
+    own, which tears the test's fixtures down. Every widget, window and
+    `Project` the test dropped is unreferenced by then, and any of them caught
+    in a reference cycle is freed here, on the GUI thread, between tests.
+    Otherwise the cyclic collector frees them whenever an allocation trips its
+    threshold. That can be mid-way through the next test, between two Qt
+    events, or on a worker thread such as `mangatl-batch`. The coverage job
+    then dies natively: `docs/wiki/audits/qt-coverage-access-violation-2026-10-21.md`,
+    2026-11-12 addendum, and MT-149 `## Regressions` R-3 have the experiments.
+
+    A hook in this conftest runs only for items under `tests/ui`, so the core
+    suite pays nothing."""
+    gc.collect()
