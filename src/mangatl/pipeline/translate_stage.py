@@ -131,7 +131,9 @@ def _update_glossary(ctx: PageContext, ocr_results: Sequence[OcrResult]) -> None
             upsert(ctx.project, entry)
 
 
-def _to_reading_indices(result: TranslationResult, included: Sequence[int]) -> dict[int, str]:
+def _to_reading_indices(
+    result: TranslationResult, included: Sequence[int]
+) -> tuple[dict[int, str], frozenset[int]]:
     """MT-118 C-4: the answer's keys index the listing that was **sent**; the
     store's index the page. `included[k]` is the reading index of the `k`-th
     region sent.
@@ -144,16 +146,22 @@ def _to_reading_indices(result: TranslationResult, included: Sequence[int]) -> d
     an `IndexError` would break MT-044 C-7's "a bad answer reaches the runner
     as `ValueError`, after the bill and with no proposal", and passing the key
     through unmapped would land it on whichever region has that reading index.
+
+    `result.misaligned` (MT-149 C-1a) is in the same key space and is mapped,
+    and refused, the same way. Returns `(proposals, misaligned)`.
     """
-    proposals: dict[int, str] = {}
-    for index, english in result.lines.items():
+
+    def mapped(index: int) -> int:
         if not 0 <= index < len(included):
             raise ValueError(
                 f"the translator answered for index {index}, but only"
                 f" {len(included)} region(s) were sent"
             )
-        proposals[included[index]] = english
-    return proposals
+        return included[index]
+
+    proposals = {mapped(index): english for index, english in result.lines.items()}
+    misaligned = frozenset(mapped(index) for index in result.misaligned)
+    return proposals, misaligned
 
 
 @dataclass
@@ -277,7 +285,8 @@ class TranslateStage:
                 )
             )
         _update_glossary(ctx, sent)
-        ctx.project.write_proposed(ctx.page.ordinal, _to_reading_indices(result, included))
+        proposals, misaligned = _to_reading_indices(result, included)
+        ctx.project.write_proposed(ctx.page.ordinal, proposals, misaligned)
 
     def is_done(self, ctx: PageContext) -> bool:
         """Whether this page already carries a **proposal**.

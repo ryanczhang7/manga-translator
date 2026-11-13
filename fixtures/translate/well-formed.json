@@ -1,6 +1,6 @@
 {
-  "2": "Why are you here?",
-  "0": "As if a demon would move at a human's say-so.",
-  "3": "Let's go.",
-  "1": "...I see."
+  "2": {"ja": "どうして君がここに", "en": "Why are you here?"},
+  "0": {"ja": "醜鬼が人間の言う通りに動いたりね", "en": "As if a demon would move at a human's say-so."},
+  "3": {"ja": "行くぞ", "en": "Let's go."},
+  "1": {"ja": "……なるほど", "en": "...I see."}
 }

@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from io import BytesIO
@@ -70,6 +70,7 @@ from mangatl.store.schema import (
     CLEANED_PAGE_DDL,
     CORRECTION_DDL,
     DDL,
+    LINE_MISALIGNED_DDL,
     LLM_CALL_DDL,
     REGION_DDL,
 )
@@ -149,7 +150,11 @@ __all__ = [
 #: Version 13 is MT-146's: `region.excluded` admits `art`, text drawn into the
 #: artwork that the pipeline leaves as drawn. The table is rebuilt for the
 #: CHECK; every row, and every reason it held, comes through unchanged.
-SCHEMA_VERSION: int = 13
+#:
+#: Version 14 is MT-149's: `line.misaligned`, the flag that says a region's
+#: answer entry echoed another region's Japanese. Every migrated line reads 0,
+#: "not flagged" - the truth about a file no earlier version could check.
+SCHEMA_VERSION: int = 14
 
 #: `page.status` as `create_project` writes it: read, hashed, nothing done yet.
 PAGE_PENDING: str = "pending"
@@ -275,7 +280,8 @@ _SELECT_LINES = (
 # (`architecture.md` §4/§6). This statement can only ever set `proposed_en`, on
 # one row, and it leaves `source_ja`, `ocr_empty`, `final_en` and `edited_at`
 # exactly as they were.
-_UPDATE_PROPOSED = "UPDATE line SET proposed_en = ? WHERE region_id = ?"
+_UPDATE_PROPOSED = "UPDATE line SET proposed_en = ?, misaligned = 0 WHERE region_id = ?"
+_FLAG_MISALIGNED = "UPDATE line SET misaligned = 1 WHERE region_id = ?"
 # One entry per **region**, which is why the join starts at `region` and is a
 # LEFT JOIN: a page whose regions are stored and whose OCR has not run has no
 # `line` rows at all, and it has to read back as NULLs rather than as an empty
@@ -611,6 +617,12 @@ DROP TABLE region_v12;
 """
 )
 
+#: Version 13 to version 14 (MT-149): `line.misaligned`, altered rather than
+#: rebuilt for `_MIGRATE_TO_V2`'s reason, and the fresh schema's own string
+#: (`schema.LINE_MISALIGNED_DDL`), so both paths store the same `line`
+#: declaration. Every migrated line reads 0.
+_MIGRATE_TO_V14: str = LINE_MISALIGNED_DDL
+
 #: The migration chain, in order, each step keyed on the version it *produces*.
 #: A step runs when the file found on disk is older than that.
 #:
@@ -633,6 +645,7 @@ _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (11, _MIGRATE_TO_V11),
     (12, _MIGRATE_TO_V12),
     (13, _MIGRATE_TO_V13),
+    (14, _MIGRATE_TO_V14),
 )
 
 
@@ -1188,8 +1201,21 @@ class Project:
             for source_ja, ocr_empty in self._connection.execute(_SELECT_LINES, (page_ordinal,))
         )
 
-    def write_proposed(self, page_ordinal: int, proposed: Mapping[int, str]) -> None:
+    def write_proposed(
+        self,
+        page_ordinal: int,
+        proposed: Mapping[int, str],
+        misaligned: Collection[int] = (),
+    ) -> None:
         """Store one page's proposed English, **by reading index** (MT-011 C-6).
+
+        **`misaligned` (MT-149 C-1a)** names the regions whose answer entry did
+        not echo their own Japanese: each gets `line.misaligned = 1` and keeps
+        whatever `proposed_en` it had - a previous run's paid-for English is not
+        erased by a later slip. A row named in `proposed` gets its English and
+        `misaligned = 0`; a row named in neither is untouched, flag included. An
+        index in both is a caller contradiction and raises `ValueError` naming
+        it; every index in either argument is checked before the first write.
 
         A `Mapping` and not a positional `Sequence` - unlike `write_lines`, and
         for two reasons that are both criteria. AC-5 needs "the model omitted
@@ -1224,14 +1250,23 @@ class Project:
         """
         with self.transaction() as cursor:
             region_ids = [row[0] for row in cursor.execute(_SELECT_REGION_IDS, (page_ordinal,))]
-            for reading_index in proposed:
+            flagged = tuple(misaligned)
+            for reading_index in (*proposed, *flagged):
                 if not 0 <= reading_index < len(region_ids):
                     raise ValueError(
                         f"reading index {reading_index} is not on page {page_ordinal}:"
                         f" the page has {len(region_ids)} region(s)"
                     )
+            both = sorted(set(proposed) & set(flagged))
+            if both:
+                raise ValueError(
+                    f"reading index(es) {both} are both proposed and misaligned on page"
+                    f" {page_ordinal}; a line is one or the other"
+                )
             for reading_index, english in proposed.items():
                 cursor.execute(_UPDATE_PROPOSED, (english, region_ids[reading_index]))
+            for reading_index in flagged:
+                cursor.execute(_FLAG_MISALIGNED, (region_ids[reading_index],))
 
     def read_proposed(self, page_ordinal: int) -> tuple[str | None, ...]:
         """One page's proposed English, one entry per region in reading order.

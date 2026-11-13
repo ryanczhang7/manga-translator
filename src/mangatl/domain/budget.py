@@ -25,8 +25,8 @@ rather than re-decided:
   landing exactly on the ceiling is permitted.
 - The per-page estimate is `page_estimate(model_id)`: the design-A page
   (`docs/wiki/cost-model.awk`) priced at that model's rates and rounded **up**
-  to the cent - $0.06 on claude-opus-5 ($0.05673), $0.03 on
-  gemini-3.1-pro-preview ($0.025692). An estimate that errs low lets a run
+  to the cent - $0.07 on claude-opus-5 ($0.06923), $0.04 on
+  gemini-3.1-pro-preview ($0.031692). An estimate that errs low lets a run
   start that it cannot finish. `BOOTSTRAP_PAGE_ESTIMATE`, what `Budget()`
   projects when no model is named, is the dearest listed model's figure, so an
   unnamed model errs high (MT-100 AC-7).
@@ -35,7 +35,7 @@ rather than re-decided:
 
 **No defensive branches, by design.** A $0.00 ceiling, an empty `priced_calls`
 and a `pages_remaining` of 0 all fall out of the arithmetic: the zero ceiling
-refuses because $0.00 + $0.06 is not <= $0.00, and the estimate branch already
+refuses because $0.00 + $0.07 is not <= $0.00, and the estimate branch already
 keeps `reduce` from ever seeing an empty sequence. `domain` sits under
 `coverage-core`'s `--cov-fail-under=100` with branch coverage on, and
 `mypy --strict` runs with `warn_unreachable`, so an unreachable arm fails two
@@ -79,9 +79,11 @@ DEFAULT_CEILING: Usd = Usd(Decimal("2.00"))
 #: cost-model.awk design A, per page: 2,296 image + 500 OCR + 900 rolling
 #: context as uncached input; the 1,500-token prefix as a cache READ (the awk
 #: writes it once a chapter and reads it 19 times - per page that is a read);
-#: 700 visible + 800 thinking as output; no cache write.
+#: 700 visible English + 500 echoed Japanese + 800 thinking as output (MT-149
+#: R-2b: each answer entry now repeats its region's Japanese, which the same
+#: profile budgets at 500 tokens as OCR input); no cache write.
 DESIGN_A_PAGE_TOKENS: TokenUsage = TokenUsage(
-    input_tokens=3696, output_tokens=1500, cache_read_tokens=1500, cache_write_tokens=0
+    input_tokens=3696, output_tokens=2000, cache_read_tokens=1500, cache_write_tokens=0
 )
 
 #: One cent, in micro-dollars: the unit `page_estimate` rounds up to.
@@ -101,7 +103,7 @@ def page_estimate(model_id: str, *, pricing: Pricing = "standard") -> Usd:
 
     `pricing` (MT-111 AC-1) is keyword-only and defaults to the interactive
     row, so every MT-100 figure is unchanged; `pricing="batch"` reads MT-102's
-    batch row - $0.02 for gemini-3.1-pro-preview ($0.012996, rounded up) - and
+    batch row - $0.02 for gemini-3.1-pro-preview ($0.015996, rounded up) - and
     a model with no batch row raises `UnknownModel` rather than falling back.
     """
     cost = price(model_id, DESIGN_A_PAGE_TOKENS, pricing=pricing).cost
@@ -121,7 +123,7 @@ def call_estimate(model_id: str, usage: TokenUsage, *, pricing: Pricing = "stand
 
 
 #: What `Budget()` projects when no model is named:the dearest listed model's
-#: `page_estimate`, so an unnamed model errs high. $0.06 today (claude-opus-5).
+#: `page_estimate`, so an unnamed model errs high. $0.07 today (claude-opus-5).
 BOOTSTRAP_PAGE_ESTIMATE: Usd = max(page_estimate(model_id) for model_id in RATES)
 
 #: How many priced calls it takes before the projection extrapolates from them

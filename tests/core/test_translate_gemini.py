@@ -42,6 +42,7 @@ budget in this file to size. The dominant cost is `prepare_page_image` on a
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from functools import cache
 from io import BytesIO
@@ -446,7 +447,7 @@ def test_a_gemini_page_that_returns_a_glossary_anyway_proposes_no_terms(
     through it, still returns both terms from this very body - so an adapter
     that still parsed it fails here on content."""
     body = (
-        '{"1": "Sakura!", "glossary": ['
+        '{"1": {"ja": "……なるほど", "en": "Sakura!"}, "glossary": ['
         '{"term_ja": "さくら", "term_en": "Sakura", "note": "name"},'
         '{"term_ja": "先輩", "term_en": "senpai", "note": "honorific"}]}'
     )
@@ -615,7 +616,7 @@ def test_a_page_with_no_regions_at_all_makes_no_call_either(gemini: ModuleType) 
 def test_a_page_where_only_some_regions_read_empty_is_still_sent(gemini: ModuleType) -> None:
     """AC-5's negative control: the guard is `all`, not `any`. Without this, an
     adapter that never called anything would pass both tests above."""
-    client = _FakeGeminiClient(_response('{"1": "...I see."}'))
+    client = _FakeGeminiClient(_response('{"1": {"ja": "……なるほど", "en": "...I see."}}'))
     mixed = (
         OcrResult(text="", ocr_empty=True),
         _OCR_RESULTS[1],
@@ -626,3 +627,74 @@ def test_a_page_where_only_some_regions_read_empty_is_still_sent(gemini: ModuleT
 
     assert client.calls == 1
     assert result.lines == {1: "...I see."}
+
+
+# -- MT-149 AC-6: the answer is checked through `checked_lines` ---------------
+
+#: A slipped answer for `_OCR_RESULTS`: entries 1 and 2 echo the Japanese of
+#: regions 0 and 1 (the English shifted with them), entries 0 and 3 their own.
+#: Every mismatched pair is a wholly different string (edit ratio 1.0), so the
+#: outcome does not depend on where `ECHO_MAX_EDIT_RATIO` sits in its band.
+_SLIPPED = json.dumps(
+    {
+        "0": {"ja": _OCR_RESULTS[0].text, "en": _EXPECTED[0]},
+        "1": {"ja": _OCR_RESULTS[0].text, "en": "A demon, obeying a human."},
+        "2": {"ja": _OCR_RESULTS[1].text, "en": _EXPECTED[1]},
+        "3": {"ja": _OCR_RESULTS[3].text, "en": _EXPECTED[3]},
+    },
+    ensure_ascii=False,
+)
+
+
+def test_a_slipped_gemini_answer_comes_back_with_its_misaligned_regions(
+    gemini: ModuleType,
+) -> None:
+    """AC-6, Gemini's adapter: mismatched echoes are in `misaligned` and out
+    of `lines`; matching ones keep their English."""
+    client = _FakeGeminiClient(_response(_SLIPPED))
+
+    result = gemini.translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+    assert result.lines == {0: _EXPECTED[0], 3: _EXPECTED[3]}
+    assert result.misaligned == frozenset({1, 2})
+
+
+def test_an_aligned_gemini_answer_reports_nothing_misaligned(gemini: ModuleType) -> None:
+    """The control for the test above."""
+    client = _FakeGeminiClient(_response(_body("well-formed")))
+
+    result = gemini.translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+    assert result.lines == _EXPECTED
+    assert result.misaligned == frozenset()
+
+
+def test_the_gemini_adapter_hands_its_entries_and_its_listing_to_checked_lines(
+    gemini: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6's "no adapter compares on its own": `checked_lines(parse_lines_text
+    (...), [r.text for r in ocr_results])`, observed with a recorder bound in
+    place of `gemini.checked_lines`, and the result carries what it returned."""
+    from mangatl.domain.echo import AnswerEntry, CheckedLines
+
+    calls: list[tuple[object, list[str]]] = []
+    sentinel = CheckedLines(lines={2: "recorded"}, misaligned=frozenset({0}))
+
+    def recorder(entries: object, listed: object) -> CheckedLines:
+        calls.append((entries, list(listed)))  # type: ignore[call-overload]
+        return sentinel
+
+    monkeypatch.setattr(gemini, "checked_lines", recorder)
+
+    result = gemini.translate_page(
+        _FakeGeminiClient(_response(_body("well-formed"))), _page(), _OCR_RESULTS, EMPTY_CONTEXT
+    )
+
+    assert calls == [
+        (
+            {i: AnswerEntry(_OCR_RESULTS[i].text, _EXPECTED[i]) for i in range(4)},
+            [ocr.text for ocr in _OCR_RESULTS],
+        )
+    ], "gemini.translate_page did not check its parsed answer through checked_lines"
+    assert result.lines == {2: "recorded"}
+    assert result.misaligned == frozenset({0})

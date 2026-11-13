@@ -60,12 +60,13 @@ def _by_position(body: str, region_indices: Sequence[int]) -> dict[int, str]:
     This is the corruption AC-4 exists to catch, written out so the fixtures can
     be measured against it without a `mangatl` import.
     """
-    return dict(zip(region_indices, json.loads(body).values(), strict=False))
+    english = [entry["en"] for entry in json.loads(body).values()]
+    return dict(zip(region_indices, english, strict=False))
 
 
 def _by_index(body: str) -> dict[int, str]:
     """The mapping a correct parser produces (MT-011 C-4)."""
-    return {int(key): value for key, value in json.loads(body).items()}
+    return {int(key): entry["en"] for key, entry in json.loads(body).items()}
 
 
 def test_the_well_formed_fixture_names_every_region_with_the_expected_english() -> None:
@@ -139,12 +140,44 @@ def test_the_non_integer_key_fixture_carries_a_key_int_cannot_read() -> None:
         int("first")
 
 
-def test_every_fixture_is_a_json_object_of_strings_keyed_by_strings() -> None:
+def test_every_fixture_is_a_json_object_of_ja_en_entries_keyed_by_strings() -> None:
     """JSON object keys are strings - the whole reason C-4 pins the `int()`
     conversion. Asserted over all four fixtures so a future one cannot arrive
-    as a list and quietly change what `parse_lines` is being handed."""
+    as a list and quietly change what `parse_lines` is being handed.
+
+    MT-149 AC-1: every value is an answer entry, an object with exactly the two
+    string fields `ja` and `en` - the shape `response_schema` now asks for. A
+    fixture still carrying a bare English string is the pre-MT-149 answer."""
     for name in ("well-formed", "omits-region-3", "unknown-region-index", "non-integer-key"):
         parsed = json.loads(_body(name))
         assert isinstance(parsed, dict), f"{name} is not a JSON object"
         assert all(isinstance(key, str) for key in parsed), f"{name} has a non-string key"
-        assert all(isinstance(value, str) for value in parsed.values()), f"{name} has a non-string"
+        for key, entry in parsed.items():
+            assert isinstance(entry, dict), (
+                f"{name}[{key!r}] is {type(entry).__name__}, not {{ja, en}}"
+            )
+            assert sorted(entry) == ["en", "ja"], f"{name}[{key!r}] has fields {sorted(entry)}"
+            assert all(isinstance(entry[f], str) for f in ("ja", "en")), f"{name}[{key!r}]"
+
+
+#: The page's listing, as `fixtures/translate/README.md` tabulates it. Written
+#: out here because this file imports nothing from `mangatl`.
+_SOURCE_JA: Mapping[int, str] = {
+    0: "醜鬼が人間の言う通りに動いたりね",
+    1: "……なるほど",
+    2: "どうして君がここに",
+    3: "行くぞ",
+}
+
+
+def test_every_in_range_entry_echoes_its_own_regions_japanese_exactly() -> None:
+    """MT-149: these fixtures are the *aligned* answers - every entry the page
+    has echoes its own region's listing verbatim, so no adapter test that reads
+    them can lose a line to the echo check by accident. The keys a fixture uses
+    to name a region the page does not have are exempt: those raise first."""
+    for name in ("well-formed", "omits-region-3", "unknown-region-index", "non-integer-key"):
+        for key, entry in json.loads(_body(name)).items():
+            if key.isdigit() and int(key) in _SOURCE_JA:
+                assert entry["ja"] == _SOURCE_JA[int(key)], (
+                    f"{name}[{key!r}] echoes {entry['ja']!r}, not region {key}'s listing"
+                )

@@ -351,3 +351,86 @@ def test_the_same_term_in_included_text_is_marked_seen_on_the_page(chapter: _Cha
     assert read_entries(chapter.project) == [
         GlossaryEntry("透かし", "Watermark", "name", 0, _TARGET_ORDINAL, "model")
     ]
+
+
+# -- MT-149 C-1a: misaligned keys cross the seam like `lines` --------------------
+
+
+class _Slipped:
+    """A `PageTranslator` whose answer the echo check partly dropped: `lines`
+    and `misaligned` both keyed by the index **in the listing it was handed**."""
+
+    def __init__(self, lines: dict[int, str], misaligned: set[int]) -> None:
+        self._lines = lines
+        self._misaligned = frozenset(misaligned)
+
+    def __call__(
+        self, image: bytes, ocr_results: Sequence[OcrResult], context: PromptContext
+    ) -> TranslationResult:
+        return TranslationResult(
+            lines=dict(self._lines),
+            usage=_USAGE,
+            call=CallInfo(request_id="msg_slipped", model_id=_MODEL_ID),
+            proposed_terms=(),
+            misaligned=self._misaligned,
+        )
+
+
+def _misaligned_flags(chapter: _Chapter) -> list[int]:
+    connection = sqlite3.connect(project_dir_for(chapter.source_dir) / "project.db")
+    try:
+        rows = connection.execute(
+            "SELECT line.misaligned FROM region JOIN page ON page.id = region.page_id"
+            " JOIN line ON line.region_id = region.id WHERE page.ordinal = ?"
+            " ORDER BY region.reading_index",
+            (_TARGET_ORDINAL,),
+        ).fetchall()
+    finally:
+        connection.close()
+    return [int(row[0]) for row in rows]
+
+
+def test_a_misaligned_key_is_mapped_back_through_the_included_regions(
+    chapter: _Chapter,
+) -> None:
+    """C-1a: `_to_reading_indices` maps `result.misaligned` exactly as it maps
+    `lines`. With region 1 excluded the listing is `(A, C)`, so the answer's
+    misaligned `1` is reading index 2 - written straight through it would flag
+    the excluded region instead."""
+    chapter.seed([None, "watermark", None])
+
+    _run_slipped(chapter, _Slipped({0: "A"}, {1}))
+
+    assert chapter.project.read_proposed(_TARGET_ORDINAL) == ("A", None, None)
+    assert _misaligned_flags(chapter) == [0, 0, 1]
+
+
+def test_with_nothing_excluded_a_misaligned_key_lands_on_its_own_index(
+    chapter: _Chapter,
+) -> None:
+    """The control for the mapping: nothing excluded, `1` is reading index 1."""
+    chapter.seed([None, None, None])
+
+    _run_slipped(chapter, _Slipped({0: "A"}, {1}))
+
+    assert _misaligned_flags(chapter) == [0, 1, 0]
+
+
+def test_a_misaligned_key_outside_the_listing_is_refused_before_anything_is_written(
+    chapter: _Chapter,
+) -> None:
+    """C-1a: "same refusal for a key outside the listing" - `ValueError` naming
+    it, and the accepted line beside it is not written either. `5`, not `2`:
+    the refusal also says how many regions were sent (two), so a needle on `2`
+    would be met by the count alone."""
+    chapter.seed([None, "watermark", None])
+
+    with pytest.raises(ValueError, match=r"\b5\b"):
+        _run_slipped(chapter, _Slipped({0: "A"}, {5}))
+
+    assert chapter.project.read_proposed(_TARGET_ORDINAL) == (None, None, None)
+    assert _misaligned_flags(chapter) == [0, 0, 0]
+
+
+def _run_slipped(chapter: _Chapter, translator: _Slipped) -> None:
+    TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(chapter.context)

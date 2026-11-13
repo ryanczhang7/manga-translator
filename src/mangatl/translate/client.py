@@ -43,6 +43,7 @@ from collections.abc import Sequence
 from anthropic import Anthropic
 from anthropic.types import Usage
 
+from mangatl.domain.echo import checked_lines
 from mangatl.domain.glossary import PromptContext
 from mangatl.domain.line import OcrResult
 from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
@@ -88,11 +89,15 @@ def translate_page(
     request, _ = build_request(page_image, ocr_results, context)
     response = client.messages.create(**request)
 
+    checked = checked_lines(
+        parse_lines(response, range(len(ocr_results))), [r.text for r in ocr_results]
+    )
     return TranslationResult(
-        lines=parse_lines(response, range(len(ocr_results))),
+        lines=checked.lines,
         usage=_usage_of(response.usage),
         call=CallInfo(request_id=response.id, model_id=response.model),
         proposed_terms=(),
+        misaligned=checked.misaligned,
     )
 
 

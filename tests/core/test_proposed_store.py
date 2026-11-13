@@ -166,7 +166,8 @@ def test_storing_a_proposal_needs_no_schema_version_bump() -> None:
     # MT-137 takes it to 11: `batch_job` holds its pages (`first_ordinal`, `last_ordinal`).
     # MT-115 takes it to 12: `chapter.consistency_run_id`, the consistency pass's marker.
     # MT-146 takes it to 13: `region.excluded` admits `art` (the table is rebuilt).
-    assert SCHEMA_VERSION == 13
+    # MT-149 takes it to 14: `line.misaligned`, the echo check's flag.
+    assert SCHEMA_VERSION == 14
 
 
 def test_the_two_methods_are_named_on_the_project_beside_their_line_siblings() -> None:
@@ -422,3 +423,121 @@ def test_read_proposed_is_usable_inside_a_transaction(fixture: _Fixture) -> None
 
     with fixture.project.transaction():
         assert fixture.project.read_proposed(_TARGET_ORDINAL)[0] is not None
+
+
+# =============================================================================
+# MT-149 C-1a: `write_proposed(page, proposed, misaligned=())`
+# =============================================================================
+#
+# A region whose answer entry echoed the wrong Japanese is written as
+# `line.misaligned = 1` with its English left as it was; the review row derives
+# AC-5's reason from the flag. Read back through plain SQL on the project's own
+# connection, so these tests do not depend on `read_review_lines`.
+
+_SELECT_FLAGS = (
+    "SELECT line.misaligned FROM region JOIN page ON page.id = region.page_id"
+    " JOIN line ON line.region_id = region.id WHERE page.ordinal = ?"
+    " ORDER BY region.reading_index"
+)
+
+
+def _flags(project: Project, ordinal: int = _TARGET_ORDINAL) -> tuple[int, ...]:
+    return tuple(int(row[0]) for row in project.select(_SELECT_FLAGS, (ordinal,)))
+
+
+def test_a_fresh_page_has_no_misaligned_line(fixture: _Fixture) -> None:
+    """The zero: lines written by OCR carry `misaligned = 0`."""
+    fixture.seed()
+
+    assert _flags(fixture.project) == (0, 0, 0)
+
+
+def test_a_misaligned_index_is_flagged_and_an_accepted_one_gets_its_english(
+    fixture: _Fixture,
+) -> None:
+    """AC-5 at the store: `proposed` rows get English and flag 0, `misaligned`
+    rows get flag 1 and no English, and the row named in neither is untouched."""
+    fixture.seed()
+
+    fixture.project.write_proposed(_TARGET_ORDINAL, {0: "Alpha."}, (2,))
+
+    assert fixture.project.read_proposed(_TARGET_ORDINAL) == ("Alpha.", None, None)
+    assert _flags(fixture.project) == (0, 0, 1)
+
+
+def test_a_misaligned_row_keeps_the_english_it_already_had(fixture: _Fixture) -> None:
+    """C-1a: "its proposed_en is left as it was". A previous run's paid-for
+    English is not erased by a later run's slip on that bubble."""
+    fixture.seed(proposals=True)
+
+    fixture.project.write_proposed(_TARGET_ORDINAL, {}, (0,))
+
+    assert fixture.project.read_proposed(_TARGET_ORDINAL) == (
+        _EXISTING[0],
+        _EXISTING[1],
+        _EXISTING[2],
+    )
+    assert _flags(fixture.project) == (1, 0, 0)
+
+
+def test_an_accepted_proposal_clears_a_flag_an_earlier_run_set(fixture: _Fixture) -> None:
+    """C-1a: "A row named in `proposed` gets its English and misaligned = 0" -
+    a re-run that lines up clears the previous run's flag."""
+    fixture.seed()
+    fixture.project.write_proposed(_TARGET_ORDINAL, {}, (0, 2))
+    assert _flags(fixture.project) == (1, 0, 1)
+
+    fixture.project.write_proposed(_TARGET_ORDINAL, {0: "Alpha."})
+
+    assert _flags(fixture.project) == (0, 0, 1), "the row named in neither kept its flag"
+    assert fixture.project.read_proposed(_TARGET_ORDINAL)[0] == "Alpha."
+
+
+def test_the_two_argument_call_flags_nothing(fixture: _Fixture) -> None:
+    """`misaligned` defaults to `()`: `pipeline/consistency.py`'s two-argument
+    call, and every existing one, is unchanged."""
+    fixture.seed()
+
+    fixture.project.write_proposed(_TARGET_ORDINAL, {0: "Alpha.", 1: "Beta.", 2: "Gamma."})
+
+    assert _flags(fixture.project) == (0, 0, 0)
+
+
+def test_an_index_in_both_arguments_is_refused_and_nothing_is_written(
+    fixture: _Fixture,
+) -> None:
+    """C-1a: an index both accepted and misaligned is a caller contradiction -
+    `ValueError` naming it, before the first write."""
+    fixture.seed()
+
+    with pytest.raises(ValueError, match=r"\b2\b"):
+        fixture.project.write_proposed(_TARGET_ORDINAL, {0: "Alpha.", 2: "Gamma."}, (2,))
+
+    assert fixture.project.read_proposed(_TARGET_ORDINAL) == (None, None, None)
+    assert _flags(fixture.project) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("index", [3, 9, -1], ids=["one-past-the-end", "far-out", "negative"])
+def test_a_misaligned_index_the_page_does_not_have_is_refused_and_nothing_is_written(
+    fixture: _Fixture, index: int
+) -> None:
+    """C-1a: "Every index in either argument is validated before the first
+    write". The accepted half of the call is not written either - and `-1`
+    must not flag the page's last bubble through `region_ids[-1]`."""
+    fixture.seed()
+
+    with pytest.raises(ValueError, match=rf"^reading index {index} is not on page"):
+        fixture.project.write_proposed(_TARGET_ORDINAL, {0: "Alpha."}, (index,))
+
+    assert fixture.project.read_proposed(_TARGET_ORDINAL) == (None, None, None)
+    assert _flags(fixture.project) == (0, 0, 0)
+
+
+def test_a_misaligned_write_touches_only_the_page_it_names(fixture: _Fixture) -> None:
+    fixture.seed()
+    fixture.seed(ordinal=0)
+
+    fixture.project.write_proposed(_TARGET_ORDINAL, {}, (0, 1, 2))
+
+    assert _flags(fixture.project) == (1, 1, 1)
+    assert _flags(fixture.project, 0) == (0, 0, 0)

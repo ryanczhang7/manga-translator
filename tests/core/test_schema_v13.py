@@ -395,7 +395,7 @@ def _migrated(source_dir: Path) -> Path:
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 13, (
+    assert _user_version(db_path) == 14, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -419,15 +419,15 @@ def _kept(db_path: Path) -> dict[str, list[tuple[object, ...]]]:
 # -- the version ---------------------------------------------------------------------
 
 
-def test_this_build_writes_and_reads_schema_version_thirteen(
+def test_this_build_writes_and_reads_the_current_schema_version(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
     """MT-146's bump, in both records of it (MT-005 PO-7)."""
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"))
 
-    assert SCHEMA_VERSION == 13
-    assert _user_version(db_path) == 13
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
+    assert SCHEMA_VERSION == 14
+    assert _user_version(db_path) == 14
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(14,)]
 
 
 # -- the fresh file ------------------------------------------------------------------
@@ -488,7 +488,7 @@ def test_a_version_twelve_file_is_migrated_to_thirteen_when_it_is_opened(
     """AC-3: "it is version 13" - in both records of the version."""
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"))
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(14,)]
 
 
 def test_every_region_line_cleaned_page_and_glossary_row_comes_through_unchanged(
@@ -507,6 +507,10 @@ def test_every_region_line_cleaned_page_and_glossary_row_comes_through_unchanged
 
     _migrated_in_place(source_dir, db_path)
 
+    # MT-149: the open walks on through the v13 -> v14 step, which appends
+    # `line.misaligned` (DEFAULT 0) and nothing else. Every row this file held
+    # comes through with that one trailing 0; `test_schema_v14.py` owns the step.
+    before["line"] = [(*row, 0) for row in before["line"]]
     after = _kept(db_path)
     for table in _KEPT:
         assert after[table] == before[table], f"`{table}` changed in the v13 step"
@@ -516,7 +520,7 @@ def _migrated_in_place(source_dir: Path, db_path: Path) -> None:
     """Open an already-built v12 file once and require that it migrated."""
     with open_project(project_dir_for(source_dir)):
         pass
-    assert _user_version(db_path) == 13, (
+    assert _user_version(db_path) == 14, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
 
@@ -655,33 +659,33 @@ def test_a_migrated_lines_foreign_key_names_region_not_the_aside_table(
     assert keys == [("region", "region_id", "id", "CASCADE")], keys
 
 
-# -- a version-14 file ---------------------------------------------------------------
+# -- a version-15 file (14 when MT-146 wrote it; MT-149 moved it to 15) -------
 
 
-def test_a_file_one_version_newer_than_thirteen_is_refused(
+def test_a_file_one_version_newer_than_the_current_one_is_refused(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _fresh(source_dir)
-    _raw(db_path, "PRAGMA user_version = 14")
+    _raw(db_path, "PRAGMA user_version = 15")
 
     with pytest.raises(SchemaTooNew) as excinfo:
         open_project(project_dir_for(source_dir))
 
     message = str(excinfo.value)
-    assert re.search(r"\bversion 14(?!\d)", message), message
-    assert re.search(r"\bsupports 13(?!\d)", message), message
-    assert _user_version(db_path) == 14
+    assert re.search(r"\bversion 15(?!\d)", message), message
+    assert re.search(r"\bsupports 14(?!\d)", message), message
+    assert _user_version(db_path) == 15
 
 
-def test_the_same_file_at_version_thirteen_opens(
+def test_the_same_file_at_the_current_version_opens(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
     """The control for the refusal above."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _fresh(source_dir)
-    assert _user_version(db_path) == 13
+    assert _user_version(db_path) == 14
 
     with open_project(project_dir_for(source_dir)) as project:
         assert len(project.pages()) == len(_SOURCE_PAGES)
-    assert _user_version(db_path) == 13
+    assert _user_version(db_path) == 14

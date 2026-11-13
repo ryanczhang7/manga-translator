@@ -34,7 +34,7 @@ from pathlib import Path
 import pytest
 
 from mangatl.domain.glossary import GlossaryEntry
-from mangatl.domain.line import Line, OcrResult
+from mangatl.domain.line import Line, OcrResult, failure_reason
 from mangatl.domain.region import RawRegion
 from mangatl.store.glossary import read_entries, upsert
 from mangatl.store.intake import read_chapter
@@ -394,3 +394,52 @@ def test_control_committing_to_the_same_line_once_restored_is_written(
     commit_line(project, 0, 3, "Bye.", "edited")
 
     assert _stored(source_dir)[3][1:3] == ("Bye.", "edited")
+
+
+# =============================================================================
+# MT-149 C-1a: `line.misaligned` reaches the review line
+# =============================================================================
+
+
+def test_a_flagged_line_reads_back_misaligned_and_failed_with_its_own_reason(
+    project: Project,
+) -> None:
+    """AC-5 at the store: region 1 (`なるほど`, no proposal) is flagged
+    misaligned; on the finished page it reads `failed`, `Line.misaligned` is
+    True, and the row's reason is the misalignment one. Region 1 is also the
+    unflagged untranslated line before the write, so the same row is the
+    control for the other reason."""
+    _mark_done(project, 0)
+    before = read_review_lines(project, 0)[1]
+    assert before is not None
+    assert before.misaligned is False
+    assert failure_reason(before) == "no translation was returned"
+
+    project.write_proposed(0, {}, (1,))
+    line = read_review_lines(project, 0)[1]
+
+    assert line is not None
+    assert (line.status, line.misaligned) == ("failed", True)
+    assert failure_reason(line) == "the translation did not line up with this bubble"
+
+
+def test_only_the_flagged_line_reads_back_misaligned(project: Project) -> None:
+    """`read_review_lines` selects the flag per row, not per page."""
+    project.write_proposed(0, {}, (1,))
+
+    flags = [line.misaligned for line in read_review_lines(project, 0) if line]
+
+    assert flags == [False, True, False, False]
+
+
+def test_a_misaligned_flag_survives_closing_and_reopening_the_project(
+    project: Project, source_dir: Path
+) -> None:
+    """It is on disk, not on the open connection."""
+    project.write_proposed(0, {}, (1,))
+    project.__exit__(None, None, None)
+
+    with open_project(project_dir_for(source_dir)) as reopened:
+        lines = read_review_lines(reopened, 0)
+
+    assert [line.misaligned for line in lines if line] == [False, True, False, False]

@@ -331,7 +331,7 @@ def _migrated(source_dir: Path, mask: bytes) -> Path:
         pass
 
     # 9 since MT-119 C-4: opening a v7 file runs the v8 -> v9 step as well.
-    assert _user_version(db_path) == 13, (
+    assert _user_version(db_path) == 14, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -370,9 +370,9 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"), mask)
 
     # MT-119 C-4 takes it to 9: `cleaned_page.erased`. `test_schema_v9.py` owns it.
-    assert SCHEMA_VERSION == 13
-    assert _user_version(db_path) == 13
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
+    assert SCHEMA_VERSION == 14
+    assert _user_version(db_path) == 14
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(14,)]
 
 
 def test_a_fresh_region_table_has_a_nullable_excluded_column_declared_last(
@@ -418,7 +418,7 @@ def test_a_version_seven_file_is_migrated_to_eight_when_it_is_opened(
     """AC-4: "`schema_version` is 8" - in both records of it."""
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"), mask)
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]  # MT-103, MT-137, MT-146
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(14,)]  # MT-103 .. MT-149
     assert _columns(db_path) == _REGION_COLUMNS_V8
 
 
@@ -470,7 +470,7 @@ def test_every_region_a_version_seven_file_held_reads_back_included_and_unchange
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 13  # MT-103 PO-3, MT-137, MT-146
+    assert _user_version(db_path) == 14  # MT-103 PO-3, MT-137, MT-146, MT-149
     assert _raw(db_path, f"SELECT {v7_columns} FROM region ORDER BY id") == before
     assert _raw(db_path, "SELECT excluded FROM region ORDER BY id") == [(None,)] * 3
 
@@ -503,12 +503,20 @@ def test_the_v8_step_changes_only_the_region_table(
     # `llm_call` on purpose; `test_schema_v10.py` owns what that step does.
     # MT-137's v10 -> v11 step rebuilds `batch_job` again: still excluded, and
     # `test_schema_v11.py` owns that step.
+    # `line` excluded since MT-149: the v13 -> v14 step ALTERs `line` on purpose
+    # (C-1, `line.misaligned`) and so rewrites its stored DDL and gives every row
+    # a `misaligned` cell; `test_schema_v14.py` owns what that step does. Its
+    # pre-v14 columns are still compared, below.
     schema = (
         "SELECT type, name, sql FROM sqlite_master"
         " WHERE name NOT IN ('batch_job', 'chapter', 'cleaned_page', 'correction',"
-        " 'llm_call', 'region') ORDER BY name"
+        " 'line', 'llm_call', 'region') ORDER BY name"
     )
-    tables = ("page", "line", "run", "glossary")
+    tables = ("page", "run", "glossary")
+    pre_v14_line = (
+        "SELECT id, region_id, source_ja, proposed_en, final_en, edited_at, viewed_at,"
+        " ocr_empty, status FROM line ORDER BY rowid"
+    )
 
     def rows() -> dict[str, list[tuple[object, ...]]]:
         found = {t: _raw(db_path, f"SELECT * FROM {t} ORDER BY rowid") for t in tables}
@@ -528,6 +536,7 @@ def test_the_v8_step_changes_only_the_region_table(
         found["cleaned_page"] = _raw(
             db_path, "SELECT page_id, image_blob FROM cleaned_page ORDER BY rowid"
         )
+        found["line"] = _raw(db_path, pre_v14_line)
         return found
 
     schema_before = _raw(db_path, schema)
@@ -538,7 +547,7 @@ def test_the_v8_step_changes_only_the_region_table(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 13  # MT-103 PO-3, MT-137, MT-146
+    assert _user_version(db_path) == 14  # MT-103 PO-3, MT-137, MT-146, MT-149
     assert _raw(db_path, schema) == schema_before
     rows_after = rows()
     # The chapter row's `schema_version` is the one cell the step must change.

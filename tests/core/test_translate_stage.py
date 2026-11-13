@@ -73,13 +73,14 @@ from typing import TYPE_CHECKING, get_args, get_origin
 import pytest
 
 from mangatl.domain.budget import BOOTSTRAP_PAGE_ESTIMATE
-from mangatl.domain.line import OcrResult
+from mangatl.domain.line import OcrResult, failure_reason
 from mangatl.domain.region import RawRegion
 from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
 from mangatl.pipeline.stage import PageContext
 from mangatl.pipeline.translate_stage import PageTranslator, TranslateStage
 from mangatl.store.intake import read_chapter
-from mangatl.store.project import Project, create_project, project_dir_for
+from mangatl.store.lines import read_review_lines
+from mangatl.store.project import PAGE_DONE, Project, create_project, project_dir_for
 
 if TYPE_CHECKING:
     from mangatl.domain.glossary import PromptContext
@@ -651,3 +652,112 @@ def test_a_neighbours_stage_does_not_hand_the_first_page_the_empty_context(
     assert neighbours.contexts[0].rolling_block.split("\n")[1:] == [
         line.text for line in _LINES if not line.ocr_empty
     ]
+
+
+# =============================================================================
+# MT-149 AC-5 / C-1a: the misaligned regions the translator reports
+# =============================================================================
+#
+# `TranslationResult.misaligned` is new and the double above predates it, so
+# these tests build their results with `_Misaligned`, which sets it.
+
+
+class _Misaligned:
+    """A `PageTranslator` whose result carries `misaligned` - the regions the
+    adapter's echo check dropped - beside the accepted `lines`."""
+
+    def __init__(self, lines: dict[int, str], misaligned: set[int]) -> None:
+        self._lines = lines
+        self._misaligned = frozenset(misaligned)
+
+    def __call__(
+        self, image: bytes, results: Sequence[OcrResult], context: PromptContext
+    ) -> TranslationResult:
+        return TranslationResult(
+            lines=dict(self._lines),
+            usage=_USAGE,
+            call=None,
+            proposed_terms=(),
+            misaligned=self._misaligned,
+        )
+
+
+def _mark_done(project: Project, ordinal: int = _TARGET_ORDINAL) -> None:
+    with project.transaction() as cursor:
+        cursor.execute("UPDATE page SET status = ? WHERE ordinal = ?", (PAGE_DONE, ordinal))
+
+
+def test_translation_result_misaligned_defaults_to_empty_so_every_existing_site_stands() -> None:
+    """C-1a: `misaligned: frozenset[int] = frozenset()`, after the four fields
+    that have none - 39 construction sites build a result without it."""
+    result = TranslationResult(lines={}, usage=_USAGE, call=None, proposed_terms=())
+
+    assert result.misaligned == frozenset()
+    assert type(result.misaligned) is frozenset
+
+
+def test_a_misaligned_region_gets_no_proposal_and_the_accepted_ones_are_stored(
+    fixture: _Fixture,
+) -> None:
+    """AC-5: `write_proposed` receives only the accepted entries. Region 2 was
+    misaligned, so its row stays NULL - and is flagged, unlike region 1, which
+    the answer simply omitted."""
+    fixture.seed()
+
+    TranslateStage(
+        page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_Misaligned({0: "Alpha."}, {2})
+    ).run(fixture.context)
+
+    assert fixture.project.read_proposed(_TARGET_ORDINAL) == ("Alpha.", None, None)
+    flags = [line.misaligned for line in read_review_lines(fixture.project, _TARGET_ORDINAL)]
+    assert flags == [False, False, True]
+
+
+def test_a_dropped_region_reads_failed_with_the_line_up_reason_and_an_omitted_one_does_not(
+    fixture: _Fixture,
+) -> None:
+    """AC-5's two reasons on one page: region 2 (misaligned) reads `the
+    translation did not line up with this bubble`; the same page with region 2
+    merely omitted reads `no translation was returned` for it. Region 1 is
+    `ocr_empty` and keeps its own reason either way."""
+    fixture.seed()
+    TranslateStage(
+        page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_Misaligned({0: "Alpha."}, {2})
+    ).run(fixture.context)
+    _mark_done(fixture.project)
+
+    lines = read_review_lines(fixture.project, _TARGET_ORDINAL)
+
+    assert [line.status for line in lines] == ["proposed", "failed", "failed"]
+    assert [failure_reason(line) for line in lines] == [
+        None,
+        "no text was read in this bubble",
+        "the translation did not line up with this bubble",
+    ]
+
+
+def test_the_same_region_omitted_rather_than_misaligned_says_no_translation_was_returned(
+    fixture: _Fixture,
+) -> None:
+    """The control for the test above: nothing misaligned, region 2 omitted."""
+    fixture.seed()
+    TranslateStage(
+        page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_Misaligned({0: "Alpha."}, set())
+    ).run(fixture.context)
+    _mark_done(fixture.project)
+
+    line = read_review_lines(fixture.project, _TARGET_ORDINAL)[2]
+
+    assert failure_reason(line) == "no translation was returned"
+
+
+def test_a_page_whose_every_answer_was_misaligned_is_not_done(fixture: _Fixture) -> None:
+    """No proposal was accepted, so a later run translates the page again -
+    MT-011 PO-10's rule, which is the only retry this story relies on."""
+    fixture.seed()
+    stage = TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=_Misaligned({}, {0, 2}))
+
+    stage.run(fixture.context)
+
+    assert fixture.project.read_proposed(_TARGET_ORDINAL) == (None, None, None)
+    assert stage.is_done(fixture.context) is False

@@ -784,16 +784,16 @@ def test_a_gemini_selection_binds_the_gemini_adapter_to_one_client_built_with_it
     )
 
 
-#: MT-100 C-1's settled per-page figures, in micro-dollars: read out of the
-#: contract, not re-derived from the token profile here.
-_GEMINI_PAGE_MICRO = 30_000
-_CLAUDE_PAGE_MICRO = 60_000
+#: MT-100 C-1's per-page figures at MT-149 R-2b's token profile, in micro-dollars:
+#: read out of the contract, not re-derived from the token profile here.
+_GEMINI_PAGE_MICRO = 40_000
+_CLAUDE_PAGE_MICRO = 70_000
 
 
 @pytest.mark.parametrize(
     ("provider", "micro"),
     [("gemini", _GEMINI_PAGE_MICRO), ("anthropic", _CLAUDE_PAGE_MICRO)],
-    ids=["gemini-three-cents", "anthropic-six-cents"],
+    ids=["gemini-four-cents", "anthropic-seven-cents"],
 )
 def test_the_translate_stage_is_built_with_the_selected_models_page_estimate(
     weights_dir: Path,
@@ -806,9 +806,10 @@ def test_the_translate_stage_is_built_with_the_selected_models_page_estimate(
 ) -> None:
     """**MT-100 C-4 / AC-5's binding**: the composition root computes
     `page_estimate(model_for(selection.provider))` once and hands it to the
-    translate stage, so the guard a Gemini run consults projects $0.03 a page
-    and a Claude run $0.06. A root that passed `BOOTSTRAP_PAGE_ESTIMATE` (or
-    nothing, letting `Budget()` default) would show $0.06 for Gemini."""
+    translate stage, so the guard a Gemini run consults projects $0.04 a page
+    and a Claude run $0.07 (MT-149 R-2b). A root that passed
+    `BOOTSTRAP_PAGE_ESTIMATE` (or nothing, letting `Budget()` default) would
+    show $0.07 for Gemini."""
     stages = build_pipeline(weights_dir, selection=_selection(provider)).page_stages
 
     (translate_stage,) = [stage for stage in stages if isinstance(stage, TranslateStage)]
@@ -818,7 +819,7 @@ def test_the_translate_stage_is_built_with_the_selected_models_page_estimate(
     )
 
 
-def test_with_no_selection_a_lone_gemini_key_builds_the_stage_at_three_cents(
+def test_with_no_selection_a_lone_gemini_key_builds_the_stage_at_four_cents(
     weights_dir: Path,
     loaders: _Loaders,
     client_spy: _ClientSpy,
@@ -1964,7 +1965,7 @@ def test_a_gemini_batch_binding_estimates_pages_at_the_batch_tier(
     batch_client: list[_FakeBatchClient],
 ) -> None:
     """AC-10: `page_estimate(model_id, pricing="batch")` - $0.02 for
-    gemini-3.1-pro-preview (AC-1), not the interactive $0.03."""
+    gemini-3.1-pro-preview (AC-1), not the interactive $0.04."""
     from mangatl.domain import budget
 
     binding = _build_batch_binding(_selection("gemini"))
@@ -2125,12 +2126,19 @@ def _inlined(key: str, text: str, usage: tuple[Any, ...], model_version: str | N
 
 
 def _succeeded_items() -> list[Any]:
-    """Pages 2, 0, 1 - out of order, paired by key. Page 1's item is an error."""
+    """Pages 2, 0, 1 - out of order, paired by key. Page 1's item is an error.
+    Each entry is `{ja, en}` since MT-149 (C-1), `ja` echoing the OCR text
+    `_collect_pages()` lists for that region, so it passes the echo check."""
     from google.genai import types
 
     return [
-        _inlined("2", '{"0": "Run!"}', (700, 0, 90, 10), None),
-        _inlined("0", '{"0": "Kenji"}', (1000, None, 500, None), "gemini-3.1-pro-preview"),
+        _inlined("2", '{"0": {"ja": "走れ", "en": "Run!"}}', (700, 0, 90, 10), None),
+        _inlined(
+            "0",
+            '{"0": {"ja": "ケンジ", "en": "Kenji"}}',
+            (1000, None, 500, None),
+            "gemini-3.1-pro-preview",
+        ),
         types.InlinedResponse(error=types.JobError(code=3, message="quota"), metadata={"key": "1"}),
     ]
 

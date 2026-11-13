@@ -373,7 +373,8 @@ def _write_page(
     it, not the latest), the request id MT-110's `f"{job}#{ordinal}"` - never
     the item's own id - and the usage priced at the **batch** tier. The
     projection covers the pages after this one, as the stage's does (R-C1).
-    `result.lines` are keyed by reading index already (PO-2).
+    `result.lines` and `result.misaligned` are keyed by reading index already
+    (PO-2).
     """
     model_id = result.call.model_id if result.call is not None else job.model_id
     record_call(
@@ -393,7 +394,7 @@ def _write_page(
         )
     )
     _update_glossary(project, n)
-    project.write_proposed(n, result.lines)
+    project.write_proposed(n, result.lines, result.misaligned)
 
 
 def _update_glossary(project: Project, n: int) -> None:

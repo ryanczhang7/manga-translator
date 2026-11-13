@@ -407,7 +407,7 @@ def _migrated(source_dir: Path) -> Path:
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 13, (
+    assert _user_version(db_path) == 14, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -423,9 +423,9 @@ def test_this_build_writes_and_reads_the_current_schema_version(
     takes it to 12 (`test_schema_v12.py`), MT-146 to 13 (`test_schema_v13.py`)."""
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"))
 
-    assert SCHEMA_VERSION == 13
-    assert _user_version(db_path) == 13
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
+    assert SCHEMA_VERSION == 14
+    assert _user_version(db_path) == 14
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(14,)]
 
 
 def test_a_fresh_batch_job_has_exactly_the_ten_contracted_columns_in_order(
@@ -504,7 +504,7 @@ def test_a_version_ten_file_is_migrated_to_eleven_when_it_is_opened(
     """**AC-2**: "reads `user_version` 11" - in both records of the version."""
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"))
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(14,)]
 
 
 def test_a_fresh_file_and_a_migrated_one_store_the_same_batch_job_declaration(
@@ -552,28 +552,38 @@ def test_the_v11_step_changes_nothing_outside_batch_job(
     `test_schema_v12.py` owns what that step does. Its rows are still
     compared, column by column, below. Since MT-146 it walks on to 13, whose
     step rebuilds `region` (C-1): its declaration is excluded for the same
-    reason, `test_schema_v13.py` owns that step, and its rows are compared."""
+    reason, `test_schema_v13.py` owns that step, and its rows are compared.
+    Since MT-149 it walks on to 14, whose step ALTERs `line` to add
+    `misaligned` (C-1): its declaration is excluded for the same reason,
+    `test_schema_v14.py` owns that step, and its rows are compared on their
+    pre-v14 columns."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _build_v10_file(source_dir)
     schema = "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name != 'batch_job'"
     schema += " AND tbl_name != 'batch_job' AND name != 'chapter' AND name != 'region'"
-    schema += " ORDER BY name"
-    tables = ("page", "region", "line", "run", "llm_call", "correction", "glossary", "cleaned_page")
+    schema += " AND name != 'line' ORDER BY name"
+    tables = ("page", "region", "run", "llm_call", "correction", "glossary", "cleaned_page")
+    pre_v14_line = (
+        "SELECT id, region_id, source_ja, proposed_en, final_en, edited_at, viewed_at,"
+        " ocr_empty, status FROM line ORDER BY rowid"
+    )
     chapter = (
         "SELECT id, source_dir, output_dir, created_at, budget_ceiling_micro_usd, model_id,"
         " rate_table_version, glossary_proposed_at FROM chapter"
     )
 
     def rows() -> dict[str, list[tuple[object, ...]]]:
-        return {table: _raw(db_path, f"SELECT * FROM {table} ORDER BY rowid") for table in tables}
+        found = {table: _raw(db_path, f"SELECT * FROM {table} ORDER BY rowid") for table in tables}
+        found["line"] = _raw(db_path, pre_v14_line)
+        return found
 
     before = (_raw(db_path, schema), rows(), _raw(db_path, chapter))
-    assert all(before[1][table] for table in tables), "the v10 fixture has an empty table"
+    assert all(before[1].values()), "the v10 fixture has an empty table"
 
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 13
+    assert _user_version(db_path) == 14
     assert _raw(db_path, schema) == before[0]
     assert rows() == before[1]
     assert _raw(db_path, chapter) == before[2]
@@ -622,18 +632,18 @@ def test_every_job_a_v10_file_held_is_copied_with_the_whole_chapter_and_every_co
     ) == [(job[0], run_id, *job[1:], 0, 3) for job in _V10_JOBS]
 
 
-# -- AC-1: a version-14 file (12 when written; MT-115 moved it to 13, MT-146 to 14) --
+# -- AC-1: a version-15 file (12 when written; MT-115, MT-146 and MT-149 moved it) --
 
 
 def test_a_file_one_version_newer_than_the_current_one_is_refused(
     tmp_path: Path, png_bytes: Callable[..., bytes]
 ) -> None:
-    """A file at version 14 - one newer than this build since MT-146 - raises
+    """A file at version 15 - one newer than this build since MT-149 - raises
     `SchemaTooNew` naming both numbers, and is left at 14."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _fresh(source_dir)
-    _raw(db_path, "PRAGMA user_version = 14")
-    assert _user_version(db_path) == 14
+    _raw(db_path, "PRAGMA user_version = 15")
+    assert _user_version(db_path) == 15
 
     with pytest.raises(SchemaTooNew) as excinfo:
         open_project(project_dir_for(source_dir))
@@ -641,9 +651,9 @@ def test_a_file_one_version_newer_than_the_current_one_is_refused(
     # Anchored to the words around each number: the message also carries the
     # file's path, and a bare `11` or `12` can match a pytest temp dir.
     message = str(excinfo.value)
-    assert re.search(r"\bversion 14(?!\d)", message), message
-    assert re.search(r"\bsupports 13(?!\d)", message), message
-    assert _user_version(db_path) == 14
+    assert re.search(r"\bversion 15(?!\d)", message), message
+    assert re.search(r"\bsupports 14(?!\d)", message), message
+    assert _user_version(db_path) == 15
 
 
 def test_the_same_file_at_the_current_version_opens(
@@ -653,8 +663,8 @@ def test_the_same_file_at_the_current_version_opens(
     for every file - or for every file at 11 - would pass it."""
     source_dir = _sources(tmp_path, png_bytes, "scans")
     db_path = _fresh(source_dir)
-    assert _user_version(db_path) == 13
+    assert _user_version(db_path) == 14
 
     with open_project(project_dir_for(source_dir)) as project:
         assert len(project.pages()) == len(_SOURCE_PAGES)
-    assert _user_version(db_path) == 13
+    assert _user_version(db_path) == 14

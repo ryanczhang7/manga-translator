@@ -245,6 +245,7 @@ def test_the_call_field_has_no_default_so_a_caller_cannot_forget_it() -> None:
         "usage",
         "call",
         "proposed_terms",
+        "misaligned",  # MT-149 C-1a: last, and the one field with a default
     ]
 
 

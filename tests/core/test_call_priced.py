@@ -20,7 +20,7 @@ tokens, so `tokens x rate` is micro-dollars):
     sonnet-5 2000 in x $2.00  + 5600 out x $10.00 =  4,000 + 56,000 = 60,000
 
 and the projection is `Budget.project` (MT-013): fewer than two samples project
-`BOOTSTRAP_PAGE_ESTIMATE` ($0.06 = 60,000); from two on, the mean rounded **up**
+`BOOTSTRAP_PAGE_ESTIMATE` ($0.07 = 70,000; MT-149 R-2b); from two on, the mean rounded **up**
 to the micro-dollar; `remaining_chapter = next_call x (pages after this one)`.
 Each test additionally cross-checks the *last* event against the ledger read
 after the run, so the literals and the store cannot drift apart unnoticed.
@@ -100,9 +100,9 @@ _SONNET_USAGE = TokenUsage(
 _OPUS_MICRO = 40_000
 _SONNET_MICRO = 60_000
 
-#: `BOOTSTRAP_PAGE_ESTIMATE`, $0.06, as micro-dollars - MT-013's settled value,
+#: `BOOTSTRAP_PAGE_ESTIMATE`, $0.07 since MT-149 R-2b (MT-013 settled $0.06), as micro-dollars -
 #: spelled here so the projection literals below are arithmetic a reader can do.
-_ESTIMATE_MICRO = 60_000
+_ESTIMATE_MICRO = 70_000
 
 
 def _usd(micro: int) -> Usd:
@@ -424,7 +424,7 @@ def test_the_numbers_on_each_event_are_the_ledgers_after_that_calls_row_was_writ
 
     | page | spent   | samples | basis    | next   | pages after | remaining |
     |------|---------|---------|----------|--------|-------------|-----------|
-    | 0    |  40,000 | 1       | estimate | 60,000 | 2           | 120,000   |
+    | 0    |  40,000 | 1       | estimate | 70,000 | 2           | 140,000   |
     | 1    | 100,000 | 2       | observed | 50,000 | 1           |  50,000   |
     | 2    | 140,000 | 3       | observed | 46,667 | 0           |       0   |
 

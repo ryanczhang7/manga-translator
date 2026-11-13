@@ -110,7 +110,13 @@ text, leave it out of your answer.
 - If you cannot read a region at all, leave it out of your answer rather than \
 guessing. An omitted region is recorded as untranslated, which is recoverable; \
 an invented line is not.
-- Answer with one entry per region, keyed by the region's reading index.
+- Answer with one entry per region, keyed by the region's reading index. Each \
+entry is an object with two fields, "ja" and "en".
+- In "ja", copy the region's Japanese exactly as it is listed above, even where \
+you believe the listing was misread. Only when a region's listing is empty, \
+write in "ja" the Japanese you read in that bubble on the page image.
+- In "en", write the English for that region. Where the listing looks misread, \
+you may translate from the page image instead; "ja" stays a copy of the listing.
 
 Continuity across pages:
 - You may also be given a glossary of names, honorifics and place names this \
@@ -179,9 +185,11 @@ def context_text(context: PromptContext) -> str:
 
 
 def response_schema(region_count: int) -> dict[str, Any]:
-    """The JSON schema of one page's answer: a string per reading index and
-    nothing else (MT-011 C-5). A page proposes no glossary terms (MT-106): the
-    pre-pass does, so `glossary` is forbidden like any other unknown key.
+    """The JSON schema of one page's answer: an `{ja, en}` object per reading
+    index and nothing else (MT-011 C-5, MT-149 AC-1). `ja` repeats the region's
+    listed Japanese so `domain.echo.checked_lines` can tell a slipped answer
+    from a keyed one. A page proposes no glossary terms (MT-106): the pre-pass
+    does, so `glossary` is forbidden like any other unknown key.
 
     **No `required`**, and that is what makes an omitted region a real case
     (MT-011 AC-5): a compliant model may omit a region only if the schema lets
@@ -192,8 +200,17 @@ def response_schema(region_count: int) -> dict[str, Any]:
         "type": "object",
         "properties": {
             str(index): {
-                "type": "string",
-                "description": f"The English for the region at reading index {index}.",
+                "type": "object",
+                "description": f"The region at reading index {index}.",
+                "properties": {
+                    "ja": {
+                        "type": "string",
+                        "description": "The region's Japanese, copied exactly as listed.",
+                    },
+                    "en": {"type": "string", "description": "The English for the region."},
+                },
+                "required": ["ja", "en"],
+                "additionalProperties": False,
             }
             for index in range(region_count)
         },

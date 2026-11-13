@@ -315,7 +315,7 @@ def _migrated(source_dir: Path, mask: bytes) -> Path:
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 13, (
+    assert _user_version(db_path) == 14, (
         f"the file is still at version {_user_version(db_path)} after open_project"
     )
     return db_path
@@ -336,9 +336,9 @@ def test_this_build_writes_and_reads_schema_version_nine(
     """C-4's bump, in both records of it (MT-005 PO-7)."""
     db_path = _fresh(_sources(tmp_path, png_bytes, "scans"))
 
-    assert SCHEMA_VERSION == 13
-    assert _user_version(db_path) == 13
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
+    assert SCHEMA_VERSION == 14
+    assert _user_version(db_path) == 14
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(14,)]
 
 
 def test_the_erased_column_is_a_shared_string_appended_after_the_cleaned_page_table() -> None:
@@ -372,7 +372,7 @@ def test_a_version_eight_file_is_migrated_to_nine_when_it_is_opened(
     """**AC-6**: "a version 8 file opens at 9" - in both records of it."""
     db_path = _migrated(_sources(tmp_path, png_bytes, "scans"), mask)
 
-    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(13,)]
+    assert _raw(db_path, "SELECT schema_version FROM chapter") == [(14,)]
     assert _raw(db_path, _SHAPE) == _CLEANED_PAGE_SHAPE_V9
 
 
@@ -428,12 +428,20 @@ def test_the_v9_step_changes_only_the_cleaned_page_erased_column(
     # `test_schema_v11.py` owns that step. `region` excluded since MT-146: the
     # v12 -> v13 step rebuilds it with a third reason on purpose (C-1);
     # `test_schema_v13.py` owns that step. Its rows are still compared below.
+    # `line` excluded since MT-149: the v13 -> v14 step ALTERs `line` on purpose
+    # (C-1, `line.misaligned`) and so rewrites its stored DDL and gives every row
+    # a `misaligned` cell; `test_schema_v14.py` owns what that step does. Its
+    # pre-v14 columns are still compared below.
     schema = (
         "SELECT type, name, sql FROM sqlite_master"
         " WHERE name NOT IN ('batch_job', 'chapter', 'cleaned_page', 'correction',"
-        " 'llm_call', 'region') ORDER BY name"
+        " 'line', 'llm_call', 'region') ORDER BY name"
     )
-    tables = ("page", "region", "line", "run", "glossary")
+    tables = ("page", "region", "run", "glossary")
+    pre_v14_line = (
+        "SELECT id, region_id, source_ja, proposed_en, final_en, edited_at, viewed_at,"
+        " ocr_empty, status FROM line ORDER BY rowid"
+    )
 
     def rows() -> dict[str, list[tuple[object, ...]]]:
         found = {t: _raw(db_path, f"SELECT * FROM {t} ORDER BY rowid") for t in tables}
@@ -450,6 +458,7 @@ def test_the_v9_step_changes_only_the_cleaned_page_erased_column(
             " cache_write_tokens, cache_read_tokens, cost_micro_usd, rate_table_version, at"
             " FROM llm_call ORDER BY rowid",
         )
+        found["line"] = _raw(db_path, pre_v14_line)
         return found
 
     def images() -> list[tuple[object, ...]]:
@@ -461,7 +470,7 @@ def test_the_v9_step_changes_only_the_cleaned_page_erased_column(
     with open_project(project_dir_for(source_dir)):
         pass
 
-    assert _user_version(db_path) == 13
+    assert _user_version(db_path) == 14
     assert _raw(db_path, schema) == schema_before
     assert images() == images_before
     rows_after = rows()
@@ -491,7 +500,7 @@ def test_a_version_six_file_migrates_all_the_way_to_nine(
         project.write_cleaned(0, png_bytes(7, 3, (1, 2, 3)), erased=[0])
         assert project.read_erased(0) == frozenset({0})
 
-    assert _user_version(db_path) == 13
+    assert _user_version(db_path) == 14
     assert _cleaned_page_sql(db_path) == _cleaned_page_sql(
         _fresh(_sources(tmp_path, png_bytes, "fresh"))
     )

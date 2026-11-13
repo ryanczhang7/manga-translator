@@ -227,12 +227,19 @@ def _job(
 # well-formed glossary term - which, since MT-106, it is not asked for and which
 # reaches no result (AC-2's batch case); page 2 is sparse (region 1 omitted, it
 # is `ocr_empty`).
+#
+# MT-149: every entry is `{ja, en}`, its `ja` the page's own listing verbatim
+# (`_OCR_0`.. `_OCR_2`), so the echo check keeps every line of these answers.
 _TEXT_0 = (
     '{"glossary": [{"term_ja": "翔", "term_en": "Kakeru", "note": "name"}],'
-    ' "1": "Kakeru, over here!", "0": "Hey, hurry!"}'
+    ' "1": {"ja": "翔、こっちだ!", "en": "Kakeru, over here!"},'
+    ' "0": {"ja": "おい、急げ!", "en": "Hey, hurry!"}}'
 )
-_TEXT_1 = '{"0": "Wait up..."}'
-_TEXT_2 = '{"2": "Run!", "0": "The train\'s about to leave!"}'
+_TEXT_1 = '{"0": {"ja": "待って……", "en": "Wait up..."}}'
+_TEXT_2 = (
+    '{"2": {"ja": "走れ!", "en": "Run!"},'
+    ' "0": {"ja": "電車が出るぞ!", "en": "The train\'s about to leave!"}}'
+)
 
 #: Page 0 reports non-zero thinking: P=1000, C=200, K=150, T=400.
 _USAGE_0 = (1000, 200, 150, 400)
@@ -270,16 +277,19 @@ _EXPECTED_2 = TranslationResult(
     proposed_terms=(),
 )
 
-#: MT-101 D-14's probe response, verbatim from the story's `## Contract`: an
-#: extra index key "3" and glossary items that are strings, not objects.
+#: MT-101 D-14's probe response, from the story's `## Contract`: an extra index
+#: key "3" and glossary items that are strings, not objects. MT-149 moved its
+#: index values to the `{ja, en}` shape (the English unchanged, the `ja` page
+#: 2's listing, "" for the extra key), so the page fails on the extra key and
+#: not on a pre-MT-149 entry shape; it is no longer verbatim.
 _D14_TEXT = """{
   "glossary": [
     "{\\"japanese\\": \\"翔\\", \\"english\\": \\"Kakeru\\", \\"type\\": \\"name\\"}"
   ],
-  "0": "Hey, hurry!",
-  "1": "Kakeru, over here!",
-  "2": "Wait up...",
-  "3": "The train's about to leave!"
+  "0": {"ja": "電車が出るぞ!", "en": "Hey, hurry!"},
+  "1": {"ja": "", "en": "Kakeru, over here!"},
+  "2": {"ja": "走れ!", "en": "Wait up..."},
+  "3": {"ja": "", "en": "The train's about to leave!"}
 }"""
 
 
@@ -826,3 +836,73 @@ def test_collect_on_an_unknown_state_raises_unknown_state_not_not_finished(
     assert not isinstance(raised.value, batch.BatchNotFinished)
     assert ("None" if state is None else state.name) in str(raised.value), str(raised.value)
     assert dest.reads == 0, f"dest.inlined_responses was read {dest.reads} time(s)"
+
+
+# -- MT-149 AC-6: each item is checked through `checked_lines` ----------------
+
+#: Page 0's answer slipped by one: entry 0 echoes region 1's Japanese and entry
+#: 1 region 0's, the English swapped with them. Both pairs are wholly different
+#: strings (edit ratio 1.0), whatever `ECHO_MAX_EDIT_RATIO` is in its band.
+_SLIPPED_0 = (
+    '{"0": {"ja": "翔、こっちだ!", "en": "Kakeru, over here!"},'
+    ' "1": {"ja": "おい、急げ!", "en": "Hey, hurry!"}}'
+)
+
+
+def test_a_slipped_batch_item_comes_back_with_its_misaligned_regions(batch: Any) -> None:
+    """AC-6, the batch adapter: page 0's two crossed entries are both
+    misaligned and neither keeps its English; the other pages' results are
+    exactly what they were, with nothing misaligned."""
+    items = _good_items()
+    items[0] = _item("0", _answer(_SLIPPED_0, _usage(*_USAGE_0)))
+    client = _FakeGeminiClient(_job(items))
+
+    result = batch.collect_batch(client, _JOB, _pages(batch))
+
+    assert isinstance(result[0], TranslationResult), result[0]
+    assert result[0].lines == {}
+    assert result[0].misaligned == frozenset({0, 1})
+    assert result[1] == _EXPECTED_1
+    assert result[2] == _EXPECTED_2
+    assert result[1].misaligned == frozenset()
+
+
+def test_each_batch_item_is_checked_against_its_own_pages_listing(
+    batch: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6's "no adapter compares on its own", per item: `checked_lines` is
+    called once per page with that page's parsed entries and **that page's**
+    listing - a collector that checked every item against one page's listing
+    would hand page 2's answer page 0's Japanese. The recorder's answer is what
+    each result carries."""
+    from mangatl.domain.echo import AnswerEntry, CheckedLines
+
+    module = importlib.import_module("mangatl.translate.gemini_batch")
+    calls: list[tuple[object, list[str]]] = []
+
+    def recorder(entries: Any, listed: Any) -> CheckedLines:
+        calls.append((entries, list(listed)))
+        return CheckedLines(lines={0: f"recorded {len(calls)}"}, misaligned=frozenset({9}))
+
+    monkeypatch.setattr(module, "checked_lines", recorder)
+
+    result = batch.collect_batch(_FakeGeminiClient(_job(_good_items())), _JOB, _pages(batch))
+
+    assert sorted(calls, key=lambda call: len(call[1])) == [
+        ({0: AnswerEntry("待って……", "Wait up...")}, ["待って……"]),
+        (
+            {
+                0: AnswerEntry("おい、急げ!", "Hey, hurry!"),
+                1: AnswerEntry("翔、こっちだ!", "Kakeru, over here!"),
+            },
+            ["おい、急げ!", "翔、こっちだ!"],
+        ),
+        (
+            {
+                0: AnswerEntry("電車が出るぞ!", "The train's about to leave!"),
+                2: AnswerEntry("走れ!", "Run!"),
+            },
+            ["電車が出るぞ!", "", "走れ!"],
+        ),
+    ]
+    assert all(result[n].misaligned == frozenset({9}) for n in (0, 1, 2))

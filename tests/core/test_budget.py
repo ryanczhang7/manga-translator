@@ -17,10 +17,14 @@ MT-013's `## Contract` and `docs/wiki/cost-model.awk`, never re-derived or
 calibrated here:
 
 - The comparison is `spent + projection.next_call <= ceiling`, **inclusive**.
-- `BOOTSTRAP_PAGE_ESTIMATE` is **$0.06**: design A is $1.14 per 20-page chapter
-  (`awk -f docs/wiki/cost-model.awk`, reproduced in RED), and $1.14 / 20 =
-  $0.057 rounded **up** to the cent. Up, because an estimate that errs low lets
-  a run start that it cannot finish.
+- `BOOTSTRAP_PAGE_ESTIMATE` is **$0.07** since MT-149 R-2b (it was $0.06): the
+  dearest listed model's design-A page (MT-100 AC-7), claude-opus-5 at
+  $0.06923 now that the answer echoes the Japanese (2,000 output tokens, not
+  1,500), rounded **up** to the cent. MT-013 read $0.06 off design A at $1.14
+  per 20-page chapter (`awk -f docs/wiki/cost-model.awk`, reproduced in RED):
+  $1.14 / 20 = $0.057 rounded up, and the estimate must still never be below
+  that. Up, because an estimate that errs low lets a run start that it cannot
+  finish.
 - `MIN_SAMPLES_FOR_PROJECTION` is **2**: one page is not a sample, and a single
   wordless page would project the whole chapter at nearly zero and disable the
   guard for every page after it.
@@ -156,25 +160,30 @@ def test_the_default_ceiling_is_two_dollars() -> None:
     assert DEFAULT_CEILING.micro() == 2_000_000
 
 
-def test_the_bootstrap_estimate_is_six_cents_rounded_up_from_the_cost_model() -> None:
+def test_the_bootstrap_estimate_is_seven_cents_and_never_below_the_cost_model() -> None:
     """AC-5's "configured per-page estimate", and where the number comes from.
 
     `docs/wiki/cost-model.awk` puts design A at $1.14 for a 20-page chapter, so
-    the per-page figure is $1.14 / 20 = $0.057. It is rounded **up** to $0.06
-    and not down to $0.05, because an estimate that errs low is an estimate that
-    lets a run start which it cannot finish - the same direction of caution as
-    the inclusive comparison, and the opposite of a tuning parameter.
+    the per-page figure is $1.14 / 20 = $0.057. MT-013 rounded that **up** to
+    $0.06 and not down to $0.05, because an estimate that errs low is an
+    estimate that lets a run start which it cannot finish - the same direction
+    of caution as the inclusive comparison, and the opposite of a tuning
+    parameter.
 
-    The second assertion is the one that makes the direction observable: the
-    estimate must be at least the exact per-page cost, which $0.05 is not.
+    Since MT-100 the figure is the dearest listed model's `page_estimate`, and
+    since MT-149 R-2b the design-A page's output counts the echoed Japanese
+    (2,000 tokens): claude-opus-5's $0.06923, rounded up to **$0.07**.
+
+    The last assertion is the one that makes the direction observable: the
+    estimate must be at least the cost model's exact per-page cost.
     """
     exact_per_page = Decimal("1.14") / _CHAPTER_PAGES
     assert exact_per_page == Decimal("0.057")
 
     # `.amount` rather than `== Usd(...)`, for the `SIM300` reason recorded on
     # `test_the_default_ceiling_is_two_dollars`.
-    assert BOOTSTRAP_PAGE_ESTIMATE.amount == Decimal("0.06")
-    assert BOOTSTRAP_PAGE_ESTIMATE.micro() == 60_000
+    assert BOOTSTRAP_PAGE_ESTIMATE.amount == Decimal("0.07")
+    assert BOOTSTRAP_PAGE_ESTIMATE.micro() == 70_000
     assert BOOTSTRAP_PAGE_ESTIMATE.amount >= exact_per_page
 
 
@@ -257,7 +266,8 @@ def test_a_decision_reports_the_spend_the_ceiling_and_the_projection_it_judged()
 def test_a_chapter_with_no_priced_calls_projects_from_the_configured_estimate() -> None:
     """AC-5 at zero - the first consultation of a run, before anything is priced.
 
-    Twenty pages at $0.06 is $1.20, which is above `cost-model.awk`'s $1.14 for
+    Twenty pages at $0.07 is $1.40 (MT-149 R-2b; it was $0.06 and $1.20), which
+    is above `cost-model.awk`'s $1.14 for
     the same chapter. That gap is the round-up doing its job and is not a defect.
     """
     projection = Budget().project(priced_calls=(), pages_remaining=_CHAPTER_PAGES)
@@ -265,7 +275,7 @@ def test_a_chapter_with_no_priced_calls_projects_from_the_configured_estimate() 
     assert projection.next_call == BOOTSTRAP_PAGE_ESTIMATE
     assert projection.basis == "estimate"
     assert projection.sample_count == 0
-    assert projection.remaining_chapter.micro() == 1_200_000
+    assert projection.remaining_chapter.micro() == 1_400_000
 
 
 def test_a_chapter_with_one_priced_call_projects_from_the_estimate_not_from_that_call() -> None:
@@ -274,7 +284,7 @@ def test_a_chapter_with_one_priced_call_projects_from_the_estimate_not_from_that
     The single call here costs $0.0009 - a near-wordless splash page, exactly
     the case `## Contract` warns about. Extrapolating from it would project the
     remaining nineteen pages at about $0.017 and leave the guard unable to fire
-    for the rest of the chapter. The projection must stay at the $0.06 estimate
+    for the rest of the chapter. The projection must stay at the $0.07 estimate
     and must still *say* it is an estimate.
 
     This is `## Deferred verifications` condition 3's target: with
@@ -289,7 +299,7 @@ def test_a_chapter_with_one_priced_call_projects_from_the_estimate_not_from_that
     assert projection.next_call == BOOTSTRAP_PAGE_ESTIMATE
     assert projection.basis == "estimate"
     assert projection.sample_count == 1
-    assert projection.remaining_chapter.micro() == 1_140_000
+    assert projection.remaining_chapter.micro() == 1_330_000
 
 
 def test_the_second_priced_call_is_what_switches_the_projection_to_observed() -> None:
@@ -389,7 +399,7 @@ def test_a_zero_ceiling_refuses_the_very_first_consultation() -> None:
     """AC-7 (as reworded by `## Amendments` A-2). No call is ever permitted.
 
     This sits on the boundary rather than beside it: `BOOTSTRAP_PAGE_ESTIMATE`
-    is strictly positive, so $0.00 + $0.06 <= $0.00 is false and the refusal
+    is strictly positive, so $0.00 + $0.07 <= $0.00 is false and the refusal
     follows from the estimate being real rather than from a special case for
     zero. It is `## Deferred verifications` condition 2's second target - with
     the estimate set to $0.00 the sum becomes $0.00 <= $0.00, which **permits**,
@@ -408,7 +418,7 @@ def test_a_zero_ceiling_refuses_the_very_first_consultation() -> None:
 
     assert decision.permitted is False
     assert decision.reason is not None
-    assert "$0.0600" in decision.reason
+    assert "$0.0700" in decision.reason
     assert "$0.0000" in decision.reason
 
 
@@ -468,10 +478,16 @@ def test_a_decision_cannot_be_rewritten_after_it_is_made() -> None:
 #
 # **Settled, read out of MT-100 C-1 - not re-derived.** `DESIGN_A_PAGE_TOKENS`
 # is the contract's token profile, and the three figures below are its
-# arithmetic as the contract records it: opus 56,730 -> 60,000 micro-dollars,
-# sonnet 22,692 -> 30,000, gemini 25,692 -> 30,000. The exact pre-rounding
-# costs are pinned too, because "rounded UP to the cent" is only a claim about
-# rounding when both ends of it are on the page.
+# arithmetic. MT-100 C-1 recorded them at 1,500 output tokens (opus 56,730 ->
+# 60,000 micro-dollars, sonnet 22,692 -> 30,000, gemini 25,692 -> 30,000).
+# MT-149 R-2b (the user's decision, 2026-11-11) raises the profile's output to
+# 2,000 - 700 English + 500 echoed Japanese + 800 thinking - at the same rates:
+# opus 3,696 x $5 + 2,000 x $25 + 1,500 x $0.50 = 69,230 -> 70,000, sonnet
+# 27,692 -> 30,000, gemini 3,696 x $2 + 2,000 x $12 + 1,500 x $0.20 = 31,692 ->
+# 40,000 (computed with `price` over `TokenUsage(3696, 2000, 1500, 0)`, the
+# shipped rate table, 2026-11-11). The exact pre-rounding costs are pinned
+# too, because "rounded UP to the cent" is only a claim about rounding when
+# both ends of it are on the page.
 #
 # The new names are read off the module at call time (`budget_module.X`), so
 # in RED each of these fails on its own `AttributeError` and the MT-013 tests
@@ -483,9 +499,9 @@ def test_a_decision_cannot_be_rewritten_after_it_is_made() -> None:
 
 #: AC-7, read out of C-1: model id -> (exact cost, estimate), in micro-dollars.
 _PAGE_FIGURES: dict[str, tuple[int, int]] = {
-    "claude-opus-5": (56_730, 60_000),
-    "claude-sonnet-5": (22_692, 30_000),
-    "gemini-3.1-pro-preview": (25_692, 30_000),
+    "claude-opus-5": (69_230, 70_000),
+    "claude-sonnet-5": (27_692, 30_000),
+    "gemini-3.1-pro-preview": (31_692, 40_000),
 }
 
 _CENT_MICRO = 10_000
@@ -516,9 +532,10 @@ def _with_model(monkeypatch: pytest.MonkeyPatch, model_id: str, output_rate: str
 
 def test_the_design_a_page_is_the_contracts_token_profile() -> None:
     """C-1: 2,296 image + 500 OCR + 900 context uncached input, the 1,500-token
-    prefix as a cache read, 700 visible + 800 thinking output, no cache write."""
+    prefix as a cache read, 700 visible + 500 echoed Japanese + 800 thinking
+    output (MT-149 R-2b: the answer repeats the listing), no cache write."""
     assert _design_a() == TokenUsage(
-        input_tokens=3696, output_tokens=1500, cache_read_tokens=1500, cache_write_tokens=0
+        input_tokens=3696, output_tokens=2000, cache_read_tokens=1500, cache_write_tokens=0
     )
 
 
@@ -536,11 +553,11 @@ def test_each_listed_model_is_priced_per_page_and_rounded_up_to_the_cent(
     )
 
 
-def test_gemini_is_three_cents_a_page_not_claudes_six() -> None:
+def test_gemini_is_four_cents_a_page_not_claudes_seven() -> None:
     """AC-7, the figure the story exists for, on its own so that its failure
     message is the bug report."""
-    assert _page_estimate("gemini-3.1-pro-preview").amount == Decimal("0.03")
-    assert _page_estimate("claude-opus-5").amount == Decimal("0.06")
+    assert _page_estimate("gemini-3.1-pro-preview").amount == Decimal("0.04")
+    assert _page_estimate("claude-opus-5").amount == Decimal("0.07")
 
 
 def test_every_listed_models_estimate_is_a_positive_whole_cent_within_a_cent_above_cost() -> None:
@@ -559,18 +576,18 @@ def test_every_listed_models_estimate_is_a_positive_whole_cent_within_a_cent_abo
 def test_a_cost_just_past_a_cent_rounds_up_not_to_nearest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The rounding direction, isolated: 1,500 output tokens at $7/M is 10,500
+    """The rounding direction, isolated: 2,000 output tokens at $5.25/M is 10,500
     micro-dollars, $0.0105. Nearest gives $0.01; up gives $0.02."""
-    _with_model(monkeypatch, "test-ten-five", "7")
+    _with_model(monkeypatch, "test-ten-five", "5.25")
 
     assert price("test-ten-five", _design_a()).cost.micro() == 10_500, "precondition"
     assert _page_estimate("test-ten-five").micro() == 20_000
 
 
 def test_a_whole_number_of_cents_is_not_bumped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The other side: 1,500 output tokens at $20/M is exactly $0.03. A ceiling
+    """The other side: 2,000 output tokens at $15/M is exactly $0.03. A ceiling
     that adds a cent unconditionally gives $0.04."""
-    _with_model(monkeypatch, "test-three-cents", "20")
+    _with_model(monkeypatch, "test-three-cents", "15")
 
     assert price("test-three-cents", _design_a()).cost.micro() == 30_000, "precondition"
     assert _page_estimate("test-three-cents").micro() == 30_000
@@ -587,11 +604,11 @@ def test_an_unlisted_model_is_refused_by_name_never_priced_at_a_neighbour() -> N
 
 def test_the_bootstrap_estimate_is_the_dearest_listed_models_figure() -> None:
     """AC-7: `Budget()` with no model named projects the dearest listed model's
-    estimate - $0.06 today, claude-opus-5 - so an unnamed model errs high."""
+    estimate - $0.07 today (MT-149 R-2b), claude-opus-5 - so an unnamed model errs high."""
     dearest = max(_page_estimate(model_id) for model_id in RATES)
 
     assert dearest == BOOTSTRAP_PAGE_ESTIMATE
-    assert dearest.micro() == 60_000
+    assert dearest.micro() == 70_000
     assert Budget().project((), 1).next_call == dearest
 
 
@@ -717,12 +734,13 @@ def test_a_call_estimate_of_no_tokens_is_zero() -> None:
 # --- MT-111 AC-1: `page_estimate(model_id, pricing="batch")` ------------------
 #
 # **Settled** (the story's oracle partition): the figure is read off the batch
-# row, not tuned. Design A (3,696 in, 1,500 out, 1,500 cache read, 0 write) at
+# row, not tuned. Design A (3,696 in, 2,000 out since MT-149 R-2b, 1,500 cache
+# read, 0 write) at
 # `domain/rates.py`'s gemini-3.1-pro-preview batch row ($1.00 in, $6.00 out,
 # $0.20 cache read, $1.00 cache write, per million):
 #
-#     3,696 x 1 + 1,500 x 6 + 1,500 x 0.20 + 0 x 1 = 3,696 + 9,000 + 300
-#                                                  = 12,996 micro = $0.012996
+#     3,696 x 1 + 2,000 x 6 + 1,500 x 0.20 + 0 x 1 = 3,696 + 12,000 + 300
+#                                                  = 15,996 micro = $0.015996
 #
 # rounded UP to the cent: **$0.02** (20,000 micro). Rounded to nearest it would
 # be $0.01, which is why the exact cost is pinned beside it.
@@ -734,7 +752,7 @@ def test_a_call_estimate_of_no_tokens_is_zero() -> None:
 _GEMINI = "gemini-3.1-pro-preview"
 
 #: Worked by hand above, from the batch row - not read out of `price`.
-_BATCH_PAGE_EXACT_MICRO = 12_996
+_BATCH_PAGE_EXACT_MICRO = 15_996
 _BATCH_PAGE_ESTIMATE_MICRO = 20_000
 
 
@@ -743,8 +761,8 @@ def _batch_page_estimate(model_id: str) -> Usd:
     return estimate
 
 
-def test_a_gemini_batch_page_is_estimated_at_two_cents_rounded_up_from_0_012996() -> None:
-    """MT-111 AC-1: the design-A page at the batch row is $0.012996, and the
+def test_a_gemini_batch_page_is_estimated_at_two_cents_rounded_up_from_0_015996() -> None:
+    """MT-111 AC-1: the design-A page at the batch row is $0.015996, and the
     estimate is that rounded **up** to the cent - $0.02, not nearest's $0.01."""
     exact = price(_GEMINI, _design_a(), pricing="batch").cost
 
@@ -752,16 +770,16 @@ def test_a_gemini_batch_page_is_estimated_at_two_cents_rounded_up_from_0_012996(
     estimate = _batch_page_estimate(_GEMINI)
     assert estimate == Usd(Decimal("0.02")), (
         f"page_estimate({_GEMINI!r}, pricing='batch') is {estimate!r}; the batch row prices"
-        f" the design-A page at $0.012996, which rounds up to $0.02"
+        f" the design-A page at $0.015996, which rounds up to $0.02"
     )
     assert estimate.micro() == _BATCH_PAGE_ESTIMATE_MICRO
 
 
-def test_the_batch_page_estimate_is_not_the_interactive_three_cents() -> None:
+def test_the_batch_page_estimate_is_not_the_interactive_four_cents() -> None:
     """MT-111 AC-1: `pricing` is read, not accepted and ignored - the
-    interactive figure for the same model is $0.03."""
+    interactive figure for the same model is $0.04 (MT-149 R-2b)."""
     assert _batch_page_estimate(_GEMINI) != _page_estimate(_GEMINI)
-    assert _page_estimate(_GEMINI) == Usd(Decimal("0.03")), "precondition: MT-100's figure"
+    assert _page_estimate(_GEMINI) == Usd(Decimal("0.04")), "precondition: R-2b's figure"
 
 
 @pytest.mark.parametrize("model_id", list(_PAGE_FIGURES))

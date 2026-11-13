@@ -100,6 +100,7 @@ def test_a_line_carries_its_reading_index_not_a_region_id_in_the_contract_field_
         "edited_at",
         "ocr_empty",
         "excluded",
+        "misaligned",
     )
 
 
@@ -395,3 +396,58 @@ def test_excluded_always_wins(
 def test_an_excluded_line_has_no_failure_reason(ocr_empty: bool) -> None:
     """C-1: a removed line is not a failure, whatever OCR or the model did."""
     assert failure_reason(_line(None, None, "excluded", ocr_empty=ocr_empty)) is None
+
+
+# =============================================================================
+# MT-149 C-1a - a region whose answer did not line up with it
+# =============================================================================
+
+#: MT-149 AC-5's reason, read out of the criterion.
+REASON_MISALIGNED = "the translation did not line up with this bubble"
+
+
+def _misaligned_line(status: str, *, ocr_empty: bool = False) -> Line:
+    return Line(
+        reading_index=4,
+        source_ja="っ",
+        proposed_en=None,
+        final_en=None,
+        status=status,  # type: ignore[arg-type]
+        edited_at=None,
+        ocr_empty=ocr_empty,
+        misaligned=True,
+    )
+
+
+def test_a_lines_misaligned_flag_defaults_to_false_so_every_existing_construction_stands() -> None:
+    """C-1a: `misaligned: bool = False`, the last field - so the positional and
+    keyword constructions that predate it still build the same line."""
+    assert Line(0, "ja", "en", None, "proposed", None).misaligned is False
+    assert _misaligned_line("failed").misaligned is True
+
+
+def test_a_misaligned_failed_line_says_the_translation_did_not_line_up() -> None:
+    """AC-5: the dropped region's row gives its own reason."""
+    assert failure_reason(_misaligned_line("failed")) == REASON_MISALIGNED
+
+
+def test_the_misaligned_reason_is_distinct_from_no_translation_was_returned() -> None:
+    """AC-5: "distinct from `no translation was returned`" - same line, flag off,
+    is the other reason. A reason keyed on anything but the flag fails one side."""
+    plain = dataclasses.replace(_misaligned_line("failed"), misaligned=False)
+
+    assert failure_reason(plain) == REASON_UNTRANSLATED
+    assert failure_reason(_misaligned_line("failed")) != failure_reason(plain)
+
+
+def test_an_ocr_empty_line_says_no_text_was_read_even_if_flagged_misaligned() -> None:
+    """C-1a's order: `ocr_empty` first, then `misaligned`. An empty bubble the
+    model echoed wrongly was still never read."""
+    assert failure_reason(_misaligned_line("failed", ocr_empty=True)) == REASON_OCR_EMPTY
+
+
+@pytest.mark.parametrize("status", ["proposed", "accepted", "edited", "reverted", "excluded"])
+def test_a_misaligned_line_that_has_not_failed_has_no_failure_reason(status: str) -> None:
+    """The reason follows status, not the flag: a user who typed English over a
+    dropped line has an `edited` line with no failure reason."""
+    assert failure_reason(_misaligned_line(status)) is None
