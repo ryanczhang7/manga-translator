@@ -1,13 +1,15 @@
-"""`python -m mangatl.bench`: S1b, S1a, recall, spurious, S2 and S5 in one report.
+"""`python -m mangatl.bench`: S1b, S1a, recall, spurious, slips, S2 and S5 in one report.
 
 MT-089 `## Contract` block 2. EPIC-07's `bench` is one command; the numbers
-are the three measurement commands' own, by construction: this module calls
-`bench.acceptance.measure`, `bench.s2.measure_s2` and `bench.cost.measure_cost`
-on one opened project and one loaded document, and prints each module's
-public `render` of its report. It computes nothing and re-renders nothing.
+are the measurement modules' own, by construction: this module calls
+`bench.acceptance.measure`, `bench.s2.measure_s2`, `bench.cost.measure_cost`
+and `bench.slip.count_slips` (MT-150) on one opened project and one loaded
+document, and prints each module's public `render` of its report. It computes
+nothing and re-renders nothing. The slips lines sit between the acceptance
+block and S2, and are not headlines.
 
 The arguments, the refusal order and the refusal texts are the acceptance
-command's (PO-3). All three measurements complete before the first line is
+command's (PO-3). All four measurements complete before the first line is
 printed, so a refusal from any of them - a `development_use` document
 included - leaves stdout empty: S5 is not printed for a chapter the harness
 refuses. Exit `0` measured (an `S2 FAIL` is a measurement), `2` cannot measure.
@@ -35,6 +37,8 @@ from mangatl.bench.cost import measure_cost
 from mangatl.bench.cost import render as render_cost
 from mangatl.bench.s2 import measure_s2
 from mangatl.bench.s2 import render as render_s2
+from mangatl.bench.slip import count_slips
+from mangatl.bench.slip import render as render_slips
 from mangatl.bench.truth import (
     BenchmarkChapterUsedInDevelopment,
     InvalidGroundTruth,
@@ -90,6 +94,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             acceptance = measure(project, truth, development=development)
             s2 = measure_s2(project, truth, development=development)
             cost = measure_cost(project)
+            slips = count_slips(project)
         except (InvalidGroundTruth, BenchmarkChapterUsedInDevelopment, NotADevelopmentSet) as error:
             return _fail(str(error))
         warnings = validate(truth, project.chapter).warnings
@@ -97,6 +102,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     lines = [
         *warnings,
         *render_acceptance(acceptance),
+        *render_slips(slips),
         *render_s2(s2),
         *render_cost(cost),
     ]

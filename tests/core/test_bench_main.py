@@ -9,10 +9,22 @@ loaded document, as
 
     validate(truth, chapter).warnings
     + acceptance.render(measure(project, truth))
+    + slip.render(count_slips(project))          # MT-150 C-3, D-1
     + s2.render(measure_s2(project, truth))
     + cost.render(measure_cost(project))
 
-and compared to stdout **line for line, unstripped**. AC-2's refusal messages are
+and compared to stdout **line for line, unstripped**. The slips part is the one
+MT-150 added; `mangatl.bench.slip` is imported inside `_expected`, not at the
+top, so that its absence fails only the tests that need its lines and leaves the
+AST and refusal tests to fail on their own assertions. Where the slip lines are
+the point (MT-150 AC-5), they are also typed in, as C-2 states them, so the
+oracle is not only the module agreeing with itself.
+
+**MT-150's fixture** is the same chapter with two proposals copied onto the
+next region - page 0 region 2 takes region 1's English, page 1 region 1 takes
+region 0's - from different Japanese (`せりふ{i}`), every line still accepted
+as-is but `_EDITED`. S1b, S1a and S2 are unchanged by it, which AC-5 asserts
+against a second, unslipped chapter. AC-2's refusal messages are
 not typed in either: each is read off the acceptance command's own stderr for the
 same arrangement, so the two commands are pinned to agree (PO-3).
 
@@ -35,6 +47,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import importlib
 import runpy
 import sqlite3
 import sys
@@ -112,6 +125,19 @@ def _proposal(ordinal: int, index: int) -> str:
     return f"The café on street {10 * ordinal + index} is open."
 
 
+#: MT-150: the regions whose proposal is the previous region's English, from
+#: different Japanese - two slips, `page 0 regions 1/2` and `page 1 regions 0/1`.
+_SLIPPED = frozenset({(0, 2), (1, 1)})
+
+#: MT-150 C-2, verbatim.
+_SLIPS_HEADER = "slips (identical English, different Japanese)"
+
+
+def _proposed(ordinal: int, index: int, slipped: frozenset[tuple[int, int]]) -> str:
+    """The region's proposal: its own, or - slipped - its predecessor's."""
+    return _proposal(ordinal, index - 1 if (ordinal, index) in slipped else index)
+
+
 def _open_run(project: Project, started_at: str) -> int:
     """A `run` row for the chapter, by raw SQL - `test_ledger.py`'s `_open_run`."""
     with project.transaction() as cursor:
@@ -135,17 +161,22 @@ def _record(project: Project, run_id: int, ordinal: int, call: _Call, tag: str) 
     record_call(project, run_id, ordinal, f"req-{tag}", record)
 
 
-def _complete(folder: Path, *, priced: bool) -> None:
+def _complete(
+    folder: Path, *, priced: bool, slipped: frozenset[tuple[int, int]] = frozenset()
+) -> None:
     """Finish the baseline project at `project_dir_for(folder)`, which the command opens."""
     with open_project(project_dir_for(folder)) as project:
         for ordinal in range(len(w.FILENAMES)):
             project.write_lines(ordinal, [OcrResult(f"せりふ{i}") for i in range(w.PER_PAGE)])
-            project.write_proposed(ordinal, {i: _proposal(ordinal, i) for i in range(w.PER_PAGE)})
+            project.write_proposed(
+                ordinal, {i: _proposed(ordinal, i, slipped) for i in range(w.PER_PAGE)}
+            )
             for index in range(w.PER_PAGE):
                 if (ordinal, index) == _EDITED:
                     commit_line(project, ordinal, index, "A different line.", "edited")
                 else:
-                    commit_line(project, ordinal, index, _proposal(ordinal, index), "accepted")
+                    text = _proposed(ordinal, index, slipped)
+                    commit_line(project, ordinal, index, text, "accepted")
             project.write_cleaned(
                 ordinal,
                 w.cleaned_page(ordinal, w.WHITE),
@@ -183,22 +214,37 @@ def unpriced(folder: Path, chapter: Chapter) -> GroundTruth:
     return loaded
 
 
+@pytest.fixture
+def slipped(folder: Path, chapter: Chapter) -> GroundTruth:
+    """MT-150: the priced chapter with `_SLIPPED`'s two proposals copied forward."""
+    loaded = w.seeded_truth(folder, chapter)
+    _complete(folder, priced=True, slipped=_SLIPPED)
+    return loaded
+
+
 class _Parts(NamedTuple):
     warnings: list[str]
     acceptance: list[str]
+    slips: list[str]
     s2: list[str]
     cost: list[str]
 
     def joined(self) -> list[str]:
-        return [*self.warnings, *self.acceptance, *self.s2, *self.cost]
+        """MT-150 C-3 (D-1): the slips part after the whole acceptance block, before S2."""
+        return [*self.warnings, *self.acceptance, *self.slips, *self.s2, *self.cost]
 
 
 def _expected(folder: Path, truth: GroundTruth) -> _Parts:
-    """AC-1's report, computed from the three public functions on the same project."""
+    """AC-1's report, computed from the four public functions on the same project.
+
+    `mangatl.bench.slip` is imported here rather than at the top of the file:
+    see the module docstring."""
+    slip = importlib.import_module("mangatl.bench.slip")
     with open_project(project_dir_for(folder)) as project:
         return _Parts(
             warnings=list(validate(truth, project.chapter).warnings),
             acceptance=list(acceptance.render(measure(project, truth))),
+            slips=list(slip.render(slip.count_slips(project))),
             s2=list(s2.render(measure_s2(project, truth))),
             cost=list(cost.render(measure_cost(project))),
         )
@@ -219,6 +265,7 @@ def test_ac1_the_report_is_the_warnings_once_then_s1_then_s2_then_s5_exactly_and
     assert parts.warnings, "the seeded truth warns; the report must carry those warnings"
     assert parts.acceptance[0].startswith("S1b"), parts.acceptance
     assert "5 / ground truth 6" in parts.acceptance[0], parts.acceptance
+    assert parts.slips == [f"{_SLIPS_HEADER}  0"], parts.slips  # MT-150 C-2: every English differs
     assert parts.s2[-1] == "S2 PASS", parts.s2
     assert parts.cost[0].startswith("S5 chapter cost  $0.0212  2 priced calls"), parts.cost
 
@@ -231,16 +278,23 @@ def test_ac1_the_report_is_the_warnings_once_then_s1_then_s2_then_s5_exactly_and
     assert _lines(captured.out) == parts.joined()
 
 
-def test_ac1_the_report_has_exactly_as_many_lines_as_its_four_parts_together(
+def test_ac1_the_report_has_exactly_as_many_lines_as_its_five_parts_together(
     folder: Path, truth: GroundTruth, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Each part once: warnings are not printed per measurement, no part is dropped."""
+    """Each part once: warnings are not printed per measurement, no part is dropped
+    (MT-150: the slips part is the fifth)."""
     parts = _expected(folder, truth)
 
     main([str(folder)])
 
     out = _lines(capsys.readouterr().out)
-    expected = len(parts.warnings) + len(parts.acceptance) + len(parts.s2) + len(parts.cost)
+    expected = (
+        len(parts.warnings)
+        + len(parts.acceptance)
+        + len(parts.slips)
+        + len(parts.s2)
+        + len(parts.cost)
+    )
     assert len(out) == expected, (len(out), expected, out)
     assert sum(line in parts.warnings for line in out) == len(parts.warnings), out
 
@@ -408,7 +462,7 @@ def test_ac2_a_document_with_several_errors_is_refused_with_the_acceptance_comma
     assert captured.err == f"{_PROG}: {message}\n"
 
 
-@pytest.mark.parametrize("measurement", ["measure_s2", "measure_cost"])
+@pytest.mark.parametrize("measurement", ["measure_s2", "measure_cost", "count_slips"])
 @pytest.mark.parametrize("refusal", [InvalidGroundTruth, BenchmarkChapterUsedInDevelopment])
 def test_ac2_a_refusal_from_a_later_measurement_leaves_stdout_empty(
     folder: Path,
@@ -470,6 +524,7 @@ def _calls_named(tree: ast.Module, name: str) -> int:
         ("mangatl.bench.acceptance", {"measure", "render"}),
         ("mangatl.bench.s2", {"measure_s2", "render"}),
         ("mangatl.bench.cost", {"measure_cost", "render"}),
+        ("mangatl.bench.slip", {"count_slips", "render"}),  # MT-150 C-3
     ],
 )
 def test_ac3_the_command_imports_each_measurement_and_its_render_from_its_own_module(
@@ -479,7 +534,7 @@ def test_ac3_the_command_imports_each_measurement_and_its_render_from_its_own_mo
     assert names <= imported, f"{module}: imports {sorted(imported)}, needs {sorted(names)}"
 
 
-@pytest.mark.parametrize("name", ["measure", "measure_s2", "measure_cost"])
+@pytest.mark.parametrize("name", ["measure", "measure_s2", "measure_cost", "count_slips"])
 def test_ac3_the_command_calls_each_measurement_exactly_once(name: str) -> None:
     assert _calls_named(_tree(), name) == 1
 
@@ -620,14 +675,22 @@ def _labelled(parts: _Parts) -> list[str]:
     """AC-1's report, built by POSITION from the unflagged report's own parts - not
     by the prefix rule GREEN implements - so the two are independent: S1b and S1a
     are acceptance lines 0 and 1, the S2 verdict is the last S2 line, S5 is cost
-    line 0. Every other line is unchanged."""
+    line 0. Every other line is unchanged - the slips lines included, which MT-150
+    C-3 says are never suffixed."""
     acceptance_lines = [
         *(line + _DEVELOPMENT_SUFFIX for line in parts.acceptance[:2]),
         *parts.acceptance[2:],
     ]
     s2_lines = [*parts.s2[:-1], parts.s2[-1] + _DEVELOPMENT_SUFFIX]
     cost_lines = [parts.cost[0] + _DEVELOPMENT_SUFFIX, *parts.cost[1:]]
-    return [_DEVELOPMENT_LABEL, *parts.warnings, *acceptance_lines, *s2_lines, *cost_lines]
+    return [
+        _DEVELOPMENT_LABEL,
+        *parts.warnings,
+        *acceptance_lines,
+        *parts.slips,
+        *s2_lines,
+        *cost_lines,
+    ]
 
 
 def _assert_positions_are_the_prefix_rule(parts: _Parts) -> None:
@@ -747,3 +810,94 @@ def test_mt142_c2_the_command_passes_development_mode_to_measure_and_measure_s2(
     assert main([str(folder), "--development"]) == 0, capsys.readouterr().err
 
     assert seen == [False, True]
+
+
+# -- MT-150: the slips line, after the acceptance block and before S2 -----------
+
+#: MT-150 C-2 for `_SLIPPED`, typed in: the oracle that is not the module itself.
+_SLIP_LINES = [
+    f"{_SLIPS_HEADER}  2",
+    "page 0 regions 1/2, page 1 regions 0/1",
+]
+
+#: AC-5's acceptance block: "the five lines S1b, S1a, recall, spurious, identity".
+_ACCEPTANCE_PREFIXES = ("S1b", "S1a", "recall", "spurious", "identity")
+
+
+def test_mt150_ac5_the_slips_lines_follow_the_five_acceptance_lines_and_precede_s2(
+    folder: Path, slipped: GroundTruth, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parts = _expected(folder, slipped)
+    assert [line.split()[0] for line in parts.acceptance] == list(_ACCEPTANCE_PREFIXES), (
+        "fixture: the acceptance block is AC-5's five lines",
+        parts.acceptance,
+    )
+    assert parts.slips == _SLIP_LINES, parts.slips
+
+    status = main([str(folder)])
+
+    captured = capsys.readouterr()
+    assert status == 0, captured.err
+    assert captured.err == ""
+    out = captured.out.splitlines()
+    assert out == [*parts.warnings, *parts.acceptance, *_SLIP_LINES, *parts.s2, *parts.cost]
+    at = out.index(_SLIP_LINES[0])
+    assert out[at - 1].startswith("identity"), out
+    assert out[at + 2] == parts.s2[0], out
+
+
+def test_mt150_ac5_a_chapter_with_no_slip_prints_the_zero_line_alone_before_s2(
+    folder: Path, truth: GroundTruth, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parts = _expected(folder, truth)
+
+    main([str(folder)])
+
+    out = capsys.readouterr().out.splitlines()
+    at = out.index(f"{_SLIPS_HEADER}  0")
+    assert out[at - 1].startswith("identity"), out
+    assert out[at + 1] == parts.s2[0], out
+    assert sum(line.startswith("slips") for line in out) == 1, out
+    assert not any(line.startswith("page ") for line in out), out
+
+
+def test_mt150_ac5_slips_change_neither_s1b_s1a_nor_s2_figures_or_verdicts(
+    tmp_path: Path, folder: Path, slipped: GroundTruth
+) -> None:
+    """The same chapter without the two slips, built beside it: its acceptance and
+    S2 lines are the slipped chapter's, character for character."""
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    other = w.write_chapter(baseline / w.CHAPTER)
+    unslipped = w.seeded_truth(other, read_chapter(other))
+    _complete(other, priced=True)
+
+    with_slips = _expected(folder, slipped)
+    without = _expected(other, unslipped)
+
+    assert without.slips == [f"{_SLIPS_HEADER}  0"], without.slips
+    assert with_slips.slips == _SLIP_LINES, with_slips.slips
+    assert with_slips.acceptance == without.acceptance
+    assert with_slips.s2 == without.s2
+    assert "5 / ground truth 6" in with_slips.acceptance[0], with_slips.acceptance
+    assert with_slips.s2[-1] == "S2 PASS", with_slips.s2
+
+
+def test_mt150_c3_a_development_report_carries_the_slips_lines_unsuffixed(
+    folder: Path, slipped: GroundTruth, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parts = _expected(folder, slipped)
+    _assert_positions_are_the_prefix_rule(parts)
+    assert parts.slips == _SLIP_LINES, parts.slips
+    _flag(folder, slipped)
+
+    status = main([str(folder), "--development"])
+
+    captured = capsys.readouterr()
+    assert status == 0, captured.err
+    out = captured.out.splitlines()
+    assert out[0] == _DEVELOPMENT_LABEL
+    assert out == _labelled(parts)
+    for line in _SLIP_LINES:
+        assert line in out, (line, out)
+        assert line + _DEVELOPMENT_SUFFIX not in out, (line, out)
