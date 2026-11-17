@@ -1,6 +1,6 @@
 ---
 description: Move one story forward by exactly one phase
-model: fable
+model: opus
 argument-hint: <story-id>
 allowed-tools: Bash(bash scripts/phase.sh:*), Bash(bash scripts/gates.sh:*), Bash(bash scripts/attest.sh check:*), Bash(bash scripts/check-boundaries.sh:*), Bash(bash scripts/selftest.sh:*), Bash(bash scripts/selftest-needed.sh:*), Bash(SELFTEST_JOBS=4 bash scripts/selftest.sh:*), Bash(SELFTEST_JOBS=4 bash scripts/selftest.sh --changed:*), Bash(bash scripts/ci-local.sh:*), Bash(bash scripts/task.sh:*), Bash(bash scripts/story.sh:*), Bash(git:*), Read, Grep, Glob, Edit, Write, Task
 ---
@@ -40,9 +40,22 @@ should not have, list the real boundaries with
 section by line range.
 Then, based on the story's current phase:
 
-**PLANNED → RED.** Confirm the acceptance criteria are testable; fix them with
-the user if they are not — this is the last phase in which they may change
-without an `## Amendments` entry. Then name the gate that would fail if this
+**PLANNED → RED.** The PLANNED work is done by a `lead-po` dispatch on the
+PLANNED row of `models.conf` (the model from `bash scripts/plan.sh models $1`),
+not by you inline. Give it the story id and file path, and paste the checklist
+below - from "Confirm the acceptance criteria" to the epic's done-when - as its
+brief. It writes the story's sections and runs `bash scripts/plan.sh write $1`
+last, because the plan depends on the contract. It cannot ask the user
+anything, so it returns its questions: put each one to the user yourself, and
+send the answers back on a fresh dispatch. When it returns, read what came
+back before anything is committed - the `Contract`, `Deferred verifications`
+and `Model guidance` sections, with `bash scripts/story.sh section $1 <name>` -
+and record the model the dispatch resolved to. The checklist:
+
+Confirm the acceptance criteria are testable; return any that are not, with the
+reading that makes them untestable, for the orchestrator to settle with the
+user — this is the last phase in which they may change without an
+`## Amendments` entry. Then name the gate that would fail if this
 story's artifact broke, and check it is `required`. Read the criteria against
 `bash scripts/gates.sh --list`, whose `covers` lines say which paths each gate
 reads: if the only gate that exercises what the story builds is `optional` — a
@@ -56,7 +69,7 @@ test of a renderer ran where nothing could block on it, and `All required gates
 passed` was printed over a story whose artifact no required gate had touched.
 If no gate at all can verify the artifact, the story is not ready.
 
-Then three things that belong to you and cannot be delegated to RED:
+Then three things that belong to PLANNED and cannot be delegated to RED:
 
 **Pin the `## Contract`.** Module paths, exported names, exact signatures, the
 semantics behind every number (which way a drag moves the world, where a value
@@ -95,11 +108,12 @@ twice.
 **Check the epic's done-when against these criteria.** If the epic promises
 something no story between the last one and this one delivers — "the app opens on
 a generated landmass", when `mount()` still draws a graticule — that gap is
-yours to close, as a numbered PO decision recorded in the story and reported to
-the user *first*, so they can overrule it before GREEN. Never absorb it silently,
-and never skip it silently.
+PLANNED's to close, as a numbered PO decision recorded in the story and
+returned to the orchestrator, which reports it to the user *first*, so they can
+overrule it before GREEN. Never absorb it silently, and never skip it silently.
 
-Create and switch to the story's branch
+That is the end of the brief. Once the dispatch is back, read what it
+returned. Create and switch to the story's branch
 (`story/<id>-<slug>`) if it does not exist. Before setting the phase, commit
 the story file on that branch while it still says `phase: PLANNED`:
 `check-boundaries.sh` freezes the criteria at the last state committed at
@@ -252,16 +266,30 @@ without it is the point.
 Then, **in this order**:
 
 1. Review the story's diff and its callers with the `diff-review` skill.
-   Dispatch a **fresh** `feature-developer`, not the one that wrote the code,
-   on the GATES row of `models.conf`; it changes no file and returns its
-   report. Paste that report into a `## Diff review` section of the story,
-   directly above `## Gate results`, and record the model the dispatch
-   resolved to. A Must fix in the code is made in GATES by a feature-developer
-   dispatch; the tree has changed, so `bash scripts/gates.sh` runs again and
-   these steps start over, with a review of the fix. A finding that needs a
-   test added or changed is a return to RED, with a `## Regressions` entry. A
-   finding that an acceptance criterion is wrong is an `## Amendments` question
-   for the user. Go on only once the report's last line is `Verdict: Ship.`.
+   Dispatch a **fresh** `lead-po` on the DIFF-REVIEW row of `models.conf`,
+   with the model that `bash scripts/plan.sh models $1` prints for that row -
+   read it there, so a story planned before the row existed still gets it,
+   unless the story's `## Model guidance` records a departure for that row,
+   which outranks the policy file. It changes no file and
+   returns its report. Paste that report into a `## Diff review` section of
+   the story, directly above `## Gate results`, and record the model the
+   dispatch resolved to. Every finding carries a `Route` label, `GATES`,
+   `RED` or `AMEND`, and the orchestrator follows the label; it does not
+   choose the route. Before acting on one, run `bash scripts/classify.sh` on
+   each path the finding's Fix names and read each category against the
+   phase table in `rules.md`: a `GATES` label whose fix names a `test` path,
+   a `RED` label whose fix names only `source` or `config` paths, or an
+   `AMEND` label with no `AC-<n>`, cannot be followed, and goes back to a
+   fresh dispatch on the DIFF-REVIEW row, with the classification pasted, to
+   be relabelled - never relabelled by you. Where the paths classify as
+   `harness` the lock permits both phases and the check passes; the label
+   decides. A `GATES` finding (a Must fix in the code) is made in GATES by a
+   feature-developer dispatch; the tree has changed, so
+   `bash scripts/gates.sh` runs again and these steps start over, with a
+   review of the fix. A `RED` finding, a test added or changed, is a return
+   to RED, with a `## Regressions` entry. An `AMEND` finding, an acceptance
+   criterion in question, is an `## Amendments` question for the user. Go on
+   only once the report's last line is `Verdict: Ship.`.
    It comes before the self-test because a fix changes the tree, and a fix
    found after the self-test wastes that run.
 2. `bash scripts/selftest-needed.sh` — it answers `run` (exit 0) when the
@@ -376,6 +404,23 @@ reports nothing at all. A gate that reached REVIEW marked *pending CI* is checke
 here too, and its CI run quoted into `## Notes` on a line carrying the gate id
 and the run URL, or `check-boundaries.sh` refuses to call the story DONE.
 
+While the story is at REVIEW, feedback on the open PR that asks for a change -
+a reviewer's comment, a CI failure - is not yours to judge inline. Dispatch a
+`lead-po` on the REVIEW row of `models.conf` (the model from
+`bash scripts/plan.sh models $1`, unless the story's `## Model guidance`
+records a departure for that row, which outranks the policy file) with the
+feedback, the story id and its
+`Acceptance criteria` and `Contract` sections; it reads each item against the
+contract, changes no file, and labels each item that needs a change with a
+`Route`, `GATES`, `RED` or `AMEND`, exactly as the `diff-review` skill defines
+them. You follow and check each label as GATES → REVIEW step 1 says - ask
+`bash scripts/classify.sh` about each path its fix names, and send a label
+you cannot follow back to a fresh REVIEW-row dispatch to be relabelled -
+then leave REVIEW deliberately, with `bash scripts/phase.sh set $1 GATES` or
+`RED`, or put the `AMEND` question to the user. Setting the phase, clearing
+the lock, reading the CI timings and relaying `bash scripts/plan.sh after $1`
+stay yours.
+
 **Returning to RED from GREEN or GATES.** A test that is wrong sends the story
 back to RED; it is never edited into passing. The trigger is wider than that,
 though, and the wider form is the one to hold: **any gate failure whose only
@@ -392,7 +437,10 @@ narrower than it did the first time, because the implementation already exists
 and may well be correct:
 
 - Set the phase back to RED and say in `## Regressions` what is wrong with the
-  test, how it was found, and what it should assert instead.
+  test, how it was found, and what it should assert instead. The entry is
+  headed `R-<n>` and carries its `**Adjudicated R-<n>:**` record; a return no
+  review finding routed gets an ADJUDICATE dispatch before the test changes,
+  mechanical returns included.
 - The **test-developer**'s remit is the defective test and nothing else. Source
   is frozen again by the lock, which is correct — do not treat that as a signal
   to change phase.
@@ -429,16 +477,30 @@ Rules for you as orchestrator:
 - Verify every subagent claim against the filesystem and a real command run. A
   report of success is a claim.
 - **A claim that the contract itself is wrong — an acceptance criterion, a
-  threshold, a frozen test — you reproduce independently before accepting it:
-  different inputs, and without reusing the subagent's own code.** Running its
-  probe again is not verification. Record the reproduction in the story next to
-  the `## Amendments` or `## Regressions` entry it justifies. This is the exact
-  shape of claim an agent makes when it wants to stop failing — *the
-  specification is wrong, not my work* — and it is also the shape of the two
-  most valuable escalations this harness has seen. Independent reproduction is
-  the only thing that separates them, and it is cheap: a fresh probe on
-  different inputs, or reading the fixture and enumerating the cases the file
-  asserts to show no rule satisfies all of them.
+  threshold, a frozen test — is adjudicated by a fresh `lead-po` dispatch on
+  the ADJUDICATE row of `models.conf`, not by you.** Its model comes from
+  `bash scripts/plan.sh models $1`, or from the story's `## Model guidance`
+  where it departs from the plan for ADJUDICATE. Brief it with the claim, the story's
+  `Acceptance criteria` and `Contract`, and the paths involved — not the
+  claimant's probe as something to re-run: running that probe again is not
+  verification. It reproduces the claim on different inputs, without reusing
+  the claimant's code, and answers upheld or rejected. This is the exact shape
+  of claim an agent makes when it wants to stop failing — *the specification is
+  wrong, not my work* — and it is also the shape of the two most valuable
+  escalations this harness has seen; only an independent reproduction, by a
+  judge that does not want either answer, separates them. For an upheld claim
+  the dispatch writes the entry head under the next free id (`R-<n>` in
+  `## Regressions`, `AM-<n>` in `## Amendments`) if it does not exist yet, the
+  record line ``**Adjudicated <id>:** `<model>` (resolved <name>), <date>, ...``
+  and its reproduction beneath; the section's owner fills in the rest, and an
+  upheld `AC` claim still goes to the user for approval, a second line of the
+  entry. For a rejected claim it writes one line in `## Notes` and no entry. It
+  sets no phase and commits nothing; record the model it resolved to. An entry
+  that follows a diff-review finding or a REVIEW-row PR-feedback item routed
+  `RED` or `AMEND` was adjudicated by that dispatch: you write its record,
+  naming the review round and finding number or the PR-feedback item and the
+  model that dispatch was planned on and resolved to, with no second dispatch.
+  `check-boundaries.sh` refuses a new entry without its record.
 - **And it runs the other way: an instruction of yours that names a *mechanism*
   is a claim too.** When you tell a subagent *how* — call this function to force
   the work to complete, read the value from here, use that API — you are asserting

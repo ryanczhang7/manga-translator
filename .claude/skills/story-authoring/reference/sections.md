@@ -77,6 +77,20 @@ why. `check-boundaries.sh` fails a PR whose criteria differ from their last
 committed PLANNED state (else the base branch) without an entry. Omit when
 unused.
 
+Each entry is headed `AM-<n>` (`- **AM-1 (AC-2).** ...`) and carries an
+adjudication record, a line of its own outside any comment or fence:
+
+    - **Adjudicated AM-<n>:** `fable` (resolved <name>), <date>, <what it reproduced>
+
+A claim that a criterion is wrong is judged by a fresh `fable` dispatch, a
+`lead-po` on the ADJUDICATE row of `models.conf`, on inputs of its own and
+without the claimant's code, and that dispatch writes the record; the user
+still approves what the criterion becomes, on a line of its own. An entry that
+follows a diff-review or PR-feedback finding routed `AMEND` names that review
+instead, and a change the user asked for unprompted reads
+`- **Adjudicated AM-<n>:** requested by the user, <date>`.
+`check-boundaries.sh` refuses a new entry without a record.
+
 ## Suppressions - Lead PO, with the user
 
 The one way a GREEN or GATES commit may add a line that silences a tool - an
@@ -145,6 +159,18 @@ The only channel to the Feature Developer. See the `tdd-cycle` skill,
 Required for any story that returned to RED after GREEN or GATES; omitted
 otherwise. One block per return: which test, what was wrong with it, how that
 was found, what it asserts now, and what earns the correction.
+
+Each block is headed `R-<n>` (`### R-1 (the count test)`) and carries the
+adjudication record of the claim that the test was wrong, a line of its own
+outside any comment or fence:
+
+    - **Adjudicated R-<n>:** `fable` (resolved <name>), <date>, <what it reproduced>
+
+It is written by the fresh `fable` dispatch that judged the claim, a `lead-po`
+on the ADJUDICATE row of `models.conf`, never by the orchestrator; for a return
+that follows a diff-review or PR-feedback finding routed `RED`, the record names
+that review round and finding instead. `check-boundaries.sh` refuses a new
+entry without one.
 
 That last part is the whole section. On a return, "watched it fail" cannot apply
 - the implementation exists and is often correct, so the corrected assertion is

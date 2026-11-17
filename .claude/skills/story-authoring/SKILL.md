@@ -308,8 +308,10 @@ review and produces a green tick over a broken implementation.
 
 If the Test Developer reports that a criterion's metric cannot detect what the
 criterion is about, that is an AC change: it stops, the product owner decides,
-and the change is recorded under `## Amendments` — after the orchestrator has
-reproduced the finding independently, on its own inputs.
+and the change is recorded under `## Amendments` — once a fresh `fable`
+dispatch, a `lead-po` on the ADJUDICATE row of `models.conf`, has reproduced
+the finding on inputs of its own and upheld it, and written its
+`**Adjudicated AM-<n>:**` record in the entry.
 
 ### Name the control you cannot run yet, and the phase that owns it
 

@@ -1129,4 +1129,133 @@ if [ "$sup_judged" -gt 0 ] && [ "$sup_refused" -eq 0 ]; then
   ok "GREEN/GATES added no suppression ($sup_judged commit(s) judged)"
 fi
 
+# --- 3k. A new ## Regressions or ## Amendments entry is adjudicated -----------
+#
+# A claim that the contract is wrong - an acceptance criterion, a threshold, a
+# frozen test - is judged by a fresh lead-po dispatch on the ADJUDICATE row of
+# models.conf, never by the orchestrator that wants the answer (HARNESS-102).
+# The entry the claim justifies carries that dispatch's record, and this block
+# reads the record. It cannot read the dispatch: a record establishes that
+# somebody wrote down which model judged the claim, the same standing every
+# record in a story has.
+#
+# The grammar is the story's Contract (C-1, C-2), read after HTML comments are
+# removed and with lines inside a fence skipped:
+#
+#   entry head  ^ {0,3}((#{3,6} |- )(\*\*)?|\*\*)(R|AM)-[0-9]+([^0-9]|$)
+#               R- in ## Regressions only, AM- in ## Amendments only
+#   record      ^ {0,3}(- )?\*\*Adjudicated <id>:\*\* <who>
+#               <who> = `<opus|fable|sonnet|haiku>` (resolved <name>)
+#                     | requested by the user          (AM- only)
+#
+# The regexes are spelled without interval expressions (`{0,3}`), which an
+# older mawk does not have. New is the working tree's ids minus the base copy's;
+# prose added under an id the base already has is not judged. The base copy goes
+# through the scratch file $cp, never a here-string or a pipe (3d says why).
+#
+# adj_scan <section-file> <R|AM>   One line per entry head, `head <id>`, and one
+# per well-formed record, `rec <id> <model|user>`; each id once. Last, the line
+# `unreadable` when the section cannot be read to its end (C-4 step 2a): a
+# comment opener with no closer after it, or, comments removed, an odd number
+# of fence lines - a line that opens and closes a fence on one line is read as
+# an opener, so it counts as one. Also `unreadable` when the section has a head
+# outside comments and fences and some line of the raw section shaped like a
+# head names an id that is none of those heads: a stray pair (two one-line
+# fences, a quoted opener and a later closer) balances both counts and hides
+# what lies between. With no head at all, step 3's headless problem refuses it.
+adj_scan() {
+  awk -v p="$2" '{ s = s $0 "\n" }
+    END {
+      open = 0; raw = s; nh = 0
+      while ((i = index(s, "<!--")) > 0) {
+        r = substr(s, i); j = index(r, "-->")
+        if (j == 0) { s = substr(s, 1, i - 1); open = 1; break }
+        s = substr(s, 1, i - 1) substr(r, j + 3)
+      }
+      hre = "^ ? ? ?((####?#?#? |- )([*][*])?|[*][*])" p "-[0-9]+([^0-9]|$)"
+      rre = "^ ? ? ?(- )?[*][*]Adjudicated " p "-[0-9]+:[*][*] "
+      mre = "^`(opus|fable|sonnet|haiku)` [(]resolved [A-Za-z0-9._-]+[)]"
+      n = split(s, L, "\n"); fence = 0
+      for (k = 1; k <= n; k++) {
+        l = L[k]
+        if (l ~ /^[[:space:]]*(```|~~~)/) { fence = !fence; continue }
+        if (fence) continue
+        if (l ~ hre) {
+          match(l, p "-[0-9]+"); id = substr(l, RSTART, RLENGTH)
+          if (!(id in H)) { H[id] = 1; nh++; print "head " id }
+        }
+        if (match(l, rre)) {
+          head = substr(l, 1, RLENGTH); rest = substr(l, RLENGTH + 1)
+          match(head, p "-[0-9]+"); id = substr(head, RSTART, RLENGTH)
+          who = ""
+          if (match(rest, mre)) { who = substr(rest, 2); sub(/`.*/, "", who) }
+          else if (p == "AM" && index(rest, "requested by the user") == 1) who = "user"
+          if (who != "" && !(id in R)) { R[id] = 1; print "rec " id " " who }
+        }
+      }
+      hid = 0
+      if (nh > 0) {
+        n = split(raw, L, "\n")
+        for (k = 1; k <= n; k++)
+          if (L[k] ~ hre) {
+            match(L[k], p "-[0-9]+")
+            if (!(substr(L[k], RSTART, RLENGTH) in H)) hid = 1
+          }
+      }
+      if (open || fence || hid) print "unreadable"
+    }' "$1"
+}
+adj_dir="$ROOT/.claude/state/check-boundaries"
+adj_cur="$adj_dir/adjcur-$$.md"; adj_old="$adj_dir/adjold-$$.md"
+adj_cs="$adj_dir/adjcs-$$.txt"; adj_os="$adj_dir/adjos-$$.txt"
+adj_have_base=0
+if git cat-file -e "$BASE:$sfile" 2>/dev/null && git show "$BASE:$sfile" > "$cp" 2>/dev/null; then
+  adj_have_base=1
+fi
+# The planned model, from the ADJUDICATE row, read with plan.sh's field grammar:
+# `|`-separated, each field trimmed, comment and blank lines ignored.
+adj_planned="$(awk -F'|' '/^[[:space:]]*#/ || !/[^[:space:]]/ { next }
+  { for (i = 1; i <= NF; i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i) }
+  $1 == "model" && $2 == "ADJUDICATE" && $4 != "" { print $4; exit }' .claude/harness/models.conf 2>/dev/null)"
+for adj_sec in Regressions Amendments; do
+  case "$adj_sec" in Regressions) adj_p=R ;; *) adj_p=AM ;; esac
+  section "$sfile" "$adj_sec" > "$adj_cur"
+  has_content < "$adj_cur" || continue                                   # step 1
+  if [ "$adj_have_base" = 1 ]; then section "$cp" "$adj_sec" > "$adj_old"; else : > "$adj_old"; fi
+  adj_a="$(strip_comments < "$adj_cur" | sed 's/[[:space:]]*$//')"
+  adj_b="$(strip_comments < "$adj_old" | sed 's/[[:space:]]*$//')"
+  [ "$adj_a" = "$adj_b" ] && continue                                    # step 2
+  adj_scan "$adj_cur" "$adj_p" > "$adj_cs"
+  if grep -qx unreadable "$adj_cs"; then                                 # step 2a
+    problem "story $sid: ## $adj_sec is unreadable: it holds an HTML comment opener (\`<!--\`) with no closer after it, or it ends inside a fenced block (an odd number of lines beginning with three backticks or three tildes; a line that opens and closes a fence on the same line counts as an opener). Or a line shaped like an entry head sits inside a comment or a fence and names an id that is no head outside them: a pair of stray lines (two one-line fences, or a quoted opener and a later closer) hides what lies between. Nothing hidden can be judged, so an entry there could pass unadjudicated. Close the comment, close the fence, or quote the opener together with its closer, or name it in words. For a hidden head: move the entry's head outside the comment or fence, or, if it is only an example, indent it four spaces or quote it inline; and write a fence's markers on lines of their own."
+    continue
+  fi
+  adj_scan "$adj_old" "$adj_p" > "$adj_os"
+  adj_heads="$(awk '$1 == "head" { print $2 }' "$adj_cs")"
+  if [ -z "$adj_heads" ]; then                                           # step 3
+    problem "story $sid: ## $adj_sec has new content and no entry head, so nothing can say which entry it is or whether it was adjudicated. An entry is headed $adj_p-<n> (\`### $adj_p-<n> (...)\`, \`**$adj_p-<n> (...)**\` or \`- **$adj_p-<n> (...)**\`, outside any HTML comment or fence), and carries its adjudication record in the same section: \`- **Adjudicated $adj_p-<n>:** \`<model>\` (resolved <name>), <date>, <what the fresh lead-po dispatch on the ADJUDICATE row reproduced>\`."
+    continue
+  fi
+  adj_old_heads=" $(awk '$1 == "head" { printf "%s ", $2 }' "$adj_os")"
+  adj_new=0; adj_bad=0
+  for adj_id in $adj_heads; do
+    case "$adj_old_heads" in *" $adj_id "*) continue ;; esac
+    adj_new=$((adj_new+1))
+    adj_m="$(awk -v i="$adj_id" '$1 == "rec" && $2 == i { print $3; exit }' "$adj_cs")"
+    if [ -z "$adj_m" ]; then                                             # step 4
+      adj_bad=1
+      adj_user=""
+      [ "$adj_p" = AM ] && adj_user=" A change the user asked for unprompted is not a claim and has no dispatch: \`- **Adjudicated $adj_id:** requested by the user, <date>\`."
+      problem "story $sid: ## $adj_sec entry $adj_id is new and has no adjudication record. A claim that the contract is wrong is judged by a fresh lead-po dispatch on the ADJUDICATE row (the model from \`bash scripts/plan.sh models $sid\`), not by the orchestrator; write its record in ## $adj_sec, on a line of its own outside any HTML comment or fence: \`- **Adjudicated $adj_id:** \`<model>\` (resolved <name>), <date>, <what it reproduced, or the review round and finding it came from>\`, where <model> is opus, fable, sonnet or haiku.$adj_user"
+      continue
+    fi
+    if [ "$adj_m" != user ] && [ -n "$adj_planned" ] && [ "$adj_m" != "$adj_planned" ]; then   # step 5
+      note "story $sid: ## $adj_sec: the adjudication record for $adj_id names \`$adj_m\`, and the ADJUDICATE row of models.conf plans \`$adj_planned\`; accepted - ## Model guidance should say why the dispatch departed from the plan"
+    fi
+  done
+  if [ "$adj_new" -gt 0 ] && [ "$adj_bad" -eq 0 ]; then                  # step 6
+    ok "## $adj_sec: every new entry carries an adjudication record"
+  fi
+done
+
 exit $fail

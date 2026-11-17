@@ -1231,4 +1231,86 @@ rm -f "$FIX/ran-marker"
 reset_src
 h59_clear
 
+# ---------------------------------------------------------------------------
+describe "HARNESS-104: a target path with [brackets] reports the lines it really changed"
+
+# HARNESS-104, ported from trump-crime-family (its local HARNESS-089, found in
+# TCF-038 DV-3): src/pages/people/[slug].astro reported and logged
+# "0 line(s) changed" although the mutation applied. On Git Bash the MSYS
+# runtime converts /d/... to D:/... for a native program such as git.exe, but
+# not for an argument holding a glob character, and the backup's name keeps
+# the brackets - so `git diff --no-index` could not open it and the count was
+# an empty diff's. Linux does no conversion, so this block discriminates on
+# Git Bash only (the story's Out of scope says why that is accepted).
+BRK="$FIX/src/[slug].txt"
+printf 'container-type: inline-size;\n' > "$BRK"
+# Hashed by RELATIVE path, from inside the fixture: `sha "$BRK"` hands git the
+# same unconvertible absolute path, fails, and two empty hashes compare equal.
+brk_sha() { ( cd "$FIX" && git hash-object 'src/[slug].txt' ); }
+before="$(brk_sha)"
+assert_eq "HARNESS-104: control - the hash helper can read the bracketed file" 40 "${#before}"
+out="$(mutate 'src/[slug].txt' 's/inline-size/normal/' -- grep -c 'container-type: normal;' 'src/[slug].txt')"; rc=$?
+assert_eq "HARNESS-104 AC-1: the command saw the mutated line (exit 0)" "0" "$rc"
+assert_eq "HARNESS-104 AC-1: the header reports 1 line changed, as a whole line" 1 \
+  "$(whole_lines '=== mutate: src/[slug].txt (1 line(s) changed by s/inline-size/normal/) ===' "$out")"
+assert_eq "HARNESS-104 AC-1: the preview lists the removed and the added line" \
+  '  1 - container-type: inline-size;
+  1 + container-type: normal;' "$(preview_of "$out")"
+assert_contains "HARNESS-104 AC-1: the log records 1 line(s), not 0" \
+  "${TAB}src/[slug].txt${TAB}s/inline-size/normal/${TAB}1 line(s)${TAB}" "$(last_log)"
+assert_eq "HARNESS-104 AC-2: the bracketed file is byte-identical afterwards" "$before" "$(brk_sha)"
+assert_eq "HARNESS-104 AC-2: the restore listing names the line it put back" \
+  '  1: container-type: inline-size;' "$(listing_of "$out")"
+rm -f "$BRK"
+reset_src
+h59_clear
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-105: a target whose backup path passes 260 characters reports the lines it really changed"
+
+# HARNESS-105, deferred from HARNESS-104's diff review (finding 1). The count
+# comes from `git diff --no-index` on the backup and the mutated copy, and the
+# backup's name is the whole target path flattened. git.exe refuses a path over
+# 260 characters unless core.longpaths is on, so a long absolute target put the
+# backup past the limit, the diff came out empty and a mutation that applied
+# reported "0 line(s) changed", with no preview and no restore listing. Linux
+# has no such limit, so this block discriminates on Git Bash only (the story's
+# Out of scope says why that is accepted).
+#
+# LONG is exactly 200 characters, built from the fixture root so its length
+# does not depend on where the temp directory is. Its backup's name (~225
+# characters) stays under one file name's 255 limit; its backup's whole path
+# (root + /.claude/state/mutations/ + that name) is over 260 for any root of 13
+# characters or more. Assertion 1 checks that, so the block cannot go green by
+# quietly no longer exercising the long path.
+#
+# Host config is taken out of the question for the two mutate calls only: a
+# global or system core.longpaths=true would make the unfixed script pass.
+h105_pre="$FIX/src/"; h105_n=$(( 200 - ${#h105_pre} - 4 ))
+LONG="$h105_pre$(printf '%*s' "$h105_n" '' | tr ' ' 'a').txt"
+SHORT="$FIX/src/b.txt"
+printf 'container-type: inline-size;\n' > "$LONG"
+printf 'container-type: inline-size;\n' > "$SHORT"
+out="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  mutate "$LONG" 's/inline-size/normal/' -- grep -c 'container-type: normal;' "$LONG")"
+h105_bak="$(sed -n 's/.*restored (verified byte-for-byte against \(.*\)) ===$/\1/p' <<< "$out")"
+assert_eq "HARNESS-105: control - the long run's backup path is over 260 characters (measured ${#h105_bak}; target ${#LONG})" \
+  over "$([ "${#h105_bak}" -gt 260 ] && printf over || printf under)"
+assert_eq "HARNESS-105 AC-1: a long absolute target's header reports 1 line changed, as a whole line" 1 \
+  "$(whole_lines "=== mutate: $LONG (1 line(s) changed by s/inline-size/normal/) ===" "$out")"
+assert_eq "HARNESS-105 AC-1: a long absolute target's preview lists the removed and the added line" \
+  '  1 - container-type: inline-size;
+  1 + container-type: normal;' "$(preview_of "$out")"
+assert_contains "HARNESS-105 AC-1: a long absolute target is logged with 1 line(s), not 0" \
+  "${TAB}${LONG}${TAB}s/inline-size/normal/${TAB}1 line(s)${TAB}" "$(last_log)"
+assert_eq "HARNESS-105 AC-1: a long absolute target's restore listing names the line it put back" \
+  '  1: container-type: inline-size;' "$(listing_of "$out")"
+out="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  mutate "$SHORT" 's/inline-size/normal/' -- grep -c 'container-type: normal;' "$SHORT")"
+assert_eq "HARNESS-105 AC-2: the short absolute twin's header reports 1 line changed, as a whole line" 1 \
+  "$(whole_lines "=== mutate: $SHORT (1 line(s) changed by s/inline-size/normal/) ===" "$out")"
+rm -f "$LONG" "$SHORT"
+reset_src
+h59_clear
+
 summary "mutate"

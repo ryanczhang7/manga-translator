@@ -477,9 +477,11 @@ NEW_TOOLS=", $TOOL_FULL, $TOOL_CHANGED"
 # continuation lines, so the compliant fixture proves continuation lines count
 # for the review step too. It names neither the backticked self-test needle
 # nor any of the self-test step's words or conditions, so it cannot satisfy
-# them.
+# them. HARNESS-101 (C-3): the dispatch is a fresh `lead-po` on the
+# DIFF-REVIEW row, in the new words; route_problems reads its own fixtures.
 RV="$(cat <<'EOF'
-1. Review the change with the `diff-review` skill: a fresh dispatch reads the
+1. Review the change with the `diff-review` skill: a fresh `lead-po` dispatch
+   on the DIFF-REVIEW row reads the
    diff and its callers, and its report goes into `## Diff review`. A Must fix
    finding is fixed, `bash scripts/gates.sh` runs again and these steps start
    over. Go on only once the report's last line is `Verdict: Ship.`.
@@ -1677,5 +1679,389 @@ assert_eq "the HARNESS-094 text (full run only, no \`--changed\` entry) gives fo
 $CH_NO_STEP
 $CH_LACKS_C
 $CH_NO_BULLET" "$(procedure_problems "$d")"
+
+
+# ===========================================================================
+# HARNESS-101 AC-5: every diff-review finding carries a route, and the
+# orchestrator follows the label rather than choosing one.
+#
+# C-4: a fifth part after `**If we skip it:**`, `- **Route:** <value>`, the
+# value exactly one of GATES (a code fix in GATES), RED (a test: a return to
+# RED) or AMEND (a criterion: a question for the user). C-5: before acting the
+# orchestrator asks `bash scripts/classify.sh` about each path the fix names,
+# and a label it cannot follow goes back to a fresh dispatch on the
+# DIFF-REVIEW row to be relabelled. That wording is required in the skill's
+# section on what happens to a finding AND in advance-story's GATES -> REVIEW
+# step 1, because the orchestrator reads the step, not the skill.
+#
+# `route_problems <root>` is its own guard beside procedure_problems, for the
+# reason dispatch.test.sh gives for row_problems: folding new needles into
+# procedure_problems would change the expected lines of every earlier case.
+# Same pattern - silent over the real tree once GREEN lands, silent over a
+# compliant fixture, the pinned lines over each regression.
+#
+# The route values are matched as backticked spans (`GATES`, `RED`, `AMEND`)
+# in the output section: a bare `RED` or `GATES` is in half the prose of any
+# file in this harness (`GATES → REVIEW`, `return to RED`) and would float.
+# The example's route line is matched WHOLE, trimmed: `- **Route:** GATES`
+# and nothing after it, so `- **Route:** GATES or RED` is not a route.
+
+ROUTE_PART='**Route:**'
+ROUTE_VALUES=('GATES' 'RED' 'AMEND')
+# AC-5 "a fifth part": the output section no longer says every finding has
+# four (RED amendment to C-3, recorded in the story).
+ROUTE_NOT=('all four parts')
+ROUTE_FOLLOW=('follows the label' 'bash scripts/classify.sh' 'DIFF-REVIEW row')
+SKIP_PART='- **If we skip it:**'
+
+RL_NO_OUTPUT="$SKILL: has no output section (a \`## \` heading ending \`Output\`)"
+RL_NO_EXLINE="$SKILL: its example has no \`- **Route:** GATES\`, \`RED\` or \`AMEND\` line"
+RL_EX_ORDER="$SKILL: its example's route line does not come after \`- **If we skip it:**\`"
+RL_NO_WHAT="$SKILL: has no section on what happens to a finding"
+RL_NO_STEP1="$ADVANCE: GATES → REVIEW has no step 1"
+rl_say() { printf '%s: %s does not say `%s`' "$1" "$2" "$3"; }
+rl_still() { printf '%s: %s still says `%s`' "$1" "$2" "$3"; }
+rl_value() { printf '%s: its output section does not name the route value `%s`' "$SKILL" "$1"; }
+
+# rflat <text>   F := <text>'s lines, each trimmed, joined by one space.
+rflat() {
+  local l; local -a xs
+  F=""
+  mapfile -t xs <<<"$1"
+  for l in "${xs[@]}"; do
+    trim "$l"
+    [ -z "$T" ] && continue
+    if [ -z "$F" ]; then F="$T"; else F="$F $T"; fi
+  done
+  return 0
+}
+
+# h2_where <glob>   SEC := the lines after the first line beginning `## ` that
+# matches <glob>, up to the next line beginning `## `; HAS_SEC := 1.
+h2_where() {
+  local l on=0
+  SEC=""; HAS_SEC=0
+  for l in "${LN[@]}"; do
+    if [ "$on" = 0 ]; then
+      # shellcheck disable=SC2053
+      [ "${l:0:3}" = "## " ] && [[ $l == $1 ]] && { on=1; HAS_SEC=1; }
+      continue
+    fi
+    [ "${l:0:3}" = "## " ] && break
+    SEC="$SEC"$'\n'"$l"
+  done
+  return 0
+}
+
+# example_route <section>   EXR := 1 when an indented-by-four line of
+# <section>, trimmed, is exactly `- **Route:** GATES|RED|AMEND`; EXO := 1 when
+# such a line comes after an indented `- **If we skip it:**` line.
+example_route() {
+  local l skip=0; local -a xs
+  EXR=0; EXO=0
+  mapfile -t xs <<<"$1"
+  for l in "${xs[@]}"; do
+    [ "${l:0:4}" = "    " ] || continue
+    trim "$l"
+    case "$T" in "$SKIP_PART"*) skip=1 ;; esac
+    case "$T" in
+      '- **Route:** GATES'|'- **Route:** RED'|'- **Route:** AMEND')
+        EXR=1; [ "$skip" = 1 ] && EXO=1 ;;
+    esac
+  done
+  return 0
+}
+
+# route_problems <root>   Silent when compliant. Always returns 0.
+route_problems() {
+  local root="$1" w k k1
+  if [ ! -f "$root/$SKILL" ]; then
+    printf '%s: file is missing\n' "$SKILL"
+  else
+    load "$root/$SKILL"
+    h2_where '## *Output'
+    if [ "$HAS_SEC" = 0 ]; then
+      printf '%s\n' "$RL_NO_OUTPUT"
+    else
+      rflat "$SEC"
+      case "$F" in *"$ROUTE_PART"*) ;; *) rl_say "$SKILL" 'its output section' "$ROUTE_PART"; printf '\n' ;; esac
+      for w in "${ROUTE_VALUES[@]}"; do
+        case "$F" in *'`'"$w"'`'*) ;; *) rl_value "$w"; printf '\n' ;; esac
+      done
+      for w in "${ROUTE_NOT[@]}"; do
+        case "$F" in *"$w"*) rl_still "$SKILL" 'its output section' "$w"; printf '\n' ;; esac
+      done
+      example_route "$SEC"
+      if [ "$EXR" = 0 ]; then printf '%s\n' "$RL_NO_EXLINE"
+      elif [ "$EXO" = 0 ]; then printf '%s\n' "$RL_EX_ORDER"
+      fi
+    fi
+    h2_where '## *What happens to a finding*'
+    if [ "$HAS_SEC" = 0 ]; then
+      printf '%s\n' "$RL_NO_WHAT"
+    else
+      rflat "$SEC"
+      for w in "${ROUTE_FOLLOW[@]}"; do
+        case "$F" in *"$w"*) ;; *) rl_say "$SKILL" 'what happens to a finding' "$w"; printf '\n' ;; esac
+      done
+    fi
+  fi
+  if [ ! -f "$root/$ADVANCE" ]; then
+    printf '%s: file is missing\n' "$ADVANCE"
+  else
+    load "$root/$ADVANCE"
+    gates_steps
+    k1=-1
+    for k in "${!SN[@]}"; do [ "${SN[$k]}" = 1 ] && { k1=$k; break; }; done
+    if [ "$k1" = "-1" ]; then
+      printf '%s\n' "$RL_NO_STEP1"
+    else
+      rflat "${ST[$k1]}"
+      for w in "${ROUTE_FOLLOW[@]}"; do
+        case "$F" in *"$w"*) ;; *) rl_say "$ADVANCE" 'GATES → REVIEW step 1' "$w"; printf '\n' ;; esac
+      done
+    fi
+  fi
+  return 0
+}
+
+# --- HARNESS-101: a compliant fixture, by construction -----------------------
+# Every needle appears once in the piece that must carry it, and the sections
+# after each carry the same needles, so a region that ran on would be seen.
+
+RT_OUTPUT_GOOD="$(cat <<'EOF'
+## 4. Output
+
+Number findings across all groups. Every finding has all five parts, the
+last a route, `**Route:**`, exactly one of `GATES` (a code fix), `RED` (a test)
+or `AMEND` (a criterion, named as `AC-<n>`):
+
+    2. **A refused write is reported as success** (`scripts/sync.sh:40-52`)
+       - **What this is:** The step that copies the gate stamp.
+       - **Problem:** It ignores the copy's exit status.
+       - **Fix:** Exit non-zero when the copy fails.
+       - **If we skip it:** CI reads an empty stamp.
+       - **Route:** GATES
+
+End with exactly one verdict line, last.
+EOF
+)"
+RT_OUTPUT_TODAY="$(cat <<'EOF'
+## 4. Output
+
+Number findings across all groups, so the orchestrator can say "fix 2 and 5".
+Every finding has all four parts, each one or two short sentences:
+
+    2. **A refused write is reported as success** (`scripts/sync.sh:40-52`)
+       - **What this is:** The step that copies the gate stamp.
+       - **Problem:** It ignores the copy's exit status.
+       - **Fix:** Exit non-zero when the copy fails.
+       - **If we skip it:** CI reads an empty stamp.
+
+End with exactly one verdict line, last.
+EOF
+)"
+RT_WHAT_GOOD="$(cat <<'EOF'
+## 5. What happens to a finding
+
+The orchestrator follows the label and does not choose the route. It checks
+the label first with `bash scripts/classify.sh` on each path the fix names; a
+label it cannot follow goes back to a fresh dispatch on the DIFF-REVIEW row.
+EOF
+)"
+RT_WHAT_TODAY="$(cat <<'EOF'
+## 5. What happens to a finding
+
+- **A Must-fix in the code** is fixed in GATES, by a feature-developer
+  dispatch.
+- **A finding that needs a test added or changed** is a return to RED.
+EOF
+)"
+# Text after both sections that carries every needle, so neither region may
+# run on into it.
+RT_TAIL="$(cat <<'EOF'
+## 6. Afterwards
+
+**Route:**, `GATES`, `RED`, `AMEND`; it follows the label; `bash scripts/classify.sh`;
+the DIFF-REVIEW row. A worked example:
+
+    - **If we skip it:** nothing.
+    - **Route:** RED
+EOF
+)"
+
+# write_rt_skill <dir> <output-section> <what-section>
+write_rt_skill() {
+  [ -d "$1/.claude/skills/diff-review" ] || mkdir -p "$1/.claude/skills/diff-review"
+  printf -- '---\nname: diff-review\ndescription: Review a diff.\n---\n\n# Diff review\n\n%s\n\n%s\n\n%s\n' \
+    "$2" "$3" "$RT_TAIL" > "$1/$SKILL"
+}
+
+RT_STEP1_GOOD="$(cat <<'EOF'
+1. Review the change with the `diff-review` skill: a fresh `lead-po` dispatch
+   on the DIFF-REVIEW row. Each finding carries a Route; the orchestrator
+   follows the label, checked first with `bash scripts/classify.sh`.
+EOF
+)"
+RT_STEP1_TODAY="$(cat <<'EOF'
+1. Review the story's diff and its callers with the `diff-review` skill.
+   Dispatch a **fresh** `feature-developer`, not the one that wrote the code,
+   on the GATES row of `models.conf`; it changes no file and returns its
+   report. A finding that needs a test added or changed is a return to RED.
+EOF
+)"
+# Step 2 carries the step 1 words, so step 1 may not run on into it.
+RT_STEP2='2. Then the self-test; the orchestrator follows the label with `bash scripts/classify.sh` on the DIFF-REVIEW row.'
+
+# write_rt_advance <dir> <step1>
+write_rt_advance() {
+  [ -d "$1/.claude/commands" ] || mkdir -p "$1/.claude/commands"
+  {
+    printf -- '---\ndescription: Move one story forward\n---\n\n'
+    printf '%s Only when every required gate passes.\n\nThen, **in this order**:\n\n' "$PARA_START"
+    printf '%s\n%s\n3. `bash scripts/phase.sh set $1 REVIEW`\n\n' "$2" "$RT_STEP2"
+    printf '**REVIEW → DONE.** Only once the PR is merged.\n'
+  } > "$1/$ADVANCE"
+}
+
+rt_case() { # <name>   d := a new compliant HARNESS-101 AC-5 fixture.
+  d="$WORK/route-$1"
+  [ -e "$d" ] && rm -rf "${d:?}"
+  mkdir -p "$d/.claude/commands" "$d/.claude/skills/diff-review"
+  write_rt_skill "$d" "$RT_OUTPUT_GOOD" "$RT_WHAT_GOOD"
+  write_rt_advance "$d" "$RT_STEP1_GOOD"
+}
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-101 AC-5 the real tree: findings carry a Route, and the orchestrator follows the label"
+
+assert_eq "HARNESS-101 AC-5: route_problems over the real tree prints nothing: diff-review's output section names \`**Route:**\` and \`GATES\`, \`RED\`, \`AMEND\`, no longer says \`all four parts\`, and its example ends with a \`- **Route:**\` line after \`**If we skip it:**\`; its section on what happens to a finding, and advance-story's GATES → REVIEW step 1, say the orchestrator \`follows the label\`, checks it with \`bash scripts/classify.sh\`, and sends one it cannot follow back to the \`DIFF-REVIEW row\`" \
+  "" "$(route_problems "$REPO_ROOT")"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-101 AC-5 the fixture: compliant by construction"
+
+rt_case compliant
+assert_eq "HARNESS-101 AC-5: the compliant fixture is silent" "" "$(route_problems "$d")"
+
+rt_case crlf
+for f in "$SKILL" "$ADVANCE"; do
+  c="$(cat "$d/$f")"; printf '%s\r\n' "${c//$'\n'/$'\r\n'}" > "$d/$f"
+done
+assert_eq "HARNESS-101 AC-5: a CRLF checkout reads the same as an LF one: silent" "" "$(route_problems "$d")"
+
+for v in AMEND RED; do
+  rt_case "example-$v"
+  write_rt_skill "$d" "${RT_OUTPUT_GOOD//'**Route:** GATES'/"**Route:** $v"}" "$RT_WHAT_GOOD"
+  assert_eq "HARNESS-101 AC-5: an example whose route is \`$v\` is a route too: silent" "" "$(route_problems "$d")"
+done
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-101 AC-5: the output section and its example"
+
+rt_case output-today
+write_rt_skill "$d" "$RT_OUTPUT_TODAY" "$RT_WHAT_GOOD"
+assert_eq "HARNESS-101 AC-5 control: the output section as it reads today (four parts, no route) gives the four \"does not say\" lines, the four-parts line and the example line" \
+  "$(rl_say "$SKILL" 'its output section' '**Route:**')
+$(rl_value GATES)
+$(rl_value RED)
+$(rl_value AMEND)
+$(rl_still "$SKILL" 'its output section' 'all four parts')
+$RL_NO_EXLINE" "$(route_problems "$d")"
+
+for w in "${ROUTE_VALUES[@]}"; do
+  rt_case "output-without-$w"
+  bw='`'"$w"'`'; write_rt_skill "$d" "${RT_OUTPUT_GOOD//"$bw"/elsewhere}" "$RT_WHAT_GOOD"
+  assert_eq "HARNESS-101 AC-5: the output section without the route value \`$w\` (backticked) gives exactly the one line" \
+    "$(rl_value "$w")" "$(route_problems "$d")"
+done
+
+rt_case output-without-part
+write_rt_skill "$d" "${RT_OUTPUT_GOOD//'`**Route:**`'/a label}" "$RT_WHAT_GOOD"
+c="$(cat "$d/$SKILL")"; printf '%s\n' "${c//'       - **Route:** GATES'/'       - Route: GATES'}" > "$d/$SKILL"
+assert_eq "HARNESS-101 AC-5: no \`**Route:**\` anywhere in the output section gives that line and the example line" \
+  "$(rl_say "$SKILL" 'its output section' '**Route:**')
+$RL_NO_EXLINE" "$(route_problems "$d")"
+
+rt_case output-four-parts
+write_rt_skill "$d" "${RT_OUTPUT_GOOD//all five parts/all four
+parts}" "$RT_WHAT_GOOD"
+assert_eq "HARNESS-101 AC-5: \`all four parts\` reflowed across a line break still contradicts the fifth: one line" \
+  "$(rl_still "$SKILL" 'its output section' 'all four parts')" "$(route_problems "$d")"
+
+rt_case example-no-route
+write_rt_skill "$d" "${RT_OUTPUT_GOOD//$'\n''       - **Route:** GATES'/}" "$RT_WHAT_GOOD"
+assert_eq "HARNESS-101 AC-5: an example with no route line gives exactly that line (the prose's \`**Route:**\` is not the example's)" \
+  "$RL_NO_EXLINE" "$(route_problems "$d")"
+
+rt_case example-two-values
+write_rt_skill "$d" "${RT_OUTPUT_GOOD//'**Route:** GATES'/'**Route:** GATES or RED'}" "$RT_WHAT_GOOD"
+assert_eq "HARNESS-101 AC-5: \`- **Route:** GATES or RED\` is not exactly one value: the example line" \
+  "$RL_NO_EXLINE" "$(route_problems "$d")"
+
+rt_case example-other-value
+write_rt_skill "$d" "${RT_OUTPUT_GOOD//'**Route:** GATES'/'**Route:** GREEN'}" "$RT_WHAT_GOOD"
+assert_eq "HARNESS-101 AC-5: \`- **Route:** GREEN\` is not one of the three values: the example line" \
+  "$RL_NO_EXLINE" "$(route_problems "$d")"
+
+rt_case example-unindented
+write_rt_skill "$d" "${RT_OUTPUT_GOOD//'       - **Route:** GATES'/'- **Route:** GATES'}" "$RT_WHAT_GOOD"
+assert_eq "HARNESS-101 AC-5: a route line outside the indented example is not in it: the example line" \
+  "$RL_NO_EXLINE" "$(route_problems "$d")"
+
+rt_case example-route-first
+o="${RT_OUTPUT_GOOD//$'\n''       - **Route:** GATES'/}"
+write_rt_skill "$d" "${o//'       - **What this is:**'/'       - **Route:** GATES'$'\n''       - **What this is:**'}" "$RT_WHAT_GOOD"
+assert_eq "HARNESS-101 AC-5: a route line before \`**If we skip it:**\` is not the fifth part: the order line" \
+  "$RL_EX_ORDER" "$(route_problems "$d")"
+
+rt_case output-none
+write_rt_skill "$d" "${RT_OUTPUT_GOOD//'## 4. Output'/'## 4. What to write'}" "$RT_WHAT_GOOD"
+assert_eq "HARNESS-101 AC-5: no \`## \` heading ending \`Output\` gives the one line (the later sections do not stand in)" \
+  "$RL_NO_OUTPUT" "$(route_problems "$d")"
+
+# ---------------------------------------------------------------------------
+describe "HARNESS-101 AC-5: what happens to a finding, and step 1, follow the label"
+
+rt_case what-today
+write_rt_skill "$d" "$RT_OUTPUT_GOOD" "$RT_WHAT_TODAY"
+assert_eq "HARNESS-101 AC-5 control: the section as it reads today gives three lines" \
+  "$(for w in "${ROUTE_FOLLOW[@]}"; do rl_say "$SKILL" 'what happens to a finding' "$w"; printf '\n'; done)" "$(route_problems "$d")"
+
+for w in "${ROUTE_FOLLOW[@]}"; do
+  rt_case "what-without-${w//[^a-zA-Z]/_}"
+  write_rt_skill "$d" "$RT_OUTPUT_GOOD" "${RT_WHAT_GOOD//"$w"/elsewhere}"
+  assert_eq "HARNESS-101 AC-5: what happens to a finding without \`$w\` gives exactly the one line (the next section carries it)" \
+    "$(rl_say "$SKILL" 'what happens to a finding' "$w")" "$(route_problems "$d")"
+done
+
+rt_case what-none
+write_rt_skill "$d" "$RT_OUTPUT_GOOD" "${RT_WHAT_GOOD//'## 5. What happens to a finding'/'## 5. Routing'}"
+assert_eq "HARNESS-101 AC-5: no section on what happens to a finding gives the one line" \
+  "$RL_NO_WHAT" "$(route_problems "$d")"
+
+rt_case step1-today
+write_rt_advance "$d" "$RT_STEP1_TODAY"
+assert_eq "HARNESS-101 AC-5 control: step 1 as it reads today gives three lines (step 2 carries the words and does not count)" \
+  "$(for w in "${ROUTE_FOLLOW[@]}"; do rl_say "$ADVANCE" 'GATES → REVIEW step 1' "$w"; printf '\n'; done)" "$(route_problems "$d")"
+
+for w in "${ROUTE_FOLLOW[@]}"; do
+  rt_case "step1-without-${w//[^a-zA-Z]/_}"
+  write_rt_advance "$d" "${RT_STEP1_GOOD//"$w"/elsewhere}"
+  assert_eq "HARNESS-101 AC-5: step 1 without \`$w\` gives exactly the one line" \
+    "$(rl_say "$ADVANCE" 'GATES → REVIEW step 1' "$w")" "$(route_problems "$d")"
+done
+
+rt_case step1-none
+write_rt_advance "$d" "${RT_STEP1_GOOD/#1. /- }"
+assert_eq "HARNESS-101 AC-5: no step numbered 1 gives the one line" \
+  "$RL_NO_STEP1" "$(route_problems "$d")"
+
+for f in "$SKILL" "$ADVANCE"; do
+  rt_case "missing-${f##*/}"
+  rm -f "${d:?}/${f:?}"
+  assert_eq "HARNESS-101 AC-5: a missing $f gives only \`file is missing\`" \
+    "$f: file is missing" "$(route_problems "$d")"
+done
 
 summary "procedure"

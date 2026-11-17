@@ -22,6 +22,16 @@ set -uo pipefail
 # host-load.test.sh points it at listings of its own, per call.
 export HARNESS_PS_LISTING=/dev/null
 
+# A full gates.sh or selftest.sh run waits in the machine-wide run queue
+# (HARNESS-108, scripts/run-queue.sh) while another full run anywhere on the
+# host holds it. A suite's fixture runs must never join the HOST's queue: the
+# outer self-test holds it, so they would wait on their own ancestor, and a
+# suite run by hand would wait on whatever else the machine is doing. `off` -
+# unconditionally, exported - keeps every fixture run any suite starts out of
+# the queue, as HARNESS_PS_LISTING above keeps it out of `ps`. Only
+# run-queue.test.sh turns it on, per call, with a queue directory of its own.
+export HARNESS_RUN_QUEUE=off
+
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$TESTS_DIR/../.." && pwd)"
 

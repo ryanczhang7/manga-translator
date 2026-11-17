@@ -144,10 +144,24 @@ cat >> "$file" <<'TEMPLATE'
      approved it and why. check-boundaries.sh fails a PR whose criteria differ
      from their last committed PLANNED state (else the base branch) without an
      entry here. Omit the section if unused.
-     Where the change came from a subagent's claim that the criterion was
-     wrong, record the ORCHESTRATOR'S OWN reproduction of it - different
-     inputs, not the subagent's code. That claim is also what an agent says
-     when it wants to stop failing. -->
+     Head each entry AM-<n> (`- **AM-1 (AC-2).** ...`), and give it its
+     adjudication record, a line of its own in this section, outside any
+     comment or fence - check-boundaries.sh refuses a new entry without one:
+       - **Adjudicated AM-<n>:** `fable` (resolved <name>), <date>, <what it reproduced>
+     A claim that a criterion is wrong is also what an agent says when it
+     wants to stop failing, so it is judged by a fresh `fable` dispatch - a
+     `lead-po` on the ADJUDICATE row of models.conf, on different inputs, not
+     the claimant's code - and that dispatch writes the judgement and the
+     record line; the judgement is never the orchestrator's. An entry that
+     follows a diff-review or PR-feedback finding routed RED or AMEND was
+     judged by that review, so the orchestrator writes its record, naming the
+     round and finding (or the PR-feedback item) and the model the review was
+     planned on and resolved to:
+       - **Adjudicated AM-<n>:** `fable` (resolved <name>), <date>, diff review round <r>, finding <f>
+     Its being upheld does not replace the user's approval; both go in the
+     entry. A change
+     the user asked for unprompted is not a claim: `- **Adjudicated AM-<n>:**
+     requested by the user, <date>`. -->
 
 ## Suppressions
 
@@ -230,7 +244,20 @@ cat >> "$file" <<'TEMPLATE'
 <!-- REQUIRED if this story ever returned to RED after GREEN or GATES; omit
      otherwise. A test that is wrong is never edited into passing, and the
      return is not a footnote - it is the story failing to be one clean cycle,
-     and the next person needs to know why. One block per return:
+     and the next person needs to know why. One block per return, headed
+     R-<n> (`### R-1 (the count test)`), and carrying its adjudication
+     record - a line of its own, outside any comment or fence, written by
+     the fresh `fable` dispatch (a `lead-po` on the ADJUDICATE row of
+     models.conf) that judged the claim the test is wrong; the judgement is
+     never the orchestrator's. check-boundaries.sh refuses a new entry
+     without one:
+       - **Adjudicated R-<n>:** `fable` (resolved <name>), <date>, <what it reproduced>
+     A return that follows a diff-review or PR-feedback finding routed RED
+     or AMEND was judged by that review, so the orchestrator writes the
+     record, naming the round and finding (or the PR-feedback item) and the
+     model the review was planned on and resolved to:
+       - **Adjudicated R-<n>:** `fable` (resolved <name>), <date>, diff review round <r>, finding <f>
+     Then:
        * which test, what it asserted, and what was wrong with it
        * how the defect was found
        * what it asserts now

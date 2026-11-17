@@ -1,0 +1,6 @@
+# HARNESS-106's copies are byte-for-byte oracles: the boundaries suite pins each
+# by checksum and size, and its C-9 cases read them as real story sections. The
+# root .gitattributes is not shipped by a refresh, so a consumer's own
+# attributes and core.autocrlf would otherwise decide their line endings on
+# checkout and turn an oracle into a different file. Nothing here is converted.
+* -text

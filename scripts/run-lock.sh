@@ -37,6 +37,15 @@
 # the variables from; the pid is what stops a stale or hand-set variable being
 # a bypass.
 #
+# THE MACHINE-WIDE QUEUE (HARNESS-108) is joined here, not by the callers: on
+# every path that has just TAKEN the run lock, a run that queues
+# (run_lock_queues: a full run, or selftest.sh --changed, HARNESS-111) with
+# HARNESS_RUN_QUEUE not `off` sources scripts/run-queue.sh beside this file and
+# waits there for any other such run on the machine. run_lock_release leaves
+# it last. The run lock is still never waited on: lock order is run lock, then
+# queue, and the queue is the only thing that waits. scripts/run-queue.sh's
+# header has the rest.
+#
 # Silent on an uncontended take and release: whole-run goldens depend on it.
 # Bash 3.2, awk and coreutils only.
 
@@ -79,6 +88,60 @@ run_lock_taken() {
   export HARNESS_RUN_LOCK HARNESS_RUN_LOCK_PID
 }
 
+# run_lock_full <command>   0 if <command> is a FULL run, 1 otherwise
+# (HARNESS-108, C-5): scripts/gates.sh with none of --fast, --gate, --skip,
+# --required, --list, --audit among its words (a --story value cannot be one:
+# valid_story_id wants a letter or digit first), or exactly
+# scripts/selftest.sh. Every full run joins the machine-wide queue, and so does
+# selftest.sh --changed, which is not full (run_lock_queues). Words are
+# matched in a case over the space-padded string, so no globbing happens. The
+# opening line stays alone on its line: DV-3's sed expression targets it.
+run_lock_full() {
+  case "$1" in
+    scripts/selftest.sh) return 0 ;;
+    scripts/gates.sh|'scripts/gates.sh '*)
+      case " ${1#scripts/gates.sh} " in
+        *' --fast '*|*' --gate '*|*' --skip '*|*' --required '*|*' --list '*|*' --audit '*) return 1 ;;
+      esac
+      return 0 ;;
+  esac
+  return 1
+}
+
+# run_lock_queues <command>   0 if <command> joins the machine-wide queue, 1
+# otherwise (HARNESS-111, C-2): every full run (run_lock_full), and every
+# scripts/selftest.sh --changed, with or without a base ref, whatever it
+# resolved to. The size of a --changed run is not known here and is not the
+# count of its suites, so it queues as a whole. A --changed that is not the
+# first argument, a named-suite run and every other non-full run do not. The
+# opening line stays alone on its line: the suite pins it.
+run_lock_queues() {
+  run_lock_full "$1" && return 0
+  case "$1" in
+    "scripts/selftest.sh --changed"|"scripts/selftest.sh --changed "*) return 0 ;;
+  esac
+  return 1
+}
+
+# run_lock_join <root> <command>   Joins the machine-wide queue
+# (scripts/run-queue.sh) once the run lock is taken, and only for a run that
+# queues (run_lock_queues: a full run, or selftest.sh --changed). Off and a
+# run that does not queue are decided before the file is looked for, so neither
+# reads nor writes anything outside the tree. run-queue.sh is this file's
+# sibling, not the caller's $PWD's nor <root>'s. Never refuses: 0 always.
+run_lock_join() {
+  local q
+  [ "${HARNESS_RUN_QUEUE:-}" = off ] && return 0
+  run_lock_queues "$2" || return 0
+  case "${BASH_SOURCE[0]}" in */*) q="${BASH_SOURCE[0]%/*}/run-queue.sh" ;; *) q="run-queue.sh" ;; esac
+  if [ ! -f "$q" ] || ! . "$q"; then
+    printf 'run-queue: scripts/run-queue.sh is missing; %s runs without the machine-wide queue.\n' "$2" >&2
+    return 0
+  fi
+  run_queue_acquire "$1" "$2"
+  return 0
+}
+
 # run_lock_acquire <root> <command>   0: this process may run - it took the
 # lock, or it is nested under the holder. 2: refused, or the lock cannot be
 # created; the message has been printed.
@@ -103,12 +166,12 @@ run_lock_acquire() {
     rm -f "$tmp" 2>/dev/null
     run_lock_cannot; return 2
   fi
-  if run_lock_link "$tmp" "$lock"; then run_lock_taken "$lock" "$tmp"; return 0; fi
+  if run_lock_link "$tmp" "$lock"; then run_lock_taken "$lock" "$tmp"; run_lock_join "$root" "$self"; return 0; fi
 
   # (5) ln failed, and not because another run holds the lock. A holder that
   # released in the instant between the two is given one more try.
   if [ ! -e "$lock" ]; then
-    if run_lock_link "$tmp" "$lock"; then run_lock_taken "$lock" "$tmp"; return 0; fi
+    if run_lock_link "$tmp" "$lock"; then run_lock_taken "$lock" "$tmp"; run_lock_join "$root" "$self"; return 0; fi
     rm -f "$tmp"
     if [ -e "$lock" ]; then run_lock_refuse "$self" "$lock"; else run_lock_cannot; fi
     return 2
@@ -133,7 +196,7 @@ run_lock_acquire() {
     printf 'run-lock: reclaimed an unreadable lock (no pid recorded in .claude/state/run.lock).\n' >&2
   fi
   rm -f "$lock"
-  if run_lock_link "$tmp" "$lock"; then run_lock_taken "$lock" "$tmp"; return 0; fi
+  if run_lock_link "$tmp" "$lock"; then run_lock_taken "$lock" "$tmp"; run_lock_join "$root" "$self"; return 0; fi
   rm -f "$tmp"
   if [ -e "$lock" ]; then run_lock_refuse "$self" "$lock"; else run_lock_cannot; fi
   return 2
@@ -147,5 +210,7 @@ run_lock_release() {
   RUN_LOCK_HELD=0
   if [ "$(run_lock_field "$RUN_LOCK_FILE" pid)" = "$$" ]; then rm -f "$RUN_LOCK_FILE"; fi
   rm -f "$RUN_LOCK_FILE.$$" 2>/dev/null
+  # The queue goes last, so the next run starts only once nothing is held.
+  if declare -F run_queue_release >/dev/null; then run_queue_release; fi
   return 0
 }

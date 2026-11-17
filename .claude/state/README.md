@@ -145,6 +145,25 @@ It is `yes` because deleting it is that remedy. `run.lock.<pid>` is the record
 being written before `ln` puts it in place as `run.lock`, removed straight
 after; one left behind is safe to delete.
 
+**The machine-wide queue lock is not in this directory, and not in the table.**
+The table is this tree's own state files; the queue is one file per user per
+machine, outside every repository: `$HARNESS_RUN_QUEUE_DIR/run-queue.lock`, or
+`$HOME/.cache/agentic-harness/run-queue.lock` when that variable is unset
+(`scripts/run-queue.sh`, HARNESS-108). A full run - `gates.sh` with none of
+`--fast`, `--gate`, `--skip`, `--required`, or `selftest.sh` with no argument -
+and every `selftest.sh --changed [base-ref]` that selects at least one suite
+(HARNESS-111) takes it after taking `run.lock`, and releases it last. A
+named-suite `selftest.sh` run and `gates.sh --fast` do not. It records the
+holder's pid, when it started, its command and its tree root, four
+TAB-separated lines. A second such run anywhere on the machine waits rather
+than running beside it, and prints `run-queue: queued:` with what it waits
+behind; it starts by itself when the holder ends. One left behind by a run
+killed outright is reclaimed by pid, with one line saying so, by the next run
+that queues. If the recorded pid has
+since been reused by a live process, the waiting run waits behind it: deleting
+the file by hand is the remedy, and the queued message names it.
+`HARNESS_RUN_QUEUE=off` switches the queue off; the harness's own suites set it.
+
 `selftest.<pid>/` exists only during a run of `scripts/selftest.sh` with
 `SELFTEST_JOBS` of 2 or more over two or more suites: each suite's output goes
 to `<name>.out` there while it runs, and the script prints them in suite order.

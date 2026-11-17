@@ -298,4 +298,60 @@ for h46_t in "T-50|probe"$'\n\n'"# injected" "T-51|a"$'\r'"b"; do
     "2|one-line|no file" "$h46_rc|$h46_m|$h46_f"
 done
 
+# ---------------------------------------------------------------------------
+describe "HARNESS-102 AC-8: the Amendments and Regressions comments give the entry head and the adjudication record"
+
+# check-boundaries.sh block 3k refuses a new `## Regressions` or
+# `## Amendments` entry without a record line, so the template comment - the
+# one place an author reads first - says what the head is and what the record
+# looks like, in the form 3k accepts, and who writes it: a fresh `fable`
+# dispatch, not the orchestrator. Scoped to each section's own text and
+# whitespace-collapsed, as the HARNESS-037 block above is, so a wrapped comment
+# still counts and one section cannot satisfy the other. The pieces are pinned
+# separately rather than as one long string, so the comment's own wording stays
+# GREEN's; what is fixed is the grammar of Contract C-1 and C-2.
+ns_body() { # <file> <heading-prefix>   the section, whitespace collapsed
+  awk -v h="## $2" 'index($0, h) == 1 { on = 1; next } on && /^## / { exit } on { print }' "$1" \
+    | tr -s ' \t\n' '   '
+}
+for pair in "Amendments|AM" "Regressions|R"; do
+  sec="${pair%%|*}"; p="${pair#*|}"
+  body="$(ns_body "$STORY" "$sec")"
+  assert_contains "HARNESS-102 AC-8: the template's ## $sec comment names the entry head \`$p-<n>\`" "$p-<n>" "$body"
+  assert_contains "HARNESS-102 AC-8: the template's ## $sec comment shows the record line \`**Adjudicated $p-<n>:**\`" "**Adjudicated $p-<n>:**" "$body"
+  assert_contains "HARNESS-102 AC-8: the template's ## $sec record line carries \`(resolved <name>)\`" "(resolved <name>)" "$body"
+  assert_contains "HARNESS-102 AC-8: the template's ## $sec comment says a \`fable\` dispatch writes the judgement" "fable" "$body"
+  assert_contains "HARNESS-102 AC-8: the template's ## $sec comment says the dispatch is a fresh one" "fresh" "$body"
+done
+# The old instruction, case-insensitive so that lowercasing it cannot pass.
+am_lc="$(ns_body "$STORY" Amendments | tr '[:upper:]' '[:lower:]')"
+assert_not_contains "HARNESS-102 AC-8: the template's ## Amendments comment no longer asks for the orchestrator's own reproduction" \
+  "orchestrator's own reproduction" "$am_lc"
+
+# The same, in the skill that describes the sections. `story-authoring`'s
+# reference/sections.md headings are `## Amendments - Lead PO, with the user`
+# and `## Regressions - Test Developer, with the Lead PO`; the prefix reaches
+# them.
+SECTIONS_MD="$REPO_ROOT/.claude/skills/story-authoring/reference/sections.md"
+AUTHORING_MD="$REPO_ROOT/.claude/skills/story-authoring/SKILL.md"
+for pair in "Amendments|AM" "Regressions|R"; do
+  sec="${pair%%|*}"; p="${pair#*|}"
+  body="$(ns_body "$SECTIONS_MD" "$sec")"
+  assert_contains "HARNESS-102 AC-8: story-authoring's sections.md ## $sec names the entry head \`$p-<n>\`" "$p-<n>" "$body"
+  assert_contains "HARNESS-102 AC-8: story-authoring's sections.md ## $sec shows the record line \`**Adjudicated $p-<n>:**\`" "**Adjudicated $p-<n>:**" "$body"
+  assert_contains "HARNESS-102 AC-8: story-authoring's sections.md ## $sec says a \`fable\` dispatch writes the judgement" "fable" "$body"
+done
+# story-authoring/SKILL.md: the paragraph that opens "If the Test Developer
+# reports that a criterion's metric cannot detect" ends today "after the
+# orchestrator has reproduced the finding independently, on its own inputs".
+# Read as one paragraph, whitespace collapsed, so a reflow cannot hide the old
+# words or lose the new ones.
+sa_par="$(awk '/^If the Test Developer reports that a criterion/ { on = 1 } on && /^[[:space:]]*$/ { exit } on { print }' "$AUTHORING_MD" | tr -s ' \t\n' '   ')"
+assert_contains "HARNESS-102 AC-8: story-authoring's SKILL.md still has the paragraph that opens \"If the Test Developer reports that a criterion\"" \
+  "If the Test Developer reports that a criterion" "$sa_par"
+assert_not_contains "HARNESS-102 AC-8: story-authoring's SKILL.md no longer says the orchestrator reproduces the finding itself" \
+  "after the orchestrator has reproduced the finding independently, on its own inputs" "$sa_par"
+assert_contains "HARNESS-102 AC-8: story-authoring's SKILL.md says the finding is adjudicated by a \`fable\` dispatch" "fable" "$sa_par"
+assert_contains "HARNESS-102 AC-8: story-authoring's SKILL.md names the ADJUDICATE row" "ADJUDICATE" "$sa_par"
+
 summary "new-story"
