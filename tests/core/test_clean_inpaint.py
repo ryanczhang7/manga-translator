@@ -38,9 +38,22 @@ from rectangles, so the component structure is known exactly. The AC-2 headline
 test and one AC-4 test go through `erase_mask` from region PNGs, as production
 will.
 
+**MT-151 adds a third path, strips** (C-2, C-3): a component long on exactly
+one axis is cleaned at native resolution in overlapping 512-px windows along
+that axis, each cut from the working result. Its tests use the **stamped**
+fake, which fills every call with a colour unique to that call (`_stamp`), so
+the result shows which call wrote each pixel and a later window shows which
+earlier call's output it was cut from. Every window origin, mask and
+write-back band is a pinned number worked from C-3's rule (`_STRIP_CASES`),
+never re-derived from it here. AC-3 of MT-019 ("a component never spans two
+calls") now holds for the native and downscale paths only; C-3 makes a strip
+component span several calls by design, and AC-1's "written exactly once" is
+the property that replaces it there. Holes long on **both** axes keep the
+downscale tests (C-6).
+
 Nothing here loads a model. No per-test timeout exists in this project
 (`pytest-timeout` is not a dependency), so there is no budget to size; the
-largest page here is 1200x1000 and every call is one 512x512 float array.
+largest page here is 2000x1414 and every call is one 512x512 float array.
 """
 
 from __future__ import annotations
@@ -48,6 +61,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from io import BytesIO
+from itertools import pairwise
 from typing import Any, Literal
 
 import cv2
@@ -56,6 +70,7 @@ import pytest
 from numpy.typing import NDArray
 from PIL import Image
 
+from mangatl.clean import inpaint as inpaint_module
 from mangatl.clean.inpaint import MIN_CONTEXT_PX, clean_page
 from mangatl.clean.mask import erase_mask
 from mangatl.clean.session import MODEL_INPUT_SIDE, InpaintSession
@@ -71,6 +86,13 @@ _PATCH = (17, 34, 51)
 _NATIVE_LIMIT = _SIDE - 2 * 32
 
 
+def _stamp(call: int) -> tuple[int, int, int]:
+    """The stamped fake's colour for its `call`-th call (0-based): distinct per
+    call and per channel, and never white, so it cannot pass for the white page
+    of the context test or for a neighbouring call's output."""
+    return (8 + 16 * call, 200 - 16 * call, 100 + call)
+
+
 # -- the fake session ----------------------------------------------------------
 
 
@@ -78,7 +100,7 @@ _NATIVE_LIMIT = _SIDE - 2 * 32
 class FakeInpaintSession:
     """An `InpaintSession` that checks C-2's convention and records every call."""
 
-    mode: Literal["constant", "inverted"]
+    mode: Literal["constant", "inverted", "stamped"]
     calls: list[tuple[NDArray[np.float32], NDArray[np.float32]]] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
 
@@ -88,9 +110,10 @@ class FakeInpaintSession:
             self.violations.extend(problems)
             raise AssertionError(f"C-2 calling convention violated: {problems}")
         self.calls.append((image.copy(), mask.copy()))
-        if self.mode == "constant":
+        if self.mode in ("constant", "stamped"):
+            colour = _PATCH if self.mode == "constant" else _stamp(len(self.calls) - 1)
             out = np.empty((1, 3, _SIDE, _SIDE), dtype=np.float32)
-            for channel, value in enumerate(_PATCH):
+            for channel, value in enumerate(colour):
                 out[0, channel] = value
             return out
         return (255.0 - 255.0 * image).astype(np.float32)
@@ -384,13 +407,19 @@ def test_inside_the_mask_each_pixel_is_the_model_output_for_that_same_pixel() ->
     assert np.array_equal(result[mask], 255 - page[mask])
 
 
+#: MT-151 C-6: a hole long on **both** axes, so it still takes the downscale
+#: path (a hole long on one axis now takes strips). 460 x 600 on an 800 x 1000
+#: page; the crop is bbox + 32 a side, `[138, 662) x [168, 832)`, 524 x 664.
+_DOWNSCALE_RECT = (170, 200, 630, 800)
+
+
 def test_the_downscale_path_also_fills_exactly_the_mask_with_the_patch() -> None:
-    """AC-2, C-6: a component taller than 448 px goes through the downscale path,
-    and the patch still covers every mask pixel exactly - resized back, cropped,
-    and written only into the hole."""
+    """AC-2, C-6: a component past 448 px on both axes goes through the downscale
+    path, and the patch still covers every mask pixel exactly - resized back,
+    cropped, and written only into the hole."""
     size = (800, 1000)
     page = _coded_page(*size)
-    mask = _mask(size, (380, 200, 420, 800))  # 40 x 600: past the native limit
+    mask = _mask(size, _DOWNSCALE_RECT)  # 460 x 600: past the native limit on both axes
     fake = FakeInpaintSession("constant")
 
     result = clean_page(page, mask, fake)
@@ -404,22 +433,26 @@ def test_the_downscale_path_also_fills_exactly_the_mask_with_the_patch() -> None
 
 
 def test_the_downscale_path_scales_the_crop_to_512_on_its_long_side_and_edge_pads() -> None:
-    """C-4 step 4: crop = bbox + 32 px a side (104 x 664 here), scaled by
-    512 / 664 to 80 x 512 with `INTER_AREA`, padded right to 512 with the edge
-    column. Columns 80..511 of the model input all repeat column 79."""
+    """C-4 step 4: crop = bbox + 32 px a side (524 x 664 here), scaled by
+    512 / 664 to 404 x 512 with `INTER_AREA` (measured in MT-151 RED with a
+    standalone resize: `round(524 * 512 / 664) = 404`), padded right to 512 with
+    the edge column. Columns 404..511 of the model input all repeat column 403."""
     size = (800, 1000)
     page = _coded_page(*size)
-    mask = _mask(size, (380, 200, 420, 800))
+    mask = _mask(size, _DOWNSCALE_RECT)
     fake = FakeInpaintSession("constant")
 
     clean_page(page, mask, fake)
 
+    assert len(fake.calls) == 1
     image, model_mask = fake.calls[0]
-    assert np.array_equal(image[0, :, :, 80:], np.repeat(image[0, :, :, 79:80], _SIDE - 80, axis=2))
-    assert not np.array_equal(image[0, :, :, 79], image[0, :, :, 78]), (
-        "column 79 must still be real page content, not padding"
+    assert np.array_equal(
+        image[0, :, :, 404:], np.repeat(image[0, :, :, 403:404], _SIDE - 404, axis=2)
     )
-    assert not model_mask[0, 0, :, 80:].any(), "the mask is padded with False"
+    assert not np.array_equal(image[0, :, :, 403], image[0, :, :, 402]), (
+        "column 403 must still be real page content, not padding"
+    )
+    assert not model_mask[0, 0, :, 404:].any(), "the mask is padded with False"
 
 
 def test_on_the_downscale_path_no_hole_pixel_survives_as_visible_context() -> None:
@@ -427,17 +460,19 @@ def test_on_the_downscale_path_no_hole_pixel_survives_as_visible_context() -> No
     that a hole pixel contributed to is itself a hole. On a white page with a
     black hole, every model pixel left visible is pure white.
 
-    Measured in RED with a standalone resize of this exact fixture: `> 0` leaves
-    0 non-white visible pixels; `> 0.5` would leave 988, minimum 157.
+    Measured in MT-151 RED with a standalone resize of this exact fixture (the
+    460 x 600 hole): `> 0` leaves 0 non-white visible pixels; `> 0.5` would
+    leave 1636, minimum 171.
     """
     size = (800, 1000)
     page = np.full((1000, 800, 3), 255, dtype=np.uint8)
-    mask = _mask(size, (380, 200, 420, 800))
+    mask = _mask(size, _DOWNSCALE_RECT)
     page[mask] = 0
     fake = FakeInpaintSession("constant")
 
     clean_page(page, mask, fake)
 
+    assert len(fake.calls) == 1
     image, model_mask = fake.calls[0]
     visible = image[0][:, model_mask[0, 0] == 0.0]
     assert np.array_equal(visible, np.ones_like(visible)), (
@@ -445,22 +480,53 @@ def test_on_the_downscale_path_no_hole_pixel_survives_as_visible_context() -> No
     )
 
 
-@pytest.mark.parametrize(("height", "native"), [(_NATIVE_LIMIT, True), (_NATIVE_LIMIT + 1, False)])
-def test_the_native_path_ends_at_a_bbox_side_of_448(height: int, native: bool) -> None:
-    """C-4 step 3's boundary: `h + 2 * MIN_CONTEXT_PX <= 512` is native. At 448
-    the window is unresampled page; at 449 it is not."""
+def _is_unresampled_crop(image: NDArray[np.float32], mask: NDArray[np.bool_]) -> bool:
+    """Whether a recorded window is an unresampled crop of the coded page: at
+    every window position whose page pixel lies inside the page and outside
+    the erase mask - pixels no call ever rewrites - the decoded coordinate is
+    the window origin plus the position. A resized crop fails it."""
+    x0, y0 = _window_origin(image)
+    xs, ys = _decode(image)
+    rows, cols = np.mgrid[0:_SIDE, 0:_SIDE]
+    px, py = x0 + cols, y0 + rows
+    height, width = mask.shape
+    inside = (px >= 0) & (px < width) & (py >= 0) & (py < height)
+    check = inside.copy()
+    check[inside] = ~mask[py[inside], px[inside]]
+    return bool(check.any() and (xs[check] == px[check]).all() and (ys[check] == py[check]).all())
+
+
+@pytest.mark.parametrize(
+    ("bbox", "calls", "unresampled"),
+    [
+        ((20, _NATIVE_LIMIT), 1, True),  # native
+        ((_NATIVE_LIMIT, _NATIVE_LIMIT), 1, True),  # native, at the limit on both axes
+        ((20, _NATIVE_LIMIT + 1), 2, True),  # strips along y
+        ((_NATIVE_LIMIT + 1, 20), 2, True),  # strips along x
+        ((_NATIVE_LIMIT, _NATIVE_LIMIT + 1), 2, True),  # strips along y, 448 wide
+        ((_NATIVE_LIMIT + 1, _NATIVE_LIMIT + 1), 1, False),  # downscale
+    ],
+    ids=["20x448", "448x448", "20x449", "449x20", "448x449", "449x449"],
+)
+def test_the_native_path_ends_at_a_bbox_side_of_448(
+    bbox: tuple[int, int], calls: int, unresampled: bool
+) -> None:
+    """C-4 step 3's boundary, as MT-151 C-2 and C-6 restate it: a bbox side of
+    448 is native in one call; 449 on one axis is strips, unresampled, in two
+    calls (C-3: on this page the second window clamps to the page end); 449 on
+    both axes is the downscale path, one resized call."""
     size = (800, 1000)
     page = _coded_page(*size)
-    mask = _mask(size, (380, 200, 400, 200 + height))
+    bw, bh = bbox
+    mask = _mask(size, (200, 200, 200 + bw, 200 + bh))
     fake = FakeInpaintSession("constant")
 
     clean_page(page, mask, fake)
 
-    image, _ = fake.calls[0]
-    xs, ys = _decode(image)
-    rows, cols = np.mgrid[0:_SIDE, 0:_SIDE]
-    unresampled = bool(np.array_equal(xs, xs[0, 0] + cols) and np.array_equal(ys, ys[0, 0] + rows))
-    assert unresampled is native, f"bbox height {height}: native={unresampled}"
+    assert fake.violations == []
+    assert len(fake.calls) == calls, f"bbox {bw} x {bh}: {len(fake.calls)} calls, wanted {calls}"
+    seen = [_is_unresampled_crop(image, mask) for image, _ in fake.calls]
+    assert seen == [unresampled] * calls, f"bbox {bw} x {bh}: unresampled per call {seen}"
 
 
 # -- AC-3: one call per component, never a pixel in two calls ----------------------
@@ -594,13 +660,14 @@ def test_every_pixel_outside_the_dilated_region_masks_is_byte_identical() -> Non
 
 def test_nothing_outside_the_mask_changes_on_the_downscale_path() -> None:
     """AC-4 on the fallback path, where the patch is resized back to the crop:
-    the resize must not leak into the crop's non-hole pixels. Two components
-    take the downscale path (600 px tall, 600 px wide) and one the native."""
-    size = (800, 1000)
+    the resize must not leak into the crop's non-hole pixels. MT-151 C-6: one
+    component is long on both axes (500 x 550) and takes the downscale path;
+    the 40 x 600 and 600 x 70 components that stood for it before now take
+    strips, and AC-4 must hold there too; one more is native."""
+    size = (1600, 1000)
     page = _coded_page(*size)
-    mask = _mask(size, (380, 200, 420, 800), (100, 50, 700, 120))
-    mask[900:920, 200:600] = True  # joined to neither: three components, one native
-
+    mask = _mask(size, (380, 200, 420, 800), (100, 50, 700, 120), (900, 200, 1400, 750))
+    mask[900:920, 200:600] = True  # joined to none: four components, one native
     result = clean_page(page, mask, FakeInpaintSession("inverted"))
 
     _assert_outside_untouched(result, page, mask)
@@ -738,4 +805,408 @@ def test_an_erase_mask_dilated_past_the_edge_is_cleaned_with_ac4_intact() -> Non
     assert np.array_equal(
         result[mask], np.broadcast_to(np.array(_PATCH, dtype=np.uint8), (int(mask.sum()), 3))
     )
+    _assert_outside_untouched(result, page, mask)
+
+
+# -- MT-151: the strips path ------------------------------------------------------
+#
+# Every number below is worked from C-3's rule by hand and cross-checked in RED
+# against a standalone transcription of it (the handoff has the output). The
+# rule, for reference: on the long axis `t`, cursor `c` starts at the bbox start
+# `b`; `lo = clamp(c - 64, 0, max(N - 512, 0))`, `hi = min(lo + 512, N)`; the
+# call masks the component's pixels in the window with `t >= c`; the window is
+# the last if `b + L <= hi - 32` or `hi == N`, writing `[c, b + L)`, else it
+# writes `[c, hi - 32)` and the cursor moves there. The short axis is the native
+# path's centred 512 span of the bbox.
+
+Rect = tuple[int, int, int, int]
+Span = tuple[int, int]
+
+
+@dataclass(frozen=True)
+class _StripCase:
+    """One component on the strips path and the calls C-3 makes for it.
+
+    `origins` are the page `(x0, y0)` of each window; `masked` is the long-axis
+    `[lo, hi)` each call masks (cursor to window end; intersected with the
+    component); `written` is the long-axis band each call's patch is written to.
+    """
+
+    size: tuple[int, int]  # (width, height)
+    rects: tuple[Rect, ...]  # one 8-connected component between them
+    axis: Literal["x", "y"]
+    origins: tuple[tuple[int, int], ...]
+    masked: tuple[Span, ...]
+    written: tuple[Span, ...]
+
+
+_STRIP_CASES = {
+    # AC-1 as stated: 60 x 1000 on 1414 x 2000, hole y [500, 1500). C-3's own
+    # worked example: windows [436, 948), [852, 1364), [1268, 1780).
+    "ac1-vertical-60x1000": _StripCase(
+        size=(1414, 2000),
+        rects=((600, 500, 660, 1500),),
+        axis="y",
+        origins=((374, 436), (374, 852), (374, 1268)),
+        masked=((500, 948), (916, 1364), (1332, 1780)),
+        written=((500, 916), (916, 1332), (1332, 1500)),
+    ),
+    # AC-5: the same hole turned on its side, 1000 x 60 on 2000 x 1414.
+    "ac5-horizontal-1000x60": _StripCase(
+        size=(2000, 1414),
+        rects=((500, 600, 1500, 660),),
+        axis="x",
+        origins=((436, 374), (852, 374), (1268, 374)),
+        masked=((500, 948), (916, 1364), (1332, 1780)),
+        written=((500, 916), (916, 1332), (1332, 1500)),
+    ),
+    # Touching the start of the long axis: the first window clamps to 0.
+    "touching-the-top": _StripCase(
+        size=(1414, 2000),
+        rects=((600, 0, 660, 600),),
+        axis="y",
+        origins=((374, 0), (374, 416)),
+        masked=((0, 512), (480, 928)),
+        written=((0, 480), (480, 600)),
+    ),
+    # Touching the end: the second window clamps to N - 512 and is the last by
+    # `hi == N`, not by `b + L <= hi - 32` (2000 > 1968).
+    "touching-the-bottom": _StripCase(
+        size=(1414, 2000),
+        rects=((600, 1400, 660, 2000),),
+        axis="y",
+        origins=((374, 1336), (374, 1488)),
+        masked=((1400, 1848), (1816, 2000)),
+        written=((1400, 1816), (1816, 2000)),
+    ),
+    "touching-the-right-edge": _StripCase(
+        size=(2000, 1414),
+        rects=((1400, 600, 2000, 660),),
+        axis="x",
+        origins=((1336, 374), (1488, 374)),
+        masked=((1400, 1848), (1816, 2000)),
+        written=((1400, 1816), (1816, 2000)),
+    ),
+    # A page 480 tall with a 460-tall component: one window, the whole axis,
+    # edge-padded to 512 (`hi == N` at once).
+    "page-shorter-than-512-on-the-long-axis": _StripCase(
+        size=(1414, 480),
+        rects=((600, 10, 660, 470),),
+        axis="y",
+        origins=((374, 0),),
+        masked=((10, 480),),
+        written=((10, 470),),
+    ),
+    # A page 400 tall under a horizontal strip: the short-axis span is the whole
+    # axis, edge-padded, on every window.
+    "page-shorter-than-512-on-the-short-axis": _StripCase(
+        size=(2000, 400),
+        rects=((500, 170, 1500, 230),),
+        axis="x",
+        origins=((436, 0), (852, 0), (1268, 0)),
+        masked=((500, 948), (916, 1364), (1332, 1780)),
+        written=((500, 916), (916, 1332), (1332, 1500)),
+    ),
+    # Not a rectangle: two bars joined at [640, 660) x [980, 1000), bbox
+    # 100 x 1000, so the short-axis span centres on x = 650.
+    "non-rectangular-component": _StripCase(
+        size=(1414, 2000),
+        rects=((600, 500, 660, 1000), (640, 980, 700, 1500)),
+        axis="y",
+        origins=((394, 436), (394, 852), (394, 1268)),
+        masked=((500, 948), (916, 1364), (1332, 1780)),
+        written=((500, 916), (916, 1332), (1332, 1500)),
+    ),
+    # One past the native limit: the first window ends at 648 and the hole at
+    # 649, so its last row lies outside the first window and is masked only by
+    # the second.
+    "449-tall": _StripCase(
+        size=(800, 1000),
+        rects=((380, 200, 400, 649),),
+        axis="y",
+        origins=((134, 136), (134, 488)),
+        masked=((200, 648), (616, 1000)),
+        written=((200, 616), (616, 649)),
+    ),
+}
+
+_STRIP_IDS = sorted(_STRIP_CASES)
+_ORIENTATIONS = ["ac1-vertical-60x1000", "ac5-horizontal-1000x60"]
+
+
+def _strip_overlap_px() -> int:
+    """`STRIP_OVERLAP_PX`, read late so that its absence fails the test that
+    needs it, on an assertion, rather than the whole file at import."""
+    value = getattr(inpaint_module, "STRIP_OVERLAP_PX", None)
+    assert isinstance(value, int), "mangatl.clean.inpaint.STRIP_OVERLAP_PX is not defined"
+    return value
+
+
+def _band(size: tuple[int, int], axis: str, span: Span) -> NDArray[np.bool_]:
+    """The page pixels whose long-axis coordinate lies in the half-open `span`."""
+    width, height = size
+    ys, xs = np.ogrid[0:height, 0:width]
+    t = ys if axis == "y" else xs
+    lo, hi = span
+    return np.broadcast_to((t >= lo) & (t < hi), (height, width))
+
+
+def _cut(array: NDArray[Any], origin: tuple[int, int]) -> NDArray[Any]:
+    """The 512 x 512 window at page `origin`, edge-padded bottom/right where the
+    page ends (as `_inpaint` pads; a bool mask is padded with `False`)."""
+    x0, y0 = origin
+    crop = array[y0 : y0 + _SIDE, x0 : x0 + _SIDE]
+    pad = [(0, _SIDE - crop.shape[0]), (0, _SIDE - crop.shape[1])]
+    if array.dtype == np.bool_:
+        return np.pad(crop, pad, mode="constant", constant_values=False)
+    return np.pad(crop, [*pad, (0, 0)], mode="edge")
+
+
+def _seen(image: NDArray[np.float32]) -> NDArray[np.uint8]:
+    """A recorded model input back in page form: `(512, 512, 3)` uint8."""
+    seen: NDArray[np.uint8] = np.rint(image[0] * 255.0).astype(np.uint8).transpose(1, 2, 0)
+    return seen
+
+
+@dataclass(frozen=True)
+class _Expected:
+    """What C-3 says each call sees, and the result after every call."""
+
+    windows: list[NDArray[np.uint8]]  # the working page, cut at each origin
+    originals: list[NDArray[np.uint8]]  # the untouched page, cut at each origin
+    masks: list[NDArray[np.bool_]]  # each call's exact hole, window coordinates
+    result: NDArray[np.uint8]  # the page after every band is stamped
+
+
+def _expected(case: _StripCase, page: NDArray[np.uint8]) -> _Expected:
+    """Replays the pinned `case` on `page` with the stamped fake's colours."""
+    component = _mask(case.size, *case.rects)
+    working = page.copy()
+    windows: list[NDArray[np.uint8]] = []
+    originals: list[NDArray[np.uint8]] = []
+    masks: list[NDArray[np.bool_]] = []
+    steps = zip(case.origins, case.masked, case.written, strict=True)
+    for k, (origin, masked, written) in enumerate(steps):
+        windows.append(_cut(working, origin))
+        originals.append(_cut(page, origin))
+        masks.append(_cut(component & _band(case.size, case.axis, masked), origin))
+        working[component & _band(case.size, case.axis, written)] = _stamp(k)
+    return _Expected(windows, originals, masks, working)
+
+
+def _run_case(
+    case: _StripCase,
+    page: NDArray[np.uint8],
+    mode: Literal["inverted", "stamped"] = "stamped",
+    *,
+    check_count: bool = True,
+) -> tuple[FakeInpaintSession, NDArray[np.uint8], NDArray[np.bool_]]:
+    mask = _mask(case.size, *case.rects)
+    fake = FakeInpaintSession(mode)
+    result = clean_page(page, mask, fake)
+    assert fake.violations == []
+    if check_count:
+        _assert_strip_count(fake, case)
+    return fake, result, mask
+
+
+def _assert_strip_count(fake: FakeInpaintSession, case: _StripCase) -> None:
+    assert len(fake.calls) == len(case.origins), (
+        f"{len(fake.calls)} calls for a component C-3 cleans in {len(case.origins)} strips"
+    )
+
+
+def test_the_strip_overlap_starts_at_min_context_and_is_exported() -> None:
+    """MT-151 C-1, C-4: `STRIP_OVERLAP_PX` is public and starts at
+    `MIN_CONTEXT_PX` (32); it changes only on DV-2's evidence."""
+    assert _strip_overlap_px() == MIN_CONTEXT_PX == 32
+    assert "STRIP_OVERLAP_PX" in inpaint_module.__all__
+
+
+@pytest.mark.parametrize("name", _STRIP_IDS)
+def test_a_component_long_on_one_axis_is_cut_into_windows_advancing_along_that_axis(
+    name: str,
+) -> None:
+    """AC-1 / AC-5 "the calls advance down the long axis": the windows sit at
+    exactly the origins C-3 gives, the short-axis origin never moves, and the
+    long-axis origin strictly increases."""
+    case = _STRIP_CASES[name]
+    page = _coded_page(*case.size)
+
+    fake, _result, _page_mask = _run_case(case, page)
+
+    origins = [_window_origin(image) for image, _ in fake.calls]
+    assert origins == list(case.origins), f"window origins {origins}, wanted {list(case.origins)}"
+    long_i, short_i = (1, 0) if case.axis == "y" else (0, 1)
+    assert len({o[short_i] for o in origins}) == 1, "the short-axis span moved between windows"
+    assert all(a[long_i] < b[long_i] for a, b in pairwise(origins))
+
+
+@pytest.mark.parametrize("name", _STRIP_IDS)
+def test_every_strip_window_is_an_unresampled_crop_of_the_working_page(name: str) -> None:
+    """AC-1 / AC-5: every non-hole pixel of every 512 x 512 window is,
+    byte-exactly, the **working** page at that position - the original page,
+    except where an earlier call of this component already wrote its band. A
+    window cut from the source would show the original page in those rows; a
+    resized window would match nowhere. "No resize" is asserted first, before
+    the call count, so the downscale path standing in for strips (DV-1) fails
+    on exactly that."""
+    case = _STRIP_CASES[name]
+    page = _coded_page(*case.size)
+    expected = _expected(case, page)
+
+    fake, _result, page_mask = _run_case(case, page, check_count=False)
+
+    resized = [
+        k for k, (image, _) in enumerate(fake.calls) if not _is_unresampled_crop(image, page_mask)
+    ]
+    assert resized == [], f"calls {resized} saw a resized crop, not a native window"
+    _assert_strip_count(fake, case)
+    for k, (image, model_mask) in enumerate(fake.calls):
+        context = model_mask[0, 0] == 0.0
+        seen = _seen(image)
+        wrong = int((seen[context] != expected.windows[k][context]).any(axis=1).sum())
+        assert wrong == 0, f"call {k}: {wrong} context pixels are not the working page"
+
+
+@pytest.mark.parametrize("name", _STRIP_IDS)
+def test_each_strip_call_masks_only_the_part_of_the_component_not_yet_filled(name: str) -> None:
+    """AC-2: each call's mask is exactly the component's pixels inside its
+    window from the cursor on - every unfilled pixel the window shows, including
+    the 32-px trail it will not write, and no pixel an earlier call wrote."""
+    case = _STRIP_CASES[name]
+    page = _coded_page(*case.size)
+    expected = _expected(case, page)
+
+    fake, _result, _page_mask = _run_case(case, page)
+
+    for k, (_image, model_mask) in enumerate(fake.calls):
+        got = model_mask[0, 0] == 1.0
+        want = expected.masks[k]
+        assert np.array_equal(got, want), (
+            f"call {k}: mask has {int(got.sum())} pixels, wanted {int(want.sum())}; "
+            f"{int((got & ~want).sum())} extra, {int((want & ~got).sum())} missing"
+        )
+
+
+@pytest.mark.parametrize("name", _STRIP_IDS)
+def test_every_strip_pixel_is_written_exactly_once_from_the_call_whose_band_holds_it(
+    name: str,
+) -> None:
+    """AC-1 "every hole pixel is written exactly once", AC-4: the result carries
+    each band in the colour of the call that owns it, and nothing outside the
+    erase mask moved. And no hole pixel is written early: under every call's
+    mask the window still shows the untouched page, so a pixel in a window's
+    32-px trail was not written by that window and then again by the next."""
+    case = _STRIP_CASES[name]
+    page = _coded_page(*case.size)
+    expected = _expected(case, page)
+
+    fake, result, mask = _run_case(case, page)
+
+    for k, (image, model_mask) in enumerate(fake.calls):
+        holes = model_mask[0, 0] == 1.0
+        early = int((_seen(image)[holes] != expected.originals[k][holes]).any(axis=1).sum())
+        assert early == 0, f"call {k}: {early} masked pixels were already written"
+    wrong = int((result[mask] != expected.result[mask]).any(axis=1).sum())
+    assert wrong == 0, (
+        f"{wrong} hole pixels do not carry the stamp of the call whose band holds them"
+    )
+    _assert_outside_untouched(result, page, mask)
+
+
+@pytest.mark.parametrize("name", _STRIP_IDS)
+def test_a_strip_patch_lands_on_the_pixel_it_was_computed_from(name: str) -> None:
+    """AC-1, AC-4 with the inverted fake: every hole pixel is `255 - page`, so
+    each band was written from its own call's patch at the right offset, and
+    nothing outside the mask moved although the fake changed every pixel."""
+    case = _STRIP_CASES[name]
+    page = _coded_page(*case.size)
+
+    _fake, result, mask = _run_case(case, page, mode="inverted")
+
+    assert np.array_equal(result[mask], 255 - page[mask])
+    _assert_outside_untouched(result, page, mask)
+
+
+@pytest.mark.parametrize("name", _ORIENTATIONS)
+def test_consecutive_strip_windows_overlap_by_at_least_strip_overlap_px(name: str) -> None:
+    """AC-2: consecutive windows of one component share at least
+    `STRIP_OVERLAP_PX` along the long axis. Away from the page ends C-3 makes
+    that exactly `2 * MIN_CONTEXT_PX + STRIP_OVERLAP_PX` (96): a 512 window
+    advancing 416 a call."""
+    case = _STRIP_CASES[name]
+    page = _coded_page(*case.size)
+    overlap_px = _strip_overlap_px()
+
+    fake, _result, _page_mask = _run_case(case, page)
+
+    long_i = 1 if case.axis == "y" else 0
+    starts = [_window_origin(image)[long_i] for image, _ in fake.calls]
+    overlaps = [a + _SIDE - b for a, b in pairwise(starts)]
+    assert overlaps, "one window: nothing overlaps"
+    assert all(o >= overlap_px for o in overlaps), f"overlaps {overlaps} < {overlap_px}"
+    assert overlaps == [2 * MIN_CONTEXT_PX + overlap_px] * len(overlaps)
+
+
+@pytest.mark.parametrize("name", _ORIENTATIONS)
+def test_no_unfilled_hole_pixel_is_shown_to_the_model_as_context(name: str) -> None:
+    """C-3 step 3: on a white page with a black hole, every unmasked pixel of
+    every window is white or an earlier call's fill - never the black of a hole
+    pixel left unmasked."""
+    case = _STRIP_CASES[name]
+    page = np.full((case.size[1], case.size[0], 3), 255, dtype=np.uint8)
+    page[_mask(case.size, *case.rects)] = 0
+
+    fake, _result, _page_mask = _run_case(case, page)
+
+    for k, (image, model_mask) in enumerate(fake.calls):
+        visible = _seen(image)[model_mask[0, 0] == 0.0]
+        allowed = np.array([(255, 255, 255), *(_stamp(j) for j in range(k))], dtype=np.uint8)
+        ok = (visible[:, None, :] == allowed[None, :, :]).all(axis=2).any(axis=1)
+        assert ok.all(), f"call {k}: {int((~ok).sum())} visible pixels show an unfilled hole"
+
+
+def test_a_strip_call_masks_none_of_another_components_pixels() -> None:
+    """AC-2 "the part of **the** hole": a native component inside the strip's
+    first window is context there, never a hole, and is cleaned in its own
+    call afterwards (ascending label order: the strip starts higher)."""
+    case = _STRIP_CASES["ac1-vertical-60x1000"]
+    size = case.size
+    page = _coded_page(*size)
+    strip = _mask(size, *case.rects)
+    blob = _mask(size, (800, 700, 820, 720))
+    fake = FakeInpaintSession("stamped")
+
+    result = clean_page(page, strip | blob, fake)
+
+    assert len(fake.calls) == len(case.origins) + 1
+    width = size[0]
+    for k in range(len(case.origins)):
+        holes = _hole_page_indices(fake.calls[k], width)
+        assert not np.isin(holes, _indices(blob)).any(), f"strip call {k} masked the blob"
+    assert np.array_equal(_hole_page_indices(fake.calls[-1], width), _indices(blob))
+    assert (result[blob] == _stamp(len(case.origins))).all()
+    _assert_outside_untouched(result, page, strip | blob)
+
+
+def test_a_hole_long_on_both_axes_still_takes_one_resized_call() -> None:
+    """AC-3, the control: a 600 x 600 hole on a 1414 x 2000 page is the
+    downscale path as before - one call, a crop that is not an unresampled
+    window, a hole shrunk with it (the 664 px crop becomes 512, so the 600 px
+    hole is under 600 px a side in the model mask) - and AC-4 holds."""
+    size = (1414, 2000)
+    page = _coded_page(*size)
+    mask = _mask(size, (400, 500, 1000, 1100))
+    fake = FakeInpaintSession("inverted")
+
+    result = clean_page(page, mask, fake)
+
+    assert fake.violations == []
+    assert len(fake.calls) == 1
+    image, model_mask = fake.calls[0]
+    assert not _is_unresampled_crop(image, mask), "the session saw a native crop, not a resized one"
+    holes = model_mask[0, 0] == 1.0
+    rows, cols = np.flatnonzero(holes.any(axis=1)), np.flatnonzero(holes.any(axis=0))
+    assert rows.size < 600 and cols.size < 600, f"hole is {cols.size} x {rows.size} in the model"
     _assert_outside_untouched(result, page, mask)
