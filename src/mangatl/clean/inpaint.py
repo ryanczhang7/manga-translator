@@ -1,23 +1,24 @@
 """Cleaning one page: erase the mask and let LaMa reconstruct it (MT-019 C-4).
 
-**One model call per 8-connected component of the erase mask, never tiles**
-(PO-5). A component inpainted in one call has no tile boundary inside its hole,
-so the seam failure MT-002 DV-1 names cannot occur, and two overlapping regions
-are one component - which is what makes AC-3 hold by construction.
+Each 8-connected component of the erase mask takes one of three paths, chosen
+from its bbox against `512 - 2 * MIN_CONTEXT_PX` (MT-151 C-2):
 
-* **Native path** - a component whose bbox leaves `MIN_CONTEXT_PX` on every side
-  inside 512 is cut as a 512x512 window at native resolution, centred on the
-  bbox and clamped into the page. An axis shorter than 512 is the whole axis,
-  edge-padded bottom/right to 512.
-* **Downscale path** - otherwise the bbox plus `MIN_CONTEXT_PX` is resized so its
-  long side is 512 (`INTER_AREA`), the hole thresholded `> 0` so that no hole
-  pixel can survive as visible context, and the patch resized back
-  (`INTER_LINEAR`). A correctness fallback: no component on the fixture pages
-  takes it.
+* **Native** - fits on both axes: one call on a 512x512 window at native
+  resolution, centred on the bbox and clamped into the page. An axis shorter
+  than 512 is the whole axis, edge-padded bottom/right to 512.
+* **Strips** - too long on exactly one axis: native-resolution 512 windows
+  advancing along that axis, each cut from the working result (MT-151 C-3).
+  A call masks every unfilled component pixel in its window but writes back
+  only up to `MIN_CONTEXT_PX` short of the window's far edge, so each band is
+  reconstructed with context on both sides; every pixel is written once.
+* **Downscale** - too long on both axes: one call on the bbox plus
+  `MIN_CONTEXT_PX`, resized so its long side is 512 (`INTER_AREA`), the hole
+  thresholded `> 0` so that no hole pixel survives as visible context, and the
+  patch resized back (`INTER_LINEAR`).
 
 Components are processed in ascending label order, each window cut from the
 working result, and **only the component's own pixels are written back** - the
-one line ending `# write-back`. Nothing outside the erase mask is modified
+lines ending `# write-back`. Nothing outside the erase mask is modified
 (AC-4); the brief's firmest non-goal.
 
 The session convention (RGB, `[0, 1]` in, `1.0` = hole, `[0, 255]` out) is
@@ -35,6 +36,7 @@ from mangatl.clean.session import MODEL_INPUT_SIDE, InpaintSession
 __all__ = [
     "INPAINT_MAX_RESIDUAL",
     "MIN_CONTEXT_PX",
+    "STRIP_OVERLAP_PX",
     "TONE_VARIANCE_TOLERANCE",
     "clean_page",
 ]
@@ -66,7 +68,16 @@ TONE_VARIANCE_TOLERANCE: float = 0.3
 #: the lossy downscale path.
 MIN_CONTEXT_PX: int = 32
 
+#: The minimum overlap, along the long axis, of consecutive windows on the
+#: strips path (MT-151 C-3, C-4). It starts at `MIN_CONTEXT_PX` and is not
+#: tuned: it changes only on the evidence of MT-151 DV-2 (residual ink on the
+#: tall regions of the development set, real LaMa), recorded here when it does.
+STRIP_OVERLAP_PX: int = MIN_CONTEXT_PX
+
 _SIDE = MODEL_INPUT_SIDE
+_LIMIT = _SIDE - 2 * MIN_CONTEXT_PX
+_LEAD = MIN_CONTEXT_PX + STRIP_OVERLAP_PX
+_TRAIL = MIN_CONTEXT_PX
 
 
 def clean_page(
@@ -83,17 +94,22 @@ def clean_page(
     if not mask.any():
         return result
     height, width = mask.shape
-    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+    count, found, stats, _centroids = cv2.connectedComponentsWithStats(
         mask.astype(np.uint8), connectivity=8
     )
+    labels = np.asarray(found, dtype=np.int32)
     for label in range(1, count):
         bx, by, bw, bh = (int(v) for v in stats[label, :4])
-        if bw + 2 * MIN_CONTEXT_PX <= _SIDE and bh + 2 * MIN_CONTEXT_PX <= _SIDE:
+        fits_x, fits_y = bw <= _LIMIT, bh <= _LIMIT
+        if fits_x and fits_y:
             x0, x1 = _native_span(bx, bw, width)
             y0, y1 = _native_span(by, bh, height)
             target = result[y0:y1, x0:x1]
             hole = labels[y0:y1, x0:x1] == label
             patch = _inpaint(target, hole, session)
+        elif fits_x != fits_y:
+            _clean_strips(result, labels, label, (bx, by, bw, bh), fits_x, session)
+            continue
         else:
             x0, x1 = max(bx - MIN_CONTEXT_PX, 0), min(bx + bw + MIN_CONTEXT_PX, width)
             y0, y1 = max(by - MIN_CONTEXT_PX, 0), min(by + bh + MIN_CONTEXT_PX, height)
@@ -121,6 +137,47 @@ def _native_span(start: int, length: int, limit: int) -> tuple[int, int]:
     centre = start + length // 2
     lo = min(max(centre - _SIDE // 2, 0), max(limit - _SIDE, 0))
     return lo, min(lo + _SIDE, limit)
+
+
+def _clean_strips(
+    result: NDArray[np.uint8],
+    labels: NDArray[np.int32],
+    label: int,
+    bbox: tuple[int, int, int, int],
+    along_y: bool,
+    session: InpaintSession,
+) -> None:
+    """MT-151 C-3: clean one component in native windows along its long axis, in place."""
+    bx, by, bw, bh = bbox
+    height, width = labels.shape
+    if along_y:
+        x0, x1 = _native_span(bx, bw, width)
+        b, length, n = by, bh, height
+    else:
+        y0, y1 = _native_span(by, bh, height)
+        b, length, n = bx, bw, width
+    stop = b + length
+    c = b
+    while True:
+        lo = min(max(c - _LEAD, 0), max(n - _SIDE, 0))
+        hi = min(lo + _SIDE, n)
+        last = stop <= hi - _TRAIL or hi == n
+        end = stop if last else hi - _TRAIL
+        if along_y:
+            y0, y1 = lo, hi
+            t = np.arange(lo, hi)[:, None]
+        else:
+            x0, x1 = lo, hi
+            t = np.arange(lo, hi)[None, :]
+        target = result[y0:y1, x0:x1]
+        comp = labels[y0:y1, x0:x1] == label
+        hole = comp & (t >= c)
+        patch = _inpaint(target, hole, session)
+        write = hole & (t < end)
+        target[write] = patch[write]  # write-back
+        if last:
+            return
+        c = end
 
 
 def _inpaint_downscaled(
