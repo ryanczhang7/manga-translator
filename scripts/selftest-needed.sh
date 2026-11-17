@@ -167,6 +167,13 @@ if [ "$MODE" = suites ]; then
   #   profiles      profiles.test.sh, PROFILE_DIR: the reference directory
   #   shipped-docs  shipped-docs.test.sh: .claude/commands/*.md,
   #                 .claude/agents/*.md, and every .md under .claude/skills
+  #                 (map row); and the `add` row: suite_docs_reads in
+  #                 shipped-docs.test.sh scans every top-level
+  #                 .claude/tests/*.sh for a read of docs/ (HARNESS-106,
+  #                 HARNESS-107). The pattern also matches a .sh in a
+  #                 subdirectory, which the rule does not scan; harmless,
+  #                 because an `add` row never maps a path: it only runs
+  #                 one small suite more than needed
   # The second column is the row's kind (A-5). A `map` row maps the path: a
   # match counts as placing it. An `add` row only adds its suite: the `*.sh`
   # scanners match every shell file, so letting them map would mean no shell
@@ -175,6 +182,7 @@ if [ "$MODE" = suites ]; then
 sigpipe      add *.sh
 grep-count   add *.sh
 profiles     map .claude/skills/stack-profiles/reference/*
+shipped-docs add .claude/tests/*.sh
 shipped-docs map .claude/commands/*.md .claude/agents/*.md .claude/skills/*.md'
   SC_NAME=(); SC_PAT=(); SC_MAP=()
   while read -r sc_suite sc_kind sc_pats; do

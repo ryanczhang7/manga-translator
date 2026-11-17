@@ -81,13 +81,16 @@ b1444f57e1b021a61175733b8c356171861c8701  validate-coverage-ledger.test.cjs
 #   F  fixed string, anywhere in the file (`grep -F`, so within one line)
 #   E  extended regex, anywhere in the file, within one line
 #   L  fixed string, in the file's LAST PARAGRAPH
+#   M  a FRONTMATTER line equal to the needle, CR stripped (HARNESS-101). The
+#      model row was an F row until then; as `model: opus` it would float, since
+#      the body says `model: opus` for the hunters and research agents.
 # The E row is C-3's Defaults line with the number left free, so DV-1 can set
 # the measured budget and drop the "provisional" clause without touching this
 # file; scope and profile stay pinned (see the C-3 amendment in the story).
 TAB="$(printf '\t')"
 NEEDLES="$(cat <<'NEEDLES'
 F	description: Audit the code for security defects with Cloudflare's vendored security-audit skill (optional, on request)
-F	model: fable
+M	model: opus
 F	argument-hint: [path | subsystem | <ref>..<ref>]
 F	Runs in the session that reads this file, not in a subagent
 F	Load `.claude/skills/security-audit/SKILL.md` in full audit mode
@@ -302,7 +305,7 @@ last_paragraph() {
 # so containment in the whole text is containment within one line, and the
 # regex is tried line by line with bash's own ERE.
 command_problems() {
-  local file="$1" name kind needle para text l hit
+  local file="$1" name kind needle para text l hit front
   local -a lines
   name="${file##*/}"
   if [ ! -f "$file" ]; then
@@ -312,9 +315,22 @@ command_problems() {
   para="$(last_paragraph "$file")"
   mapfile -t lines < "$file"
   text="$(printf '%s\n' "${lines[@]%$'\r'}")"
+  # The frontmatter: line 1 `---` to the next `---`, newline-framed so an M
+  # needle is compared as a whole line.
+  front=$'\n'
+  if [ "${#lines[@]}" -gt 0 ] && [ "${lines[0]%$'\r'}" = "---" ]; then
+    for ((l = 1; l < ${#lines[@]}; l++)); do
+      [ "${lines[$l]%$'\r'}" = "---" ] && break
+      front="$front${lines[$l]%$'\r'}"$'\n'
+    done
+  fi
   while IFS="$TAB" read -r kind needle; do
     [ -n "$kind" ] || continue
     case "$kind" in
+      M) case "$front" in
+           *$'\n'"$needle"$'\n'*) ;;
+           *) printf '%s: its frontmatter has no line `%s`\n' "$name" "$needle" ;;
+         esac ;;
       F) case "$text" in
            *"$needle"*) ;;
            *) printf '%s: does not carry `%s`\n' "$name" "$needle" ;;
@@ -338,6 +354,7 @@ ROWS
 missing_line() {
   case "$2" in
     F) printf '%s: does not carry `%s`' "${1##*/}" "$3" ;;
+    M) printf '%s: its frontmatter has no line `%s`' "${1##*/}" "$3" ;;
     E) printf '%s: has no line matching /%s/' "${1##*/}" "$3" ;;
     L) printf '%s: its last paragraph does not carry `%s`' "${1##*/}" "$3" ;;
   esac
@@ -359,6 +376,7 @@ command_fixture() {
            *) body="$body"$'\n'"Fixture prose: $needle."$'\n' ;;
          esac ;;
       E) body="$body"$'\n'"$DEFAULTS_LINE"$'\n' ;;
+      M) front="$front$needle"$'\n' ;;
       L) last="$last$needle"$'\n' ;;
     esac
   done <<ROWS
@@ -373,7 +391,7 @@ describe "AC-2 the rule itself: every needle present, then each one removed in t
 C="$WORK/cmd/security-audit.md"; mkdir -p "$WORK/cmd"
 command_fixture "$C"
 assert_eq "a command fixture carrying every C-3 needle is silent" "" "$(command_problems "$C")"
-assert_eq "there are 18 needles: 15 fixed, the budget regex, and 2 in the last paragraph" 18 \
+assert_eq "there are 18 needles: 14 fixed, the frontmatter model line, the budget regex, and 2 in the last paragraph" 18 \
   "$(printf '%s\n' "$NEEDLES" | awk 'NF { n++ } END { print n }')"
 
 # Any one needle removed prints exactly the one line naming it. A loop, one
@@ -436,6 +454,18 @@ assert_eq "a command file that does not exist is one line" \
 describe "AC-2 the real tree: $CMD_REL carries every C-3 needle"
 
 assert_eq "command_problems over the real command prints nothing" "" "$(command_problems "$REAL_CMD")"
+
+# HARNESS-101 (C-1): the command runs on `opus` since 2026-11-11. The model
+# row is an M row because this command's body says `model: opus` for its
+# hunters and research agents: as an F row it would be satisfied by those
+# lines whatever the frontmatter said. The control is that shape exactly - a
+# frontmatter still on `fable`, a body that says `model: opus` - and it must
+# print the one M line.
+command_fixture "$C"
+awk '$0 == "model: opus" && !done { $0 = "model: fable"; done = 1 } { print } $0 == "# Security audit (fixture)" { print ""; print "Hunters run with `subagent_type: general-purpose`, `model: opus`." }' \
+  "$C" > "$C.new" && mv "$C.new" "$C"
+assert_eq "HARNESS-101 AC-1 control: a frontmatter on \`model: fable\` with \`model: opus\` in the body gives exactly the frontmatter line" \
+  "$(missing_line "$C" M "model: opus")" "$(command_problems "$C")"
 
 # --- AC-4: the refresh ships it ---------------------------------------------
 

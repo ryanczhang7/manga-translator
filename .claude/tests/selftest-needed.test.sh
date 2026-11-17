@@ -623,19 +623,23 @@ describe "HARNESS-094 AC-2: a changed suite selects itself; _lib.sh, _spawns.sh,
 
 suites_fixture
 put .claude/tests/gamma.test.sh '# fixture suite gamma, edited'
-expect_suites "an edited .claude/tests/gamma.test.sh, mentioned by no suite, prints gamma (and the *.sh scanners)" 0 \
+expect_suites "an edited .claude/tests/gamma.test.sh, mentioned by no suite, prints gamma (and the *.sh scanners, shipped-docs among them)" 0 \
   "gamma
 grep-count
-sigpipe" first "$(hdr 3 9 1)" --suites
+shipped-docs
+sigpipe" first "$(hdr 4 9 1)" --suites
 assert_eq "stderr names gamma's path and the rule: (itself)" 1 \
   "$(reason_lines gamma .claude/tests/gamma.test.sh itself)"
+assert_eq "HARNESS-107 AC-1: stderr names shipped-docs' path and the pattern that matched: (scans .claude/tests/*.sh)" 1 \
+  "$(reason_lines shipped-docs .claude/tests/gamma.test.sh 'scans .claude/tests/*.sh')"
 
 suites_fixture
 put .claude/tests/delta.test.sh '# a new suite'
-expect_suites "a NEW untracked .claude/tests/delta.test.sh prints delta, and the count of suites is the tree's (10)" 0 \
+expect_suites "a NEW untracked .claude/tests/delta.test.sh prints delta and the *.sh scanners, shipped-docs among them, and the count of suites is the tree's (10)" 0 \
   "delta
 grep-count
-sigpipe" first "$(hdr 3 10 1)" --suites
+shipped-docs
+sigpipe" first "$(hdr 4 10 1)" --suites
 
 suites_fixture
 put .claude/tests/_lib.sh '# a library'; put .claude/harness/n.conf 'n'

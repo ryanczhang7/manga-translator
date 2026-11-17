@@ -1,6 +1,6 @@
 ---
 name: diff-review
-description: How to review a story's whole diff, and the code connected to it, for bugs no test was written for - before the PR opens. Every finding carries a concrete case, a severity group and a four-part explanation, and the report ends in a verdict that decides whether GATES → REVIEW goes on. Use at the first step of GATES → REVIEW, as a fresh feature-developer dispatch.
+description: How to review a story's whole diff, and the code connected to it, for bugs no test was written for - before the PR opens. Every finding carries a concrete case, a severity group, a four-part explanation and a route label, and the report ends in a verdict that decides whether GATES → REVIEW goes on. Use at the first step of GATES → REVIEW, as a fresh lead-po dispatch on the DIFF-REVIEW row of models.conf.
 ---
 
 # Diff review
@@ -17,10 +17,14 @@ fast, lean.
 
 ## Who runs it
 
-A **fresh** `feature-developer` dispatch, not the one that wrote the code, on
-the GATES row of `.claude/harness/models.conf`. A reviewer that carries the
-author's reasoning repeats the author's blind spots, so it starts from the
-story file and the diff, not from the author's notes on why the code is right.
+A **fresh** `lead-po` dispatch on the DIFF-REVIEW row of
+`.claude/harness/models.conf`, with the model read from
+`bash scripts/plan.sh models <id>`. A reviewer that carries the author's
+reasoning repeats the author's blind spots, so it starts from the story file
+and the diff, not from the author's notes on why the code is right. The role
+matters too: `lead-po` never writes source or tests, which is what a reviewer
+has to be, and it declares the same model the row plans, so a dispatch that
+loses its explicit model still lands where the plan said.
 
 The reviewer changes no file. Not the source, not the tests, not the story. It
 returns its report to the orchestrator, which pastes it into a `## Diff review`
@@ -98,15 +102,29 @@ Then the findings, in three groups, skipping any group that is empty:
 - **Nice to have:** a small speed-up, a shorter form.
 
 Number findings across all groups, so the orchestrator can say "fix 2 and 5".
-Every finding has all four parts, each one or two short sentences:
+Every finding has five parts: four of explanation, each one or two short
+sentences, and a fifth, `**Route:**`, that says where the fix is made. The
+route is exactly one of three values, with nothing after it on the line, and a
+Nice-to-have carries one too:
+
+| Route | When | What the orchestrator then does |
+|---|---|---|
+| `GATES` | the fix is in production code or config | dispatches a feature-developer in GATES; the gates run again and the GATES → REVIEW steps start over |
+| `RED` | a test has to be added or changed | sets the phase back to RED, with a `## Regressions` entry |
+| `AMEND` | an acceptance criterion is in question; the finding names it as `AC-<n>` | stops and puts it to the user; the outcome goes under `## Amendments` |
+
+A Missing-test finding is `RED` by definition. Name in **Fix:** every path the
+fix touches: the orchestrator checks the label against those paths.
 
     2. **A refused write is reported as success** (`scripts/sync.sh:40-52`)
        - **What this is:** The step that copies the story's gate stamp into the branch.
        - **Problem:** It ignores the copy's exit status, so a full disk leaves an
          empty stamp and the script still prints `synced`.
-       - **Fix:** Exit non-zero when the copy fails. One line; nothing else changes.
+       - **Fix:** Exit non-zero when the copy fails, in `scripts/sync.sh`. One
+         line; nothing else changes.
        - **If we skip it:** CI reads an empty stamp and refuses the PR, with nothing
          pointing at the cause.
+       - **Route:** GATES
 
 End with exactly one verdict line, last:
 
@@ -122,17 +140,38 @@ what you checked, then `Verdict: Ship.`.
 The review changes no file, and a finding is fixed through the phase rules,
 never around the phase lock.
 
-- **A Must-fix in the code** is fixed in GATES, by a feature-developer
+The orchestrator follows the label; it does not choose the route. Before acting
+on one it checks it: it runs `bash scripts/classify.sh` on each path the
+finding's **Fix:** names and reads each category against the phase table in
+`.claude/harness/rules.md`. A `GATES` label whose fix names a `test` path, or a
+`RED` label whose fix names only `source` or `config` paths, asks for a write
+the phase lock would refuse in that phase, so it cannot be followed; nor can an
+`AMEND` label whose finding names no `AC-<n>`. Such a finding goes back to a
+fresh dispatch on the DIFF-REVIEW row, with the classification pasted, to be
+relabelled; the orchestrator never relabels it itself. Where the paths classify
+as `harness`, as they do in the harness's own repository, the lock permits both
+phases and the check passes: there the label alone decides, and the check
+decides nothing.
+
+- **A Must-fix in the code** (`GATES`) is fixed in GATES, by a feature-developer
   dispatch. The tree has changed, so `bash scripts/gates.sh` runs again and
   the GATES → REVIEW steps start over, beginning with a review of the fix.
-- **A finding that needs a test added or changed** is a return to RED:
+- **A finding that needs a test added or changed** (`RED`) is a return to RED:
   `bash scripts/phase.sh set <id> RED`, the Test Developer makes the change,
   and records why in `## Regressions`. A test written against code that already
   exists has to be earned by a mutation, as the non-negotiables in
   `.claude/harness/rules.md` require.
-- **A finding that says an acceptance criterion is wrong** is an
+- **A finding that says an acceptance criterion is wrong** (`AMEND`) is an
   `## Amendments` question for the user. Nobody resolves it by editing the
   criterion.
+- **The record.** A `RED` or `AMEND` finding has already been adjudicated by
+  this review, a fresh dispatch on the DIFF-REVIEW row, so the
+  `## Regressions` or `## Amendments` entry that follows it needs no second
+  dispatch. The orchestrator writes its record line in the same section,
+  naming the review round and finding number and the model the review was
+  planned on and resolved to, as `## Model guidance` records them:
+  ``- **Adjudicated R-1:** `fable` (resolved <name>), <date>, diff review round 1, finding 2.``
+  `check-boundaries.sh` refuses a new entry without one.
 - **A Should-fix the orchestrator declines** is recorded in `## Diff review`
   with a one-line reason, never dropped silently.
 - **A Nice-to-have** is listed, and that is all.

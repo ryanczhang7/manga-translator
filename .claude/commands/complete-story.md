@@ -1,6 +1,6 @@
 ---
 description: Drive one story from its current phase all the way to a merged-ready PR
-model: fable
+model: opus
 argument-hint: <story-id>
 allowed-tools: Bash(bash scripts/phase.sh:*), Bash(bash scripts/gates.sh:*), Bash(bash scripts/attest.sh check:*), Bash(bash scripts/check-boundaries.sh:*), Bash(bash scripts/selftest.sh:*), Bash(bash scripts/selftest-needed.sh:*), Bash(SELFTEST_JOBS=4 bash scripts/selftest.sh:*), Bash(SELFTEST_JOBS=4 bash scripts/selftest.sh --changed:*), Bash(bash scripts/ci-local.sh:*), Bash(bash scripts/task.sh:*), Bash(bash scripts/story.sh:*), Bash(git:*), Read, Grep, Glob, Edit, Write, Task
 ---
@@ -35,9 +35,12 @@ approval between phases is exactly when they get quietly reordered:
   which it was; `fresh` says it ran
   here, not that it passed, so read `exit:`, `last:` and the log it names.
 - **GATES → REVIEW opens with a review of the diff and its callers**, by the
-  `diff-review` skill on a fresh feature-developer dispatch, and goes on only
-  on `Verdict: Ship.`; a fix it asks for changes the tree, so it comes before
-  the self-test. `bash scripts/selftest-needed.sh` decides whether
+  `diff-review` skill on a fresh `lead-po` dispatch on the DIFF-REVIEW row,
+  its model read from `bash scripts/plan.sh models $1`, and goes on only on
+  `Verdict: Ship.`; each finding carries a `Route` label that you follow and
+  check with `bash scripts/classify.sh`, never choose, as step 1 of
+  advance-story's GATES → REVIEW says; a fix it asks for changes the tree, so
+  it comes before the self-test. `bash scripts/selftest-needed.sh` decides whether
   `SELFTEST_JOBS=4 bash scripts/selftest.sh --changed`, the suites the
   diff can break, runs at all - only when the diff touches a `harness`
   path; on `skip` its line goes into `## Notes` and CI runs the self-test
@@ -61,16 +64,27 @@ approval between phases is exactly when they get quietly reordered:
   it, so it passes immediately and forever; the Test Developer earns it by
   mutating the specific behaviour it pins, watching that assertion fail,
   reverting, and pasting the output into `## Regressions`. `check-boundaries.sh`
-  refuses the PR otherwise. GREEN on re-entry may legitimately be a no-op you
+  refuses the PR otherwise. The entry is headed `R-<n>` and carries its
+  `**Adjudicated R-<n>:**` record; a return no review finding routed gets an
+  ADJUDICATE dispatch before the test changes, mechanical returns included,
+  as `/advance-story` says. GREEN on re-entry may legitimately be a no-op you
   verify yourself rather than delegate.
 - **GREEN confirms the negative-control values RED recorded**, not just that
   the control tests pass. RED could not run them: its suite failed at import.
-- **A claim that the contract is wrong is reproduced before it is accepted.**
-  When a subagent reports that an acceptance criterion, a threshold or a frozen
-  test is wrong, verify it yourself on different inputs, without reusing the
-  subagent's code, and record the reproduction in the story. Running unattended
-  is exactly when this gets skipped, and it is the difference between a correct
-  escalation and a plausible excuse for not failing.
+- **A claim that the contract is wrong is adjudicated before it is accepted,
+  and not by you.** When a subagent reports that an acceptance criterion, a
+  threshold or a frozen test is wrong, dispatch a fresh `lead-po` on the
+  ADJUDICATE row of `models.conf` (the model from
+  `bash scripts/plan.sh models <id>`), as `/advance-story` says: it reproduces
+  the claim on different inputs, without reusing the claimant's code, and
+  answers upheld or rejected. An upheld claim's `## Regressions` or
+  `## Amendments` entry carries the record it writes,
+  ``**Adjudicated <id>:** `<model>` (resolved <name>), ...``; a rejected one
+  gets a line in `## Notes` and no entry. An entry that follows a diff-review
+  finding or a PR-feedback item routed `RED` or `AMEND` was adjudicated by that
+  dispatch, and its record names it. Running unattended is exactly when this
+  gets skipped, and it is the difference between a correct escalation and a
+  plausible excuse for not failing.
 - **A mutation table in the handoff is a claim until you run one.** When RED
   says the suite discriminates, run **one** mutation it predicts a count for —
   the one whose predicted catch is a single assertion — with
@@ -87,6 +101,11 @@ approval between phases is exactly when they get quietly reordered:
   do not retry it on a hunch, and do not treat it as a code defect. The path —
   a PO decision recorded in the story, REVIEW with the gate *pending CI*, DONE
   only once the PR's CI log for it is quoted — is in `/advance-story`.
+- **PLANNED → RED is a `lead-po` dispatch on the PLANNED row**, briefed with
+  advance-story's checklist, not work you do inline. It cannot ask the user
+  anything, so its questions come back to you and you put them to the user;
+  read the `Contract`, `Deferred verifications` and `Model guidance` it wrote,
+  and record the model it resolved to, before you commit at PLANNED.
 - **PLANNED → RED pins the `## Contract` and lists the callers of every changed
   signature.** RED cannot find those callers itself: the old signature still
   exists during RED, so they still compile and never appear in its typecheck.

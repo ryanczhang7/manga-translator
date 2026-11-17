@@ -1,6 +1,6 @@
 ---
 description: Audit the code for security defects with Cloudflare's vendored security-audit skill (optional, on request)
-model: fable
+model: opus
 argument-hint: [path | subsystem | <ref>..<ref>]
 ---
 
