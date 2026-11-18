@@ -80,6 +80,7 @@ hook* here needs one, sized from a CI log rather than from this machine.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable, Sequence
 from io import BytesIO
 from pathlib import Path
 
@@ -89,10 +90,12 @@ from numpy.typing import NDArray
 from PIL import Image
 from test_ocr_session import _GROUND_TRUTH, _accuracy, _normalised
 
+import mangatl.clean.mask as mask_module
 from mangatl.clean.mask import erase_mask
 from mangatl.cli import main
 from mangatl.compose import DETECTOR_FILENAME, INPAINTER_FILENAME, OCR_SUBDIR
 from mangatl.domain.reading_order import sort_regions
+from mangatl.domain.region import RawRegion
 from mangatl.ocr.page import OCR_MIN_ACCURACY
 from mangatl.ocr.session import DECODER_FILENAME, ENCODER_FILENAME, VOCAB_FILENAME
 from mangatl.store.project import open_project, project_dir_for
@@ -491,6 +494,17 @@ def _decoded(image_bytes: bytes) -> NDArray[np.uint8]:
         return np.asarray(image.convert("RGB"), dtype=np.uint8)
 
 
+def _grown_erase_mask(regions: Sequence[RawRegion], rgb: NDArray[np.uint8]) -> NDArray[np.bool_]:
+    """MT-152 C-5: `erase_mask(regions, size, source_grey(rgb))`, as the composed
+    cleaner computes it. `source_grey` is read late so the module collects before
+    GREEN."""
+    source_grey = getattr(mask_module, "source_grey", None)
+    assert callable(source_grey), "mangatl.clean.mask.source_grey does not exist (MT-152 C-2)"
+    height, width = rgb.shape[:2]
+    grow: Callable[..., NDArray[np.bool_]] = erase_mask
+    return grow(regions, (width, height), source_grey(rgb))
+
+
 def test_every_page_has_a_cleaned_image_that_changed_only_inside_its_erase_mask(
     completed_run: int, chapter_dir: Path
 ) -> None:
@@ -499,7 +513,9 @@ def test_every_page_has_a_cleaned_image_that_changed_only_inside_its_erase_mask(
     Every page of the run has a `cleaned_page` row whose decoded size is the
     page's `(width, height)`. For every page with regions, the decoded cleaned
     image equals the decoded source **exactly** outside
-    `erase_mask(read_regions(ordinal), size)` - MT-019 AC-4, surviving the
+    `erase_mask(read_regions(ordinal), size, source_grey(source))` - the mask
+    the composed cleaner computes since MT-152 (C-5), grown into the glyphs it
+    cuts; with two arguments real pages fail it - MT-019 AC-4, surviving the
     composed cleaner's PNG encode (DV-8 turns this red with a JPEG encode) -
     and differs from it somewhere inside, so the real inpainter ran.
 
@@ -533,7 +549,7 @@ def test_every_page_has_a_cleaned_image_that_changed_only_inside_its_erase_mask(
             if not np.array_equal(cleaned, source):
                 findings.append(f"{filename}: no regions, but the cleaned image differs")
             continue
-        mask = erase_mask(regions[int(ordinal)], size)
+        mask = _grown_erase_mask(regions[int(ordinal)], source)
         differs = (cleaned != source).any(axis=2)
         outside = int(np.count_nonzero(differs & ~mask))
         inside = int(np.count_nonzero(differs & mask))

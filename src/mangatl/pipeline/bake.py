@@ -17,8 +17,9 @@ for the line-length rule.)
 outside the bake area, it is not counted in `regions_empty`, and wherever the
 stored cleaned image erased it (the image's `erased` set says so - it was
 removed after the page was cleaned) the source's pixels are pasted back over
-its own dilated erase mask, minus every included region's. A region excluded
-before the clean was never erased, so there is nothing to put back.
+its own erase mask (grown over the glyphs it cuts and dilated, MT-152), minus
+every included region's. A region excluded before the clean was never erased,
+so there is nothing to put back.
 
 English is fitted into the **bubble's interior** found on the cleaned page
 (`typeset.interior.bubble_interior`, MT-123), which is the region's polygon
@@ -61,7 +62,7 @@ from numpy.typing import NDArray
 from PIL import Image
 
 from mangatl.app_paths import settings_path
-from mangatl.clean.mask import erase_mask
+from mangatl.clean.mask import erase_mask, source_grey
 from mangatl.domain.line import Line, effective_text
 from mangatl.domain.region import RawRegion, included
 from mangatl.store.lines import read_review_lines
@@ -305,12 +306,14 @@ def _restore_excluded(
 ) -> NDArray[np.uint8]:
     """A copy of `cleaned` with the source put back wherever an excluded region
     was erased (MT-119 C-3): for each region with `excluded is not None` and
-    index in `erased`, its own `erase_mask([region], size)` - dilation included
-    - minus `erase_mask(included(page_regions), size)`. An included region's
+    index in `erased`, its own grown `erase_mask([region], size, grey)` -
+    growth over the glyphs it cuts and dilation included (MT-152) - minus
+    `erase_mask(included(page_regions), size, grey)`, `grey` being
+    `source_grey(source)`, the page the cleaner grew by. An included region's
     erased pixels are never restored (two bubbles 2 px apart share a band).
     Nothing to do returns `cleaned` unchanged.
 
-    Dilation distributes over union, so one region's mask is exactly its
+    Growth and dilation distribute over union, so one region's mask is exactly its
     contribution to the page's (MT-019 C-3); outside it the cleaner touched
     nothing, so after the paste the region's whole polygon is the source."""
     restore = [
@@ -321,10 +324,11 @@ def _restore_excluded(
     if not restore:
         return cleaned
     width, height = size
+    grey = source_grey(source)
     paste = np.zeros((height, width), dtype=bool)
     for region in restore:
-        paste |= erase_mask([region], size)
-    paste &= ~erase_mask(included(page_regions), size)
+        paste |= erase_mask([region], size, grey)
+    paste &= ~erase_mask(included(page_regions), size, grey)
     restored = cleaned.copy()
     restored[paste] = source[paste]
     return restored

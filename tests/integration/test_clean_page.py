@@ -21,9 +21,11 @@ left, the first rightmost, pitch `round(1.25 * size)`; the block centred in the
 source rect with integer division.
 
 **The pipeline under test is production's:** PNG bytes ->
-`detect_page_regions(load_detector(...))` -> `erase_mask(all regions, (W, H))` ->
-`clean_page(composite, mask, load_inpainter(...))`. Every region on the page is
-cleaned; only the metric is local.
+`detect_page_regions(load_detector(...))` -> `erase_mask(all regions, (W, H),
+source_grey(composite))` -> `clean_page(composite, mask, load_inpainter(...))`.
+Every region on the page is cleaned; only the metric is local. The page is
+passed to `erase_mask` since MT-152 (C-5), as `clean_page_image` passes it, so
+the mask the cleaner may touch is the one grown into cut glyphs.
 
 **The metrics are C-9's, unchanged.** AC-6: mean absolute residual over the
 pixels the rendered text changed (`F`), all three channels, against the
@@ -65,7 +67,7 @@ every hook here needs one too.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -76,6 +78,7 @@ import pytest
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
 
+import mangatl.clean.mask as mask_module
 from mangatl.clean.inpaint import INPAINT_MAX_RESIDUAL, TONE_VARIANCE_TOLERANCE, clean_page
 from mangatl.clean.mask import erase_mask
 from mangatl.clean.session import (
@@ -86,6 +89,7 @@ from mangatl.clean.session import (
 )
 from mangatl.detect.page import detect_page_regions
 from mangatl.detect.session import DetectorSession, load_detector
+from mangatl.domain.region import RawRegion
 
 pytestmark = pytest.mark.gpu
 
@@ -188,6 +192,16 @@ def _union(masks: Sequence[bytes], size: tuple[int, int]) -> NDArray[np.bool_]:
     return union
 
 
+def _grown_erase_mask(regions: Sequence[RawRegion], rgb: NDArray[np.uint8]) -> NDArray[np.bool_]:
+    """MT-152 C-5: `erase_mask(regions, size, source_grey(rgb))`, as production
+    computes it. `source_grey` is read late so the module collects before GREEN."""
+    source_grey = getattr(mask_module, "source_grey", None)
+    assert callable(source_grey), "mangatl.clean.mask.source_grey does not exist (MT-152 C-2)"
+    height, width = rgb.shape[:2]
+    grow: Callable[..., NDArray[np.bool_]] = erase_mask
+    return grow(regions, (width, height), source_grey(rgb))
+
+
 def _rect_mask(shape: tuple[int, int], rect: tuple[int, int, int, int]) -> NDArray[np.bool_]:
     x, y, w, h = rect
     mask = np.zeros(shape, dtype=bool)
@@ -217,7 +231,7 @@ def fixtures(detector: DetectorSession, inpainter: InpaintSession) -> dict[str, 
         height, width = reference.shape[:2]
         composite = _render(reference, rect, columns, size)
         regions = detect_page_regions(detector, _png(composite))
-        erase = erase_mask(regions, (width, height))
+        erase = _grown_erase_mask(regions, composite)
         cleaned = clean_page(composite, erase, inpainter)
         out[key] = _Fixture(
             name=name,

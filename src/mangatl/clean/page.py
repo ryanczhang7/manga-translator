@@ -6,7 +6,8 @@ a `pipeline.clean_stage.PageCleaner`, the pattern of
 the session first, and the decode belonging to the adapter, so that `pipeline`
 handles bytes and never imports numpy, PIL or the inference runtime.
 
-Four steps and nothing else: decode, MT-019's `erase_mask`, MT-019's
+Four steps and nothing else: decode, MT-019's `erase_mask` (grown over the
+glyphs it cuts by the page's `source_grey`, MT-152), MT-019's
 `clean_page`, encode. **The encode is PNG, never JPEG**: MT-019 AC-4's byte
 identity outside the mask has to survive it, and a lossy encode would move
 every pixel of the page the cleaner did not touch.
@@ -22,7 +23,7 @@ from numpy.typing import NDArray
 from PIL import Image
 
 from mangatl.clean.inpaint import clean_page
-from mangatl.clean.mask import erase_mask
+from mangatl.clean.mask import erase_mask, source_grey
 from mangatl.clean.session import InpaintSession
 from mangatl.domain.region import RawRegion
 
@@ -40,7 +41,7 @@ def clean_page_image(
     """
     page = _decoded_page(image_bytes)
     height, width = page.shape[:2]
-    mask = erase_mask(regions, (width, height))
+    mask = erase_mask(regions, (width, height), source_grey(page))
     cleaned = clean_page(page, mask, session)
     buffer = BytesIO()
     Image.fromarray(cleaned, mode="RGB").save(buffer, format="PNG")
