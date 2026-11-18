@@ -51,6 +51,7 @@ from _bake_world import Spec
 from numpy.typing import NDArray
 from PIL import Image, JpegImagePlugin
 
+import mangatl.clean.inpaint as inpaint_module
 import mangatl.clean.mask as mask_module
 import mangatl.pipeline.bake as bake_module
 from mangatl.clean.page import clean_page_image
@@ -1130,6 +1131,7 @@ def _bake_cut_glyph(
     the clean, or still included - with no proposal, and bake the chapter."""
     for name, value in _GLYPH_CONSTANTS.items():
         monkeypatch.setattr(mask_module, name, value, raising=False)
+    monkeypatch.setattr(inpaint_module, "FLAT_MAX_SPREAD", -1, raising=False)  # MT-153 C-5
     source = _cut_glyph_source()
     source_bytes = world.encode(source, "PNG")
     region = _cut_glyph_region()
@@ -1255,6 +1257,7 @@ def test_a_region_excluded_after_the_clean_never_restores_a_glyph_an_included_re
     does not cover - the pixels an ungrown subtraction would put back."""
     for name, value in _GLYPH_CONSTANTS.items():
         monkeypatch.setattr(mask_module, name, value, raising=False)
+    monkeypatch.setattr(inpaint_module, "FLAT_MAX_SPREAD", -1, raising=False)  # MT-153 C-5
     a_grown = _cut_glyph_grown()
     a_ungrown = _dilated([_CUT_MASK])
     b_grown = _dilated([_CUT_MASK_B, _CUT_GLYPH])
