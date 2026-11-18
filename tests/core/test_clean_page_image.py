@@ -20,21 +20,30 @@ moves pixels: JPEG on a uniform page could round-trip exactly and hide DV-8's
 mutation. The lossless test below is the one DV-8 (`format="PNG"` ->
 `format="JPEG"`) must turn red.
 
+**MT-152 C-5: the oracle passes the page.** Production now calls
+`erase_mask(regions, size, source_grey(page))`, so every oracle here does too
+(`_page_erase_mask`). Two tests at the end pin that it does, on pages where the
+difference is visible: a glyph the mask cuts is erased whole, and a coloured
+glyph is judged by PIL's luma, C-2's one conversion.
+
 **Timing.** No `pytest-timeout` in this project. Every page is 64x48 and every
 component takes the native path, one 512x512 float call each.
 """
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from io import BytesIO
 
+import cv2
 import numpy as np
 import pytest
 from numpy.typing import NDArray
 from PIL import Image
 
+import mangatl.clean.mask as mask_module
 from mangatl.clean.inpaint import clean_page
 from mangatl.clean.mask import erase_mask
 from mangatl.clean.page import clean_page_image
@@ -81,6 +90,20 @@ def _encode(page: NDArray[np.uint8], fmt: str = "PNG", mode: str = "RGB") -> byt
 def _decode(image_bytes: bytes) -> NDArray[np.uint8]:
     with Image.open(BytesIO(image_bytes)) as image:
         return np.asarray(image.convert("RGB"), dtype=np.uint8)
+
+
+def _page_erase_mask(regions: Sequence[RawRegion], rgb: NDArray[np.uint8]) -> NDArray[np.bool_]:
+    """MT-152 C-5: the oracle's erase mask is the one production now computes,
+    `erase_mask(regions, size, source_grey(page))`. Both new names are read late,
+    so this file imports before GREEN and each oracle test fails on an assertion."""
+    source_grey = getattr(mask_module, "source_grey", None)
+    assert callable(source_grey), "mangatl.clean.mask.source_grey does not exist (MT-152 C-2)"
+    assert "page" in inspect.signature(erase_mask).parameters, (
+        "erase_mask takes no `page` argument (MT-152 C-1)"
+    )
+    height, width = rgb.shape[:2]
+    grow: Callable[..., NDArray[np.bool_]] = erase_mask
+    return grow(regions, (width, height), source_grey(rgb))
 
 
 def _ring(x0: int, y0: int, x1: int, y1: int) -> tuple[tuple[int, int], ...]:
@@ -130,7 +153,7 @@ def test_the_cleaned_page_is_mt019s_clean_page_of_the_decoded_source_and_its_era
 
     cleaned = clean_page_image(session, _encode(page), regions)
 
-    expected = clean_page(page, erase_mask(regions, (_WIDTH, _HEIGHT)), _InvertingSession())
+    expected = clean_page(page, _page_erase_mask(regions, page), _InvertingSession())
     assert np.array_equal(_decode(cleaned), expected), (
         "the composed cleaner's output is not MT-019's clean_page of the decoded"
         " page and the erase mask of its regions"
@@ -158,7 +181,7 @@ def test_every_pixel_outside_the_erase_mask_survives_the_encode_byte_for_byte(
     fake guarantees a difference at every pixel - the control that the
     comparison is not between two copies of the source. DV-8 turns this red."""
     page = _coded_page()
-    mask = erase_mask(regions, (_WIDTH, _HEIGHT))
+    mask = _page_erase_mask(regions, page)
 
     decoded = _decode(clean_page_image(_InvertingSession(), _encode(page), regions))
 
@@ -183,7 +206,7 @@ def test_a_greyscale_source_page_is_cleaned_as_rgb(
 
     cleaned = clean_page_image(_InvertingSession(), source, regions)
 
-    expected = clean_page(as_rgb, erase_mask(regions, (_WIDTH, _HEIGHT)), _InvertingSession())
+    expected = clean_page(as_rgb, _page_erase_mask(regions, as_rgb), _InvertingSession())
     assert np.array_equal(_decode(cleaned), expected)
 
 
@@ -198,7 +221,7 @@ def test_a_jpeg_source_page_is_cleaned_from_its_decoded_pixels(
     cleaned = clean_page_image(_InvertingSession(), source, regions)
 
     expected = clean_page(
-        decoded_source, erase_mask(regions, (_WIDTH, _HEIGHT)), _InvertingSession()
+        decoded_source, _page_erase_mask(regions, decoded_source), _InvertingSession()
     )
     assert np.array_equal(_decode(cleaned), expected)
 
@@ -222,3 +245,87 @@ def test_every_model_call_is_c2s_fixed_512_input(regions: tuple[RawRegion, ...])
     clean_page_image(session, _encode(_coded_page()), regions)
 
     assert session.shapes == [(1, 3, 512, 512)] * 2
+
+
+# -- MT-152: the composed cleaner passes the page --------------------------------
+
+#: C-6's provisional values, set (never read) so these tests hold for any
+#: derivation GREEN lands on. `raising=False`: before GREEN they do not exist.
+_GLYPH_CONSTANTS = {
+    "GLYPH_INK_GREY": 128,
+    "GLYPH_MAX_SIDE_PX": 80,
+    "GLYPH_RING_PX": 2,
+    "GLYPH_PAPER_GREY": 200,
+    "GLYPH_PAPER_RING_FRACTION": 0.8,
+    "MASK_DILATION_PX": 2,
+}
+
+#: A 10x15 glyph on the 64x48 page; the region's mask covers its top 60 % (rows
+#: 10..18 of 10..24) and 2 px of paper round it.
+_GLYPH = (20, 10, 30, 25)
+_GLYPH_TOP_60 = (18, 8, 32, 19)
+
+
+def _set_glyph_constants(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, value in _GLYPH_CONSTANTS.items():
+        monkeypatch.setattr(mask_module, name, value, raising=False)
+
+
+def _cut_glyph_page(colour: tuple[int, int, int]) -> NDArray[np.uint8]:
+    page = np.full((_HEIGHT, _WIDTH, 3), 255, dtype=np.uint8)
+    x0, y0, x1, y1 = _GLYPH
+    page[y0:y1, x0:x1] = colour
+    return page
+
+
+def _expected_grown() -> NDArray[np.bool_]:
+    """`(mask | whole glyph)` dilated by 2, from rectangles and C-3's element -
+    never from `erase_mask`."""
+    grown = np.zeros((_HEIGHT, _WIDTH), dtype=np.uint8)
+    for x0, y0, x1, y1 in (_GLYPH, _GLYPH_TOP_60):
+        grown[y0:y1, x0:x1] = 1
+    disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    return np.asarray(cv2.dilate(grown, disk), dtype=bool)
+
+
+@pytest.mark.parametrize(
+    ("colour", "why"),
+    [
+        pytest.param((0, 0, 0), "black", id="black"),
+        # PIL's L of magenta is 105 (ink under 128); a channel mean is 170 (not ink).
+        pytest.param(
+            (255, 0, 255), "magenta, ink by PIL's luma and not by a channel mean", id="magenta"
+        ),
+    ],
+)
+def test_the_composed_cleaner_erases_a_glyph_the_mask_cuts_whole(
+    colour: tuple[int, int, int],
+    why: str,
+    one_bit_png: Callable[..., bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**MT-152 AC-1 through `clean_page_image`** (the clean half of AC-5 and
+    AC-6): the cleaner passes `source_grey(page)` to `erase_mask`, so the
+    pixels it changes are exactly the grown mask - the glyph's unmasked lower
+    40 % included - and nothing outside it. The inverting fake changes every
+    pixel it is handed, so "changed" reads the erase mask off the output. A
+    cleaner that passes no page, or converts to grey any other way than C-2's,
+    leaves the lower part as drawn."""
+    _set_glyph_constants(monkeypatch)
+    page = _cut_glyph_page(colour)
+    region = RawRegion(
+        polygon=_ring(16, 6, 34, 28),
+        mask=one_bit_png(_WIDTH, _HEIGHT, [_GLYPH_TOP_60]),
+        confidence=0.9,
+        kind="box",
+    )
+
+    cleaned = _decode(clean_page_image(_InvertingSession(), _encode(page), [region]))
+
+    changed = (cleaned != page).any(axis=2)
+    expected = _expected_grown()
+    missing, extra = int((expected & ~changed).sum()), int((changed & ~expected).sum())
+    assert (missing, extra) == (0, 0), (
+        f"{why}: {missing} pixels of the grown erase mask were not cleaned and {extra}"
+        " outside it were; the cleaner must erase the cut glyph whole"
+    )

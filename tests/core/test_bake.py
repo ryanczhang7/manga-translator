@@ -51,7 +51,9 @@ from _bake_world import Spec
 from numpy.typing import NDArray
 from PIL import Image, JpegImagePlugin
 
+import mangatl.clean.mask as mask_module
 import mangatl.pipeline.bake as bake_module
+from mangatl.clean.page import clean_page_image
 from mangatl.domain.line import effective_text
 from mangatl.domain.page import order_filenames
 from mangatl.domain.region import RawRegion
@@ -1048,3 +1050,169 @@ def test_the_same_region_included_and_without_a_proposal_is_counted_empty(
     baked = _bake_ab(tmp_path, monkeypatch, b_excluded=False, cleaner_erased="AB")
 
     assert baked.report.regions_empty == 1
+
+
+# -- MT-152 AC-5, AC-6: the bake restores the same grown mask the clean erased ----
+#
+# One 160x120 white page with one black 20x30 glyph; the one `box` region's mask
+# covers the glyph's top 60 % (rows 40..57 of 40..69) and 3 px of paper. The
+# page is cleaned through the REAL `clean_page_image`, with an inverting fake
+# session, so the stored cleaned page differs from the source at every pixel
+# the clean erased and nowhere else. The grown mask is built here from the
+# rectangles and the pinned radius - never from `erase_mask`.
+#
+# The glyph constants are set on `mangatl.clean.mask` (C-6's provisional
+# values; `raising=False`, so the file runs before GREEN adds them). The bake
+# reads them there at call time, as the clean does (MT-152 C-1).
+
+_GLYPH_CONSTANTS = {
+    "GLYPH_INK_GREY": 128,
+    "GLYPH_MAX_SIDE_PX": 80,
+    "GLYPH_RING_PX": 2,
+    "GLYPH_PAPER_GREY": 200,
+    "GLYPH_PAPER_RING_FRACTION": 0.8,
+}
+_CUT_GLYPH = (70, 40, 90, 70)
+_CUT_MASK = (67, 37, 93, 58)
+_CUT_BOX = (60, 30, 100, 80)
+
+
+class _InvertingSession:
+    """An `InpaintSession` returning `255 - 255 * image` in model scale: every
+    pixel it is handed comes back different (`255 - v == v` has no integer
+    solution), so the cleaned page differs from the source exactly where the
+    cleaner erased."""
+
+    def run(self, image: NDArray[np.float32], mask: NDArray[np.float32]) -> NDArray[np.float32]:
+        return (255.0 - 255.0 * image).astype(np.float32)
+
+    def get_providers(self) -> Sequence[str]:
+        return ["CPUExecutionProvider"]
+
+
+def _cut_glyph_source() -> NDArray[np.uint8]:
+    source = np.full((world.PAGE_H, world.PAGE_W, 3), 255, dtype=np.uint8)
+    x0, y0, x1, y1 = _CUT_GLYPH
+    source[y0:y1, x0:x1] = 0
+    return source
+
+
+def _cut_glyph_grown() -> NDArray[np.bool_]:
+    """`(mask | whole glyph)` dilated by `PINNED_DILATION_PX`: MT-152 AC-1's mask."""
+    grown = np.zeros((world.PAGE_H, world.PAGE_W), dtype=np.uint8)
+    for x0, y0, x1, y1 in (_CUT_GLYPH, _CUT_MASK):
+        grown[y0:y1, x0:x1] = 1
+    side = 2 * world.PINNED_DILATION_PX + 1
+    disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (side, side))
+    return np.asarray(cv2.dilate(grown, disk), dtype=bool)
+
+
+def _cut_glyph_region() -> RawRegion:
+    return RawRegion(
+        polygon=world.ring(*_CUT_BOX),
+        mask=world.mask_png(world.PAGE_W, world.PAGE_H, [_CUT_MASK]),
+        confidence=0.9,
+        kind="box",
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class _CutGlyphBake:
+    source: NDArray[np.uint8]
+    cleaned: NDArray[np.uint8]  # what `clean_page_image` stored, decoded
+    out: NDArray[np.uint8]  # the baked file, decoded
+
+
+def _bake_cut_glyph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, excluded: bool
+) -> _CutGlyphBake:
+    """Clean the page with the region included, then store it - excluded after
+    the clean, or still included - with no proposal, and bake the chapter."""
+    for name, value in _GLYPH_CONSTANTS.items():
+        monkeypatch.setattr(mask_module, name, value, raising=False)
+    source = _cut_glyph_source()
+    source_bytes = world.encode(source, "PNG")
+    region = _cut_glyph_region()
+    cleaned_bytes = clean_page_image(_InvertingSession(), source_bytes, [region])
+    stored = dataclasses.replace(region, excluded="user") if excluded else region
+    source_dir = tmp_path / "scans"
+    _write_source(source_dir, [("p1.png", source_bytes)])
+    with _new_project(source_dir) as project:
+        world.seed_page(project, 0, [stored], [Spec()], cleaned_bytes, erased=range(1))
+    output_dir = world.output_dir_for(source_dir)
+    with _open(source_dir) as project:
+        bake_chapter(project, output_dir)
+    return _CutGlyphBake(
+        source=source,
+        cleaned=world.decode_rgb(cleaned_bytes),
+        out=world.decode_rgb((output_dir / "p1.png").read_bytes()),
+    )
+
+
+def test_the_cut_glyph_page_is_cleaned_over_the_whole_grown_mask_and_nowhere_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control AC-5 and AC-6 rest on (MT-152): the stored cleaned page
+    differs from the source at EVERY pixel of the grown mask - the glyph's
+    unmasked lower part included - and at none outside it. So "equals the
+    source" and "equals the cleaned page" are different observations on every
+    grown pixel."""
+    grown = _cut_glyph_grown()
+
+    baked = _bake_cut_glyph(tmp_path, monkeypatch, excluded=False)
+
+    differs = np.any(baked.cleaned != baked.source, axis=-1)
+    missing, extra = int((grown & ~differs).sum()), int((differs & ~grown).sum())
+    assert (missing, extra) == (0, 0), (
+        f"{missing} of {int(grown.sum())} grown pixels were not erased by clean_page_image"
+        f" and {extra} outside the grown mask were"
+    )
+
+
+def test_a_region_excluded_after_the_clean_has_the_source_put_back_over_its_grown_mask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**MT-152 AC-5**: cleaned with the region, then excluded, the baked page
+    equals the source on every pixel of the grown mask - the grown part of the
+    glyph included, because `_restore_excluded` computes the same grown mask
+    from the same scan. Nothing else on the page was touched, so the whole
+    baked page is the source.
+
+    The Given is checked first: the stored page erased the whole grown mask.
+    Without it the assertion below holds trivially - a clean that never grew
+    leaves nothing grown for the restore to miss."""
+    grown = _cut_glyph_grown()
+
+    baked = _bake_cut_glyph(tmp_path, monkeypatch, excluded=True)
+
+    erased = int(np.any(baked.cleaned != baked.source, axis=-1)[grown].sum())
+    assert erased == int(grown.sum()), (
+        f"the Given: clean_page_image erased {erased} of {int(grown.sum())} grown pixels"
+    )
+    wrong = _mismatches(baked.out, baked.source, grown)
+    assert wrong == 0, (
+        f"{wrong} of {int(grown.sum())} pixels of the grown erase mask are not the source's"
+        " after the region was excluded; the restore must use the grown mask"
+    )
+    everywhere = np.ones((world.PAGE_H, world.PAGE_W), dtype=bool)
+    assert _mismatches(baked.out, baked.source, everywhere) == 0
+
+
+def test_a_region_still_included_keeps_the_cleaned_page_over_its_grown_mask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**MT-152 AC-6**: cleaned and baked with the region included, the baked
+    page equals the CLEANED page on the grown pixels, and differs from the
+    source on every one of them: no part of the glyph is put back."""
+    grown = _cut_glyph_grown()
+
+    baked = _bake_cut_glyph(tmp_path, monkeypatch, excluded=False)
+
+    assert _mismatches(baked.out, baked.cleaned, grown) == 0, (
+        "the baked page is not the cleaned page over the grown mask"
+    )
+    still_source = int(grown.sum()) - _mismatches(baked.out, baked.source, grown)
+    assert still_source == 0, (
+        f"{still_source} of {int(grown.sum())} grown pixels are the source's on the baked"
+        " page; the glyph was put back, or never erased"
+    )
