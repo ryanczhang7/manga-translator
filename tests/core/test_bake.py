@@ -1216,3 +1216,82 @@ def test_a_region_still_included_keeps_the_cleaned_page_over_its_grown_mask(
         f"{still_source} of {int(grown.sum())} grown pixels are the source's on the baked"
         " page; the glyph was put back, or never erased"
     )
+
+
+# -- MT-152 R-1: the restore subtracts the included regions' GROWN mask ---------
+#
+# The cut-glyph page with a second `box` region B below A, whose mask covers the
+# glyph's unmasked lower part (rows 64..69) and paper under it. Both are handed
+# to the clean, so the clean erases the whole glyph; B is then excluded. B's own
+# grown mask covers the whole glyph too, so the restore must subtract A's GROWN
+# mask - A's mask alone, ungrown, leaves the glyph's lower part in the paste and
+# A's erased glyph is put back.
+
+_CUT_MASK_B = (72, 64, 88, 78)
+_CUT_BOX_B = (64, 60, 96, 100)
+
+
+def _dilated(rects: Sequence[tuple[int, int, int, int]]) -> NDArray[np.bool_]:
+    """The union of `rects` dilated by `PINNED_DILATION_PX`, never `erase_mask`."""
+    filled = np.zeros((world.PAGE_H, world.PAGE_W), dtype=np.uint8)
+    for x0, y0, x1, y1 in rects:
+        filled[y0:y1, x0:x1] = 1
+    side = 2 * world.PINNED_DILATION_PX + 1
+    disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (side, side))
+    return np.asarray(cv2.dilate(filled, disk), dtype=bool)
+
+
+def test_a_region_excluded_after_the_clean_never_restores_a_glyph_an_included_region_grew_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**MT-152 R-1** (C-3, C-5): A cuts the glyph, B covers its lower part;
+    both are cleaned, B is excluded after the clean. The baked page equals the
+    CLEANED page on every pixel of A's grown mask: what is subtracted from B's
+    paste is the included regions' grown mask, from the same scan, not their
+    ungrown one.
+
+    The Given is checked first: the clean erased the whole of A's grown mask,
+    and B's grown mask reaches pixels of A's grown mask that A's ungrown mask
+    does not cover - the pixels an ungrown subtraction would put back."""
+    for name, value in _GLYPH_CONSTANTS.items():
+        monkeypatch.setattr(mask_module, name, value, raising=False)
+    a_grown = _cut_glyph_grown()
+    a_ungrown = _dilated([_CUT_MASK])
+    b_grown = _dilated([_CUT_MASK_B, _CUT_GLYPH])
+    source = _cut_glyph_source()
+    source_bytes = world.encode(source, "PNG")
+    region_a = _cut_glyph_region()
+    region_b = RawRegion(
+        polygon=world.ring(*_CUT_BOX_B),
+        mask=world.mask_png(world.PAGE_W, world.PAGE_H, [_CUT_MASK_B]),
+        confidence=0.9,
+        kind="box",
+    )
+    cleaned_bytes = clean_page_image(_InvertingSession(), source_bytes, [region_a, region_b])
+    cleaned = world.decode_rgb(cleaned_bytes)
+
+    erased = int(np.any(cleaned != source, axis=-1)[a_grown].sum())
+    assert erased == int(a_grown.sum()), (
+        f"the Given: clean_page_image erased {erased} of {int(a_grown.sum())} of A's grown pixels"
+    )
+    at_stake = int((b_grown & a_grown & ~a_ungrown).sum())
+    assert at_stake > 0, "the Given: B's grown mask reaches none of A's grown part"
+
+    stored_b = dataclasses.replace(region_b, excluded="user")
+    source_dir = tmp_path / "scans"
+    _write_source(source_dir, [("p1.png", source_bytes)])
+    with _new_project(source_dir) as project:
+        world.seed_page(
+            project, 0, [region_a, stored_b], [Spec(), Spec()], cleaned_bytes, erased=range(2)
+        )
+    output_dir = world.output_dir_for(source_dir)
+    with _open(source_dir) as project:
+        bake_chapter(project, output_dir)
+    out = world.decode_rgb((output_dir / "p1.png").read_bytes())
+
+    wrong = _mismatches(out, cleaned, a_grown)
+    assert wrong == 0, (
+        f"{wrong} of {int(a_grown.sum())} pixels of included region A's grown erase mask"
+        f" are not the cleaned page's after B was excluded ({at_stake} lie in A's grown"
+        " part only); the restore must subtract the included regions' grown mask"
+    )
