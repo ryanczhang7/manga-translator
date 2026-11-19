@@ -323,3 +323,53 @@ def test_a_balloon_open_into_light_art_is_not_found_whole() -> None:
     found = bubble_interior(page.grey, polygon, "bubble")
 
     _assert_no_vertex_outside_the_window(found, polygon)
+
+
+# -- MT-154 R-1: AC-3 on the other three page edges; the hull floor -------------------
+
+
+@pytest.mark.parametrize("edge", ["top", "bottom", "left"])
+def test_a_balloon_cut_by_another_page_edge_still_falls_back_inside_the_window(
+    edge: str,
+) -> None:
+    page, polygon = bw.edge_cut_balloon(edge)
+    region = bw.fill(polygon, TALL)
+    assert not (region & ~page.interior).any(), "precondition: the region is inside the balloon"
+    _assert_the_window_cannot_decide(page, polygon)
+    flood = bw.plain_flood(page.grey, polygon)
+    # Fails clause 5b.1 only, and only on this edge.
+    assert bw.edges_touched(flood) == {edge}, (
+        f"precondition: the balloon's white must reach the {edge} edge and no other, "
+        f"reached {sorted(bw.edges_touched(flood))}"
+    )
+    assert bw.page_fraction(flood) <= bw.PINNED_INTERIOR_MAX_PAGE_FRACTION, (
+        f"precondition: fraction {bw.page_fraction(flood):.4f} must be within the limit"
+    )
+    assert bw.solidity(flood) >= 0.97, f"precondition: solidity {bw.solidity(flood):.4f}"
+
+    found = bubble_interior(page.grey, polygon, "bubble")
+
+    _assert_no_vertex_outside_the_window(found, polygon)
+
+
+def test_a_one_pixel_strip_whose_hull_has_no_area_still_returns_a_ring() -> None:
+    import cv2
+
+    page = bw.strip_page()
+    polygon = bw.STRIP_POLYGON
+    _assert_the_window_cannot_decide(page, polygon)
+    flood = bw.plain_flood(page.grey, polygon)
+    assert np.array_equal(flood, page.interior), "precondition: the flood is the strip"
+    assert int(flood.sum()) >= int(bw.fill(polygon, TALL).sum()), (
+        "precondition: the strip outweighs the region's fill, so rule 4 does not decide it"
+    )
+    assert not bw.touches_page_edge(flood), "precondition: the strip touches no page edge"
+    assert bw.page_fraction(flood) <= bw.PINNED_INTERIOR_MAX_PAGE_FRACTION
+    contours, _ = cv2.findContours(flood.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    assert len(contours) == 1, f"precondition: one external contour, got {len(contours)}"
+    raw_hull = float(cv2.contourArea(cv2.convexHull(contours[0])))
+    assert raw_hull == 0.0, f"precondition: the strip's raw hull area must be 0.0, got {raw_hull}"
+
+    found = bubble_interior(page.grey, polygon, "bubble")
+
+    _assert_is_a_ring(found)

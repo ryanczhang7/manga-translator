@@ -269,3 +269,78 @@ def centroid(mask: NDArray[np.bool_]) -> tuple[float, float]:
     """The mean `(x, y)` of the mask's pixels."""
     ys, xs = np.nonzero(mask)
     return float(xs.mean()), float(ys.mean())
+
+
+# -- MT-154 R-1: the other three page edges, and a zero-area hull --------------------
+#
+# AC-3's fixture cuts the balloon with the right page edge only, so clause 5b.1's
+# top, bottom and left checks went untested (diff review round 1, finding 2). These
+# pages cut the same closed balloon with each other edge by the same 81 px: the
+# outer edge would run past the page by 81 px, exactly as `EDGE_CUT_CX` does on the
+# right (1494 - 1413). Left is the right-edge page mirrored, which for the analytic
+# ellipse is `tall_balloon_page` centred on `TALL_W - 1 - EDGE_CUT_CX`; top and
+# bottom move the centre vertically instead, the region 41 px under the page edge
+# that cuts the balloon (as `TALL_REGION_TOP` is 41 px under the interior's top),
+# and bottom is top mirrored about the page's middle row.
+
+EDGE_OVERHANG_PX = (EDGE_CUT_CX + int(TALL_OUTER_A)) - (TALL_W - 1)  # 81
+#: The balloon centre for a balloon cut by the top edge, and its mirror.
+TOP_CUT_CY = int(TALL_OUTER_B) - EDGE_OVERHANG_PX  # 304: outer edge from y = -81
+BOTTOM_CUT_CY = TALL_H - 1 - TOP_CUT_CY  # 1695: outer edge to y = 2080
+EDGE_REGION_INSET = 41  # px between the cutting page edge and the region
+
+
+def _ellipse_at(cx: int, cy: int, a: float, b: float) -> NDArray[np.bool_]:
+    y, x = np.mgrid[0:TALL_H, 0:TALL_W]
+    return np.asarray(((x - cx) / a) ** 2 + ((y - cy) / b) ** 2 <= 1.0)
+
+
+def _closed_balloon_at(cx: int, cy: int) -> BubblePage:
+    inner = _ellipse_at(cx, cy, TALL_INNER_A, TALL_INNER_B)
+    outline = _ellipse_at(cx, cy, TALL_OUTER_A, TALL_OUTER_B) & ~inner
+    rgb = dark_texture(TALL_W, TALL_H)
+    rgb[inner] = 255
+    rgb[outline] = 0
+    return BubblePage(rgb, grey_of(rgb), inner, outline, np.zeros(TALL_SHAPE, dtype=bool))
+
+
+def edge_cut_balloon(edge: str) -> tuple[BubblePage, Ring]:
+    """AC-3's balloon cut by the page's `edge` ("top", "bottom" or "left") instead
+    of its right, with the 98 x 185 region inside it: `(page, polygon)`."""
+    x0 = TALL_CX - TALL_REGION_W // 2
+    if edge == "left":
+        centre_x = TALL_W - 1 - EDGE_CUT_CX
+        return tall_balloon_page(centre_x=centre_x), tall_polygon(centre_x)
+    if edge == "top":
+        y0 = EDGE_REGION_INSET
+        page = _closed_balloon_at(TALL_CX, TOP_CUT_CY)
+    elif edge == "bottom":
+        y0 = TALL_H - 1 - EDGE_REGION_INSET - TALL_REGION_H
+        page = _closed_balloon_at(TALL_CX, BOTTOM_CUT_CY)
+    else:
+        raise ValueError(f"no edge-cut balloon for edge {edge!r}")
+    return page, ring(x0, y0, x0 + TALL_REGION_W, y0 + TALL_REGION_H)
+
+
+def edges_touched(mask: NDArray[np.bool_]) -> set[str]:
+    """Which page edges the mask has a pixel on, by name."""
+    rows = {"top": mask[0, :], "bottom": mask[-1, :], "left": mask[:, 0], "right": mask[:, -1]}
+    return {name for name, line in rows.items() if bool(line.any())}
+
+
+#: Diff review round 1, finding 3: a 1 px tall white strip, 360 px long, on row
+#: `STRIP_Y` of the dark tall page, under a 15 x 20 region. Its external contour
+#: is a line, so its convex hull's area is 0.0 and 5b.3's ratio needs the floor.
+STRIP_Y = TALL_CY
+STRIP_X0, STRIP_LEN = TALL_CX - 180, 360  # x 527..886, off every edge
+STRIP_POLYGON: Ring = ring(TALL_CX - 7, STRIP_Y - 10, TALL_CX + 8, STRIP_Y + 10)
+
+
+def strip_page() -> BubblePage:
+    """The 1 px strip page; `interior` is the strip, `outline` empty."""
+    strip = np.zeros(TALL_SHAPE, dtype=bool)
+    strip[STRIP_Y, STRIP_X0 : STRIP_X0 + STRIP_LEN] = True
+    rgb = dark_texture(TALL_W, TALL_H)
+    rgb[strip] = 255
+    empty = np.zeros(TALL_SHAPE, dtype=bool)
+    return BubblePage(rgb, grey_of(rgb), strip, empty, empty)
