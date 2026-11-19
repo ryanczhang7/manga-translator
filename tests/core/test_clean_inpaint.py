@@ -1886,3 +1886,94 @@ def test_a_later_window_shows_an_earlier_flat_component_as_filled_paper() -> Non
     height, width = flat.shape
     seen = _seen(image)[:height, :width]
     _assert_filled_with(seen, flat, _WHITE_PAPER, "the flat hole as the model sees it")
+
+
+# -- R-1: a component that is not its bounding box ---------------------------------
+
+#: An L on the native page: a 100 x 20 bar along the top and a 20 x 100 bar
+#: down the left, so the bounding box (150, 100)-(250, 200) has an empty
+#: 80 x 80 corner at the bottom right. Every pixel of that corner is at least
+#: 21 px (in x or in y) from the component, past the reach of any ring up to
+#: C-6's 16, so its pixels are neither in the component nor in its ring.
+_L_TOP = (150, 100, 250, 120)
+_L_LEFT = (150, 100, 170, 200)
+_L_BBOX = (150, 100, 250, 200)
+
+#: (a)'s marker: the middle of the empty corner, 41 px from the L on both axes.
+_L_CORNER_MARKER = (210, 160)
+
+#: (b)'s dark pixel: one column right of the bounding box's bottom-right
+#: pixel (249, 199), which lies in the empty corner - so it is on the middle
+#: row of the element centred there at every radius >= 1 - and 80 px below
+#: the L's nearest pixel (249, 119).
+_L_BEYOND_CORNER = (250, 199)
+
+
+def _l_page(dark: tuple[int, int]) -> tuple[NDArray[np.uint8], NDArray[np.bool_]]:
+    """The native page with the L's ink inside both bars and one black pixel
+    at page `(x, y)` = `dark`, outside the mask."""
+    page = _paper_page(_NATIVE_SIZE)
+    _ink(page, _L_TOP)
+    _ink(page, _L_LEFT)
+    x, y = dark
+    page[y, x] = 0
+    mask = _mask(_NATIVE_SIZE, _L_TOP, _L_LEFT)
+    assert len(_components(mask)) == 1, "the Given: the L is one component"
+    assert not bool(mask[y, x]), "the Given: the dark pixel is outside the mask"
+    return page, mask
+
+
+def test_a_marker_in_an_l_shaped_holes_empty_corner_survives_the_flat_fill() -> None:
+    """C-2.6 "exactly its own pixels", C-8 / AC-6 "no pixel outside the erase
+    mask changes": on an L whose bounding box has an empty corner, a black
+    marker in that corner, beyond the ring's reach of the L, leaves the ring
+    all paper - so the L is filled with the median without the model - and the
+    marker comes back unchanged. A fill written over the bounding box instead
+    of the component paints the marker, and the rest of the corner, paper."""
+    ring_px = _shipped("FLAT_RING_PX")
+    page, mask = _l_page(_L_CORNER_MARKER)
+    x, y = _L_CORNER_MARKER
+    assert bool(_mask(_NATIVE_SIZE, _L_BBOX)[y, x]), "the Given: the marker is in the bbox"
+    ring = _flat_ring(mask, ring_px)
+    assert not bool(ring[y, x]), "the Given: the marker is off the ring"
+    assert _spread(page, ring) == 0, "the Given: the ring is all paper"
+    median = _lower_median(page, ring)
+    fake = FakeInpaintSession("constant")
+
+    result = clean_page(page, mask, fake)
+
+    assert len(fake.calls) == 0, f"{len(fake.calls)} calls for an L whose ring is all paper"
+    assert tuple(int(v) for v in result[y, x]) == (0, 0, 0), (
+        f"the marker in the L's empty corner became {tuple(int(v) for v in result[y, x])}:"
+        " the flat fill wrote outside the component, over its bounding box"
+    )
+    _assert_filled_with(result, mask, tuple(int(v) for v in median), "the L")
+    _assert_outside_untouched(result, page, mask)
+
+
+def test_ink_in_reach_of_an_l_shaped_holes_bounding_box_but_not_of_the_l_leaves_it_flat() -> None:
+    """C-2.1 "the component dilated by the elliptical element": the ring follows
+    the L's outline, not its bounding box. A black pixel one column past the
+    bounding box's empty corner is within the element's reach of that corner
+    and 80 px from the L, so the L's ring is still all paper: no model call,
+    the L filled with the median. A ring grown from the bounding box counts it,
+    and sends a flat hole to the model."""
+    ring_px = _shipped("FLAT_RING_PX")
+    page, mask = _l_page(_L_BEYOND_CORNER)
+    x, y = _L_BEYOND_CORNER
+    bbox_mask = _mask(_NATIVE_SIZE, _L_BBOX)
+    assert bool(_flat_ring(bbox_mask, ring_px)[y, x]), "the Given: in reach of the bbox"
+    ring = _flat_ring(mask, ring_px)
+    assert not bool(ring[y, x]), "the Given: beyond the L's reach"
+    assert _spread(page, ring) == 0, "the Given: the L's ring is all paper"
+    median = _lower_median(page, ring)
+    fake = FakeInpaintSession("constant")
+
+    result = clean_page(page, mask, fake)
+
+    assert len(fake.calls) == 0, (
+        f"{len(fake.calls)} calls: a dark pixel in reach of the L's bounding box but"
+        f" {_L_BEYOND_CORNER[1] - (_L_TOP[3] - 1)} px from the L counted as ring"
+    )
+    _assert_filled_with(result, mask, tuple(int(v) for v in median), "the L")
+    _assert_outside_untouched(result, page, mask)
