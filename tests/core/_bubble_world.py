@@ -158,3 +158,114 @@ def plain_flood(grey: NDArray[np.uint8], polygon: Sequence[tuple[int, int]]) -> 
 
 def touches_page_edge(mask: NDArray[np.bool_]) -> bool:
     return bool(mask[0, :].any() or mask[-1, :].any() or mask[:, 0].any() or mask[:, -1].any())
+
+
+# -- MT-154: a closed balloon larger than the window ---------------------------------
+#
+# MT-154 Contract C-4. A development-scan-sized page (1414 x 2000) holding one tall
+# closed balloon, 360 x 770 on its outline's outer edge, and a 98 x 185 region at
+# its top: the window (bbox grown by 1.0 x 185 per side) ends at y = 1030, far
+# above the balloon's bottom at y = 1385, so the flood is NOT strictly inside it
+# and today's clause 5a cannot accept it. Three controls vary that page so that
+# exactly one clause of the new 5b rejects each; their tests assert which, with
+# the arithmetic below and never with the module's.
+
+#: MT-154 Contract C-2, written out. Not imported: the test must disagree with an
+#: implementation that changed one.
+PINNED_INTERIOR_MIN_SOLIDITY = 0.96
+PINNED_INTERIOR_MAX_PAGE_FRACTION = 0.25
+
+TALL_W, TALL_H = 1414, 2000
+TALL_SHAPE = (TALL_H, TALL_W)
+TALL_CX, TALL_CY = 707, 1000
+TALL_OUTER_A, TALL_OUTER_B = 180.0, 385.0  # 360 x 770 on the outer edge
+TALL_INNER_A, TALL_INNER_B = TALL_OUTER_A - OUTLINE_PX, TALL_OUTER_B - OUTLINE_PX
+TALL_REGION_W, TALL_REGION_H = 98, 185
+TALL_REGION_TOP = 660  # 41 px under the interior's top (y = 619)
+
+#: AC-3: the balloon's centre moved right until the page's right edge cuts it
+#: (the outer edge would end at x = 1494, the page at x = 1413).
+EDGE_CUT_CX = TALL_W - 100
+
+#: AC-4: a closed white panel, half-open `(x0, y0, x1, y1)` interior, 1000 x 1000 =
+#: 0.354 of the page, with a 4 px outline and the AC-1 region inside it.
+PANEL_INTERIOR: world.Rect = (207, 600, 1207, 1600)
+
+#: AC-5: the balloon's outline opened on the right over rows `|y - 1200| < 30`, a
+#: white band through the gap, and a white rectangle of panel art beside it.
+ART_GAP_Y = 1200
+ART_RECT: world.Rect = (920, 1100, 1300, 1700)
+
+
+def tall_polygon(centre_x: int = TALL_CX) -> Ring:
+    """The 98 x 185 region at the top of the tall balloon centred on `centre_x`."""
+    x0 = centre_x - TALL_REGION_W // 2
+    return ring(x0, TALL_REGION_TOP, x0 + TALL_REGION_W, TALL_REGION_TOP + TALL_REGION_H)
+
+
+def _tall_ellipse(centre_x: int, a: float, b: float) -> NDArray[np.bool_]:
+    y, x = np.mgrid[0:TALL_H, 0:TALL_W]
+    return np.asarray(((x - centre_x) / a) ** 2 + ((y - TALL_CY) / b) ** 2 <= 1.0)
+
+
+def tall_balloon_page(*, centre_x: int = TALL_CX, open_into_art: bool = False) -> BubblePage:
+    """AC-1's tall closed balloon (centred on `centre_x`; `EDGE_CUT_CX` is AC-3's),
+    or with `open_into_art` AC-5's, opened into a white rectangle of panel art.
+    `interior` is the balloon's own white, clipped to the page; `band` is the
+    light that is not the balloon (the gap's band and the art)."""
+    inner = _tall_ellipse(centre_x, TALL_INNER_A, TALL_INNER_B)
+    outline = _tall_ellipse(centre_x, TALL_OUTER_A, TALL_OUTER_B) & ~inner
+    rgb = dark_texture(TALL_W, TALL_H)
+    rgb[inner] = 255
+    rgb[outline] = 0
+    band = np.zeros(TALL_SHAPE, dtype=bool)
+    if open_into_art:
+        y, x = np.mgrid[0:TALL_H, 0:TALL_W]
+        ax0, ay0, ax1, ay1 = ART_RECT
+        gap = (np.abs(y - ART_GAP_Y) < GAP_PX // 2) & (x >= centre_x) & (x < ax0)
+        art = (x >= ax0) & (x < ax1) & (y >= ay0) & (y < ay1)
+        band = np.asarray(gap | art) & ~inner
+        rgb[band] = 255
+        outline = outline & ~band
+    return BubblePage(rgb, grey_of(rgb), inner, outline, band)
+
+
+def white_panel_page() -> BubblePage:
+    """AC-4's closed white panel, `PANEL_INTERIOR` inside a 4 px outline."""
+    x0, y0, x1, y1 = PANEL_INTERIOR
+    inner = np.zeros(TALL_SHAPE, dtype=bool)
+    inner[y0:y1, x0:x1] = True
+    outer = np.zeros(TALL_SHAPE, dtype=bool)
+    outer[y0 - OUTLINE_PX : y1 + OUTLINE_PX, x0 - OUTLINE_PX : x1 + OUTLINE_PX] = True
+    outline = outer & ~inner
+    rgb = dark_texture(TALL_W, TALL_H)
+    rgb[inner] = 255
+    rgb[outline] = 0
+    return BubblePage(rgb, grey_of(rgb), inner, outline, np.zeros(TALL_SHAPE, dtype=bool))
+
+
+def page_fraction(mask: NDArray[np.bool_]) -> float:
+    """C-1 clause 5b.2's ratio: the mask's pixel count over the page's."""
+    return float(mask.sum()) / mask.size
+
+
+def solidity(mask: NDArray[np.bool_]) -> float:
+    """C-1 clause 5b.3's ratio, computed here: pixel count over the area of the
+    convex hull of the mask's largest external contour, the hull floored at 1."""
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    outer = max(contours, key=cv2.contourArea)
+    return float(mask.sum()) / max(1.0, float(cv2.contourArea(cv2.convexHull(outer))))
+
+
+def strictly_inside(mask: NDArray[np.bool_], bounds: tuple[int, int, int, int]) -> bool:
+    """Clause 5a: the mask's bbox strictly inside the inclusive window `bounds`."""
+    x0, y0, x1, y1 = bounds
+    rows = np.flatnonzero(mask.any(axis=1))
+    cols = np.flatnonzero(mask.any(axis=0))
+    return bool(x0 < cols[0] and cols[-1] < x1 and y0 < rows[0] and rows[-1] < y1)
+
+
+def centroid(mask: NDArray[np.bool_]) -> tuple[float, float]:
+    """The mean `(x, y)` of the mask's pixels."""
+    ys, xs = np.nonzero(mask)
+    return float(xs.mean()), float(ys.mean())

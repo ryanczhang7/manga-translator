@@ -168,3 +168,158 @@ def test_a_polygon_with_no_light_pixel_keeps_its_polygon_unchanged() -> None:
     polygon = bw.ring(300, 300, 360, 500)
 
     assert bubble_interior(grey, polygon, "bubble") == polygon
+
+
+# -- MT-154: a closed balloon larger than the window ------------------------------------------
+#
+# Oracle: C-2's two numbers are settled and read out; AC-1..AC-5 are mechanical
+# (C-6). The new names are imported inside each test that needs them, not at the
+# top, so that the MT-123 cases above still run while they do not exist (C-5).
+# Every precondition below is the test's own arithmetic (`_bubble_world`), never
+# the module's (C-4).
+
+TALL = bw.TALL_SHAPE
+
+#: Breaks into three lines in the tall balloon's interior (measured in RED on the
+#: outer ring of the balloon's flood: 'WHERE' / 'ARE YOU' / 'GOING?' at 42 px).
+THREE_LINES = "WHERE ARE YOU GOING?"
+
+
+def test_the_shape_test_thresholds_are_the_contracts_numbers_and_are_exported() -> None:
+    from mangatl.typeset import interior
+
+    assert (interior.INTERIOR_MIN_SOLIDITY, interior.INTERIOR_MAX_PAGE_FRACTION) == (
+        bw.PINNED_INTERIOR_MIN_SOLIDITY,
+        bw.PINNED_INTERIOR_MAX_PAGE_FRACTION,
+    )
+    missing = {"INTERIOR_MIN_SOLIDITY", "INTERIOR_MAX_PAGE_FRACTION"} - set(interior.__all__)
+    assert not missing, f"not exported in __all__: {sorted(missing)}"
+
+
+def _assert_the_window_cannot_decide(page: bw.BubblePage, polygon: bw.Ring) -> None:
+    flood = bw.plain_flood(page.grey, polygon)
+    window = bw.window(polygon, TALL)
+    assert flood.any(), "precondition: the polygon must seed a light flood"
+    assert not bw.strictly_inside(flood, window), (
+        f"precondition: the flood must not be strictly inside the window {window}, "
+        "or clause 5a decides this page and 5b is not tested"
+    )
+
+
+def _assert_no_vertex_outside_the_window(found: object, polygon: bw.Ring) -> None:
+    _assert_is_a_ring(found)
+    assert isinstance(found, tuple)
+    x0, y0, x1, y1 = bw.window(polygon, TALL)
+    outside = [(x, y) for x, y in found if not (x0 <= x <= x1 and y0 <= y <= y1)]
+    assert not outside, (
+        f"{len(outside)} vertices outside the window {(x0, y0, x1, y1)} - the flood was "
+        f"accepted as the balloon: {outside[:5]}"
+    )
+
+
+# -- AC-1 / AC-2: a closed balloon larger than the window is found whole ----------------------
+
+
+def test_a_closed_balloon_taller_than_the_window_is_found_whole_and_centred() -> None:
+    page = bw.tall_balloon_page()
+    polygon = bw.tall_polygon()
+    _assert_the_window_cannot_decide(page, polygon)
+    flood = bw.plain_flood(page.grey, polygon)
+    assert not bw.touches_page_edge(flood), "precondition: the balloon touches no page edge"
+    assert bw.page_fraction(flood) <= bw.PINNED_INTERIOR_MAX_PAGE_FRACTION
+    assert bw.solidity(flood) >= bw.PINNED_INTERIOR_MIN_SOLIDITY
+
+    found = bubble_interior(page.grey, polygon, "bubble")
+
+    _assert_is_a_ring(found)
+    filled = bw.fill(found, TALL)
+    cover = (filled & page.interior).sum() / page.interior.sum()
+    assert cover >= 0.95, f"the ring covers {cover:.4f} of the balloon's white interior, < 0.95"
+    on_outline = int((filled & page.outline).sum())
+    assert on_outline == 0, f"the ring's fill holds {on_outline} outline pixels"
+    (fx, fy), (ix, iy) = bw.centroid(filled), bw.centroid(page.interior)
+    width, height = 2 * bw.TALL_OUTER_A, 2 * bw.TALL_OUTER_B
+    assert abs(fx - ix) <= 0.02 * width, (
+        f"the ring's centroid is {fx - ix:+.1f} px across from the interior's, "
+        f"beyond 2% of the balloon's width ({0.02 * width:.1f} px)"
+    )
+    assert abs(fy - iy) <= 0.02 * height, (
+        f"the ring's centroid is {fy - iy:+.1f} px ({(fy - iy) / height:+.1%} of the balloon's "
+        f"height) from the interior's, beyond 2% ({0.02 * height:.1f} px)"
+    )
+
+
+def test_three_lines_in_a_balloon_taller_than_the_window_are_centred_in_the_balloon() -> None:
+    faces = load_faces()
+    page = bw.tall_balloon_page()
+    polygon = bw.tall_polygon()
+
+    block = typeset(THREE_LINES, bubble_interior(page.grey, polygon, "bubble"), faces)
+
+    assert block.lines and not block.overflowed, "the line must set without overflowing"
+    middle = (block.lines[0].top + block.lines[-1].top + block.lines[-1].height) / 2
+    height = 2 * bw.TALL_OUTER_B
+    off = middle - bw.TALL_CY
+    assert abs(off) <= 0.05 * height, (
+        f"the block's vertical centre is {off:+.1f} px ({off / height:+.1%} of the balloon's "
+        f"height) from the balloon's centre, beyond 5% ({0.05 * height:.1f} px)"
+    )
+    assert len(block.lines) == 3, (
+        f"the string must break into three lines, got {len(block.lines)}: "
+        f"{[''.join(g.char for g in line.glyphs) for line in block.lines]}"
+    )
+
+
+# -- AC-3..AC-5: each clause of 5b alone still sends a flood to the star ---------------------
+
+
+def test_a_balloon_cut_by_the_page_edge_still_falls_back_inside_the_window() -> None:
+    page = bw.tall_balloon_page(centre_x=bw.EDGE_CUT_CX)
+    polygon = bw.tall_polygon(bw.EDGE_CUT_CX)
+    _assert_the_window_cannot_decide(page, polygon)
+    flood = bw.plain_flood(page.grey, polygon)
+    # Fails clause 5b.1 only.
+    assert bw.touches_page_edge(flood), "precondition: the balloon's white reaches the edge"
+    assert bw.page_fraction(flood) <= bw.PINNED_INTERIOR_MAX_PAGE_FRACTION, (
+        f"precondition: fraction {bw.page_fraction(flood):.4f} must be within the limit"
+    )
+    assert bw.solidity(flood) >= 0.97, f"precondition: solidity {bw.solidity(flood):.4f}"
+
+    found = bubble_interior(page.grey, polygon, "bubble")
+
+    _assert_no_vertex_outside_the_window(found, polygon)
+
+
+def test_a_closed_white_panel_over_a_quarter_of_the_page_is_not_taken_for_a_balloon() -> None:
+    page = bw.white_panel_page()
+    polygon = bw.tall_polygon()
+    _assert_the_window_cannot_decide(page, polygon)
+    flood = bw.plain_flood(page.grey, polygon)
+    # Fails clause 5b.2 only.
+    assert not bw.touches_page_edge(flood), "precondition: the panel touches no page edge"
+    assert bw.page_fraction(flood) > bw.PINNED_INTERIOR_MAX_PAGE_FRACTION, (
+        f"precondition: fraction {bw.page_fraction(flood):.4f} must exceed the limit"
+    )
+    assert bw.solidity(flood) >= 0.97, f"precondition: solidity {bw.solidity(flood):.4f}"
+
+    found = bubble_interior(page.grey, polygon, "bubble")
+
+    _assert_no_vertex_outside_the_window(found, polygon)
+
+
+def test_a_balloon_open_into_light_art_is_not_found_whole() -> None:
+    page = bw.tall_balloon_page(open_into_art=True)
+    polygon = bw.tall_polygon()
+    _assert_the_window_cannot_decide(page, polygon)
+    flood = bw.plain_flood(page.grey, polygon)
+    # Fails clause 5b.3 only.
+    assert int((flood & page.band).sum()) > 0, "precondition: the flood runs into the art"
+    assert not bw.touches_page_edge(flood), "precondition: the flood touches no page edge"
+    assert bw.page_fraction(flood) <= bw.PINNED_INTERIOR_MAX_PAGE_FRACTION, (
+        f"precondition: fraction {bw.page_fraction(flood):.4f} must be within the limit"
+    )
+    assert bw.solidity(flood) <= 0.85, f"precondition: solidity {bw.solidity(flood):.4f}"
+
+    found = bubble_interior(page.grey, polygon, "bubble")
+
+    _assert_no_vertex_outside_the_window(found, polygon)
