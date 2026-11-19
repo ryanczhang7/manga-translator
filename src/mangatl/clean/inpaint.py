@@ -1,7 +1,17 @@
 """Cleaning one page: erase the mask and let LaMa reconstruct it (MT-019 C-4).
 
-Each 8-connected component of the erase mask takes one of three paths, chosen
-from its bbox against `512 - 2 * MIN_CONTEXT_PX` (MT-151 C-2):
+Each 8-connected component of the erase mask is first judged against the paper
+around it (MT-153 C-2). Its **ring** is the component dilated by the elliptical
+element of side `2 * FLAT_RING_PX + 1`, minus every pixel of the whole erase
+mask, clipped to the page. When the ring is not empty and its **spread** - the
+largest, over the three channels, of that channel's maximum minus minimum - is
+at most `FLAT_MAX_SPREAD`, the component is on flat paper: the ring's lower
+median, per channel, is written to exactly its pixels and the model is not
+called, on any path. The ring holds only pixels `clean_page` never writes, so
+the verdict does not depend on the order of the components.
+
+Every other component takes one of three paths, chosen from its bbox against
+`512 - 2 * MIN_CONTEXT_PX` (MT-151 C-2):
 
 * **Native** - fits on both axes: one call on a 512x512 window at native
   resolution, centred on the bbox and clamped into the page. An axis shorter
@@ -34,6 +44,8 @@ from numpy.typing import NDArray
 from mangatl.clean.session import MODEL_INPUT_SIDE, InpaintSession
 
 __all__ = [
+    "FLAT_MAX_SPREAD",
+    "FLAT_RING_PX",
     "INPAINT_MAX_RESIDUAL",
     "MIN_CONTEXT_PX",
     "STRIP_OVERLAP_PX",
@@ -74,6 +86,23 @@ MIN_CONTEXT_PX: int = 32
 #: tall regions of the development set, real LaMa), recorded here when it does.
 STRIP_OVERLAP_PX: int = MIN_CONTEXT_PX
 
+#: MT-153 C-2: the radius of the ring of paper read around a component. Read
+#: at call time; `0` (an empty ring) switches the flat fill off. Measured in
+#: MT-153 GREEN on the 46 development pages (346 components, every flat ring's
+#: median pure white): at a limit of 8, radius 2 fills 207, 4 fills 180 and 8
+#: fills 131. 4 is kept: wide enough to see a balloon outline beside the text.
+FLAT_RING_PX: int = 4
+
+#: MT-153 C-2: the largest ring spread, in 8-bit levels of one channel, that is
+#: still flat paper, compared with `<=`. Read at call time; `-1` switches the
+#: flat fill off. AC-2 puts the floor at 4. Measured in MT-153 GREEN at radius
+#: 4: every component with spread 5 to 14 that was looked at is text on a white
+#: balloon, its ring off-white in under 1 % of its pixels; the smallest spread
+#: whose ring is off-white in more (1st-to-99th percentile spread over 3) is 96.
+#: 8 fills 180 of 346 components on 43 of 46 pages. Texture wins (C-6): 8 sits
+#: at the low end of a paper band that reaches at least 14.
+FLAT_MAX_SPREAD: int = 8
+
 _SIDE = MODEL_INPUT_SIDE
 _LIMIT = _SIDE - 2 * MIN_CONTEXT_PX
 _LEAD = MIN_CONTEXT_PX + STRIP_OVERLAP_PX
@@ -83,7 +112,10 @@ _TRAIL = MIN_CONTEXT_PX
 def clean_page(
     page: NDArray[np.uint8], mask: NDArray[np.bool_], session: InpaintSession
 ) -> NDArray[np.uint8]:
-    """A new copy of the RGB `page` with every `mask` pixel inpainted by `session`.
+    """A new copy of the RGB `page` with every `mask` pixel cleaned.
+
+    A component on flat paper is filled with its ring's median (MT-153 C-2);
+    every other component is inpainted by `session`.
 
     Neither input is mutated. An all-`False` mask returns a copy without calling
     the model. `ValueError` if `page` is not `(H, W, 3)` uint8, `mask` is not a
@@ -100,6 +132,8 @@ def clean_page(
     labels = np.asarray(found, dtype=np.int32)
     for label in range(1, count):
         bx, by, bw, bh = (int(v) for v in stats[label, :4])
+        if _fill_if_flat(page, mask, labels, label, (bx, by, bw, bh), result):
+            continue
         fits_x, fits_y = bw <= _LIMIT, bh <= _LIMIT
         if fits_x and fits_y:
             x0, x1 = _native_span(bx, bw, width)
@@ -127,6 +161,38 @@ def _validate(page: NDArray[np.uint8], mask: NDArray[np.bool_]) -> None:
         raise ValueError(f"mask must be a 2-D bool array; got {mask.shape} {mask.dtype}")
     if mask.shape != page.shape[:2]:
         raise ValueError(f"mask shape {mask.shape} does not match page shape {page.shape[:2]}")
+
+
+def _fill_if_flat(
+    page: NDArray[np.uint8],
+    mask: NDArray[np.bool_],
+    labels: NDArray[np.int32],
+    label: int,
+    bbox: tuple[int, int, int, int],
+    result: NDArray[np.uint8],
+) -> bool:
+    """MT-153 C-2: if the component's ring is flat, write its median and say so."""
+    # Both limits read at call time, never bound at import (C-1).
+    ring_px, max_spread = FLAT_RING_PX, FLAT_MAX_SPREAD
+    if ring_px <= 0:
+        return False  # an empty ring is not flat (C-2.2)
+    bx, by, bw, bh = bbox
+    height, width = mask.shape
+    x0, x1 = max(bx - ring_px, 0), min(bx + bw + ring_px, width)
+    y0, y1 = max(by - ring_px, 0), min(by + bh + ring_px, height)
+    component = labels[y0:y1, x0:x1] == label
+    side = 2 * ring_px + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (side, side))
+    reach = np.asarray(cv2.dilate(component.astype(np.uint8), kernel), dtype=bool)
+    values = page[y0:y1, x0:x1][reach & ~mask[y0:y1, x0:x1]]
+    if len(values) == 0:
+        return False
+    spread = int((values.max(axis=0).astype(np.int16) - values.min(axis=0)).max())
+    if spread > max_spread:
+        return False
+    median = np.sort(values, axis=0)[(len(values) - 1) // 2]
+    result[y0:y1, x0:x1][component] = median  # write-back
+    return True
 
 
 def _native_span(start: int, length: int, limit: int) -> tuple[int, int]:

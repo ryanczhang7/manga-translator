@@ -65,6 +65,7 @@ import pytest
 from numpy.typing import NDArray
 from PIL import Image
 
+import mangatl.clean.inpaint as inpaint_module
 from mangatl.compose import (
     DETECTOR_FILENAME,
     INPAINTER_FILENAME,
@@ -1050,12 +1051,14 @@ def test_the_clean_stage_runs_the_loaded_inpainter_through_clean_page_image(
     translate: bool,
     png_bytes: Callable[..., bytes],
     one_bit_png: Callable[..., bytes],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """**MT-065 AC-6**, behaviourally (C-7): the `CleanStage`'s callable, handed
     a small PNG page and one region with a non-empty mask, returns a PNG of the
     page's size, and the session `load_inpainter` returned is the one that ran.
     A stage bound to anything else - a second session, a lambda, the identity -
     leaves the counter at zero."""
+    monkeypatch.setattr(inpaint_module, "FLAT_MAX_SPREAD", -1, raising=False)  # MT-153 C-5
     stages = build_pipeline(
         weights_dir, translate=translate, selection=_anthropic_if(translate)
     ).stages

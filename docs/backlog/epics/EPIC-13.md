@@ -3,7 +3,7 @@ id: EPIC-13
 title: The baked chapter - v1 fixes for what the benchmark review found
 status: todo
 release: v1
-stories: [MT-142, MT-143, MT-144, MT-145, MT-146, MT-147, MT-148, MT-149, MT-150, MT-151, MT-152, MT-153, MT-154, MT-155, MT-156]
+stories: [MT-142, MT-143, MT-144, MT-145, MT-146, MT-147, MT-148, MT-149, MT-150, MT-151, MT-152, MT-153, MT-154, MT-155, MT-156, MT-159]
 ---
 
 *Planned 2026-11-07 by `lead-po` (Claude Opus 5.5, `claude-opus-5-5`) from
@@ -231,6 +231,12 @@ Enablers:
 6. Numbers:
    - **MT-156** - a proposal whose numbers differ from the Japanese says so in
      review.
+
+Closing:
+
+- **MT-159** (spike) - every "Done when" line measured on the development
+  set after the last story, and each region still over `RESIDUAL_INK_MAX`
+  named with its cause in an audit (the user, 2026-11-18; MT-153 PO-5).
 
 ## Deliberately not in this epic
 

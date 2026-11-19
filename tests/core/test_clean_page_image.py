@@ -43,6 +43,7 @@ import pytest
 from numpy.typing import NDArray
 from PIL import Image
 
+import mangatl.clean.inpaint as inpaint_module
 import mangatl.clean.mask as mask_module
 from mangatl.clean.inpaint import clean_page
 from mangatl.clean.mask import erase_mask
@@ -312,6 +313,7 @@ def test_the_composed_cleaner_erases_a_glyph_the_mask_cuts_whole(
     cleaner that passes no page, or converts to grey any other way than C-2's,
     leaves the lower part as drawn."""
     _set_glyph_constants(monkeypatch)
+    monkeypatch.setattr(inpaint_module, "FLAT_MAX_SPREAD", -1, raising=False)  # MT-153 C-5
     page = _cut_glyph_page(colour)
     region = RawRegion(
         polygon=_ring(16, 6, 34, 28),
