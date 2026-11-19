@@ -13,8 +13,15 @@ inside a dark outline, so it can be found there:
    light pixels of the polygon's fill. None under the polygon: the polygon.
 4. A component smaller than the polygon's fill is noise, a dark background or a
    flat-white erase mask: the polygon.
-5. A component strictly inside the window (so off the page edge, the window
-   being clipped to the page) is the interior, united with the polygon fill.
+5. The component is the interior, united with the polygon fill, when either
+   a. it lies strictly inside the window (so off the page edge, the window
+      being clipped to the page); or, failing that,
+   b. it is a closed balloon larger than the window (MT-154): it has no pixel
+      on the page's border rows or columns, it covers at most
+      `INTERIOR_MAX_PAGE_FRACTION` of the page, and its pixel count over the
+      area of its external contour's convex hull (floored at 1) is at least
+      `INTERIOR_MIN_SOLIDITY`. Both comparisons are inclusive, and the ratio
+      can exceed 1: a hull through pixel centres is smaller than its pixels.
 6. Otherwise the flood leaked through an open outline, and the interior is a
    *star*: `RAY_COUNT` rays from the bbox centre, each stopping before a dark
    pixel (the dark mask closed once by a 3 x 3 kernel), the page edge or the
@@ -37,7 +44,16 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-__all__ = ["CAP_RATIO", "DARK_GREY", "LIGHT_GREY", "RAY_COUNT", "Ring", "bubble_interior"]
+__all__ = [
+    "CAP_RATIO",
+    "DARK_GREY",
+    "INTERIOR_MAX_PAGE_FRACTION",
+    "INTERIOR_MIN_SOLIDITY",
+    "LIGHT_GREY",
+    "RAY_COUNT",
+    "Ring",
+    "bubble_interior",
+]
 
 # MT-069: survive a lost thread-pool completion port - see `mangatl.clean.mask`.
 cv2.setNumThreads(-1)
@@ -46,6 +62,8 @@ LIGHT_GREY: int = 200  # a cleaned-page pixel at or above this is bubble white
 DARK_GREY: int = 120  # a pixel at or below this is outline ink
 CAP_RATIO: float = 1.0  # the window grows the polygon's bbox by this x max(w, h) per side
 RAY_COUNT: int = 72  # rays of the fallback star, at equal angles from the bbox centre
+INTERIOR_MIN_SOLIDITY: float = 0.96  # rule 5b: closed balloons 0.977-1.002, leaks <= 0.941
+INTERIOR_MAX_PAGE_FRACTION: float = 0.25  # rule 5b: a design bound - a white panel is no balloon
 
 #: Closed: the last vertex repeats the first. `RawRegion.polygon`'s conventions.
 Ring = tuple[tuple[int, int], ...]
@@ -88,7 +106,8 @@ def bubble_interior(
     rows = np.flatnonzero(component.any(axis=1))
     cols = np.flatnonzero(component.any(axis=0))
     # The window is clipped to the page, so strictly inside it is off the edge.
-    if wx0 < cols[0] and cols[-1] < wx1 and wy0 < rows[0] and rows[-1] < wy1:
+    inside = wx0 < cols[0] and cols[-1] < wx1 and wy0 < rows[0] and rows[-1] < wy1
+    if inside or _closed_balloon(component):
         interior = component | fill
     else:
         dark = cv2.morphologyEx(
@@ -97,6 +116,27 @@ def bubble_interior(
         star = _star(dark, ((x0 + x1) / 2, (y0 + y1) / 2), reach)
         interior = (_fill(star, (height, width)) & ~dark) | fill
     return _outer_ring(interior)
+
+
+def _closed_balloon(component: NDArray[np.bool_]) -> bool:
+    """Rule 5b: off every page border, within the page-fraction bound, and
+    solid enough to be a closed outline rather than a leak into art."""
+    height, width = component.shape
+    if (
+        component[0, :].any()
+        or component[-1, :].any()
+        or component[:, 0].any()
+        or component[:, -1].any()
+    ):
+        return False
+    area = float(component.sum())
+    if area > INTERIOR_MAX_PAGE_FRACTION * height * width:
+        return False
+    contours, _ = cv2.findContours(
+        component.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+    )
+    hull = max(1.0, float(cv2.contourArea(cv2.convexHull(contours[0]))))
+    return area / hull >= INTERIOR_MIN_SOLIDITY
 
 
 def _fill(polygon: Sequence[tuple[int, int]], shape: tuple[int, int]) -> NDArray[np.bool_]:
