@@ -133,7 +133,7 @@ epic, as the release measurement.
   numbers (MT-156). The check covers Arabic digits, full-width and ASCII, plus
   English number words up to twenty and the tens. Kanji numerals (`三万八千`) are
   a documented limit.
-- **PO-6 - MT-155 (one block per shared balloon) is conditional.** After
+- **PO-6 - MT-155 (regions sharing one balloon each set in their own part of it) is conditional.** After
   MT-145 has merged what it can, MT-155 re-counts the regions
   that share a balloon interior on the development set. If the count is zero,
   it closes as a no-op with the count cited, as MT-121 did.
@@ -189,6 +189,11 @@ On the development set, before and after the epic:
   (p064:1, p073:2, p075:6, p082:1, p082:2, p092:2) are re-measured at close,
   each found whole with its text centred as MT-154's AC-1 and AC-2 define
   (the user, 2026-11-19; MT-154 PO-3).
+- No two set blocks' glyph boxes intersect inside one balloon: re-measured
+  at close as MT-155's DV-4 defines, with its fixed placeholder English.
+  Measured at MT-155's planning: 4 block pairs before (p063 4/5, p066 6/7,
+  p075 7/8, p089 7/8), 0 after by the PO's reference of the rule
+  (the user, 2026-11-19; MT-155 PO-5 and PO-11).
 - A live run of the benchmark chapter, made once, after the last story and on
   the user's request, is reviewed by the user. They find no balloon translated
   twice, no art text typeset over, and no line in a neighbour's balloon.
@@ -230,8 +235,8 @@ Enablers:
 5. Typesetting:
    - **MT-154** - a closed balloon larger than the search window is found
      whole, so its text is centred.
-   - **MT-155** - regions sharing one balloon are set as one block
-     (conditional, PO-6).
+   - **MT-155** - regions sharing one balloon are each set in their own
+     part of it (conditional, PO-6; re-cut by the user, 2026-11-19).
 6. Numbers:
    - **MT-156** - a proposal whose numbers differ from the Japanese says so in
      review.
