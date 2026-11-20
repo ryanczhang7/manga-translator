@@ -548,9 +548,9 @@ def _confirm(window: Workspace) -> RunController:
     primary = getattr(dialog, "run_button", None)
     assert isinstance(primary, QPushButton), f"the dialog's run_button is {primary!r}"
     primary.click()
-    _settle()
     run = window.run
     assert isinstance(run, RunController), f"window.run is {run!r} after the confirm"
+    _settle()
     return run
 
 
