@@ -185,6 +185,10 @@ On the development set, before and after the epic:
 - The worst residual ink is at or under `RESIDUAL_INK_MAX`, or each region over
   it is named with its cause in an audit.
 - The bench's slip count is zero.
+- Text is centred in its balloon: the six closed balloons MT-154 names
+  (p064:1, p073:2, p075:6, p082:1, p082:2, p092:2) are re-measured at close,
+  each found whole with its text centred as MT-154's AC-1 and AC-2 define
+  (the user, 2026-11-19; MT-154 PO-3).
 - A live run of the benchmark chapter, made once, after the last story and on
   the user's request, is reviewed by the user. They find no balloon translated
   twice, no art text typeset over, and no line in a neighbour's balloon.
