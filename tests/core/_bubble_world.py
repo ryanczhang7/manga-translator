@@ -344,3 +344,98 @@ def strip_page() -> BubblePage:
     rgb[strip] = 255
     empty = np.zeros(TALL_SHAPE, dtype=bool)
     return BubblePage(rgb, grey_of(rgb), strip, empty, empty)
+
+
+# -- MT-155: regions sharing one balloon ---------------------------------------------
+#
+# MT-155 Contract C-5. Every page below is the 640 x 560 dark-texture page of
+# `bubble_page`, drawn the same way: the interior is the union of the inner
+# ellipses (4 px inside the outer ones) at 255, the outline the union of the outer
+# ones minus it at 0. Nothing here imports `mangatl.typeset.interior` or
+# `mangatl.pipeline.bake`.
+
+#: The two-lobed balloon (AC-1, AC-2, AC-4, AC-5): two ellipses of outer semi-axes
+#: 90 x 125, centred at (250, 280) and (390, 280). Joined: balloon x 160..480.
+LOBE_A, LOBE_B = 90.0, 125.0
+LOBE_CENTRES: tuple[tuple[int, int], ...] = ((250, 280), (390, 280))
+#: The 40 x 220 polygon centred on each lobe, both `bubble`; left is reading index 0.
+LEFT_LOBE_POLYGON: Ring = ring(230, 170, 270, 390)
+RIGHT_LOBE_POLYGON: Ring = ring(370, 170, 410, 390)
+#: The line midway between the two polygons (x 270 and x 370).
+MIDLINE_X = 320
+
+#: Two separate balloons (AC-3, first half): outer semi-axes 120 x 150, centred at
+#: (165, 280) and (475, 280), x 45..285 and 355..595, 70 px of texture between.
+SEPARATE_A, SEPARATE_B = 120.0, 150.0
+SEPARATE_CENTRES: tuple[tuple[int, int], ...] = ((165, 280), (475, 280))
+#: The 40 x 160 polygon centred in each balloon, both `bubble`.
+SEPARATE_LEFT_POLYGON: Ring = ring(145, 200, 185, 360)
+SEPARATE_RIGHT_POLYGON: Ring = ring(455, 200, 495, 360)
+
+#: On `bubble_page()`: region A, a 40 x 160 `bubble` column left of the centre.
+BALLOON_A_POLYGON: Ring = ring(250, 200, 290, 360)
+#: A `box` region across the outline at the balloon's right (AC-3, second half).
+STRADDLING_BOX_POLYGON: Ring = ring(440, 250, 520, 310)
+#: A `box` region wholly inside the balloon, right of A (AC-6).
+INNER_BOX_POLYGON: Ring = ring(360, 240, 420, 320)
+
+
+def ellipses_page(centres: Sequence[tuple[int, int]], a: float, b: float) -> BubblePage:
+    """Closed balloons of outer semi-axes `a` x `b` centred at `centres`, drawn as
+    `bubble_page` draws one; `interior` is the union of their inner ellipses."""
+    y, x = np.mgrid[0:PAGE_H, 0:PAGE_W]
+    inner = np.zeros((PAGE_H, PAGE_W), dtype=bool)
+    outer = np.zeros((PAGE_H, PAGE_W), dtype=bool)
+    for cx, cy in centres:
+        inner |= ((x - cx) / (a - OUTLINE_PX)) ** 2 + ((y - cy) / (b - OUTLINE_PX)) ** 2 <= 1.0
+        outer |= ((x - cx) / a) ** 2 + ((y - cy) / b) ** 2 <= 1.0
+    outline = outer & ~inner
+    rgb = dark_texture()
+    rgb[inner] = 255
+    rgb[outline] = 0
+    return BubblePage(rgb, grey_of(rgb), inner, outline, np.zeros_like(inner))
+
+
+def two_lobed_page() -> BubblePage:
+    """AC-1's closed two-lobed balloon."""
+    return ellipses_page(LOBE_CENTRES, LOBE_A, LOBE_B)
+
+
+def separate_balloons_page() -> BubblePage:
+    """AC-3's two closed balloons that share nothing."""
+    return ellipses_page(SEPARATE_CENTRES, SEPARATE_A, SEPARATE_B)
+
+
+def polygon_centre(polygon: Sequence[tuple[int, int]]) -> tuple[int, int]:
+    """C-1 step 1, written out: the bbox centre in whole pixels, floor-halved."""
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    return (min(xs) + max(xs)) // 2, (min(ys) + max(ys)) // 2
+
+
+def rect_distance(
+    polygon: Sequence[tuple[int, int]], shape: tuple[int, int]
+) -> NDArray[np.float64]:
+    """Each pixel's exact Euclidean distance to the nearest pixel of an AXIS-ALIGNED
+    rectangle polygon's fill (`fillPoly` covers x0..x1 and y0..y1 inclusive), from
+    the coordinates alone - the test's own oracle, never `cv2.distanceTransform`."""
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+    y, x = np.mgrid[0 : shape[0], 0 : shape[1]]
+    dx = np.maximum(np.maximum(x0 - x, 0), x - x1)
+    dy = np.maximum(np.maximum(y0 - y, 0), y - y1)
+    return np.asarray(np.hypot(dx, dy), dtype=np.float64)
+
+
+Box = tuple[float, float, float, float]
+
+
+def boxes_intersect(a: Box, b: Box) -> bool:
+    """C-6: two glyph boxes `(x0, y0, x1, y1)` meet in an area greater than zero."""
+    return min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
+
+
+def intersecting_pairs(first: Sequence[Box], second: Sequence[Box]) -> int:
+    """How many pairs, one box from each, intersect (C-6)."""
+    return sum(1 for a in first for b in second if boxes_intersect(a, b))
