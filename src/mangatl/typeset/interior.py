@@ -42,7 +42,10 @@ between them, one page's interiors at a time:
    own polygon's fill than every rival's (exact Euclidean distance; a tie goes
    to the earlier region), united with its polygon's fill - so a part is never
    smaller than its polygon.
-5. The part's ring is its outer contour, as in rule 7.
+5. The part's ring is the outer contour, holes filled, of the 8-connected piece
+   of the part holding the most of its polygon's fill (all of it whenever that
+   fill is connected) - not the piece of largest area - closed, in Python
+   `int`s, as in rule 7. Any other piece belongs to no part.
 
 There is no tunable constant.
 
@@ -58,6 +61,7 @@ from typing import Literal
 
 import cv2
 import numpy as np
+from cv2.typing import MatLike
 from numpy.typing import NDArray
 
 __all__ = [
@@ -157,7 +161,8 @@ def shared_parts(
         for j in rivals:
             rival = _distance(polygons[j], shape)
             fill &= (own < rival) | ((own == rival) & (i < j))
-        parts.append(_outer_ring(fill | _fill(polygon, shape)))
+        floor = _fill(polygon, shape)
+        parts.append(_ring_holding(fill | floor, floor))
     return parts
 
 
@@ -227,6 +232,24 @@ def _outer_ring(interior: NDArray[np.bool_]) -> Ring:
     contours, _ = cv2.findContours(
         interior.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
-    outer = max(contours, key=cv2.contourArea)
-    points = [(int(x), int(y)) for x, y in outer.reshape(-1, 2)]
+    return _ring(max(contours, key=cv2.contourArea))
+
+
+def _ring_holding(part: NDArray[np.bool_], floor: NDArray[np.bool_]) -> Ring:
+    """Shared rule 5: the outer contour of the piece of `part` (8-connected, as
+    `cv2.findContours` traces it) whose filled contour holds the most of `floor`."""
+    contours, _ = cv2.findContours(
+        part.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    def held(contour: MatLike) -> int:
+        piece = np.zeros(part.shape, dtype=np.uint8)
+        cv2.drawContours(piece, [contour], -1, 1, thickness=cv2.FILLED)
+        return int(np.count_nonzero(piece.astype(bool) & floor))
+
+    return _ring(max(contours, key=held))
+
+
+def _ring(contour: MatLike) -> Ring:
+    points = [(int(x), int(y)) for x, y in contour.reshape(-1, 2)]
     return (*points, points[0])
