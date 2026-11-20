@@ -439,3 +439,59 @@ def boxes_intersect(a: Box, b: Box) -> bool:
 def intersecting_pairs(first: Sequence[Box], second: Sequence[Box]) -> int:
     """How many pairs, one box from each, intersect (C-6)."""
     return sum(1 for a in first for b in second if boxes_intersect(a, b))
+
+
+# -- MT-155 R-1: a part whose kept pixels fall into two pieces -------------------------
+#
+# A closed U-shaped balloon on the 640 x 560 dark-texture page, drawn as the pages
+# above are: the interior is the union of three rectangles at 255, the outline that
+# union grown by `OUTLINE_PX` on every side, minus it, at 0. The left arm is narrow,
+# the right arm wide, and the bar joins them along the bottom; 40 px of texture (32
+# once the outlines are drawn) separate the arms. The diff review's reproduction
+# (`mt155-review\u.py`) used an 800 x 800 page, on which region 1's window did not
+# hold the balloon and its interior fell to the star; these sizes are chosen so that
+# both windows hold the whole U strictly (rule 5a), which the test asserts.
+
+#: Inclusive pixel bounds `(x0, y0, x1, y1)` of the three interior rectangles.
+U_LEFT_ARM: tuple[int, int, int, int] = (100, 60, 179, 359)
+U_RIGHT_ARM: tuple[int, int, int, int] = (220, 60, 439, 359)
+U_BAR: tuple[int, int, int, int] = (100, 360, 439, 419)
+#: Region 0, `bubble`: the Japanese in the narrow left arm, 71 x 281 px.
+U_ARM_POLYGON: Ring = ring(105, 70, 175, 350)
+#: Region 1, `bubble`: the Japanese along the bar, 320 x 51 px.
+U_BAR_POLYGON: Ring = ring(110, 365, 429, 415)
+
+
+def u_balloon_page() -> BubblePage:
+    """R-1's closed U-shaped balloon; `interior` is the three rectangles' union."""
+    inner = np.zeros((PAGE_H, PAGE_W), dtype=bool)
+    outer = np.zeros((PAGE_H, PAGE_W), dtype=bool)
+    for x0, y0, x1, y1 in (U_LEFT_ARM, U_RIGHT_ARM, U_BAR):
+        inner[y0 : y1 + 1, x0 : x1 + 1] = True
+        outer[y0 - OUTLINE_PX : y1 + 1 + OUTLINE_PX, x0 - OUTLINE_PX : x1 + 1 + OUTLINE_PX] = True
+    outline = outer & ~inner
+    rgb = dark_texture()
+    rgb[inner] = 255
+    rgb[outline] = 0
+    return BubblePage(rgb, grey_of(rgb), inner, outline, np.zeros_like(inner))
+
+
+# -- MT-155 R-2: three regions in one balloon ------------------------------------------
+#
+# One long closed ellipse, `ellipses_page([LONG_CENTRE], LONG_A, LONG_B)`, holding
+# three 40 x 80 `bubble` columns in a row. Every centre lies in every interior, so
+# each region has two rivals.
+
+LONG_CENTRE: tuple[int, int] = (320, 280)
+LONG_A, LONG_B = 290.0, 90.0
+#: Reading order left to right.
+ROW_POLYGONS: tuple[Ring, ...] = (
+    ring(140, 240, 180, 320),
+    ring(300, 240, 340, 320),
+    ring(460, 240, 500, 320),
+)
+
+
+def long_balloon_page() -> BubblePage:
+    """R-2's one long closed balloon."""
+    return ellipses_page([LONG_CENTRE], LONG_A, LONG_B)

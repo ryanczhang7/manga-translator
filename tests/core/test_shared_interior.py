@@ -30,6 +30,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import _bubble_world as bw
+import cv2
 import numpy as np
 import pytest
 from numpy.typing import NDArray
@@ -230,3 +231,109 @@ def test_the_part_a_balloon_keeps_beside_a_box_is_nearer_its_own_polygon() -> No
     inside = int((a_part & ~bw.bubble_page().interior).sum())
     assert inside == 0, f"A's part reaches {inside} px past the balloon's interior"
     assert not (_fill(bw.BALLOON_A_POLYGON) & ~a_part).any(), "A's part lost A's own polygon"
+
+
+# -- R-1: a part whose kept pixels fall into two pieces --------------------------------
+
+
+def _u_case() -> tuple[bw.BubblePage, list[Ring], list[Ring]]:
+    page = bw.u_balloon_page()
+    polygons = [bw.U_ARM_POLYGON, bw.U_BAR_POLYGON]
+    return page, [bubble_interior(page.grey, p, "bubble") for p in polygons], polygons
+
+
+def test_both_u_regions_find_the_whole_u_balloon_and_the_arm_region_keeps_two_pieces() -> None:
+    # R-1's givens, measured in RED against the shipped module: both windows hold
+    # the 110,400 px U strictly, so both interiors are the whole balloon; each
+    # centre lies in the other's interior, so both are split; and the pixels
+    # nearer the arm polygon than the bar polygon (the test's own distances, a
+    # tie to region 0) are two 8-connected pieces - the left arm, 23,851 px,
+    # holding all 19,951 px of the arm polygon, and the top of the right arm,
+    # 33,330 px, holding none of it.
+    page, interiors, polygons = _u_case()
+    assert int(page.interior.sum()) == 110_400
+    for interior, polygon in zip(interiors, polygons, strict=True):
+        assert bw.strictly_inside(page.interior, bw.window(polygon, SHAPE))
+        assert np.array_equal(_fill(interior), page.interior), (
+            f"precondition: {polygon[0]}'s interior is not the whole U balloon"
+        )
+    assert _holds(_fill(interiors[0]), bw.polygon_centre(polygons[1]))
+    assert _holds(_fill(interiors[1]), bw.polygon_centre(polygons[0]))
+
+    kept = page.interior & (
+        bw.rect_distance(polygons[0], SHAPE) <= bw.rect_distance(polygons[1], SHAPE)
+    )
+    count, labels = cv2.connectedComponents(kept.astype(np.uint8), connectivity=8)
+    arm = _fill(polygons[0])
+    pieces = sorted(
+        (int((labels == k).sum()), int((arm & (labels == k)).sum())) for k in range(1, count)
+    )
+    assert pieces == [(23_851, 19_951), (33_330, 0)], (
+        f"precondition: the arm region's kept pixels are {pieces} (area, polygon px),"
+        " not a smaller piece with the polygon and a larger one without it"
+    )
+
+
+def test_every_part_of_the_u_balloon_holds_its_own_polygons_whole_fill() -> None:
+    # C-1, "the floor is the polygon". The arm region's larger kept piece is the
+    # top of the right arm, which holds none of its polygon; its ring must be the
+    # piece that holds the polygon, or its English is set in the other arm.
+    _, interiors, polygons = _u_case()
+    parts = interior_module.shared_parts(interiors, polygons, SHAPE)
+    missed = [
+        (index, int((_fill(polygon) & ~_fill(part)).sum()), int(_fill(polygon).sum()))
+        for index, (part, polygon) in enumerate(zip(parts, polygons, strict=True))
+    ]
+    assert [m for m in missed if m[1]] == [], (
+        "region (index, px of its polygon outside its part, polygon px): "
+        f"{[m for m in missed if m[1]]} - a part was traced from a piece without its polygon"
+    )
+
+
+# -- R-2: three regions in one balloon, each with two rivals ---------------------------
+
+
+def _row_case() -> tuple[bw.BubblePage, list[Ring], list[Ring]]:
+    page = bw.long_balloon_page()
+    polygons = list(bw.ROW_POLYGONS)
+    interiors = [bubble_interior(page.grey, p, "bubble") for p in polygons]
+    return page, interiors, list(interior_module.shared_parts(interiors, polygons, SHAPE))
+
+
+def test_three_regions_in_one_balloon_each_find_it_whole_and_have_two_rivals() -> None:
+    # R-2's givens, measured in RED: the 77,249 px ellipse (page fraction 0.216,
+    # solidity 1.001) is every region's interior, every centre lies in it, and
+    # the three polygons do not meet.
+    page, interiors, _ = _row_case()
+    assert int(page.interior.sum()) == 77_249
+    fills = [_fill(p) for p in bw.ROW_POLYGONS]
+    for i, interior in enumerate(interiors):
+        assert np.array_equal(_fill(interior), page.interior)
+        rivals = [
+            j
+            for j, p in enumerate(bw.ROW_POLYGONS)
+            if j != i and _holds(_fill(interior), bw.polygon_centre(p))
+        ]
+        assert len(rivals) == 2
+        assert not any((fills[i] & fills[j]).any() for j in rivals)
+
+
+def test_three_parts_of_one_balloon_are_pairwise_disjoint() -> None:
+    # Every rival narrows the part, not only the first: handling one rival each
+    # leaves the middle part overlapping the right one. Measured in RED against
+    # the shipped module: parts of 25,147, 27,120 and 24,982 px, no overlap.
+    _, _, parts = _row_case()
+    fills = [_fill(part) for part in parts]
+    overlaps = {(i, j): int((fills[i] & fills[j]).sum()) for i in range(3) for j in range(i + 1, 3)}
+    assert all(v == 0 for v in overlaps.values()), (
+        f"parts overlap (pair: px) {overlaps}: one region is printed over another"
+    )
+
+
+def test_each_of_three_parts_of_one_balloon_holds_its_own_polygon() -> None:
+    _, _, parts = _row_case()
+    outside = [
+        int((_fill(polygon) & ~_fill(part)).sum())
+        for part, polygon in zip(parts, bw.ROW_POLYGONS, strict=True)
+    ]
+    assert outside == [0, 0, 0], f"px of each polygon outside its part: {outside}"
