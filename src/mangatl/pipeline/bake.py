@@ -70,7 +70,7 @@ from mangatl.store.project import Project
 from mangatl.store.settings import lettering_font_dir
 from mangatl.typeset.fit import TypesetBlock, typeset
 from mangatl.typeset.font import FONT_FAMILY, Faces, FallbackReason, load_faces
-from mangatl.typeset.interior import Ring, bubble_interior
+from mangatl.typeset.interior import Ring, bubble_interior, shared_parts
 from mangatl.typeset.render import bake_page
 from mangatl.typeset.resolve import FaceResolution, resolve_faces
 
@@ -266,20 +266,31 @@ def _set_blocks(
     faces: Faces,
     cleaned: NDArray[np.uint8],
 ) -> list[tuple[int, Ring, TypesetBlock]]:
-    """`(reading_index, interior, block)` for each region with text to set, in
+    """`(reading_index, part, block)` for each region with text to set, in
     reading order (C-4). The one rule for which lines a bake sets, and where:
-    each block is fitted into the bubble's interior found on the `cleaned`
-    grey page (MT-123). `preview_bake`'s overflow count reads it too (MT-066 C-1).
-    An excluded region is never set (MT-119 C-3); `enumerate` runs over every
-    region so the reading indices stay aligned with `lines`."""
-    blocks: list[tuple[int, Ring, TypesetBlock]] = []
+    each block is fitted into its region's part of the bubble's interior found
+    on the `cleaned` grey page (MT-123), which is the whole interior unless
+    another region set on the page has its centre in it (`shared_parts`,
+    MT-155 C-2). `preview_bake`'s overflow count reads it too (MT-066 C-1).
+    An excluded region is never set (MT-119 C-3), and a region that is not set
+    takes no share (MT-155 AC-4); `enumerate` runs over every region so the
+    reading indices stay aligned with `lines`."""
+    texts: dict[int, str] = {}
     for index, (region, line) in enumerate(zip(page_regions, lines, strict=True)):
-        if region.excluded is not None:
+        if region.excluded is not None or line is None:
             continue
-        if line is not None and line.status != "failed" and effective_text(line).strip():
-            interior = bubble_interior(cleaned, region.polygon, region.kind)
-            blocks.append((index, interior, typeset(effective_text(line), interior, faces)))
-    return blocks
+        if line.status != "failed" and effective_text(line).strip():
+            texts[index] = effective_text(line)
+    sharing = list(texts)  # who takes a share of a balloon: exactly who is set (AC-4)
+    regions = [page_regions[index] for index in sharing]
+    interiors = [bubble_interior(cleaned, region.polygon, region.kind) for region in regions]
+    polygons = [region.polygon for region in regions]
+    parts = shared_parts(interiors, polygons, cleaned.shape)
+    part_of = dict(zip(sharing, parts, strict=True))
+    return [
+        (index, part_of[index], typeset(text, part_of[index], faces))
+        for index, text in texts.items()
+    ]
 
 
 def _bake_area(

@@ -30,6 +30,25 @@ inside a dark outline, so it can be found there:
 
 The union with the polygon fill in 5 and 6 is what keeps the interior a
 superset of the polygon, so the bake area that is clipped to it only grows.
+
+**A balloon two regions share** (`shared_parts`, MT-155 Contract C-1) is split
+between them, one page's interiors at a time:
+
+1. A polygon's *centre* is its bounding box's centre in whole pixels.
+2. `j` is a *rival* of `i` when `polygons[j]`'s centre is a set pixel of
+   `interiors[i]`'s fill. One-way: kind is not consulted.
+3. No rival: `interiors[i]` is returned unchanged, the same ring.
+4. With rivals, region `i` keeps each pixel of its interior strictly nearer its
+   own polygon's fill than every rival's (exact Euclidean distance; a tie goes
+   to the earlier region), united with its polygon's fill - so a part is never
+   smaller than its polygon.
+5. The part's ring is the outer contour, holes filled, of the 8-connected piece
+   of the part holding the most of its polygon's fill (all of it whenever that
+   fill is connected) - not the piece of largest area - closed, in Python
+   `int`s, as in rule 7. Any other piece belongs to no part.
+
+There is no tunable constant.
+
 Imports `numpy` and `cv2` only from outside this package - nothing of `detect`
 or `clean` (`architecture.md` §3).
 """
@@ -42,6 +61,7 @@ from typing import Literal
 
 import cv2
 import numpy as np
+from cv2.typing import MatLike
 from numpy.typing import NDArray
 
 __all__ = [
@@ -53,6 +73,7 @@ __all__ = [
     "RAY_COUNT",
     "Ring",
     "bubble_interior",
+    "shared_parts",
 ]
 
 # MT-069: survive a lost thread-pool completion port - see `mangatl.clean.mask`.
@@ -118,6 +139,47 @@ def bubble_interior(
     return _outer_ring(interior)
 
 
+def shared_parts(
+    interiors: Sequence[Ring],
+    polygons: Sequence[Sequence[tuple[int, int]]],
+    shape: tuple[int, int],
+) -> list[Ring]:
+    """One ring per region of a page: `interiors[k]` (what `bubble_interior`
+    found for `polygons[k]`) unchanged where no other region's centre lies in
+    it, otherwise the part of it nearer `polygons[k]` than every such rival's
+    (module docstring, "A balloon two regions share"). `shape` is `(H, W)`."""
+    pairs = list(zip(interiors, polygons, strict=True))
+    centres = [_centre(polygon) for _, polygon in pairs]
+    parts: list[Ring] = []
+    for i, (interior, polygon) in enumerate(pairs):
+        fill = _fill(interior, shape)
+        rivals = [j for j, (cx, cy) in enumerate(centres) if j != i and fill[cy, cx]]
+        if not rivals:
+            parts.append(interior)
+            continue
+        own = _distance(polygon, shape)
+        for j in rivals:
+            rival = _distance(polygons[j], shape)
+            fill &= (own < rival) | ((own == rival) & (i < j))
+        floor = _fill(polygon, shape)
+        parts.append(_ring_holding(fill | floor, floor))
+    return parts
+
+
+def _centre(polygon: Sequence[tuple[int, int]]) -> tuple[int, int]:
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    return (min(xs) + max(xs)) // 2, (min(ys) + max(ys)) // 2
+
+
+def _distance(polygon: Sequence[tuple[int, int]], shape: tuple[int, int]) -> NDArray[np.float32]:
+    """Each pixel's exact Euclidean distance to the nearest pixel of `polygon`'s fill."""
+    outside = (~_fill(polygon, shape)).astype(np.uint8)
+    return np.asarray(
+        cv2.distanceTransform(outside, cv2.DIST_L2, cv2.DIST_MASK_PRECISE), dtype=np.float32
+    )
+
+
 def _closed_balloon(component: NDArray[np.bool_]) -> bool:
     """Rule 5b: off every page border, within the page-fraction bound, and
     solid enough to be a closed outline rather than a leak into art."""
@@ -170,6 +232,24 @@ def _outer_ring(interior: NDArray[np.bool_]) -> Ring:
     contours, _ = cv2.findContours(
         interior.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
-    outer = max(contours, key=cv2.contourArea)
-    points = [(int(x), int(y)) for x, y in outer.reshape(-1, 2)]
+    return _ring(max(contours, key=cv2.contourArea))
+
+
+def _ring_holding(part: NDArray[np.bool_], floor: NDArray[np.bool_]) -> Ring:
+    """Shared rule 5: the outer contour of the piece of `part` (8-connected, as
+    `cv2.findContours` traces it) whose filled contour holds the most of `floor`."""
+    contours, _ = cv2.findContours(
+        part.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    def held(contour: MatLike) -> int:
+        piece = np.zeros(part.shape, dtype=np.uint8)
+        cv2.drawContours(piece, [contour], -1, 1, thickness=cv2.FILLED)
+        return int(np.count_nonzero(piece.astype(bool) & floor))
+
+    return _ring(max(contours, key=held))
+
+
+def _ring(contour: MatLike) -> Ring:
+    points = [(int(x), int(y)) for x, y in contour.reshape(-1, 2)]
     return (*points, points[0])
