@@ -239,6 +239,23 @@ def test_numbers_in_of_an_empty_string_is_empty() -> None:
     assert numbers_in("") == ()
 
 
+HUGE_NINES = "9" * 1000001
+
+
+@pytest.mark.parametrize(
+    "text",
+    [HUGE_NINES + "万", "1万" + HUGE_NINES],
+    ids=["huge-digit-run-times-a-multiplier", "a-part-plus-a-huge-digit-run"],
+)
+def test_a_digit_run_beyond_the_ambient_decimal_exponent_reads_as_inf_and_never_raises(
+    text: str,
+) -> None:
+    """C-2: `numbers_in` never raises, for any `str` (R-2). A million-digit run
+    overflows the ambient `decimal` context's exponent when multiplied or summed
+    there; the value is still one number, and it reads as `inf`."""
+    assert numbers_in(text) == (float("inf"),)
+
+
 # =============================================================================
 # C-3: the comparison (AC-1 to AC-5)
 # =============================================================================
