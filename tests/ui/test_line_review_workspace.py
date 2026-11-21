@@ -53,6 +53,7 @@ from mangatl.ui.link import OrderedRegion
 from mangatl.ui.workspace import (
     STATUS_COLOR_TOKENS,
     STATUS_GLYPHS,
+    TranslationColumn,
     TranslationRow,
     Workspace,
 )
@@ -122,7 +123,9 @@ def _line(
 ) -> Line:
     return Line(
         reading_index=index,
-        source_ja="" if ocr_empty else f"ja {index}",
+        # MT-156 C-8: a letter, not the index, so the fixture's two sides carry
+        # the same numbers (none) and the number caption stays out of the way.
+        source_ja="" if ocr_empty else f"ja {chr(ord('a') + index)}",
         proposed_en=proposed_en,
         final_en=final_en,
         status=status,  # type: ignore[arg-type]
@@ -458,10 +461,10 @@ def test_rows_built_from_lines_read_their_status_in_the_accessible_name(qtbot) -
     _five_status_rows(window)
 
     assert _item_texts(window) == [
-        "Bubble 1 of 5. Japanese: ja 0. English: Hello.. machine proposal.",
-        "Bubble 2 of 5. Japanese: ja 1. English: Hello.. accepted.",
-        "Bubble 3 of 5. Japanese: ja 2. English: Mine. edited.",
-        "Bubble 4 of 5. Japanese: ja 3. English: Hello.. edited, then returned to the proposal.",
+        "Bubble 1 of 5. Japanese: ja a. English: Hello.. machine proposal.",
+        "Bubble 2 of 5. Japanese: ja b. English: Hello.. accepted.",
+        "Bubble 3 of 5. Japanese: ja c. English: Mine. edited.",
+        "Bubble 4 of 5. Japanese: ja d. English: Hello.. edited, then returned to the proposal.",
         "Bubble 5 of 5. Japanese: not read. English: not translated."
         " translation failed: no text was read in this bubble.",
     ]
@@ -474,7 +477,7 @@ def test_a_rows_accessible_name_follows_its_status_change(qtbot) -> None:  # typ
     _focus(qtbot, editor)
     _key(editor, Qt.Key.Key_Return, CTRL)
 
-    assert _item_texts(window)[0] == "Bubble 1 of 5. Japanese: ja 0. English: Hello.. accepted."
+    assert _item_texts(window)[0] == "Bubble 1 of 5. Japanese: ja a. English: Hello.. accepted."
 
 
 def test_rows_given_lines_show_the_committed_text_over_the_proposal(qtbot) -> None:  # type: ignore[no-untyped-def]
@@ -500,7 +503,7 @@ def test_three_argument_rows_are_unsaved_proposed_lines_as_mt016_left_them(qtbot
 
     editor = window.translation_column.row(0).editor
     _focus(qtbot, editor)
-    _type(editor, "typed")
+    _type(editor, "typed 0")  # MT-156 C-8: the same 0 as "ja 0"
     _key(editor, Qt.Key.Key_Return)
     editor.flush()
     assert editor.status == "edited"
@@ -852,3 +855,200 @@ def test_changing_page_commits_text_typed_without_enter_to_the_page_it_was_typed
 
     assert _on_disk(chapter_dir, 0)[2] == ("Typed, no Enter", "edited")
     assert _on_disk(chapter_dir, 1) == [(None, None)]
+
+
+# =============================================================================
+# MT-156: a line whose numbers differ says so on its row (AC-6, C-6, D-4)
+# =============================================================================
+# Settled copy, read out of AC-6 / C-5. The caption is unstyled (C-7): no test
+# here asserts a colour.
+
+DOSE_JA = "ハイドロコーン１００ミリ"
+DOSE_WRONG = "give 1000 mg"
+DOSE_RIGHT = "give him 100 mil"
+DOSE_SENTENCE = "Japanese 100; English 1000 - numbers differ, check the page"
+KANJI_JA = "三万八千円"
+KANJI_EN = "38,000 yen"
+KANJI_SENTENCE = "Japanese none; English 38000 - numbers differ, check the page"
+
+
+def _dose_line(
+    status: str = "proposed",
+    *,
+    proposed_en: str | None = DOSE_WRONG,
+    final_en: str | None = None,
+    source_ja: str = DOSE_JA,
+) -> Line:
+    return Line(
+        reading_index=0,
+        source_ja=source_ja,
+        proposed_en=proposed_en,
+        final_en=final_en,
+        status=status,  # type: ignore[arg-type]
+        edited_at=None,
+    )
+
+
+def _dose_column(qtbot, lines: list[Line], saves=None) -> TranslationColumn:  # type: ignore[no-untyped-def]
+    column = TranslationColumn()
+    qtbot.addWidget(column)
+    column.resize(380, 400)
+    column.set_rows(
+        _grid(len(lines)),
+        [line.source_ja for line in lines],
+        [line.proposed_en for line in lines],
+        lines=lines,
+        saves=saves,
+    )
+    with qtbot.waitExposed(column):
+        column.show()
+    column.activateWindow()
+    qtbot.waitUntil(column.isActiveWindow)
+    _settle()
+    return column
+
+
+def _column_names(column: TranslationColumn) -> list[str]:
+    lst = column.list
+    return [lst.item(i).data(Qt.ItemDataRole.AccessibleTextRole) for i in range(lst.count())]
+
+
+def test_a_proposed_row_whose_numbers_differ_shows_the_numbers_caption(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-6, the case: p018's dose, 100 read and 1000 proposed."""
+    row = _show_row(qtbot, _dose_line("proposed"))
+
+    assert row.error_caption.isVisibleTo(row), "the row shows no caption for 100 against 1000"
+    assert row.error_caption.text() == DOSE_SENTENCE
+
+
+def test_control_a_proposed_row_whose_numbers_agree_shows_no_caption(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-6's last sentence (DV-2's UI control). Passes on arrival."""
+    row = _show_row(qtbot, _dose_line("proposed", proposed_en=DOSE_RIGHT))
+
+    assert not row.error_caption.isVisibleTo(row), row.error_caption.text()
+
+
+def test_a_kanji_numeral_line_shows_none_for_the_japanese_side(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """AC-5: "The row shows it" - `三万八千円` is not read, so the Japanese is none."""
+    row = _show_row(qtbot, _dose_line("proposed", proposed_en=KANJI_EN, source_ja=KANJI_JA))
+
+    assert row.error_caption.isVisibleTo(row)
+    assert row.error_caption.text() == KANJI_SENTENCE
+
+
+@pytest.mark.parametrize("status", ["accepted", "edited", "reverted"])
+def test_a_reviewed_row_shows_the_caption_computed_from_its_shown_text(
+    qtbot,  # type: ignore[no-untyped-def]
+    status: str,
+) -> None:
+    """AC-6: `edited` and `accepted` rows too, on `effective_text`; C-4 adds
+    `reverted` (PO-6). The proposal agrees where the text is committed, so a
+    row read off the proposal would show nothing."""
+    if status == "accepted":
+        line = _dose_line("accepted")
+    else:
+        line = _dose_line(status, proposed_en=DOSE_RIGHT, final_en=DOSE_WRONG)
+    row = _show_row(qtbot, line)
+
+    assert row.editor.status == status
+    assert row.error_caption.isVisibleTo(row), f"the {status} row shows no caption"
+    assert row.error_caption.text() == DOSE_SENTENCE
+
+
+def test_control_an_edited_row_whose_shown_text_agrees_shows_no_caption(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """The proposal differs, the committed text agrees: the shown text decides."""
+    row = _show_row(qtbot, _dose_line("edited", proposed_en=DOSE_WRONG, final_en=DOSE_RIGHT))
+
+    assert not row.error_caption.isVisibleTo(row), row.error_caption.text()
+
+
+def test_committing_text_whose_numbers_agree_removes_the_caption(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """C-6: recomputed on every render, so on a commit (Enter)."""
+    row = _show_row(qtbot, _dose_line("proposed"))
+    shown_before = row.error_caption.isVisibleTo(row)
+    _focus(qtbot, row.editor)
+    _type(row.editor, "give 100 mg")
+    _key(row.editor, Qt.Key.Key_Return)
+
+    assert shown_before, "precondition: the 1000 mg proposal shows the caption"
+    assert row.editor.status == "edited"
+    assert not row.error_caption.isVisibleTo(row), row.error_caption.text()
+
+
+def test_committing_text_whose_numbers_differ_brings_the_caption(qtbot) -> None:  # type: ignore[no-untyped-def]
+    row = _show_row(qtbot, _dose_line("proposed", proposed_en=DOSE_RIGHT))
+    _focus(qtbot, row.editor)
+    _type(row.editor, "give 1000 mg")
+    _key(row.editor, Qt.Key.Key_Return)
+
+    assert row.editor.status == "edited"
+    assert row.error_caption.isVisibleTo(row), "committing 1000 against 100 shows no caption"
+    assert row.error_caption.text() == DOSE_SENTENCE
+
+
+def test_a_differing_rows_status_glyph_and_controls_are_its_statuss_own(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """D-1: a mismatch is a warning, not a status. Passes on arrival."""
+    differs = _show_row(qtbot, _dose_line("proposed"), region_id=0)
+    agrees = _show_row(qtbot, _dose_line("proposed", proposed_en=DOSE_RIGHT), region_id=1)
+
+    assert differs.editor.status == agrees.editor.status == "proposed"
+    assert differs.gutter.text() == agrees.gutter.text() == DESIGN_GLYPHS["proposed"]
+    assert differs.gutter.property("status") == agrees.gutter.property("status") == "proposed"
+    assert _actions(differs) == _actions(agrees) == DESIGN_ACTIONS["proposed"]
+
+
+def test_a_differing_rows_accessible_name_ends_with_the_numbers_sentence(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """C-6 / D-3: today's name, one space, the sentence, a full stop. The two
+    agreeing rows keep today's name exactly."""
+    column = _dose_column(
+        qtbot,
+        [
+            _dose_line("proposed"),
+            _dose_line("proposed", proposed_en=DOSE_RIGHT),
+            _dose_line("accepted", proposed_en="Stop it", source_ja="やめろ"),
+        ],
+    )
+    names = _column_names(column)
+
+    assert names == [
+        "Bubble 1 of 3. Japanese: ハイドロコーン１００ミリ. English: give 1000 mg."
+        " machine proposal. Japanese 100; English 1000 - numbers differ, check the page.",
+        "Bubble 2 of 3. Japanese: ハイドロコーン１００ミリ. English: give him 100 mil."
+        " machine proposal.",
+        "Bubble 3 of 3. Japanese: やめろ. English: Stop it. accepted.",
+    ]
+    assert names[0].endswith(DOSE_SENTENCE + ".")
+
+
+def test_a_rows_accessible_name_drops_the_sentence_once_an_edit_agrees(qtbot) -> None:  # type: ignore[no-untyped-def]
+    column = _dose_column(qtbot, [_dose_line("proposed")])
+    editor = column.row(0).editor
+    _focus(qtbot, editor)
+    _type(editor, "give 100 mg")
+    _key(editor, Qt.Key.Key_Return)
+
+    assert _column_names(column) == [
+        "Bubble 1 of 1. Japanese: ハイドロコーン１００ミリ. English: give 100 mg. edited."
+    ]
+
+
+def test_a_save_error_outranks_the_numbers_caption_and_the_name_still_carries_it(
+    qtbot,  # type: ignore[no-untyped-def]
+) -> None:
+    """D-4 / C-6 (DV-3): the slot holds one caption, the save error first; the
+    accessible name carries the sentence whatever the slot shows."""
+
+    def failing(_text: str | None, _status: str) -> None:
+        raise OSError("disk is full")
+
+    column = _dose_column(qtbot, [_dose_line("proposed")], saves=[failing])
+    row = column.row(0)
+    _focus(qtbot, row.editor)
+    _type(row.editor, "give 1000 mg.")
+    _key(row.editor, Qt.Key.Key_Return)
+    row.editor.flush()
+    _settle()
+
+    assert row.error_caption.isVisibleTo(row)
+    assert row.error_caption.text() == "Not saved: disk is full"
+    assert _column_names(column)[0].endswith(DOSE_SENTENCE + "."), _column_names(column)[0]

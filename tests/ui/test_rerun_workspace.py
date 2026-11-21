@@ -1310,7 +1310,8 @@ def every_page_done(tmp_path: Path) -> Path:
             count = 2 if ordinal == 1 else 1
             project.write_regions(ordinal, [_region(i) for i in range(count)])
             project.write_lines(ordinal, [OcrResult(f"ja-{ordinal}-{i}") for i in range(count)])
-            project.write_proposed(ordinal, {0: f"EN-{ordinal}"})
+            # MT-156 C-8: the English carries region 0's two numbers, as its Japanese does.
+            project.write_proposed(ordinal, {0: f"EN-{ordinal}-0"})
             if ordinal == 1:
                 project.set_excluded(1, 1, "user")
             project.write_cleaned(ordinal, _page_png(ordinal), erased=(0,))
