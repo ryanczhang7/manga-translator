@@ -33,6 +33,8 @@ or miss one that is not:
 - A number word in the Japanese text counts like any other Japanese number.
 - Idiom (`7割` against "70%", `2倍` against "twice") flags.
 - Units are not compared: 100 mg against 100 mL agrees.
+- Superscript and fraction characters are read as NFKC spells them: `m²` is
+  a 2, and `3½` is 31 and 2.
 
 Values are taken exactly (`Decimal`) and turned into `float` once, so `2.01千`
 is 2010.0. A value too large for a float reads as `inf`; nothing here raises.
@@ -45,7 +47,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import MAX_PREC, Context, Decimal, localcontext
 
 from mangatl.domain.line import Line, effective_text
 
@@ -63,7 +65,7 @@ class NumberMismatch:
 # C-2 rule 3: grouped first, else plain; then one optional decimal part.
 _DIGIT_NUMBER = re.compile(r"(?:[0-9]{1,3}(?:,[0-9]{3})+(?![0-9])|[0-9]+)(?:\.[0-9]+)?")
 
-# C-2 rule 4. Written as escapes: U+5343 千, U+4E07 万, U+5104 億, U+5146 兆.
+# C-2 rule 4: U+5343 千, U+4E07 万, U+5104 億, U+5146 兆.
 _MULTIPLIERS: dict[str, Decimal] = {
     "千": Decimal(1000),
     "万": Decimal(10_000),
@@ -106,6 +108,10 @@ _NUMBER_WORD = re.compile(
 )
 
 
+# Sums of parts are exact, and one too large overflows to Infinity, not raises.
+_EXACT = Context(prec=MAX_PREC, traps=[])
+
+
 def _digit_value(match: re.Match[str]) -> Decimal:
     return Decimal(match.group().replace(",", ""))
 
@@ -119,17 +125,19 @@ def _digit_numbers(text: str) -> list[float]:
         pos = match.end()
         multiplier = _MULTIPLIERS.get(text[pos : pos + 1])
         if multiplier is not None:
-            total *= multiplier
-            pos += 1
-            # Parts directly after parts add; one bare digit number ends the sum.
-            while (following := _DIGIT_NUMBER.match(text, pos)) is not None:
-                pos = following.end()
-                multiplier = _MULTIPLIERS.get(text[pos : pos + 1])
-                if multiplier is None:
-                    total += _digit_value(following)
-                    break
-                total += _digit_value(following) * multiplier
+            # Exact, whatever the ambient context; past its exponent, Infinity.
+            with localcontext(_EXACT):
+                total *= multiplier
                 pos += 1
+                # Parts directly after parts add; one bare digit number ends the sum.
+                while (following := _DIGIT_NUMBER.match(text, pos)) is not None:
+                    pos = following.end()
+                    multiplier = _MULTIPLIERS.get(text[pos : pos + 1])
+                    if multiplier is None:
+                        total += _digit_value(following)
+                        break
+                    total += _digit_value(following) * multiplier
+                    pos += 1
         values.append(float(total))
     return values
 
