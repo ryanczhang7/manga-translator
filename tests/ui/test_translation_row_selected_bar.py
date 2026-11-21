@@ -206,7 +206,8 @@ def _show(qtbot, window: QWidget) -> None:  # type: ignore[no-untyped-def]
 def _line(status: str, index: int) -> Line:
     return Line(
         reading_index=index,
-        source_ja="" if status == "failed" else f"ja {index}",
+        # MT-156 C-8: a letter, not the index, so no number caption appears.
+        source_ja="" if status == "failed" else f"ja {chr(ord('a') + index)}",
         proposed_en=None if status == "failed" else "Hello.",
         final_en={"edited": "Mine", "reverted": "Hello."}.get(status),
         status=status,  # type: ignore[arg-type]
@@ -230,7 +231,7 @@ def _workspace_with_rows(  # type: ignore[no-untyped-def]
     ]
     window.set_regions(
         regions,
-        [f"ja {i}" for i in range(len(statuses))],
+        [f"ja {chr(ord('a') + i)}" for i in range(len(statuses))],
         ["Hello."] * len(statuses),
         [_line(status, i) for i, status in enumerate(statuses)],
     )

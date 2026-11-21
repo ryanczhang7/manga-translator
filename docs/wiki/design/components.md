@@ -1057,6 +1057,58 @@ are the excluded row's, unchanged: only the caption says who left it out.
 Restore makes it an ordinary included region; Remove after that is the user's
 own act and is recorded as `user`.
 
+**A line whose numbers differ from the Japanese** *(MT-156)* shows, in the same
+caption slot, the sentence
+
+> Japanese {ja}; English {en} - numbers differ, check the page
+
+where each of `{ja}` and `{en}` is that side's numbers, ascending, joined with
+", ", or the word `none`; the sides are separated by "; " (ASCII hyphen, no
+thousands separator, no terminal full stop): `Japanese 100; English 1000 -
+numbers differ, check the page`. The numbers lead because they are what the
+user compares against the page (user decision 2026-11-20). It is a **warning, not a status**: gutter glyph, glyph colour,
+leading bar, ground, border and row actions are the line's own status's,
+unchanged, and there is no marker on the canvas, in the gutter, in the page
+strip or in the column header. The words are the only carrier, so no colour
+carries anything (A-10). It is not announced (A-12's list is closed).
+
+- **Which rows.** `proposed`, `accepted`, `edited` and `reverted`, on the text
+  the row shows. Never `failed` or `excluded`, and never a line with no
+  English yet (a run in progress).
+- **When it changes.** On a commit (Enter, Accept, Revert, focus leaving the
+  editor), a save outcome, or the row being given a new line. Not per
+  keystroke. The row grows by the caption's height when it appears and
+  shrinks when an edit makes the numbers agree.
+- **Accessible name.** The name above, then one space, the sentence and a full
+  stop: "… machine proposal. Japanese 100; English 1000 - numbers differ,
+  check the page." The name carries it whenever the line
+  differs, whatever the slot is showing.
+
+**The caption slot holds one caption, unstyled, in this order** (first that
+applies): "Not saved: {reason}" · the failed line's reason · `Left as drawn:
+read as art text` · the numbers sentence. Only the save error can sit over a
+numbers sentence, and the accessible name still carries the sentence while it
+does. The slot (`rowErrorCaption`) has no stylesheet rule: every caption
+inherits the row's text colour, which is what keeps it the guaranteed pair on
+the selected row and under High Contrast. The `type.caption`
+`color.status.danger` this section asks of the failed row's caption was never
+built; colouring the slot is one design story for all its captions, not yet
+cut.
+
+**Known limit** *(measured 2026-11-20, Segoe UI 13px)*: the caption is one
+line, clipped at the row's width, against a column of 300 or 380 px by default
+and 280 at its narrowest (`layout.md`). The numbers sentence is 353 px of text
+for `Japanese 100; English 1000` and 405 px for five numbers, so at a default
+width its end is clipped. What clips is the instruction, " - numbers differ,
+check the page" (194 px, the same on every row): the part before it is 159 px
+for one number a side, 174 px for `Japanese none; English 38000` and 211 px
+for five numbers, so both sides' numbers show at 280. Two 14-digit values
+(306 px) are the case that still clips inside a number at 280 and 300. These
+are text widths; the row's own margins were not measured. Wrapping the caption
+is the fix for every caption in the slot and is a story of its own, not yet
+cut. MT-156's `## Design notes` D-6 has the measurements, and the first
+wording this one replaced.
+
 ### Row actions
 
 Always visible on the row when applicable — **never hover-only**:

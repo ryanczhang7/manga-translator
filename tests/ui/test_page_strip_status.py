@@ -696,7 +696,7 @@ def test_an_empty_column_has_no_statuses(qtbot) -> None:  # type: ignore[no-unty
 
 def test_the_column_reports_each_rows_status_in_row_order(qtbot) -> None:  # type: ignore[no-untyped-def]
     column = _column(
-        qtbot, [_line(0, "accepted"), None, _line(2, "failed"), _line(3, "edited", "x")]
+        qtbot, [_line(0, "accepted"), None, _line(2, "failed"), _line(3, "edited", "x 3")]
     )
     # A `None` line is MT-016's unsaved proposal: it shows, and reports, proposed.
     assert column.statuses() == ("accepted", "proposed", "failed", "edited")
@@ -825,10 +825,11 @@ def test_editing_and_reverting_lines_walk_the_page_to_fully_reviewed_without_a_r
     loads = _Calls(monkeypatch, window, "load_chapter")
     rebuilds = _Calls(monkeypatch, strip, "set_pages")
 
-    _edit(qtbot, window, 1, "My own words.")
+    # MT-156 C-8: each typed text keeps its row's number ("ja 1", "ja 2").
+    _edit(qtbot, window, 1, "My own words 1.")
     after_edit = (strip.progress(0), window.translation_column.statuses())
     _click(window, 0, "accept_button")
-    _edit(qtbot, window, 2, "Another.")
+    _edit(qtbot, window, 2, "Another 2.")
     after_all = (strip.progress(0), _shown(strip)[0])
     _click(window, 2, "revert_button")
     after_revert = (strip.progress(0), window.translation_column.statuses())

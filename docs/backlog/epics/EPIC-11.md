@@ -2,7 +2,7 @@
 id: EPIC-11
 title: Running the chapter again - a stopped or invalidated run resumes from the workspace
 status: todo
-stories: [MT-124, MT-125, MT-127, MT-128, MT-129]
+stories: [MT-124, MT-125, MT-127, MT-128, MT-129, MT-161]
 ---
 
 *Added 2026-10-30 by lead-po on Claude Fable 5.1, from two things the user hit.
@@ -110,6 +110,9 @@ and nothing else.
 - **MT-129** - (same audit) tests only: the run hand-over parks focus before
   hiding the body, a one-page chapter is announced singular, and a second
   Run again leaves one dialog. Lower priority than MT-128.
+- **MT-161** - (filed by the second EPIC-11 mutation audit, 2026-11-21) tests
+  only: a run started on page 1 returns to page 1, and Cancel on the Run again
+  dialog hands focus back to Run again. `docs/wiki/audits/EPIC-11-2026-11-21.md`.
 
 ## Deliberately not in this epic
 

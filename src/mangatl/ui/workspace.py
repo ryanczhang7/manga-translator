@@ -119,6 +119,7 @@ from PySide6.QtWidgets import (
 from mangatl.domain.budget import DEFAULT_CEILING, page_estimate
 from mangatl.domain.glossary import UnknownContextMode
 from mangatl.domain.line import Line, LineStatus, effective_text, failure_reason
+from mangatl.domain.numbers import line_mismatch, mismatch_sentence
 from mangatl.domain.page import Chapter
 from mangatl.domain.page_status import PageProgress, PageStatus, page_progress
 from mangatl.domain.region import RawRegion
@@ -676,7 +677,12 @@ def _row_accessible_text(ordinal: int, total: int, japanese: str | None, line: L
         phrase = _ART_PHRASE
     else:
         phrase = _STATUS_PHRASES[line.status]
-    return f"Bubble {ordinal} of {total}. Japanese: {ja}. English: {en}. {phrase}."
+    name = f"Bubble {ordinal} of {total}. Japanese: {ja}. English: {en}. {phrase}."
+    # MT-156 C-6: the numbers sentence goes last, whatever the caption shows.
+    mismatch = line_mismatch(line)
+    if mismatch is not None:
+        name = f"{name} {mismatch_sentence(mismatch)}."
+    return name
 
 
 def _unsaved_line(reading_index: int, japanese: str | None, english: str | None) -> Line:
@@ -838,10 +844,13 @@ class TranslationRow(QWidget):
         self.exclude_button.setVisible(not excluded)
         self.restore_button.setVisible(excluded)
         line = self.editor.line
+        # MT-156 C-6: the numbers sentence is the last term; a save error outranks it.
+        mismatch = line_mismatch(line)
         caption = (
             self._save_error
             or failure_reason(line)
             or (_ART_CAPTION if _left_as_art(line) else None)
+            or (mismatch_sentence(mismatch) if mismatch is not None else None)
         )
         self.error_caption.setText(caption or "")
         self.error_caption.setVisible(caption is not None)

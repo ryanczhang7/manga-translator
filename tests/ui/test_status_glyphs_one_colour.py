@@ -416,7 +416,8 @@ def _status_line(status: str, index: int = 0) -> Line:
     failed = status == "failed"
     return Line(
         reading_index=index,
-        source_ja="" if failed else f"ja {index}",
+        # MT-156 C-8: a letter, not the index, so no number caption appears.
+        source_ja="" if failed else f"ja {chr(ord('a') + index)}",
         proposed_en=None if failed else "Hello.",
         final_en={"edited": "Mine", "reverted": "Hello."}.get(status),
         status=status,  # type: ignore[arg-type]
