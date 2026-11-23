@@ -50,7 +50,18 @@ wider one inside one box on a page that is vertical throughout.
 **Merging is transitive within a fence box**, evaluated on the *input* extents:
 the output is one region per connected component of the pairwise relation, so
 three columns of one bubble produce one region and the answer does not depend on
-the order the pairs were visited.
+the order the pairs were visited. It follows that a piece of **any size** that
+passes the pair rule with a region on each side carries the join, and all three
+become one region: both overlaps are measured against the smaller extent, so a
+small piece overlaps a neighbour it sits beside fully however short or narrow
+it is. On the MT-143 development set this happens twice with a middle piece
+under half its neighbours' size, and both are correct joins: **p062**'s short
+column piece, between a block and a column of one balloon, and **p089**'s `一`
+in the sign `第一外科`. The cost is that two balloons in one fence box can fuse
+through a stray piece between them. That was not observed on the development
+set - 0 of 111 bridge-shaped links join two different confirmed regions, and
+the 7 fence boxes holding two confirmed regions hold no stray region - and the
+rule is kept by the user's decision in **MT-158** (D-1).
 """
 
 from __future__ import annotations
@@ -117,6 +128,11 @@ COLUMN_MAX_RUN_GAP_PX: int = 25
 #: must stay apart - the two separate bubbles `011` box 4 fences - shares 50 of
 #: 157 rows, 0.3185. The admissible band is `0.3185 < value <= 1.0`, the
 #: separation is 3.2x, and 0.50 sits in the middle of it.
+#:
+#: The stacked clause (MT-145) uses the same value across the run, as a
+#: fraction of the narrower piece's width. Its one measured negative is p075
+#: seeds 2/3 on the MT-143 development set: they touch, gap 0, sharing 0.156
+#: of the narrower width, so the overlap alone keeps them apart.
 COLUMN_MIN_OVERLAP: float = 0.50
 
 #: A half-open `(x0, y0, x1, y1)` rectangle in page pixels.

@@ -58,6 +58,7 @@ import itertools
 import struct
 from collections.abc import Callable
 from io import BytesIO
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -1094,3 +1095,189 @@ def test_the_stacked_limit_is_a_pixel_count_below_the_side_by_side_limit() -> No
     assert 0 <= run < COLUMN_MAX_GAP_PX, (
         f"COLUMN_MAX_RUN_GAP_PX = {run} is not below COLUMN_MAX_GAP_PX = {COLUMN_MAX_GAP_PX}"
     )
+
+
+# -- MT-158: a small piece between two regions joins all three -----------------
+#
+# The relation is pairwise and then closed transitively (`_components`), and a
+# small piece overlaps its neighbours completely by construction, because both
+# overlaps are fractions of the SMALLER extent. So a 10x10 piece within reach of
+# two regions that are out of reach of each other joins all three. The user's
+# decision D-1 (2026-11-11) keeps that rule; these tests pin it, with its three
+# controls, and pin that the module says so.
+#
+# The geometry is the story's, in page pixels, half-open `(x0, y0, x1, y1)`.
+
+#: Side by side: two 40x200 columns 42 px apart, a 10x10 piece 16 px from each.
+_SIDE_A: Rect = (100, 0, 140, 200)
+_SIDE_B: Rect = (182, 0, 222, 200)
+_SIDE_S: Rect = (156, 95, 166, 105)
+
+#: Stacked: two 40x100 pieces 40 px apart, a 10x10 piece 15 px from each.
+_STACK_A: Rect = (100, 0, 140, 100)
+_STACK_B: Rect = (100, 140, 140, 240)
+_STACK_S: Rect = (115, 115, 125, 125)
+
+
+def _transposed(rect: Rect) -> Rect:
+    x0, y0, x1, y1 = rect
+    return (y0, x0, y1, x1)
+
+
+def _every_order_gives_one_region(
+    pieces: list[RawRegion],
+    whole: Rect,
+    axis: Literal["vertical", "horizontal"] = "vertical",
+) -> dict[tuple[int, ...], object]:
+    """The input orders of `pieces` that did NOT come back as exactly one
+    region naming every index and covering `whole`, with what each gave.
+    Collected and asserted once by the caller."""
+    fence = _fence_around(*pieces)
+    wrong: dict[tuple[int, ...], object] = {}
+    for order in itertools.permutations(range(len(pieces))):
+        result = merge_columns([pieces[index] for index in order], [fence], axis=axis)
+        got = [(region.merged_from, _mask_bbox(region)) for region in result]
+        if got != [(tuple(range(len(pieces))), whole)]:
+            wrong[order] = got
+    return wrong
+
+
+@pytest.mark.parametrize(
+    ("first_rect", "second_rect"),
+    [(_SIDE_A, _SIDE_B), (_STACK_A, _STACK_B)],
+    ids=["side-by-side", "stacked"],
+)
+def test_two_regions_out_of_reach_of_each_other_stay_two_without_a_piece_between(
+    one_bit_png: Callable[..., bytes], first_rect: Rect, second_rect: Rect
+) -> None:
+    """MT-158 AC-1, the control for AC-7 and AC-8: the same A and B with no
+    piece between them are two regions, so a join in those tests is carried by
+    the piece and not by the pair."""
+    first = _rect_region(one_bit_png, _PAGE, first_rect)
+    second = _rect_region(one_bit_png, _PAGE, second_rect)
+
+    result = merge_columns([first, second], [_fence_around(first, second)])
+
+    _kept_apart(result, first, second)
+
+
+def test_a_piece_within_reach_of_one_region_only_joins_that_one_and_not_the_other(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """MT-158 AC-2: a 10x10 piece 10 px right of A, and B one pixel past
+    `COLUMN_MAX_GAP_PX` right of the piece. A takes the piece; B stays alone,
+    because the piece reaches only one side."""
+    piece_x0 = _SIDE_A[2] + 10
+    piece: Rect = (piece_x0, 95, piece_x0 + 10, 105)
+    b_x0 = piece[2] + COLUMN_MAX_GAP_PX + 1
+    far: Rect = (b_x0, 0, b_x0 + 40, 200)
+    assert far[2] <= _PAGE[0], "B does not fit on the fixture page"
+    a = _rect_region(one_bit_png, _PAGE, _SIDE_A)
+    b = _rect_region(one_bit_png, _PAGE, far)
+    s = _rect_region(one_bit_png, _PAGE, piece)
+
+    result = merge_columns([a, b, s], [_fence_around(a, b, s)])
+
+    got = [(region.merged_from, _mask_bbox(region)) for region in result]
+    assert got == [((0, 2), _union(_SIDE_A, piece)), ((), far)], (
+        f"a piece reaching only A, with B {COLUMN_MAX_GAP_PX + 1} px past it, gave {got}"
+    )
+
+
+def test_a_piece_between_two_regions_in_different_fence_boxes_joins_only_its_own_box(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """MT-158 AC-3: A and the piece in one fence box, B in another. The piece
+    is within reach of both, but a fence box is never crossed, so A takes the
+    piece and B stays alone."""
+    a = _rect_region(one_bit_png, _PAGE, _SIDE_A)
+    b = _rect_region(one_bit_png, _PAGE, _SIDE_B)
+    s = _rect_region(one_bit_png, _PAGE, _SIDE_S)
+    near, far = _fence_around(a, s, margin=5), _fence_around(b, margin=5)
+    assert near[2] <= _SIDE_B[0] and far[0] >= _SIDE_S[2], "the two fences overlap a region"
+
+    result = merge_columns([a, b, s], [near, far])
+
+    got = [(region.merged_from, _mask_bbox(region)) for region in result]
+    assert got == [((0, 2), _union(_SIDE_A, _SIDE_S)), ((), _SIDE_B)], (
+        f"a piece between two fence boxes joined across them: {got}"
+    )
+
+
+def test_a_small_piece_between_two_columns_joins_all_three_in_every_input_order(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """MT-158 AC-7: two columns 42 px apart, which no pair rule joins (AC-1),
+    and a 10x10 piece 16 px from each. All 6 input orders give one region with
+    `merged_from == (0, 1, 2)`: the piece carries the join, by the transitive
+    closure the user decided to keep (D-1)."""
+    pieces = [_rect_region(one_bit_png, _PAGE, rect) for rect in (_SIDE_A, _SIDE_B, _SIDE_S)]
+
+    wrong = _every_order_gives_one_region(pieces, _union(_SIDE_A, _SIDE_B, _SIDE_S))
+
+    assert wrong == {}, f"{len(wrong)} of 6 input orders did not give one region: {wrong}"
+
+
+def test_a_small_piece_between_two_stacked_pieces_joins_all_three_in_every_input_order(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """MT-158 AC-8: two pieces of one column 40 px apart, past the run limit,
+    and a 10x10 piece 15 px from each. All 6 input orders give one region with
+    `merged_from == (0, 1, 2)`."""
+    pieces = [_rect_region(one_bit_png, _PAGE, rect) for rect in (_STACK_A, _STACK_B, _STACK_S)]
+
+    wrong = _every_order_gives_one_region(pieces, _union(_STACK_A, _STACK_B, _STACK_S))
+
+    assert wrong == {}, f"{len(wrong)} of 6 input orders did not give one region: {wrong}"
+
+
+def test_a_small_piece_between_two_rows_joins_all_three_on_the_horizontal_axis(
+    one_bit_png: Callable[..., bytes],
+) -> None:
+    """MT-158 AC-9: AC-7's geometry transposed, with `axis="horizontal"`. All
+    6 input orders give one region: the rule is written once, through
+    `_oriented`."""
+    rects = [_transposed(rect) for rect in (_SIDE_A, _SIDE_B, _SIDE_S)]
+    pieces = [_rect_region(one_bit_png, _WIDE, rect) for rect in rects]
+
+    wrong = _every_order_gives_one_region(pieces, _union(*rects), axis="horizontal")
+
+    assert wrong == {}, f"{len(wrong)} of 6 input orders did not give one region: {wrong}"
+
+
+def test_the_module_docstring_says_a_piece_of_any_size_joins_the_regions_either_side() -> None:
+    """MT-158 AC-4: the docstring no longer reads as pairwise. It says a piece
+    of any size between two regions joins all three, and names the two
+    development-set cases that was measured on (p062, p089) and the story that
+    decided to keep it (MT-158)."""
+    import mangatl.detect.columns as columns
+
+    doc = columns.__doc__ or ""
+    missing = [needle for needle in ("any size", "p062", "p089", "MT-158") if needle not in doc]
+
+    assert missing == [], f"the module docstring of mangatl.detect.columns lacks {missing}"
+
+
+def test_the_overlap_comment_says_the_stacked_clause_uses_it_against_the_narrower_piece() -> None:
+    """MT-158 AC-5: the `#:` block directly above `COLUMN_MIN_OVERLAP` - and no
+    other comment, since the run-gap block above it already holds both needles -
+    describes the stacked use (across the run, against the narrower piece) and
+    its one measured negative, p075's 0.156. Its side-by-side band stays."""
+    import inspect
+
+    import mangatl.detect.columns as columns
+
+    lines = inspect.getsource(columns).splitlines()
+    anchor = "COLUMN_MIN_OVERLAP: float = 0.50"
+    at = [index for index, line in enumerate(lines) if line == anchor]
+    assert len(at) == 1, f"expected exactly one line {anchor!r}, found {len(at)}"
+    start = at[0]
+    while start > 0 and lines[start - 1].startswith("#:"):
+        start -= 1
+    block = "\n".join(lines[start : at[0]])
+    assert block, f"no `#:` comment block directly above {anchor!r}"
+
+    needles = ("narrower", "0.156", "0.3185 < value <= 1.0")
+    missing = [needle for needle in needles if needle not in block]
+
+    assert missing == [], f"the comment above COLUMN_MIN_OVERLAP lacks {missing}:\n{block}"
