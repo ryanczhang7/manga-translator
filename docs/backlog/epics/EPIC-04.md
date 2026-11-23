@@ -2,7 +2,7 @@
 id: EPIC-04
 title: Translating with the page in view, under a hard budget
 status: todo
-stories: [MT-011, MT-012, MT-013, MT-044, MT-014, MT-045]
+stories: [MT-011, MT-012, MT-013, MT-044, MT-014, MT-045, MT-162]
 ---
 
 ## Goal
@@ -90,6 +90,9 @@ MT-080 instead of MT-038.
 - ~~**MT-038** — Claude's measurement~~ — **parked 2026-10-12**; v1's measured cost is Gemini's, from MT-080.
 - **MT-045** — the evidence: a name translated live on two pages **on Gemini** (re-targeted 2026-10-12), with the
   glossary on and off, K runs each (split out of MT-014, PO-1, 2026-09-28).
+- **MT-162** — fix (added 2026-11-23): in the default `rolling` mode page 1 is translated with the pre-pass
+  glossary, so it no longer renders a name differently from every later page. Found by MT-045's live
+  measurement failing on `main`; reverses MT-014 AC-5 for a chapter that has a glossary.
 
 ## Deliberately not in this epic
 
