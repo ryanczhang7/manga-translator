@@ -232,7 +232,7 @@ def test_a_region_the_model_calls_art_bakes_back_to_the_source_scan_pixel_for_pi
     source, baked, report, excluded = _run_and_bake(tmp_path, mark_art=True)
     art_polygon = _polygon_mask(_ART_BOX)
 
-    assert sorted(excluded, key=str) == ["art", None], (
+    assert sorted(excluded, key=str) == [None, "art"], (
         f"the regions read excluded {excluded}; the art region should be `art`"
     )
     assert _differs(baked, source, art_polygon) == 0, (
