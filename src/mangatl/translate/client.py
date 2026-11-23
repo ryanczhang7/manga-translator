@@ -47,7 +47,7 @@ from mangatl.domain.echo import checked_lines
 from mangatl.domain.glossary import PromptContext
 from mangatl.domain.line import OcrResult
 from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
-from mangatl.translate.parse import parse_lines
+from mangatl.translate.parse import parse_art_text, parse_lines
 from mangatl.translate.prompt import build_request
 
 __all__ = ["translate_page"]
@@ -98,6 +98,7 @@ def translate_page(
         call=CallInfo(request_id=response.id, model_id=response.model),
         proposed_terms=(),
         misaligned=checked.misaligned,
+        art_text=parse_art_text(response, range(len(ocr_results))),
     )
 
 

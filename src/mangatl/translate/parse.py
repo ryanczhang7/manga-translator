@@ -60,12 +60,15 @@ from anthropic.types import Message
 
 from mangatl.domain.echo import AnswerEntry
 from mangatl.domain.glossary import ProposedTerm
-from mangatl.translate.page_prompt import GLOSSARY_KEY
+from mangatl.translate.page_prompt import ART_KEY, GLOSSARY_KEY
 
 __all__ = [
+    "ART_KEY",
     "GLOSSARY_KEY",
     "UnknownRegionIndex",
     "first_text_block",
+    "parse_art_text",
+    "parse_art_text_text",
     "parse_lines",
     "parse_lines_text",
     "parse_terms",
@@ -136,9 +139,9 @@ def parse_lines_text(text: str, region_indices: Sequence[int]) -> dict[int, Answ
 
     lines: dict[int, AnswerEntry | None] = {}
     for key, entry in _body(text).items():
-        # MT-014 C-4: exactly this key and no other - a case-folded or prefix
+        # MT-014 C-4, MT-147 C-1: exactly these keys and no other - a case-folded or prefix
         # match would silently turn a malformed key into a dropped one.
-        if key == GLOSSARY_KEY:
+        if key in (GLOSSARY_KEY, ART_KEY):
             continue
         try:
             reading_index = int(key)
@@ -148,6 +151,36 @@ def parse_lines_text(text: str, region_indices: Sequence[int]) -> dict[int, Answ
             raise _unknown(reading_index, known)
         lines[reading_index] = _entry(entry)
     return lines
+
+
+def parse_art_text(response: Message, region_indices: Sequence[int]) -> frozenset[int]:
+    """The reading indices the response lists as drawn art text:
+    `parse_art_text_text` over the response's first text block."""
+    return parse_art_text_text(first_text_block(response), region_indices)
+
+
+def parse_art_text_text(text: str, region_indices: Sequence[int]) -> frozenset[int]:
+    """The reading indices listed under `ART_KEY` (MT-147 C-3).
+
+    `frozenset()` when the key is absent or empty; a repeated index counts
+    once. **Strict, where a malformed line entry is lenient**: an item that is
+    not an `int` - a `bool` included, since `true` must not become region 1 -
+    or is not one of `region_indices` raises `UnknownRegionIndex` naming it, and
+    so does a value that is not a list. A dropped art index would typeset
+    English over drawn art with nothing flagged; a failed page is seen and
+    re-run. Only `ART_KEY` is read: a bad line key is `parse_lines_text`'s.
+    """
+    known = set(region_indices)
+    items = _body(text).get(ART_KEY, [])
+    if not isinstance(items, list):
+        raise UnknownRegionIndex(
+            f"the response's {ART_KEY!r} is {items!r}, not a list of reading indices;"
+            f" this page's reading indices are {sorted(known)}"
+        )
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, int) or item not in known:
+            raise _unknown(item, known)
+    return frozenset(items)
 
 
 def _entry(value: object) -> AnswerEntry | None:

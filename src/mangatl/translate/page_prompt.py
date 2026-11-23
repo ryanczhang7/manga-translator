@@ -49,6 +49,7 @@ from mangatl.domain.glossary import PromptContext
 from mangatl.domain.line import OcrResult
 
 __all__ = [
+    "ART_KEY",
     "GLOSSARY_KEY",
     "GLOSSARY_SCHEMA",
     "MAX_IMAGE_LONG_EDGE_PX",
@@ -65,6 +66,10 @@ MAX_IMAGE_LONG_EDGE_PX: int = 1568
 #: The one response key that is not a reading index (MT-014 C-3/C-4). It can
 #: never collide with one: a reading index is always digits.
 GLOSSARY_KEY: str = "glossary"
+
+#: MT-147 C-1: the second non-index response key - the reading indices of the
+#: regions whose text is drawn into the artwork. Never a reading index either.
+ART_KEY: str = "art_text"
 
 #: Claude's published tokens-per-image divisor: `width x height / 750`.
 _PIXELS_PER_TOKEN = 750
@@ -117,6 +122,11 @@ you believe the listing was misread. Only when a region's listing is empty, \
 write in "ja" the Japanese you read in that bubble on the page image.
 - In "en", write the English for that region. Where the listing looks misread, \
 you may translate from the page image instead; "ja" stays a copy of the listing.
+- The one exception to translating every region is text drawn into the \
+artwork itself: sound effects, signs, labels on objects. List the reading \
+index of each such region under the "art_text" key and give that region no \
+entry and no translation. Dialogue, narration and captions are never art \
+text, however they are lettered.
 
 Continuity across pages:
 - You may also be given a glossary of names, honorifics and place names this \
@@ -195,24 +205,33 @@ def response_schema(region_count: int) -> dict[str, Any]:
     (MT-011 AC-5): a compliant model may omit a region only if the schema lets
     it. `additionalProperties: false` is the other half - it makes an unknown
     index the model disobeying rather than the schema inviting it.
+
+    For a page with regions, one more property, `ART_KEY` (MT-147 C-2): the
+    reading indices of regions whose text is drawn into the art. The range is
+    an `enum` on the items rather than `minimum`/`maximum`, which Claude's
+    structured outputs do not support, and there is no `uniqueItems` (PO-1).
+    A page with no regions gets none: an `enum` of no values is not a schema.
     """
-    return {
-        "type": "object",
-        "properties": {
-            str(index): {
-                "type": "object",
-                "description": f"The region at reading index {index}.",
-                "properties": {
-                    "ja": {
-                        "type": "string",
-                        "description": "The region's Japanese, copied exactly as listed.",
-                    },
-                    "en": {"type": "string", "description": "The English for the region."},
+    properties: dict[str, Any] = {
+        str(index): {
+            "type": "object",
+            "description": f"The region at reading index {index}.",
+            "properties": {
+                "ja": {
+                    "type": "string",
+                    "description": "The region's Japanese, copied exactly as listed.",
                 },
-                "required": ["ja", "en"],
-                "additionalProperties": False,
-            }
-            for index in range(region_count)
-        },
-        "additionalProperties": False,
+                "en": {"type": "string", "description": "The English for the region."},
+            },
+            "required": ["ja", "en"],
+            "additionalProperties": False,
+        }
+        for index in range(region_count)
     }
+    if region_count:
+        properties[ART_KEY] = {
+            "type": "array",
+            "description": "Reading indices of regions whose text is drawn into the artwork.",
+            "items": {"type": "integer", "enum": list(range(region_count))},
+        }
+    return {"type": "object", "properties": properties, "additionalProperties": False}

@@ -65,7 +65,7 @@ from mangatl.store.glossary import read_entries, upsert
 from mangatl.store.ledger import chapter_call_costs, chapter_total, record_call
 from mangatl.store.project import Project
 
-__all__ = ["PageTranslator", "TranslateStage", "budget_for", "pages_remaining"]
+__all__ = ["PageTranslator", "TranslateStage", "apply_answer", "budget_for", "pages_remaining"]
 
 #: Page image bytes, the page's OCR results and its continuity context (MT-014
 #: C-9) in, one result out.
@@ -150,18 +150,53 @@ def _to_reading_indices(
     `result.misaligned` (MT-149 C-1a) is in the same key space and is mapped,
     and refused, the same way. Returns `(proposals, misaligned)`.
     """
-
-    def mapped(index: int) -> int:
-        if not 0 <= index < len(included):
-            raise ValueError(
-                f"the translator answered for index {index}, but only"
-                f" {len(included)} region(s) were sent"
-            )
-        return included[index]
-
-    proposals = {mapped(index): english for index, english in result.lines.items()}
-    misaligned = frozenset(mapped(index) for index in result.misaligned)
+    proposals = {_mapped(index, included): english for index, english in result.lines.items()}
+    misaligned = frozenset(_mapped(index, included) for index in result.misaligned)
     return proposals, misaligned
+
+
+def _mapped(index: int, included: Sequence[int]) -> int:
+    """`included[index]`, or `ValueError` naming `index` when it is outside the
+    listing that was sent (see `_to_reading_indices`)."""
+    if not 0 <= index < len(included):
+        raise ValueError(
+            f"the translator answered for index {index}, but only"
+            f" {len(included)} region(s) were sent"
+        )
+    return included[index]
+
+
+def apply_answer(
+    project: Project, ordinal: int, result: TranslationResult, included: Sequence[int]
+) -> None:
+    """Write one page's answer to the store: the one place "art wins" lives
+    (MT-147 C-5), shared by `TranslateStage.run` and `pipeline.batch`.
+
+    1. **Map** `lines`, `misaligned` and `art_text` through `included`; a key
+       outside the listing, in any of the three, raises `ValueError` naming it
+       before anything is written.
+    2. **Art wins**: an art region gets no proposal and is not misaligned - it
+       is no failed translation, and must not read `failed` if restored.
+    3. **Mark** each art region, ascending, `excluded = "art"`, unless it is
+       already excluded: a region excluded for another reason keeps it (PO-2).
+    4. **Write** the proposals.
+
+    Marks before proposals. Each write opens its own transaction and this
+    opens none (see the module docstring), so a crash between them leaves art
+    marked and no proposals: the page is translated again with the art already
+    excluded. The other order would leave a page that reads done with its art
+    typeset.
+    """
+    proposals, misaligned = _to_reading_indices(result, included)
+    art = sorted({_mapped(index, included) for index in result.art_text})
+    for index in art:
+        proposals.pop(index, None)
+    misaligned = misaligned.difference(art)
+    regions = project.read_regions(ordinal)
+    for index in art:
+        if regions[index].excluded is None:
+            project.set_excluded(ordinal, index, "art")
+    project.write_proposed(ordinal, proposals, misaligned)
 
 
 @dataclass
@@ -285,8 +320,7 @@ class TranslateStage:
                 )
             )
         _update_glossary(ctx, sent)
-        proposals, misaligned = _to_reading_indices(result, included)
-        ctx.project.write_proposed(ctx.page.ordinal, proposals, misaligned)
+        apply_answer(ctx.project, ctx.page.ordinal, result, included)
 
     def is_done(self, ctx: PageContext) -> bool:
         """Whether this page already carries a **proposal**.

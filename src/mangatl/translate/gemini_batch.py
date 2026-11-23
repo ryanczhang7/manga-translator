@@ -52,7 +52,7 @@ from mangatl.domain.glossary import PromptContext
 from mangatl.domain.line import OcrResult
 from mangatl.domain.translation import CallInfo, TranslationResult
 from mangatl.translate.gemini import MODEL_ID, _usage_of, build_request
-from mangatl.translate.parse import parse_lines_text
+from mangatl.translate.parse import parse_art_text_text, parse_lines_text
 
 __all__ = [
     "BatchItemError",
@@ -231,6 +231,7 @@ def _result_of(
             ),
             proposed_terms=(),
             misaligned=checked.misaligned,
+            art_text=parse_art_text_text(text, range(len(page.ocr_results))),
         )
     except Exception as exc:
         return BatchItemError(page.ordinal, f"{type(exc).__name__}: {exc}")

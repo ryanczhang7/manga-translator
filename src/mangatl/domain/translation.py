@@ -111,6 +111,10 @@ class TranslationResult:
     #: answer through the parser, and AC-6's per-adapter tests close the
     #: vacuous "never checks" implementation the default would allow.
     misaligned: frozenset[int] = frozenset()
+    #: The keys the answer listed as text drawn into the artwork (MT-147 C-1),
+    #: in the same key space. Carried as parsed: `lines` may name them too, and
+    #: `pipeline.translate_stage.apply_answer` is where art wins.
+    art_text: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
