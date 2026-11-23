@@ -245,7 +245,8 @@ def test_the_call_field_has_no_default_so_a_caller_cannot_forget_it() -> None:
         "usage",
         "call",
         "proposed_terms",
-        "misaligned",  # MT-149 C-1a: last, and the one field with a default
+        "misaligned",  # MT-149 C-1a: defaulted
+        "art_text",  # MT-147 C-1: last, defaulted like `misaligned`
     ]
 
 
@@ -275,3 +276,34 @@ def test_the_wordless_page_is_the_c2_value_exactly() -> None:
 
     assert result.proposed_terms == ()
     assert result == TranslationResult({}, TokenUsage(0, 0, 0, 0), None, ())
+
+
+# -- MT-147 C-1: art_text ---------------------------------------------------------
+
+
+def test_art_text_is_the_last_field_and_defaults_to_the_empty_set() -> None:
+    """MT-147 C-1: `art_text` - the reading indices the model listed as text
+    drawn into the artwork, in the key space of `lines` - is the last field and
+    defaults to `frozenset()`, like `misaligned`, so all 44 construction sites
+    keep working. A result built without it lists no art."""
+    fields = {field.name: field for field in dataclasses.fields(TranslationResult)}
+
+    assert "art_text" in fields, "TranslationResult has no art_text field (MT-147 C-1)"
+    assert fields["art_text"].default == frozenset()
+    result = TranslationResult(lines={}, usage=TokenUsage(0, 0, 0, 0), call=None, proposed_terms=())
+    assert result.art_text == frozenset()  # type: ignore[attr-defined]
+
+
+def test_art_text_carries_what_it_was_given() -> None:
+    """The field holds the set it was built with, and two results differing
+    only in it are not equal - so a result that dropped it is told apart."""
+    listed = TranslationResult(
+        lines={0: "Hi."},
+        usage=TokenUsage(0, 0, 0, 0),
+        call=None,
+        proposed_terms=(),
+        art_text=frozenset({1, 2}),  # type: ignore[call-arg]
+    )
+
+    assert listed.art_text == frozenset({1, 2})  # type: ignore[attr-defined]
+    assert listed != dataclasses.replace(listed, art_text=frozenset())

@@ -509,14 +509,16 @@ def test_the_response_schema_names_the_pages_indices_and_requires_none_of_them()
     assert schema["type"] == "object"
     assert schema["additionalProperties"] is False
     # MT-014 C-3 added one non-index property, `glossary`; MT-106 removes it
-    # again (a page proposes no terms), so the properties are the indices only.
-    assert set(schema["properties"]) == {"0", "1", "2", "3"}, (
-        "the page schema names something other than the reading indices"
-        " (MT-106: no `glossary` property)"
+    # again (a page proposes no terms). MT-147 C-2 adds one non-index property,
+    # `art_text`, so the properties are the indices and that key, nothing else.
+    assert set(schema["properties"]) == {"0", "1", "2", "3", "art_text"}, (
+        "the page schema names something other than the reading indices and"
+        " `art_text` (MT-106: no `glossary` property; MT-147: one `art_text`)"
     )
     assert not schema.get("required"), "AC-5 turns on no region being required"
     # MT-149 AC-1: each index's answer is `{ja, en}`, both required, nothing else.
-    for key, entry in schema["properties"].items():
+    for key in ("0", "1", "2", "3"):
+        entry = schema["properties"][key]
         assert entry["type"] == "object", f"region {key}'s answer is not an object"
         assert sorted(entry["required"]) == ["en", "ja"]
         assert entry["additionalProperties"] is False

@@ -1234,3 +1234,174 @@ def test_the_real_collector_writes_the_new_shape_exactly_as_the_double_does(
     assert world.proposed() == _PROPOSED_AFTER_ALL
     assert world.ledger() == [_row(world, 0), _row(world, 1), _row(world, 2)]
     assert world.events == [*_PRICED_ALL, _collected(job.id, 3, 0, ())], f"emitted {world.events}"
+
+
+# -- MT-147 AC-5: a collected answer's art_text, through apply_answer -----------
+#
+# The batch half of AC-3. Page 0 is re-seeded with AC-3's four regions, so "the
+# same regions are excluded `art` as in AC-3" is the same four-region answer
+# on the same shape of page: lines for regions 0, 1 and 3, `art_text: [1, 2]`.
+# A batch answer is keyed by reading index already (MT-110 PO-2), so the
+# mapping is the identity. The `art_text=` keyword is passed inside helpers,
+# so in RED the missing field fails these tests and not the file's collection.
+
+#: AC-3's four lines, on page 0.
+_ART_LINES: tuple[OcrResult, ...] = (
+    OcrResult("一つ目の台詞"),
+    OcrResult("看板の文字"),
+    OcrResult("ドドド"),
+    OcrResult("四つ目"),
+)
+
+
+def _seed_four_regions_on_page_0(world: _World, one_bit_png: Callable[..., bytes]) -> None:
+    mask = one_bit_png(8, 8, [(0, 0, 4, 4)])
+    world.project.write_regions(
+        0,
+        [
+            RawRegion(polygon=_ring(i * 6), mask=mask, confidence=1.0, kind="bubble")
+            for i in range(len(_ART_LINES))
+        ],
+    )
+    world.project.write_lines(0, _ART_LINES)
+
+
+def _art_answer() -> Any:
+    """Page 0's answer as AC-3 states it; pages 1 and 2 as AC-2's."""
+    result_0 = TranslationResult(
+        lines={0: "First line.", 1: "SIGN", 3: "Fourth."},
+        usage=_USAGE[0],
+        call=CallInfo("item-response-0", _MODEL),
+        proposed_terms=(),
+        art_text=frozenset({1, 2}),  # type: ignore[call-arg]
+    )
+    return _results({0: result_0, 1: _RESULTS[1], 2: _RESULTS[2]})
+
+
+def _excluded(world: _World, ordinal: int) -> tuple[str | None, ...]:
+    return tuple(region.excluded for region in world.project.read_regions(ordinal))
+
+
+def test_a_collected_answer_excludes_its_art_regions_as_the_stage_does(
+    world: _World, one_bit_png: Callable[..., bytes]
+) -> None:
+    """**AC-5**: the batch write excludes the same regions `art` as AC-3's
+    stage write - regions 1 and 2 of page 0 - with `proposed_en` NULL, region
+    1's line discarded, and regions 0 and 3 carrying their proposals. Pages 1
+    and 2 are written as before and exclude nothing."""
+    _seed_four_regions_on_page_0(world, one_bit_png)
+    job = world.job()
+
+    world.collect(job, _Collector(_art_answer()))
+
+    assert _excluded(world, 0) == (None, "art", "art", None), (
+        f"page 0 reads excluded {_excluded(world, 0)}; the answer listed 1 and 2 as art"
+    )
+    assert world.proposed() == {
+        **_PROPOSED_AFTER_ALL,
+        0: ("First line.", None, None, "Fourth."),
+    }
+    assert _excluded(world, 1) == (None,)
+    assert _excluded(world, 2) == (None, None)
+
+
+def test_a_collected_answer_with_no_art_excludes_nothing(
+    world: _World, one_bit_png: Callable[..., bytes]
+) -> None:
+    """The control: the same four-region page and the same lines with no
+    `art_text` exclude nothing and store all three lines."""
+    _seed_four_regions_on_page_0(world, one_bit_png)
+    result_0 = TranslationResult(
+        lines={0: "First line.", 1: "SIGN", 3: "Fourth."},
+        usage=_USAGE[0],
+        call=CallInfo("item-response-0", _MODEL),
+        proposed_terms=(),
+    )
+    job = world.job()
+
+    world.collect(job, _Collector(_results({0: result_0, 1: _RESULTS[1], 2: _RESULTS[2]})))
+
+    assert _excluded(world, 0) == (None, None, None, None)
+    assert world.proposed()[0] == ("First line.", "SIGN", None, "Fourth.")
+
+
+def test_a_region_already_excluded_keeps_its_reason_when_a_batch_answer_calls_it_art(
+    world: _World,
+) -> None:
+    """C-5 step 3 and PO-2 (the user's answer: keep the existing reason). The
+    batch path sends every region, so the user's excluded region 1 of page 0
+    can be named in `art_text`: it stays `user`, and its line is still
+    dropped."""
+    world.project.set_excluded(0, 1, "user")
+    result_0 = dataclasses.replace(
+        _RESULTS[0],
+        art_text=frozenset({1}),  # type: ignore[call-arg]
+    )
+    job = world.job()
+
+    world.collect(job, _Collector(_results({0: result_0, 1: _RESULTS[1], 2: _RESULTS[2]})))
+
+    assert _excluded(world, 0) == (None, "user")
+    assert world.proposed()[0] == ("Kenji, wait", None)
+
+
+def test_the_batch_write_goes_through_the_stages_apply_answer_with_the_identity_listing(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**AC-5**'s "both paths share one helper" (C-5): with a recorder in
+    place of `pipeline.batch.apply_answer`, every page's write reaches it -
+    the project, the ordinal, the result as collected, and the identity
+    listing `range(len(read_regions(n)))` - and nothing else writes a
+    proposal, so with the recorder writing nothing the store has none."""
+    import mangatl.pipeline.batch as batch_module
+
+    calls: list[tuple[object, int, object, list[int]]] = []
+
+    def recorder(project: object, ordinal: int, result: object, included: Sequence[int]) -> None:
+        calls.append((project, ordinal, result, list(included)))
+
+    monkeypatch.setattr(batch_module, "apply_answer", recorder)
+    job = world.job()
+
+    world.collect(job, _Collector(_all_answered()))
+
+    assert calls == [
+        (world.project, 0, _RESULTS[0], [0, 1]),
+        (world.project, 1, _RESULTS[1], [0]),
+        (world.project, 2, _RESULTS[2], [0, 1]),
+    ], f"pipeline.batch reached apply_answer as {calls}"
+    assert world.proposed() == {0: (None, None), 1: (None,), 2: (None, None)}
+
+
+def _store_writes_called_in(module_path: Path) -> list[str]:
+    """Every `.set_excluded(...)` and `.write_proposed(...)` call in a module's
+    source, by attribute name, read off its AST (so a comment or a docstring
+    naming either is not a call)."""
+    import ast
+
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    return [
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"set_excluded", "write_proposed"}
+    ]
+
+
+def test_pipeline_batch_has_no_second_copy_of_the_write() -> None:
+    """**AC-5**'s "no second copy of the rule exists", as C-5 reads it:
+    `pipeline/batch.py`'s source calls neither `set_excluded` nor
+    `write_proposed` - both live in `apply_answer` alone.
+
+    The control is in the same test: the scan finds the `write_proposed` call
+    `pipeline/consistency.py` keeps (Out of scope), so an empty answer here is
+    about `batch.py` and not about a scanner that finds nothing."""
+    import mangatl.pipeline.batch as batch_module
+    import mangatl.pipeline.consistency as consistency_module
+
+    assert "write_proposed" in _store_writes_called_in(Path(str(consistency_module.__file__)))
+    assert _store_writes_called_in(Path(str(batch_module.__file__))) == [], (
+        "pipeline/batch.py writes to the store itself; AC-5 says the batch path"
+        " writes an answer only through translate_stage.apply_answer"
+    )

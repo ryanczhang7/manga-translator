@@ -698,3 +698,84 @@ def test_the_gemini_adapter_hands_its_entries_and_its_listing_to_checked_lines(
     ], "gemini.translate_page did not check its parsed answer through checked_lines"
     assert result.lines == {2: "recorded"}
     assert result.misaligned == frozenset({0})
+
+
+# -- MT-147 AC-7: the answer's art_text, through parse_art_text_text ------------
+
+
+def _answer_with_art(art_text: object) -> str:
+    """An aligned answer for all four regions, with `art_text` beside them.
+    Region 2 is both lined and listed: the adapter returns both as parsed
+    (C-4); "art wins" is `apply_answer`'s."""
+    body: dict[str, object] = {
+        str(i): {"ja": _OCR_RESULTS[i].text, "en": _EXPECTED[i]} for i in range(4)
+    }
+    body["art_text"] = art_text
+    return json.dumps(body, ensure_ascii=False)
+
+
+def test_geminis_adapter_returns_the_answers_art_text_and_leaves_its_lines_alone(
+    gemini: ModuleType,
+) -> None:
+    """**AC-7**, Gemini: `TranslationResult.art_text` is the answer's set, and
+    `lines` still carries region 2's English."""
+    client = _FakeGeminiClient(_response(_answer_with_art([2, 0])))
+
+    result = gemini.translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+    assert result.art_text == frozenset({0, 2})
+    assert result.lines == _EXPECTED
+
+
+def test_geminis_adapter_returns_no_art_for_an_answer_without_the_key(gemini: ModuleType) -> None:
+    """The zero: the recorded aligned answer has no `art_text`."""
+    client = _FakeGeminiClient(_response(_body("well-formed")))
+
+    result = gemini.translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+    assert result.art_text == frozenset()
+
+
+def test_geminis_adapter_refuses_an_art_index_the_page_does_not_have(gemini: ModuleType) -> None:
+    """**AC-7** with AC-2: region 7 of a four-region page raises
+    `UnknownRegionIndex` naming it."""
+    client = _FakeGeminiClient(_response(_answer_with_art([7])))
+
+    with pytest.raises(UnknownRegionIndex, match=r"\b7\b"):
+        gemini.translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+
+def test_geminis_adapter_reads_art_text_through_parse_art_text_text(
+    gemini: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**AC-7**'s "through `parse_art_text_text`": a recorder bound in place of
+    `gemini.parse_art_text_text` sees the response text and the page's
+    `range(len(ocr_results))`, and the result carries what it returned."""
+    text = _answer_with_art([1])
+    calls: list[tuple[str, list[int]]] = []
+    sentinel = frozenset({3})
+
+    def recorder(body: str, region_indices: Sequence[int]) -> frozenset[int]:
+        calls.append((body, list(region_indices)))
+        return sentinel
+
+    monkeypatch.setattr(gemini, "parse_art_text_text", recorder)
+
+    result = gemini.translate_page(
+        _FakeGeminiClient(_response(text)), _page(), _OCR_RESULTS, EMPTY_CONTEXT
+    )
+
+    assert calls == [(text, [0, 1, 2, 3])], (
+        "gemini.translate_page did not read art_text through parse_art_text_text"
+    )
+    assert result.art_text is sentinel
+
+
+def test_geminis_wordless_page_lists_no_art_and_makes_no_call(gemini: ModuleType) -> None:
+    """C-4: the no-call return keeps the default `frozenset()`."""
+    client = _FakeGeminiClient(explode=True)
+
+    result = gemini.translate_page(client, _page(), _ALL_EMPTY, EMPTY_CONTEXT)
+
+    assert client.calls == 0
+    assert result.art_text == frozenset()
