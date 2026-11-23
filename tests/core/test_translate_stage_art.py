@@ -50,7 +50,7 @@ from mangatl.domain.line import OcrResult
 from mangatl.domain.region import RawRegion
 from mangatl.domain.translation import CallInfo, TokenUsage, TranslationResult
 from mangatl.pipeline import translate_stage
-from mangatl.pipeline.stage import PageContext
+from mangatl.pipeline.stage import BudgetRefused, PageContext
 from mangatl.pipeline.translate_stage import TranslateStage
 from mangatl.store.intake import read_chapter
 from mangatl.store.project import Project, create_project, project_dir_for
@@ -456,3 +456,67 @@ def test_apply_answer_with_no_art_writes_exactly_what_the_stage_wrote_before(
 
     assert calls == [("write_proposed", _TARGET, {1: "Second.", 3: "Fourth."}, frozenset({2}))]
     assert chapter.excluded() == ("user", None, None, None)
+
+
+# -- R-2: a page with nothing to send is not refused by the budget guard ---------
+#
+# Diff review round 1, finding 1: the guard ran before `included` was built, so
+# a page whose every region is already excluded - all `art`, after a run that
+# marked them - was refused within one page estimate of the ceiling although it
+# would send nothing. The ceiling here is half of one page estimate, written by
+# raw SQL as `test_budget_run._set_ceiling` writes it (no shipped writer).
+
+#: Less than one page estimate: $0.00 spent + one estimate projected > this.
+_UNDER_ONE_PAGE_MICRO = BOOTSTRAP_PAGE_ESTIMATE.micro() // 2
+
+
+def _set_ceiling_under_one_page(project: Project) -> None:
+    with project.transaction() as cursor:
+        cursor.execute("UPDATE chapter SET budget_ceiling_micro_usd = ?", (_UNDER_ONE_PAGE_MICRO,))
+
+
+def test_a_page_whose_every_region_is_already_art_is_not_refused_by_the_budget(
+    chapter: _Chapter,
+) -> None:
+    """**R-2**: every region of the page is already `art`, and less than one
+    page estimate is left under the ceiling. Nothing would be sent, so the
+    stage completes: no `BudgetRefused`, no translator call, no bill, no
+    event, and the store reads as it did before."""
+    chapter.seed(_TARGET, ["art", "art", "art", "art"])
+    _set_ceiling_under_one_page(chapter.project)
+    translator = _Answering({})
+
+    try:
+        _run(chapter, translator)
+    except BudgetRefused as refusal:
+        pytest.fail(
+            "a page with every region already excluded was refused by the budget"
+            f" guard although it sends nothing: {refusal}"
+        )
+
+    assert translator.seen == [], (
+        f"the translator was handed {translator.seen} for a page with nothing to send"
+    )
+    assert chapter.ledger_rows() == 0
+    assert chapter.events == []
+    assert chapter.excluded() == ("art", "art", "art", "art")
+    assert chapter.proposed() == (None, None, None, None)
+
+
+def test_control_the_same_budget_with_one_region_still_included_is_refused(
+    chapter: _Chapter,
+) -> None:
+    """The control for the test above: the same ceiling, three regions `art`
+    and one still included. One region would be sent, so the guard refuses
+    before the translator is called - the test above is about an empty page,
+    not about a guard that is gone or skipped whenever any region is excluded."""
+    chapter.seed(_TARGET, ["art", "art", None, "art"])
+    _set_ceiling_under_one_page(chapter.project)
+    translator = _Answering({0: "Third."})
+
+    with pytest.raises(BudgetRefused):
+        _run(chapter, translator)
+
+    assert translator.seen == []
+    assert chapter.ledger_rows() == 0
+    assert chapter.proposed() == (None, None, None, None)
