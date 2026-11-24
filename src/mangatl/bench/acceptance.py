@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mangatl.bench.matching import match_regions
+from mangatl.bench.recall import proposal_indices
 from mangatl.bench.truth import (
     BenchmarkChapterUsedInDevelopment,
     GroundTruth,
@@ -67,6 +68,7 @@ class AcceptanceReport:
     matched: int
     spurious: int
     ground_truth: int
+    left_as_art: int = 0  # stored regions set aside by the pipeline (bench.recall's rule)
 
 
 def _ratio(numerator: int, denominator: int) -> float:
@@ -87,18 +89,21 @@ def measure(project: Project, truth: GroundTruth, *, development: bool = False) 
     if not report.ok:
         raise InvalidGroundTruth("\n".join(report.errors))
 
-    accepted = proposed = matched = spurious = ground_truth = 0
+    accepted = proposed = matched = spurious = ground_truth = left_as_art = 0
     for page in truth.pages:
-        proposals = project.read_regions(page.ordinal)
-        lines = read_review_lines(project, page.ordinal)
+        regions = project.read_regions(page.ordinal)
+        kept = proposal_indices(regions)
+        lines = read_review_lines(project, page.ordinal)  # one per stored region
         ground_truth += len(page.regions)
-        proposed += len(proposals)
+        proposed += len(kept)
+        left_as_art += len(regions) - len(kept)
+        proposals = [regions[i] for i in kept]
         for match in match_regions(proposals, page.regions, width=page.width, height=page.height):
             if match.truth_index is None:
                 spurious += 1
             elif match.region_id is not None:
                 matched += 1
-                line = lines[match.region_id]
+                line = lines[kept[match.region_id]]
                 if line is not None and is_accepted_as_is(line):
                     accepted += 1
 
@@ -111,6 +116,7 @@ def measure(project: Project, truth: GroundTruth, *, development: bool = False) 
         matched=matched,
         spurious=spurious,
         ground_truth=ground_truth,
+        left_as_art=left_as_art,
     )
 
 
@@ -124,6 +130,7 @@ def render(report: AcceptanceReport) -> list[str]:
         f"recall                      {report.recall:.1%}  matched {report.matched}"
         f" / ground truth {report.ground_truth}",
         f"spurious                    {report.spurious}",
+        f"left as art                 {report.left_as_art}",
         f"identity S1b = S1a x recall {identity}",
     ]
 

@@ -90,6 +90,7 @@ def render(report: S2Report) -> list[str]:
         f" / ground truth {recall.ground_truth}",
         f"missed        {missed}",
         f"spurious      {recall.spurious}",
+        f"left as art   {recall.left_as_art}",
         f"residual ink  worst {residual.worst:.4f} / max {RESIDUAL_INK_MAX:.4f}",
         *(
             f"  page {region.page_ordinal} region {region.truth_index}  {region.fraction:.4f}"
