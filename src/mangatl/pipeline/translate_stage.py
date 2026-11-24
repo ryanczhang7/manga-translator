@@ -241,6 +241,9 @@ class TranslateStage:
            after paying for it has not guarded anything". The refusal leaves the
            page untouched - no call, no ledger row, no proposals - and reaches
            the runner as `BudgetRefused`, which maps it to `reason="budget"`.
+           It is consulted on every page except one that has regions and none
+           of them included (MT-147 R-2): that page sends nothing, so there is
+           no call to guard. A page with no regions at all is still checked.
         2. **`record_call` before `write_proposed`.** Both open their own
            transaction and `Project.transaction()` is not reentrant (MT-005
            PO-5), so they are two commits with a window between them, and a
@@ -285,21 +288,25 @@ class TranslateStage:
         this story's whole subject. One `SELECT` a page is nothing at 20 pages.
         """
         ocr_results = ctx.project.read_lines(ctx.page.ordinal)
-        budget = budget_for(ctx.project, self.page_estimate)
-        projection = budget.project(chapter_call_costs(ctx.project), pages_remaining(ctx))
-        decision = budget.check(chapter_total(ctx.project), projection)
-        if not decision.permitted:
-            raise BudgetRefused(decision)
-
-        image_bytes = (ctx.project.chapter.source_dir / ctx.page.filename).read_bytes()
-        context = build_prompt_context(ctx.project, ctx.page.ordinal, mode=self.context_mode)
         # MT-118 C-4: only the included regions cross the seam, as a contiguous
         # listing, and the answer's indices are mapped back to reading indices.
         # A page with none included hands over `()`, and the translator's own
         # `all(ocr_empty)` guard makes no call for it - `all([])` is True.
+        # MT-147 R-2: so a page with regions and none included skips the budget
+        # guard, which would otherwise refuse a page that sends nothing.
         regions = ctx.project.read_regions(ctx.page.ordinal)
         included = [i for i, region in enumerate(regions) if region.excluded is None]
         sent = [ocr_results[i] for i in included]
+
+        budget = budget_for(ctx.project, self.page_estimate)
+        if included or not regions:
+            projection = budget.project(chapter_call_costs(ctx.project), pages_remaining(ctx))
+            decision = budget.check(chapter_total(ctx.project), projection)
+            if not decision.permitted:
+                raise BudgetRefused(decision)
+
+        image_bytes = (ctx.project.chapter.source_dir / ctx.page.filename).read_bytes()
+        context = build_prompt_context(ctx.project, ctx.page.ordinal, mode=self.context_mode)
         result = self.translate(image_bytes, sent, context)
         if result.call is not None:
             record_call(
