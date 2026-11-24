@@ -212,6 +212,25 @@ class _Answering:
         )
 
 
+class _GuardedAnswering(_Answering):
+    """`_Answering` behind the translators' own no-call guard, as
+    `test_translate_stage_excluded._Guarded` applies it:
+    `all(result.ocr_empty for result in ocr_results)` - `translate/client.py`
+    and `translate/gemini.py` verbatim - returns the wordless-page result with
+    `call=None` and makes no call; `all([])` is `True`, so a `()` listing is
+    one. Otherwise it answers exactly as `_Answering` does, priced."""
+
+    def __call__(
+        self, image: bytes, ocr_results: Sequence[OcrResult], context: PromptContext
+    ) -> TranslationResult:
+        if all(result.ocr_empty for result in ocr_results):
+            self.seen.append(tuple(ocr_results))
+            return TranslationResult(
+                lines={}, usage=TokenUsage(0, 0, 0, 0), call=None, proposed_terms=()
+            )
+        return super().__call__(image, ocr_results, context)
+
+
 def _run(chapter: _Chapter, translator: _Answering) -> None:
     TranslateStage(page_estimate=BOOTSTRAP_PAGE_ESTIMATE, translate=translator).run(chapter.context)
 
@@ -480,11 +499,12 @@ def test_a_page_whose_every_region_is_already_art_is_not_refused_by_the_budget(
 ) -> None:
     """**R-2**: every region of the page is already `art`, and less than one
     page estimate is left under the ceiling. Nothing would be sent, so the
-    stage completes: no `BudgetRefused`, no translator call, no bill, no
-    event, and the store reads as it did before."""
+    stage completes: no `BudgetRefused`, the translator is handed nothing and
+    makes no call (MT-118), no bill, no event, and the store reads as it did
+    before."""
     chapter.seed(_TARGET, ["art", "art", "art", "art"])
     _set_ceiling_under_one_page(chapter.project)
-    translator = _Answering({})
+    translator = _GuardedAnswering({})
 
     try:
         _run(chapter, translator)
@@ -494,8 +514,9 @@ def test_a_page_whose_every_region_is_already_art_is_not_refused_by_the_budget(
             f" guard although it sends nothing: {refusal}"
         )
 
-    assert translator.seen == [], (
-        f"the translator was handed {translator.seen} for a page with nothing to send"
+    assert translator.seen == [()], (
+        f"the translator was handed {translator.seen}; a page with nothing to send"
+        " is handed an empty listing, as MT-118 pins"
     )
     assert chapter.ledger_rows() == 0
     assert chapter.events == []
