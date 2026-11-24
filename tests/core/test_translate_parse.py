@@ -715,14 +715,240 @@ def test_parse_terms_delegates_to_parse_terms_text_with_the_first_text_block(
 def test_parse_exports_the_three_new_names_and_keeps_the_old_four() -> None:
     """C-3: `__all__` grows by exactly three names. Pinned in the sorted order
     the existing list already uses (isort-style, which ruff's RUF022 enforces),
-    and `GLOSSARY_KEY` still importable from `parse` with its value."""
+    and `GLOSSARY_KEY` still importable from `parse` with its value.
+
+    MT-147 C-1 adds three more, in the same order: `ART_KEY` (re-exported from
+    `page_prompt` as `GLOSSARY_KEY` is), `parse_art_text` and
+    `parse_art_text_text`."""
     assert parse.__all__ == [
+        "ART_KEY",
         "GLOSSARY_KEY",
         "UnknownRegionIndex",
         "first_text_block",
+        "parse_art_text",
+        "parse_art_text_text",
         "parse_lines",
         "parse_lines_text",
         "parse_terms",
         "parse_terms_text",
     ]
     assert parse.GLOSSARY_KEY == "glossary"
+
+
+# =============================================================================
+# MT-147: the `art_text` key
+# =============================================================================
+#
+# AC-2 and C-3. The new names are reached as `parse.<name>` at call time, as the
+# MT-079 section above reaches its own, so that in RED each test below fails on
+# an `AttributeError` naming the missing function and nothing else in this file
+# goes dark. The exact messages are `_unknown`'s shape, pinned as a line key's
+# is: C-3 says the parser reuses it.
+
+
+def _unknown_message(value: object) -> str:
+    """`_unknown`'s message for `value` on the fixture page, written out."""
+    return (
+        f"the response names region {value!r}, which this page does not have;"
+        " its reading indices are [0, 1, 2, 3]"
+    )
+
+
+def test_parse_re_exports_page_prompts_art_key() -> None:
+    """C-1: `ART_KEY` lives in `page_prompt` and is re-exported here, the very
+    object, as `GLOSSARY_KEY` is."""
+    from mangatl.translate import page_prompt
+
+    assert parse.ART_KEY == "art_text"  # type: ignore[attr-defined]
+    assert parse.ART_KEY is page_prompt.ART_KEY  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ('{"0": {"ja": "x", "en": "y"}}', frozenset()),
+        ("{}", frozenset()),
+        ('{"art_text": []}', frozenset()),
+        ('{"art_text": [1, 2]}', frozenset({1, 2})),
+        ('{"art_text": [2, 1]}', frozenset({1, 2})),
+        ('{"art_text": [1, 1]}', frozenset({1})),
+        ('{"art_text": [0, 3]}', frozenset({0, 3})),
+        ('{"0": {"ja": "x", "en": "y"}, "art_text": [3], "2": {"ja": "z", "en": "w"}}', {3}),
+    ],
+    ids=[
+        "key-absent",
+        "empty-body",
+        "empty-list",
+        "two-indices",
+        "order-ignored",
+        "repeat-collapses",
+        "both-ends",
+        "beside-lines",
+    ],
+)
+def test_art_text_parses_to_the_set_of_listed_indices(body: str, expected: frozenset[int]) -> None:
+    """**AC-2** and C-3's table: the set of listed indices, `frozenset()` when
+    the key is absent or the list empty; a repeat collapses (PO-1: no
+    `uniqueItems`, the parser returns a set). The result is a `frozenset`, the
+    type `TranslationResult.art_text` carries."""
+    result = parse.parse_art_text_text(body, _REGION_INDICES)  # type: ignore[attr-defined]
+
+    assert result == expected
+    assert type(result) is frozenset, f"parse_art_text_text returned a {type(result).__name__}"
+
+
+@pytest.mark.parametrize(
+    "item",
+    [7, 4, -1],
+    ids=["out-of-range", "one-past-the-end", "negative"],
+)
+def test_an_art_index_this_page_does_not_have_raises_naming_it(item: int) -> None:
+    """**AC-2**: an index outside `region_indices` raises `UnknownRegionIndex`
+    naming it, as a line key does - `4` is the count-from-one slip, `-1` the
+    index a check written as `region_indices[item]` would let through."""
+    body = json.dumps({"art_text": [1, item]})
+
+    with pytest.raises(UnknownRegionIndex) as raised:
+        parse.parse_art_text_text(body, _REGION_INDICES)  # type: ignore[attr-defined]
+
+    assert str(raised.value) == _unknown_message(item)
+
+
+@pytest.mark.parametrize(
+    "item",
+    ["1", 1.0, None, [1], {"0": 1}, True, False],
+    ids=["string", "float", "null", "list", "object", "true", "false"],
+)
+def test_an_art_item_that_is_not_an_integer_raises_naming_it(item: object) -> None:
+    """**AC-2** and C-3: an item that is not an `int` raises `UnknownRegionIndex`
+    naming it - `"1"` and `1.0` are not region 1. `true` and `false` too: a
+    `bool` is an `int` to `isinstance`, and `true` must not become region 1 nor
+    `false` region 0."""
+    body = json.dumps({"art_text": [item]})
+
+    with pytest.raises(UnknownRegionIndex) as raised:
+        parse.parse_art_text_text(body, _REGION_INDICES)  # type: ignore[attr-defined]
+
+    assert str(raised.value) == _unknown_message(item)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "1", 9, {"0": 1}],
+    ids=["null", "string", "number", "object"],
+)
+def test_an_art_text_value_that_is_not_a_list_raises_naming_the_key_and_the_value(
+    value: object,
+) -> None:
+    """C-3's last row: a value that is not a list raises `UnknownRegionIndex`
+    naming `art_text` and the value. Strict where a malformed line entry is
+    lenient, because a dropped art index typesets English over drawn art with
+    nothing flagged. `9`, not `3`: the message also lists the page's indices,
+    and `3` is one of them. The message's wording beyond the two names is
+    GREEN's."""
+    body = json.dumps({"art_text": value})
+
+    with pytest.raises(UnknownRegionIndex) as raised:
+        parse.parse_art_text_text(body, _REGION_INDICES)  # type: ignore[attr-defined]
+
+    assert "art_text" in str(raised.value)
+    assert repr(value) in str(raised.value), f"{raised.value} does not name {value!r}"
+
+
+def test_art_text_reads_only_its_own_key_and_leaves_a_bad_line_key_to_parse_lines() -> None:
+    """C-3: line keys are `parse_lines_text`'s. A body with an unknown line key
+    `7` and a good `art_text` returns the art set - raising for the line key is
+    the other function's job, which it does on the same body."""
+    body = '{"7": {"ja": "x", "en": "y"}, "art_text": [1]}'
+
+    assert parse.parse_art_text_text(body, _REGION_INDICES) == frozenset({1})  # type: ignore[attr-defined]
+    with pytest.raises(UnknownRegionIndex, match=r"\b7\b"):
+        parse.parse_lines_text(body, _REGION_INDICES)
+
+
+def test_art_text_on_a_non_json_body_is_loud() -> None:
+    """C-3: a body that is not JSON raises out of `json.loads`, as
+    `parse_lines_text` does."""
+    with pytest.raises(json.JSONDecodeError):
+        parse.parse_art_text_text("I'm not able to help with that.", _REGION_INDICES)  # type: ignore[attr-defined]
+
+
+def test_a_page_with_no_regions_rejects_every_art_index() -> None:
+    """The zero of `region_indices`: nothing a page with no regions could list."""
+    with pytest.raises(UnknownRegionIndex, match=r"\b0\b"):
+        parse.parse_art_text_text('{"art_text": [0]}', ())  # type: ignore[attr-defined]
+
+
+def test_parse_art_text_delegates_to_parse_art_text_text_with_the_first_text_block(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_message: Callable[..., object],
+) -> None:
+    """C-1: `parse_art_text(message, ...)` **is**
+    `parse_art_text_text(first_text_block(message), ...)`, as `parse_lines` is
+    to `parse_lines_text`. Observed with a recorder; the leading thinking
+    block makes "first text block" and `content[0]` disagree."""
+    body = '{"0": {"ja": "x", "en": "y"}, "art_text": [2]}'
+    calls: list[tuple[str, object]] = []
+    sentinel = frozenset({99})
+
+    def recorder(text: str, region_indices: object) -> frozenset[int]:
+        calls.append((text, region_indices))
+        return sentinel
+
+    monkeypatch.setattr(parse, "parse_art_text_text", recorder)
+
+    result = parse.parse_art_text(  # type: ignore[attr-defined]
+        fake_message(body, leading_thinking=True), _REGION_INDICES
+    )
+
+    assert calls == [(body, _REGION_INDICES)], (
+        "parse_art_text did not delegate to parse_art_text_text with the first text block's text"
+    )
+    assert result is sentinel
+
+
+def test_parse_art_text_reads_the_set_off_a_message(
+    fake_message: Callable[..., object],
+) -> None:
+    """The same answer through the `Message` entry point, without a recorder,
+    behind a thinking block."""
+    message = fake_message('{"art_text": [3, 0]}', leading_thinking=True)
+
+    assert parse.parse_art_text(message, _REGION_INDICES) == frozenset({0, 3})  # type: ignore[attr-defined]
+
+
+# -- C-1: parse_lines_text skips ART_KEY as it skips GLOSSARY_KEY ---------------
+
+
+def test_parse_lines_text_skips_the_art_text_key_rather_than_reading_it_as_a_region(
+    fake_message: Callable[..., object],
+) -> None:
+    """C-1: `parse_lines_text` skips `"art_text"` exactly as it skips
+    `"glossary"`. Without it every answer that lists art raises
+    `UnknownRegionIndex('art_text')` and the page's lines are lost."""
+    body = '{"0": {"ja": "さくら", "en": "Sakura!"}, "art_text": [1, 2]}'
+
+    assert _pairs(parse.parse_lines_text(body, _REGION_INDICES)) == {0: ("さくら", "Sakura!")}
+    assert _pairs(parse_lines(fake_message(body), _REGION_INDICES)) == {0: ("さくら", "Sakura!")}
+
+
+@pytest.mark.parametrize("value", ["junk", None, [99], {"x": 1}, [True]])
+def test_parse_lines_text_never_inspects_the_art_text_value(value: object) -> None:
+    """C-1: the key is skipped before the `int()` conversion and its value
+    never inspected - a bad `art_text` is `parse_art_text_text`'s to raise, not
+    a reason for the lines to fail."""
+    body = json.dumps({"art_text": value, "2": {"ja": "なぜ", "en": "Why?"}}, ensure_ascii=False)
+
+    assert _pairs(parse.parse_lines_text(body, _REGION_INDICES)) == {2: ("なぜ", "Why?")}
+
+
+@pytest.mark.parametrize("key", ["Art_text", "art_text ", "art", "art_texts", "arttext"])
+def test_only_the_exact_art_text_key_is_skipped_and_its_neighbours_still_raise(key: str) -> None:
+    """The negative control for the skip: **only** `"art_text"` is skipped. A
+    skip written as "any non-integer key", a case-fold or a prefix match turns
+    every malformed key into a dropped one. Passes on arrival - today every
+    non-integer key raises - and is the control that keeps the skip exact."""
+    body = f'{{"0": {{"ja": "さくら", "en": "Sakura!"}}, "{key}": [1]}}'
+
+    with pytest.raises(UnknownRegionIndex, match=key.strip()):
+        parse.parse_lines_text(body, _REGION_INDICES)

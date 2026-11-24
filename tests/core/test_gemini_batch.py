@@ -906,3 +906,82 @@ def test_each_batch_item_is_checked_against_its_own_pages_listing(
         ),
     ]
     assert all(result[n].misaligned == frozenset({9}) for n in (0, 1, 2))
+
+
+# -- MT-147 AC-7: each item's art_text, through parse_art_text_text ------------
+
+#: Page 2's answer (`_TEXT_2`) with `art_text: [1]` - its `ocr_empty` middle
+#: region, which the answer omits - beside the two lines.
+_TEXT_2_ART = (
+    '{"2": {"ja": "走れ!", "en": "Run!"}, "art_text": [1],'
+    ' "0": {"ja": "電車が出るぞ!", "en": "The train\'s about to leave!"}}'
+)
+
+
+def test_a_batch_item_returns_its_answers_art_text(batch: Any) -> None:
+    """**AC-7**, the batch adapter: page 2's result carries `art_text ==
+    {1}` and otherwise exactly what it carried; the other pages list no art."""
+    items = _good_items()
+    items[2] = _item("2", _answer(_TEXT_2_ART, _usage(*_USAGE_2), model_version=None))
+
+    result = batch.collect_batch(_FakeGeminiClient(_job(items)), _JOB, _pages(batch))
+
+    assert result[2] == TranslationResult(
+        lines=_EXPECTED_2.lines,
+        usage=_EXPECTED_2.usage,
+        call=_EXPECTED_2.call,
+        proposed_terms=(),
+        art_text=frozenset({1}),  # type: ignore[call-arg]
+    )
+    assert result[0] == _EXPECTED_0
+    assert result[1] == _EXPECTED_1
+    assert result[0].art_text == frozenset()
+
+
+def test_a_bad_art_index_fails_only_its_own_batch_page(batch: Any) -> None:
+    """C-4: `parse_art_text_text` runs inside `_result_of`'s `try`, so an
+    `art_text` naming region 5 of page 0's two regions is that page's
+    `BatchItemError`, with the parser's message, and no other page's."""
+    text = (
+        '{"0": {"ja": "おい、急げ!", "en": "Hey, hurry!"},'
+        ' "1": {"ja": "翔、こっちだ!", "en": "Kakeru, over here!"}, "art_text": [5]}'
+    )
+    items = _good_items()
+    items[0] = _item("0", _answer(text, _usage(*_USAGE_0)))
+
+    result = batch.collect_batch(_FakeGeminiClient(_job(items)), _JOB, _pages(batch))
+
+    assert result[0] == batch.BatchItemError(
+        0,
+        "UnknownRegionIndex: the response names region 5, which this page does not"
+        " have; its reading indices are [0, 1]",
+    )
+    assert result[1] == _EXPECTED_1
+    assert result[2] == _EXPECTED_2
+
+
+def test_each_batch_item_reads_art_text_through_parse_art_text_text_over_its_own_page(
+    batch: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**AC-7**'s "through `parse_art_text_text`", per item: one call per page,
+    with that item's text and **that page's** `range(len(ocr_results))` - a
+    collector checking every item against one page's range would pass page
+    2's answer page 0's indices. The recorder's answer is what each result
+    carries."""
+    module = importlib.import_module("mangatl.translate.gemini_batch")
+    calls: list[tuple[str, list[int]]] = []
+
+    def recorder(text: str, region_indices: Sequence[int]) -> frozenset[int]:
+        calls.append((text, list(region_indices)))
+        return frozenset({8})
+
+    monkeypatch.setattr(module, "parse_art_text_text", recorder)
+
+    result = batch.collect_batch(_FakeGeminiClient(_job(_good_items())), _JOB, _pages(batch))
+
+    assert sorted(calls, key=lambda call: len(call[1])) == [
+        (_TEXT_1, [0]),
+        (_TEXT_0, [0, 1]),
+        (_TEXT_2, [0, 1, 2]),
+    ]
+    assert all(result[n].art_text == frozenset({8}) for n in (0, 1, 2))

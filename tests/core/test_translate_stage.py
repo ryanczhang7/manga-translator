@@ -291,9 +291,12 @@ def test_the_stage_is_exported_from_mangatl_pipeline_translate_stage_under_that_
     # `budget_for` builds this chapter's guard (AC-5) and `pages_remaining`
     # feeds the projection. Both are named here because this assertion is
     # exact, so leaving either out would make GREEN's correct module red.
+    # MT-147 C-1 adds `apply_answer`, the one place an answer is written, in
+    # the sorted order the list uses (RUF022).
     assert module.__all__ == [
         "PageTranslator",
         "TranslateStage",
+        "apply_answer",
         "budget_for",
         "pages_remaining",
     ]

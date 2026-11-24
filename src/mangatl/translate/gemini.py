@@ -106,7 +106,7 @@ from mangatl.translate.page_prompt import (
     response_schema,
     user_text,
 )
-from mangatl.translate.parse import parse_lines_text
+from mangatl.translate.parse import parse_art_text_text, parse_lines_text
 
 __all__ = [
     "MAX_OUTPUT_TOKENS",
@@ -195,6 +195,7 @@ def translate_page(
         ),
         proposed_terms=(),
         misaligned=checked.misaligned,
+        art_text=parse_art_text_text(text, range(len(ocr_results))),
     )
 
 

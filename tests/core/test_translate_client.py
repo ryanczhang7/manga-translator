@@ -612,3 +612,96 @@ def test_the_adapter_hands_the_parsed_entries_and_the_listing_it_sent_to_checked
     ], "translate_page did not check its parsed answer through checked_lines"
     assert result.lines == {2: "recorded"}
     assert result.misaligned == frozenset({0})
+
+
+# -- MT-147 AC-7: the answer's art_text, through parse_art_text -----------------
+
+
+def _answer_with_art(art_text: object) -> str:
+    """An aligned answer for all four regions, with `art_text` beside them.
+    Region 2 is both lined and listed: the adapter returns both as parsed and
+    does not apply "art wins", which is C-5's alone (C-4)."""
+    body: dict[str, object] = {
+        str(i): {"ja": _OCR_RESULTS[i].text, "en": _EXPECTED[i]} for i in range(4)
+    }
+    body["art_text"] = art_text
+    return json.dumps(body, ensure_ascii=False)
+
+
+def test_claudes_adapter_returns_the_answers_art_text_and_leaves_its_lines_alone(
+    fake_message: Callable[..., object],
+) -> None:
+    """**AC-7**, Claude: `TranslationResult.art_text` is the answer's set, and
+    `lines` still carries region 2's English - the adapter returns what was
+    parsed; the rule that art wins lives in `apply_answer`."""
+    client = _FakeClient(fake_message(_answer_with_art([2, 0])))
+
+    result = translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+    assert result.art_text == frozenset({0, 2})  # type: ignore[attr-defined]
+    assert result.lines == _EXPECTED
+
+
+def test_claudes_adapter_returns_no_art_for_an_answer_without_the_key(
+    response_body: Callable[[str], str],
+    fake_message: Callable[..., object],
+) -> None:
+    """The zero: the recorded aligned answer has no `art_text`, so nothing is
+    art."""
+    client = _FakeClient(fake_message(response_body("well-formed")))
+
+    result = translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+    assert result.art_text == frozenset()  # type: ignore[attr-defined]
+
+
+def test_claudes_adapter_refuses_an_art_index_the_page_does_not_have(
+    fake_message: Callable[..., object],
+) -> None:
+    """**AC-7** with AC-2: an `art_text` naming region 7 of a four-region page
+    raises `UnknownRegionIndex` naming it, as a bad line key does - the page
+    fails rather than dropping the art mark silently."""
+    client = _FakeClient(fake_message(_answer_with_art([7])))
+
+    with pytest.raises(UnknownRegionIndex, match=r"\b7\b"):
+        translate_page(client, _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+
+def test_claudes_adapter_reads_art_text_through_parse_art_text(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_message: Callable[..., object],
+) -> None:
+    """**AC-7**'s "through `parse_art_text_text`", observed as MT-149's AC-6
+    observes `checked_lines`: a recorder bound in place of
+    `client.parse_art_text` (which delegates to `parse_art_text_text`, C-4)
+    sees the response and the page's `range(len(ocr_results))`, and the result
+    carries exactly what it returned. An adapter reading the key on its own
+    never calls it."""
+    from mangatl.translate import client as client_module
+
+    response = fake_message(_answer_with_art([1]))
+    calls: list[tuple[object, list[int]]] = []
+    sentinel = frozenset({3})
+
+    def recorder(message: object, region_indices: Sequence[int]) -> frozenset[int]:
+        calls.append((message, list(region_indices)))
+        return sentinel
+
+    monkeypatch.setattr(client_module, "parse_art_text", recorder)
+
+    result = translate_page(_FakeClient(response), _page(), _OCR_RESULTS, EMPTY_CONTEXT)
+
+    assert calls == [(response, [0, 1, 2, 3])], (
+        "translate_page did not read art_text through parse_art_text"
+    )
+    assert result.art_text is sentinel  # type: ignore[attr-defined]
+
+
+def test_claudes_wordless_page_lists_no_art_and_makes_no_call() -> None:
+    """C-4: the no-call return keeps the default `frozenset()`."""
+    client = _FakeClient(explode=True)
+
+    result = translate_page(client, _page(), _ALL_EMPTY, EMPTY_CONTEXT)
+
+    assert client.calls == 0
+    assert result.art_text == frozenset()  # type: ignore[attr-defined]

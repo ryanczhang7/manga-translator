@@ -104,7 +104,7 @@ from mangatl.pipeline.continuity import build_prompt_context
 from mangatl.pipeline.prelude import ChapterStep
 from mangatl.pipeline.runner import BUDGET, CANCELLED, RUN_ABORTED, run_chapter
 from mangatl.pipeline.stage import BudgetRefused, Stage
-from mangatl.pipeline.translate_stage import budget_for
+from mangatl.pipeline.translate_stage import apply_answer, budget_for
 from mangatl.store.batch import mark_collected, mark_failed, pending_jobs, record_submission
 from mangatl.store.glossary import read_entries, upsert
 from mangatl.store.ledger import chapter_call_costs, chapter_total, record_call
@@ -373,8 +373,10 @@ def _write_page(
     it, not the latest), the request id MT-110's `f"{job}#{ordinal}"` - never
     the item's own id - and the usage priced at the **batch** tier. The
     projection covers the pages after this one, as the stage's does (R-C1).
-    `result.lines` and `result.misaligned` are keyed by reading index already
-    (PO-2).
+    `result.lines`, `result.misaligned` and `result.art_text` are keyed by
+    reading index already (PO-2), so the answer goes to the stage's
+    `apply_answer` with the identity listing: one copy of "art wins" (MT-147
+    C-5), and this module writes no proposal or exclusion itself.
     """
     model_id = result.call.model_id if result.call is not None else job.model_id
     record_call(
@@ -394,7 +396,7 @@ def _write_page(
         )
     )
     _update_glossary(project, n)
-    project.write_proposed(n, result.lines, result.misaligned)
+    apply_answer(project, n, result, range(len(project.read_regions(n))))
 
 
 def _update_glossary(project: Project, n: int) -> None:

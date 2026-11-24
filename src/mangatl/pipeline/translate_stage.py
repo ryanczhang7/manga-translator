@@ -65,7 +65,7 @@ from mangatl.store.glossary import read_entries, upsert
 from mangatl.store.ledger import chapter_call_costs, chapter_total, record_call
 from mangatl.store.project import Project
 
-__all__ = ["PageTranslator", "TranslateStage", "budget_for", "pages_remaining"]
+__all__ = ["PageTranslator", "TranslateStage", "apply_answer", "budget_for", "pages_remaining"]
 
 #: Page image bytes, the page's OCR results and its continuity context (MT-014
 #: C-9) in, one result out.
@@ -150,18 +150,53 @@ def _to_reading_indices(
     `result.misaligned` (MT-149 C-1a) is in the same key space and is mapped,
     and refused, the same way. Returns `(proposals, misaligned)`.
     """
-
-    def mapped(index: int) -> int:
-        if not 0 <= index < len(included):
-            raise ValueError(
-                f"the translator answered for index {index}, but only"
-                f" {len(included)} region(s) were sent"
-            )
-        return included[index]
-
-    proposals = {mapped(index): english for index, english in result.lines.items()}
-    misaligned = frozenset(mapped(index) for index in result.misaligned)
+    proposals = {_mapped(index, included): english for index, english in result.lines.items()}
+    misaligned = frozenset(_mapped(index, included) for index in result.misaligned)
     return proposals, misaligned
+
+
+def _mapped(index: int, included: Sequence[int]) -> int:
+    """`included[index]`, or `ValueError` naming `index` when it is outside the
+    listing that was sent (see `_to_reading_indices`)."""
+    if not 0 <= index < len(included):
+        raise ValueError(
+            f"the translator answered for index {index}, but only"
+            f" {len(included)} region(s) were sent"
+        )
+    return included[index]
+
+
+def apply_answer(
+    project: Project, ordinal: int, result: TranslationResult, included: Sequence[int]
+) -> None:
+    """Write one page's answer to the store: the one place "art wins" lives
+    (MT-147 C-5), shared by `TranslateStage.run` and `pipeline.batch`.
+
+    1. **Map** `lines`, `misaligned` and `art_text` through `included`; a key
+       outside the listing, in any of the three, raises `ValueError` naming it
+       before anything is written.
+    2. **Art wins**: an art region gets no proposal and is not misaligned - it
+       is no failed translation, and must not read `failed` if restored.
+    3. **Mark** each art region, ascending, `excluded = "art"`, unless it is
+       already excluded: a region excluded for another reason keeps it (PO-2).
+    4. **Write** the proposals.
+
+    Marks before proposals. Each write opens its own transaction and this
+    opens none (see the module docstring), so a crash between them leaves art
+    marked and no proposals: the page is translated again with the art already
+    excluded. The other order would leave a page that reads done with its art
+    typeset.
+    """
+    proposals, misaligned = _to_reading_indices(result, included)
+    art = sorted({_mapped(index, included) for index in result.art_text})
+    for index in art:
+        proposals.pop(index, None)
+    misaligned = misaligned.difference(art)
+    regions = project.read_regions(ordinal)
+    for index in art:
+        if regions[index].excluded is None:
+            project.set_excluded(ordinal, index, "art")
+    project.write_proposed(ordinal, proposals, misaligned)
 
 
 @dataclass
@@ -206,6 +241,9 @@ class TranslateStage:
            after paying for it has not guarded anything". The refusal leaves the
            page untouched - no call, no ledger row, no proposals - and reaches
            the runner as `BudgetRefused`, which maps it to `reason="budget"`.
+           It is consulted on every page except one that has regions and none
+           of them included (MT-147 R-2): that page sends nothing, so there is
+           no call to guard. A page with no regions at all is still checked.
         2. **`record_call` before `write_proposed`.** Both open their own
            transaction and `Project.transaction()` is not reentrant (MT-005
            PO-5), so they are two commits with a window between them, and a
@@ -250,21 +288,25 @@ class TranslateStage:
         this story's whole subject. One `SELECT` a page is nothing at 20 pages.
         """
         ocr_results = ctx.project.read_lines(ctx.page.ordinal)
-        budget = budget_for(ctx.project, self.page_estimate)
-        projection = budget.project(chapter_call_costs(ctx.project), pages_remaining(ctx))
-        decision = budget.check(chapter_total(ctx.project), projection)
-        if not decision.permitted:
-            raise BudgetRefused(decision)
-
-        image_bytes = (ctx.project.chapter.source_dir / ctx.page.filename).read_bytes()
-        context = build_prompt_context(ctx.project, ctx.page.ordinal, mode=self.context_mode)
         # MT-118 C-4: only the included regions cross the seam, as a contiguous
         # listing, and the answer's indices are mapped back to reading indices.
         # A page with none included hands over `()`, and the translator's own
         # `all(ocr_empty)` guard makes no call for it - `all([])` is True.
+        # MT-147 R-2: so a page with regions and none included skips the budget
+        # guard, which would otherwise refuse a page that sends nothing.
         regions = ctx.project.read_regions(ctx.page.ordinal)
         included = [i for i, region in enumerate(regions) if region.excluded is None]
         sent = [ocr_results[i] for i in included]
+
+        budget = budget_for(ctx.project, self.page_estimate)
+        if included or not regions:
+            projection = budget.project(chapter_call_costs(ctx.project), pages_remaining(ctx))
+            decision = budget.check(chapter_total(ctx.project), projection)
+            if not decision.permitted:
+                raise BudgetRefused(decision)
+
+        image_bytes = (ctx.project.chapter.source_dir / ctx.page.filename).read_bytes()
+        context = build_prompt_context(ctx.project, ctx.page.ordinal, mode=self.context_mode)
         result = self.translate(image_bytes, sent, context)
         if result.call is not None:
             record_call(
@@ -285,8 +327,7 @@ class TranslateStage:
                 )
             )
         _update_glossary(ctx, sent)
-        proposals, misaligned = _to_reading_indices(result, included)
-        ctx.project.write_proposed(ctx.page.ordinal, proposals, misaligned)
+        apply_answer(ctx.project, ctx.page.ordinal, result, included)
 
     def is_done(self, ctx: PageContext) -> bool:
         """Whether this page already carries a **proposal**.

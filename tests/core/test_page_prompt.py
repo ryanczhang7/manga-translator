@@ -11,6 +11,12 @@ of read off `page_prompt.response_schema` - read off it, the byte-for-byte pin
 moved with whatever the schema became. Everything else MT-079 pinned is
 unchanged.
 
+**Amended by MT-147** ("the page answer names drawn art text"), in place, by
+C-2: the golden gains one bullet, inserted after the answer bullets
+(`_ART_BULLET_MT147`), and the expected schema gains an `art_text` property
+for a page with at least one region (`_art_property`). `page_prompt.__all__`
+gains `ART_KEY`. Nothing else MT-079, MT-106 or MT-149 pinned moves.
+
 **Why the system prompt is pinned as a literal here, not read off `prompt`.**
 Deferred verification 1 is "one character of `SYSTEM_PROMPT` changed must turn
 AC-1 red". `test_translate_prompt.py` pins only a phrase of it, so a test that
@@ -108,8 +114,27 @@ write in "ja" the Japanese you read in that bubble on the page image.
 you may translate from the page image instead; "ja" stays a copy of the listing.
 """
 
-#: The system prompt this story pins, to the character.
-_SYSTEM_PROMPT_GOLDEN = _SYSTEM_PROMPT_PRE_MT149.replace(_ANSWER_PRE_MT149, _ANSWER_MT149)
+#: The system prompt MT-149 pinned, to the character - the text before MT-147.
+_SYSTEM_PROMPT_PRE_MT147 = _SYSTEM_PROMPT_PRE_MT149.replace(_ANSWER_PRE_MT149, _ANSWER_MT149)
+
+#: MT-147 C-2: the one bullet inserted directly after the `- In "en", write the
+#: English` bullet (the last line of `_ANSWER_MT149`) and before the blank line
+#: above `Continuity across pages:`. Verbatim from the story's Contract; each
+#: trailing backslash is a line continuation, so the bullet is one line.
+_ART_BULLET_MT147 = """\
+- The one exception to translating every region is text drawn into the \
+artwork itself: sound effects, signs, labels on objects. List the reading \
+index of each such region under the "art_text" key and give that region no \
+entry and no translation. Dialogue, narration and captions are never art \
+text, however they are lettered.
+"""
+
+#: The system prompt this story pins, to the character: MT-149's text with the
+#: art bullet inserted after the answer bullets, and not one other character
+#: changed (MT-147 C-2).
+_SYSTEM_PROMPT_GOLDEN = _SYSTEM_PROMPT_PRE_MT147.replace(
+    _ANSWER_MT149, _ANSWER_MT149 + _ART_BULLET_MT147
+)
 
 #: The bullet MT-106 removed, verbatim, with the newline that preceded it. The
 #: pre-MT-106 prompt was exactly `_SYSTEM_PROMPT_PRE_MT149 + this`.
@@ -180,12 +205,29 @@ def _region_property(index: int) -> dict[str, Any]:
     }
 
 
+def _art_property(region_count: int) -> dict[str, Any]:
+    """MT-147 C-2's `art_text` property, written out: an array of integers
+    restricted by an `enum` to the page's reading indices, with no
+    `uniqueItems` and no `minimum`/`maximum` (PO-1)."""
+    return {
+        "type": "array",
+        "description": "Reading indices of regions whose text is drawn into the artwork.",
+        "items": {"type": "integer", "enum": list(range(region_count))},
+    }
+
+
 def _expected_schema(region_count: int) -> dict[str, Any]:
     """MT-106 AC-1's page schema, literally: one `{ja, en}` object per reading index (MT-149), no
-    `glossary` property, no `required`, `additionalProperties: False`."""
+    `glossary` property, no `required`, `additionalProperties: False` - and, for a page with at
+    least one region, MT-147's `art_text` beside the indices. A page with none has no properties."""
+    properties: dict[str, Any] = {
+        str(index): _region_property(index) for index in range(region_count)
+    }
+    if region_count >= 1:
+        properties["art_text"] = _art_property(region_count)
     return {
         "type": "object",
-        "properties": {str(index): _region_property(index) for index in range(region_count)},
+        "properties": properties,
         "additionalProperties": False,
     }
 
@@ -273,12 +315,13 @@ def test_the_system_prompt_no_longer_asks_pages_to_add_glossary_terms() -> None:
 
 def test_the_pinned_prompt_differs_from_the_pre_story_one_only_in_the_answer_bullets() -> None:
     """The golden's own precondition: the old answer bullet occurs exactly once
-    in the pre-MT-149 text, so the replacement that derives the golden changes
-    that bullet and nothing else."""
+    in the pre-MT-149 text, so the replacement that derives MT-149's text
+    changes that bullet and nothing else (MT-147 then inserts one bullet; see
+    `test_the_prompt_gains_the_art_bullet_once_and_no_other_character`)."""
     assert _SYSTEM_PROMPT_PRE_MT149.count(_ANSWER_PRE_MT149) == 1
-    assert _SYSTEM_PROMPT_GOLDEN != _SYSTEM_PROMPT_PRE_MT149
+    assert _SYSTEM_PROMPT_PRE_MT147 != _SYSTEM_PROMPT_PRE_MT149
     head, tail = _SYSTEM_PROMPT_PRE_MT149.split(_ANSWER_PRE_MT149)
-    assert head + _ANSWER_MT149 + tail == _SYSTEM_PROMPT_GOLDEN
+    assert head + _ANSWER_MT149 + tail == _SYSTEM_PROMPT_PRE_MT147
 
 
 def test_the_prompt_tells_the_model_to_copy_each_listing_into_ja_even_where_it_looks_misread() -> (
@@ -436,8 +479,10 @@ def test_the_glossary_schema_is_mt014s_verbatim() -> None:
 def test_the_glossary_names_stay_exported_for_the_pre_pass() -> None:
     """MT-106 AC-4's last clause and C-1: `GLOSSARY_SCHEMA` and `GLOSSARY_KEY`
     leave the page schema but not the module - `glossary_pass` builds the
-    pre-pass schema from both - and `page_prompt.__all__` is unchanged."""
+    pre-pass schema from both. MT-147 C-1 adds `ART_KEY`, first in the sorted
+    order the list already uses (RUF022), and nothing else."""
     assert page_prompt.__all__ == [
+        "ART_KEY",
         "GLOSSARY_KEY",
         "GLOSSARY_SCHEMA",
         "MAX_IMAGE_LONG_EDGE_PX",
@@ -459,18 +504,15 @@ def test_the_response_schema_names_every_region_and_nothing_else_and_requires_no
     omitted region is legal, MT-011 AC-5); `additionalProperties: False` (an
     unknown index is the model disobeying, not the schema inviting it). 20 is
     past single digits, so a schema built from characters rather than numbers
-    is caught; 0 is a page the detector found nothing on."""
+    is caught; 0 is a page the detector found nothing on. MT-147 C-2: plus
+    `art_text` for a page with a region, and nothing for a page with none."""
     schema = page_prompt.response_schema(region_count)
 
     assert "glossary" not in schema["properties"], (
         "a page's response schema still offers a glossary array; after MT-106 a"
         " page proposes no terms and the key must be forbidden"
     )
-    assert schema == {
-        "type": "object",
-        "properties": {str(index): _region_property(index) for index in range(region_count)},
-        "additionalProperties": False,
-    }
+    assert schema == _expected_schema(region_count)
     assert "required" not in schema, "AC-5 of MT-011 turns on no region being required"
     assert schema["additionalProperties"] is False
 
@@ -490,7 +532,8 @@ def test_each_region_is_an_object_requiring_its_echoed_japanese_and_its_english(
     False`, and the index properties themselves are still not required."""
     schema = page_prompt.response_schema(region_count)
 
-    for key, entry in schema["properties"].items():
+    for key in (str(index) for index in range(region_count)):
+        entry = schema["properties"][key]
         assert entry["type"] == "object", f"region {key} is a {entry['type']}, not an object"
         assert sorted(entry["required"]) == ["en", "ja"], f"region {key}: {entry['required']}"
         assert set(entry["properties"]) == {"ja", "en"}, f"region {key}: {entry['properties']}"
@@ -498,6 +541,97 @@ def test_each_region_is_an_object_requiring_its_echoed_japanese_and_its_english(
         assert entry["properties"]["en"]["type"] == "string"
         assert entry["additionalProperties"] is False
     assert "required" not in schema
+
+
+# -- MT-147 AC-1: the art_text key ---------------------------------------------
+
+
+def test_the_art_key_is_art_text_and_lives_in_page_prompt() -> None:
+    """MT-147 C-1: `ART_KEY` sits beside `GLOSSARY_KEY`, its value the literal
+    the schema and the prompt both name. It can never collide with a reading
+    index, which is always digits."""
+    assert page_prompt.ART_KEY == "art_text"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("region_count", [1, 3, 20])
+def test_the_schema_offers_art_text_as_integers_restricted_to_the_pages_indices(
+    region_count: int,
+) -> None:
+    """MT-147 AC-1 and C-2: for `n >= 1` a property `art_text`, an array whose
+    items are integers restricted by an `enum` to `0..n-1` - not by `minimum`
+    and `maximum`, which Claude's structured outputs do not support, and with
+    no `uniqueItems` (PO-1). 20 is past single digits."""
+    schema = page_prompt.response_schema(region_count)
+
+    assert "art_text" in schema["properties"], (
+        f"response_schema({region_count}) has no art_text property (MT-147 AC-1)"
+    )
+    assert schema["properties"]["art_text"] == _art_property(region_count)
+    items = schema["properties"]["art_text"]["items"]
+    assert items["enum"] == list(range(region_count))
+    assert "minimum" not in items
+    assert "maximum" not in items
+    assert "uniqueItems" not in schema["properties"]["art_text"]
+
+
+@pytest.mark.parametrize("region_count", [1, 3])
+def test_art_text_is_not_required_and_unknown_keys_are_still_refused(region_count: int) -> None:
+    """MT-147 AC-1: `art_text` is optional - a page with no art omits it - and
+    `additionalProperties` is still `False`. The index properties are
+    untouched."""
+    schema = page_prompt.response_schema(region_count)
+
+    assert "art_text" in schema["properties"]
+    assert "required" not in schema
+    assert schema["additionalProperties"] is False
+    for index in range(region_count):
+        assert schema["properties"][str(index)] == _region_property(index)
+
+
+def test_a_page_with_no_regions_offers_no_art_text_either() -> None:
+    """MT-147 AC-1 and C-2: `response_schema(0)` has no properties - an `enum`
+    of no values is not a valid schema, and no call is made for such a page."""
+    assert page_prompt.response_schema(0) == {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+
+
+def test_the_prompt_gains_the_art_bullet_once_and_no_other_character() -> None:
+    """MT-147 C-2, the golden's precondition: the answer bullets occur once in
+    MT-149's text, so the insertion that derives the golden adds the art bullet
+    right after the `en` bullet and before the blank line above `Continuity
+    across pages:`, and changes nothing else."""
+    assert _SYSTEM_PROMPT_PRE_MT147.count(_ANSWER_MT149) == 1
+    head, tail = _SYSTEM_PROMPT_PRE_MT147.split(_ANSWER_MT149)
+    assert tail.startswith("\nContinuity across pages:")
+    assert head + _ANSWER_MT149 + _ART_BULLET_MT147 + tail == _SYSTEM_PROMPT_GOLDEN
+    assert page_prompt.SYSTEM_PROMPT.count(_ART_BULLET_MT147) == 1, (
+        "SYSTEM_PROMPT does not carry MT-147's art bullet exactly once"
+    )
+
+
+def test_the_prompt_tells_the_model_to_list_drawn_text_under_art_text_with_no_translation() -> None:
+    """MT-147 AC-1: the model lists there any region whose text is drawn into
+    the artwork - sound effects, signs, labels on objects - and gives it no
+    translation. The needle is the instruction itself, anchored at its
+    imperative: a prompt telling the model to translate such a region does not
+    contain it."""
+    assert (
+        "text drawn into the artwork itself: sound effects, signs, labels on objects."
+        ' List the reading index of each such region under the "art_text" key and give'
+        " that region no entry and no translation." in page_prompt.SYSTEM_PROMPT
+    ), "SYSTEM_PROMPT does not tell the model to list drawn text under art_text untranslated"
+
+
+def test_the_prompt_says_dialogue_narration_and_captions_are_never_art_text() -> None:
+    """MT-147 AC-1's last clause: the one guard against a balloon wrongly
+    excluded, which DV-2 measures as the number that matters."""
+    assert (
+        "Dialogue, narration and captions are never art text, however they are lettered."
+        in page_prompt.SYSTEM_PROMPT
+    ), "SYSTEM_PROMPT does not say dialogue, narration and captions are never art text"
 
 
 # -- AC-5: no SDK --------------------------------------------------------------
