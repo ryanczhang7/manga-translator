@@ -376,12 +376,12 @@ DROP TABLE llm_call_v2;
 #: table rebuild for `_MIGRATE_TO_V3`'s second reason: the column is *converted*,
 #: not defaulted, and SQLite cannot change a column's type in place.
 #:
-#: **The two opening pragmas are the whole of this block, and each is silently
-#: wrong on its own.** `chapter` is a *parent* table with three cascading
-#: children - `page`, `run` and `glossary` - so MT-012's `llm_call` recipe
-#: applied here destroys the project in two different ways, neither of which
-#: raises. Measured on sqlite 3.53.1 against a 1-chapter / 3-page / 2-run /
-#: 2-glossary fixture:
+#: **Two pragmas, `foreign_keys = OFF` and `legacy_alter_table = ON`, are the
+#: whole of this block, and each is silently wrong on its own.** `chapter` is a
+#: *parent* table with three cascading children - `page`, `run` and `glossary` -
+#: so MT-012's `llm_call` recipe applied here destroys the project in two
+#: different ways, neither of which raises. Measured on sqlite 3.53.1 against a
+#: 1-chapter / 3-page / 2-run / 2-glossary fixture:
 #:
 #: | recipe | child FK names | pages | runs | glossary | `foreign_key_check` |
 #: |---|---|---|---|---|---|
@@ -401,10 +401,11 @@ DROP TABLE llm_call_v2;
 #: - a property of the fixture, not of the recipe - so a test asserts it is
 #: **empty**, never that it has a particular length.
 #:
-#: They are the first statements *inside* the script because `executescript`
-#: commits any open transaction first, so neither pragma lands inside one - and
-#: a pragma set inside a transaction is the silent no-op this module's own
-#: docstring records. `_migrate_to_current` puts both back **after** its commit.
+#: They are not in this string: `_migrate_to_current` runs the whole chain as
+#: one transaction (MT-157), and a pragma set inside a transaction is the silent
+#: no-op this module's own docstring records. So both are the chain script's
+#: prologue, before its `BEGIN`, and apply to every step; `_migrate_to_current`
+#: puts both back **after** its commit.
 #:
 #: `CAST(ROUND(... * 1000000) AS INTEGER)` is `_MIGRATE_TO_V3`'s conversion and
 #: its reason: the value still *is* a double at that point, and rounding to the
@@ -413,9 +414,6 @@ DROP TABLE llm_call_v2;
 #: what AC-5's second half needs.
 _MIGRATE_TO_V4 = (
     """
-PRAGMA foreign_keys = OFF;
-PRAGMA legacy_alter_table = ON;
-
 ALTER TABLE chapter RENAME TO chapter_v3;
 """
     + CHAPTER_DDL
@@ -591,18 +589,15 @@ _MIGRATE_TO_V12: str = CHAPTER_CONSISTENCY_RUN_DDL
 #: `foreign_keys = OFF`, repoint `line` at `region_v12` and cascade-delete every
 #: line on the `DROP` - with `foreign_key_check` clean afterwards - and, without
 #: `legacy_alter_table = ON`, leave `line` naming a table that no longer exists.
-#: `_MIGRATE_TO_V4`'s note has the measurement; both pragmas are the first
-#: statements inside the script for its reason, and `_migrate_to_current` puts
-#: them back after its commit.
+#: `_MIGRATE_TO_V4`'s note has the measurement; both pragmas are set by the
+#: chain script's prologue, before its `BEGIN`, for its reason, and
+#: `_migrate_to_current` puts them back after its commit.
 #:
 #: Every column is copied by name and every `id` kept, so `line.region_id` still
 #: points at the same rows. `region` has no index beyond its `UNIQUE` key's, which
 #: the shared string recreates.
 _MIGRATE_TO_V13 = (
     """
-PRAGMA foreign_keys = OFF;
-PRAGMA legacy_alter_table = ON;
-
 ALTER TABLE region RENAME TO region_v12;
 """
     + REGION_DDL
@@ -769,43 +764,69 @@ def _migrate_to_current(connection: sqlite3.Connection, found: int) -> None:
     `ALTER TABLE line ADD COLUMN ocr_empty` against a v2 file and die on
     `duplicate column name`.
 
-    `executescript` rather than `execute`, because the v2 -> v3 step is a table
-    rebuild and is several statements.
+    **One script, one `executescript`, one transaction** (MT-157). The steps
+    are joined - each terminated with `;` if its text does not end in one -
+    between `BEGIN;` and `COMMIT;`, with the two version records last, so a
+    step that fails leaves the file exactly as it was found: no aside table
+    from a half-done rebuild, and no earlier step's `ADD COLUMN` committed
+    under the old version number for the next open to re-run. One
+    `executescript` per step cannot do that, because each call commits the
+    transaction the previous one left open. The pragmas the parent-table
+    rebuilds need (`_MIGRATE_TO_V4`'s note) are the script's prologue, before
+    `BEGIN`, because inside a transaction they are no-ops.
+
+    On failure the transaction is rolled back, the connection closed, and the
+    failing statement's own exception re-raised unchanged.
 
     **Both** records of the version are updated. `PRAGMA user_version` is the
     one `open_project` reads, and `chapter.schema_version` is the one
     `architecture.md` §4 keeps for fidelity (MT-005 PO-7) - a migration that
     moved one of them would leave a file disagreeing with itself.
 
-    The explicit `commit()` is not decoration: `UPDATE` opens an implicit
-    transaction under sqlite3's legacy isolation handling, and a migration that
-    is not on disk when the process ends is not a migration.
+    The `COMMIT;` is not decoration: a migration that is not on disk when the
+    process ends is not a migration.
 
     **The two pragma restores go after that commit, and that is measured rather
-    than stylistic** (MT-044 C-12). `_MIGRATE_TO_V4` turns `foreign_keys` and
-    `legacy_alter_table` off to rebuild a parent table safely, and the `UPDATE`
-    on the line above opens exactly the implicit transaction this module's own
-    docstring warns about - inside which setting a pragma is a silent no-op:
+    than stylistic** (MT-044 C-12). The prologue turns `foreign_keys` off and
+    `legacy_alter_table` on to rebuild a parent table safely, and inside the
+    chain's transaction - this module's own docstring warns about it - setting
+    a pragma is a silent no-op:
 
         restore before commit ->  0      # still 0 after the commit, too
         restore after commit  ->  1
     """
-    for version, script in _MIGRATIONS:
-        if found < version:
-            connection.executescript(script)
-    connection.execute("UPDATE chapter SET schema_version = ?", (SCHEMA_VERSION,))
-    # Not parameterisable - a PRAGMA value cannot be bound - and formatted from
-    # this module's own int, so there is nothing to inject. Same call, and same
-    # reasoning, as `create_project`.
-    connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION:d}")
-    connection.commit()
+    # `_MIGRATIONS` is read here, at call time. Each step was once a complete
+    # script of its own, so some end without a `;` (V2, V6, V8); joined bare,
+    # the next statement is a syntax error.
+    steps = [step.strip() for version, step in _MIGRATIONS if found < version]
+    chain = "\n".join(step if step.endswith(";") else step + ";" for step in steps)
+    # Not parameterisable - nothing binds inside a script, and a PRAGMA value
+    # cannot be bound at all - and formatted from this module's own int, so
+    # there is nothing to inject. Same reasoning as `create_project`.
+    script = (
+        "PRAGMA foreign_keys = OFF;\n"
+        "PRAGMA legacy_alter_table = ON;\n"
+        "BEGIN;\n"
+        f"{chain}\n"
+        f"UPDATE chapter SET schema_version = {SCHEMA_VERSION:d};\n"
+        f"PRAGMA user_version = {SCHEMA_VERSION:d};\n"
+        "COMMIT;\n"
+    )
+    try:
+        connection.executescript(script)
+    except BaseException:
+        # Rolled back, so nothing the chain did reaches the file, and closed,
+        # so the caller holding this exception does not hold a lock on a file
+        # it may want to move (`open_project`'s `SchemaTooNew` reason).
+        connection.rollback()
+        connection.close()
+        raise
     # After the commit, and measured: before it both of these read back
     # unchanged. `_connect` turned foreign keys on because every cascade in
     # `schema.py` depends on it, and a migration that left them off would
     # silently disable MT-007's per-page invalidation for the rest of the
     # session. Unconditional and after the loop, so a file that ran no
-    # migration pays two no-op pragmas and a file that ran the v4 step cannot
-    # skip the restore.
+    # migration pays two no-op pragmas and no chain can skip the restore.
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA legacy_alter_table = OFF")
 

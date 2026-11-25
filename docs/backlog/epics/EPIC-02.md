@@ -46,6 +46,9 @@ and replacing one input scan invalidates only that page.
   any test order: the run moves into a fresh interpreter, because pytest-qt's
   application outlives `tests/ui`. Filed 2026-10-01 from MT-062's GATES; the
   subprocess approach is the user's decision.
+- **MT-157** — an upgrade of an older project file that fails part way leaves
+  the file at its old version and openable: the whole migration chain is one
+  transaction. Filed 2026-11-10 from MT-146's diff review.
 
 ## Amendment, 2026-09-15 — the done-when had no entry point
 
