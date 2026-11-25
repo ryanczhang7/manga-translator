@@ -3,7 +3,7 @@ id: EPIC-13
 title: The baked chapter - v1 fixes for what the benchmark review found
 status: todo
 release: v1
-stories: [MT-142, MT-143, MT-144, MT-145, MT-146, MT-147, MT-148, MT-149, MT-150, MT-151, MT-152, MT-153, MT-154, MT-155, MT-156, MT-159]
+stories: [MT-142, MT-143, MT-144, MT-145, MT-146, MT-147, MT-148, MT-149, MT-150, MT-151, MT-152, MT-153, MT-154, MT-155, MT-156, MT-158, MT-159]
 ---
 
 *Planned 2026-11-07 by `lead-po` (Claude Opus 5.5, `claude-opus-5-5`) from
@@ -26,6 +26,13 @@ a size that fits. No Japanese is visible beside it. Drawn sound effects and
 signs are left exactly as drawn, and a line never lands in a neighbour's
 balloon. Where the pipeline cannot be sure of a line, the review screen says
 so instead of shipping it silently.
+
+*Added 2026-11-25 (MT-159 PO-4; the user chose to record it).* The last
+sentence, "the review screen says so", has no line under "Done when". It is
+covered only by the unit tests of MT-149 (a mismatched entry is recorded
+untranslated and shown as `misaligned`) and MT-156 (the number flag). Nothing
+measures it on real pages: MT-149's DV-2 is waived, and MT-159 does not
+measure it.
 
 ## Why now
 
@@ -198,6 +205,18 @@ On the development set, before and after the epic:
   the user's request, is reviewed by the user. They find no balloon translated
   twice, no art text typeset over, and no line in a neighbour's balloon.
 
+**How the first two lines are read (the Lead PO's reading, 2026-11-25; for
+the user to confirm or replace).** MT-159's audit applies this reading and
+states it beside its verdicts, so a different reading can be applied to the
+same figures.
+
+- *`spurious`.* MT-143 counts 89 fragment pieces and 17 art-text regions,
+  which together are all 106 of the seed run's spurious regions. The line is
+  read as a fall of at least 106.
+- *`recall`.* MT-143 counts 18 fragmented balloons: 16 were missed, and 2
+  were already matched by a whole region. Only the 16 can raise the matched
+  count, so the line is read as a rise of at least 16 in `matched`, from 234.
+
 ## Stories (in the user's priority order)
 
 Enablers:
@@ -215,6 +234,9 @@ Enablers:
      2026-11-11* (see PO-1's amendment).
    - **MT-145** - pieces of one utterance come back as one region, stacked or
      side by side, decided by the gaps between them in one fence box.
+   - **MT-158** (chore) - a small piece between two regions in one fence box
+     joins all three, pinned by tests and documented (added to this list
+     2026-11-25; it was cut after MT-145 and is DONE).
 2. Art text:
    - **MT-146** - `art` is an exclusion reason the project file, the domain and
      the review row know (schema v13).
