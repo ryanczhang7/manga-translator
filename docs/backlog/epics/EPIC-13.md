@@ -3,7 +3,7 @@ id: EPIC-13
 title: The baked chapter - v1 fixes for what the benchmark review found
 status: todo
 release: v1
-stories: [MT-142, MT-143, MT-144, MT-145, MT-146, MT-147, MT-148, MT-149, MT-150, MT-151, MT-152, MT-153, MT-154, MT-155, MT-156, MT-158, MT-159]
+stories: [MT-142, MT-143, MT-144, MT-145, MT-146, MT-147, MT-148, MT-149, MT-150, MT-151, MT-152, MT-153, MT-154, MT-155, MT-156, MT-158, MT-159, MT-166, MT-167, MT-168]
 ---
 
 *Planned 2026-11-07 by `lead-po` (Claude Opus 5.5, `claude-opus-5-5`) from
@@ -205,10 +205,10 @@ On the development set, before and after the epic:
   the user's request, is reviewed by the user. They find no balloon translated
   twice, no art text typeset over, and no line in a neighbour's balloon.
 
-**How the first two lines are read (the Lead PO's reading, 2026-11-25; for
-the user to confirm or replace).** MT-159's audit applies this reading and
-states it beside its verdicts, so a different reading can be applied to the
-same figures.
+**How the first two lines are read (the Lead PO's reading, 2026-11-25;
+confirmed by the user on 2026-11-25, after seeing MT-159's figures:
+"Confirm").** MT-159's audit applies this reading and states it beside its
+verdicts.
 
 - *`spurious`.* MT-143 counts 89 fragment pieces and 17 art-text regions,
   which together are all 106 of the seed run's spurious regions. The line is
@@ -268,6 +268,18 @@ Closing:
 - **MT-159** (spike) - every "Done when" line measured on the development
   set after the last story, and each region still over `RESIDUAL_INK_MAX`
   named with its cause in an audit (the user, 2026-11-18; MT-153 PO-5).
+
+After the closing audit (filed 2026-11-25 from MT-159's audit,
+`docs/wiki/audits/MT-159-epic-13-done-when.md`; the user accepted these
+three of its six candidates and declined the other three):
+
+- **MT-166** (spike) - why twelve fragmented balloons on the development set
+  are still split, and whether a rule can join them. They are what keeps
+  the first two "Done when" lines not met.
+- **MT-167** - an art mark on text inside a closed balloon is not applied,
+  and the balloon stays in review (p075's three hand-lettered balloons).
+- **MT-168** - a long dash the erase mask covers at both ends is erased
+  whole (the stroke left on p082's cleaned page).
 
 ## Deliberately not in this epic
 
