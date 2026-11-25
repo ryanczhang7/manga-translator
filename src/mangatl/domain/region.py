@@ -73,7 +73,8 @@ class RawRegion:
     merged_from: tuple[int, ...] = ()
     #: Why this region is out of translation, cleaning and typesetting; None
     #: is "included". `watermark` is the detector's rule (MT-121), `user` the
-    #: workspace's (MT-120). LAST and defaulted, for merged_from's reason.
+    #: workspace's (MT-120), `art` the pipeline's for text drawn into the
+    #: artwork (MT-146). LAST and defaulted, for merged_from's reason.
     excluded: ExclusionReason | None = None
 
     def __post_init__(self) -> None:

@@ -225,8 +225,9 @@ page       id, chapter_id, ordinal, filename, width, height, sha256, status
 
 region     id, page_id, reading_index, polygon, mask_blob, kind, confidence,
            merged_from,           -- furigana regions merged in (O6)
-           excluded               -- NULL, 'watermark' or 'user': out of
-                                  -- translation (MT-118, schema v8; D14)
+           excluded               -- NULL, 'watermark', 'user' or 'art': out of
+                                  -- translation (MT-118, schema v8; 'art'
+                                  -- MT-146, schema v13; D14)
            -- reading_index is assigned by the reading-order pass (MT-007)
 
 line       id, region_id, source_ja, proposed_en, final_en, edited_at,
@@ -525,7 +526,8 @@ stage, invisible to the model.** *(Drafted by the Feature Developer in MT-118
 GREEN; the Lead PO owns the final wording at REVIEW.)* EPIC-10 PO-1..PO-3/PO-6.
 `region.excluded` (schema v8) is NULL for an included region and the reason
 otherwise - `watermark` for the detector's rule (MT-121), `user` for the
-workspace's toggle (MT-120) - with a CHECK admitting only those, and
+workspace's toggle (MT-120), `art` for text the pipeline judged drawn into the
+artwork (MT-146, schema v13) - with a CHECK admitting only those three, and
 `domain.region.RawRegion.excluded` carries it as `ExclusionReason | None`. Both
 writers go through one mechanism: `RawRegion`s handed to `write_regions`, or
 `Project.set_excluded(ordinal, reading_index, reason)` for one region in place.
