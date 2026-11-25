@@ -51,7 +51,7 @@ from mangatl.bench.truth import (
     validate,
 )
 from mangatl.domain.page import Chapter
-from mangatl.domain.region import RawRegion
+from mangatl.domain.region import ExclusionReason, RawRegion
 from mangatl.store.intake import read_chapter
 from mangatl.store.project import Project, open_project, project_dir_for
 
@@ -375,6 +375,7 @@ def _expected(report: S2Report) -> list[str]:
         rf"matched {r.matched} / ground truth {r.ground_truth}",
         rf"missed\s+{re.escape(missed)}",
         rf"spurious\s+{r.spurious}",
+        rf"left as art\s+{r.left_as_art}",
         rf"residual ink\s+worst {s.worst:.4f} / max {RESIDUAL_INK_MAX:.4f}",
         *(rf"page {x.page_ordinal} region {x.truth_index}\s+{x.fraction:.4f}" for x in s.regions),
     ]
@@ -408,7 +409,7 @@ def test_main_prints_the_warnings_then_the_report_ending_s2_pass_and_returns_zer
     out = _lines(capsys.readouterr().out)
     assert status == 0
     assert out[: len(warnings_)] == [line.strip() for line in warnings_]
-    assert len(out) == len(warnings_) + 4 + w.GROUND_TRUTH + 1, out
+    assert len(out) == len(warnings_) + 5 + w.GROUND_TRUTH + 1, out
     _assert_report(out, report)
     assert out[-1] == "S2 PASS"
     assert re.fullmatch(r"page 1 region 2\s+0\.0000", out[-2])
@@ -464,9 +465,10 @@ def test_main_names_every_missed_region_by_page_and_index_and_counts_spurious(
     main([str(folder)])
 
     out = _lines(capsys.readouterr().out)
-    assert re.fullmatch(r"recall\s+66\.7%\s+matched 4 / ground truth 6", out[-10]), out
-    assert re.fullmatch(r"missed\s+page 0 region 2, page 1 region 0", out[-9])
-    assert re.fullmatch(r"spurious\s+2", out[-8])
+    assert re.fullmatch(r"recall\s+66\.7%\s+matched 4 / ground truth 6", out[-11]), out
+    assert re.fullmatch(r"missed\s+page 0 region 2, page 1 region 0", out[-10])
+    assert re.fullmatch(r"spurious\s+2", out[-9])
+    assert re.fullmatch(r"left as art\s+0", out[-8])
     assert re.fullmatch(r"uncleaned\s+page 0, page 1 \(measured on the source scan\)", out[-2])
     _assert_report(out, report)
 
@@ -677,3 +679,121 @@ def test_mt142_measure_s2_takes_development_by_keyword_only_defaulting_to_false(
     parameter = inspect.signature(measure_s2).parameters["development"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is False
+
+
+# -- MT-148: `left as art` under `spurious`; the verdict does not read it ---------
+#
+# `left_as_art` is read or passed only inside these tests, so that while it does
+# not exist every test above still runs.
+
+
+def test_mt148_ac5_render_prints_left_as_art_in_the_label_column_directly_under_spurious() -> None:
+    """C-4, typed in: every line byte for byte, the new one fourth."""
+    report = S2Report(
+        recall=dataclasses.replace(_recall(), left_as_art=2),
+        residual=_residual(0.0),
+        recall_ok=True,
+        residual_ok=True,
+        passed=True,
+    )
+
+    assert s2_module.render(report) == [
+        "recall        100.0%  matched 6 / ground truth 6",
+        "missed        none",
+        "spurious      0",
+        "left as art   2",
+        f"residual ink  worst 0.0000 / max {RESIDUAL_INK_MAX:.4f}",
+        "  page 0 region 0  0.0000",
+        "S2 PASS",
+    ]
+
+
+def test_mt148_ac5_render_prints_the_left_as_art_line_at_zero_too_on_a_failing_report() -> None:
+    report = S2Report(
+        recall=dataclasses.replace(_recall(missed=((0, 1),), spurious=3), left_as_art=0),
+        residual=_residual(),
+        recall_ok=False,
+        residual_ok=True,
+        passed=False,
+    )
+
+    assert s2_module.render(report) == [
+        "recall        83.3%  matched 5 / ground truth 6",
+        "missed        page 0 region 1",
+        "spurious      3",
+        "left as art   0",
+        f"residual ink  worst 0.0000 / max {RESIDUAL_INK_MAX:.4f}",
+        "S2 FAIL: recall",
+    ]
+
+
+def test_mt148_c4_left_as_art_never_enters_the_verdict(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`recall_ok` stays "nothing missed and nothing spurious": a thousand regions
+    set aside neither fail S2 nor rescue it."""
+    clean = _residual(0.0)
+    found = dataclasses.replace(_recall(), left_as_art=1000)
+    missing = dataclasses.replace(_recall(missed=((0, 1),)), left_as_art=1000)
+
+    _with_reports(monkeypatch, found, clean)
+    with w.project(tmp_path, chapter, {}) as project:
+        passed = measure_s2(project, truth)
+    _with_reports(monkeypatch, missing, clean)
+    with w.project(tmp_path, chapter, {}) as project:
+        failed = measure_s2(project, truth)
+
+    assert _verdict(passed) == (True, True, True)
+    assert _verdict(failed) == (False, True, False)
+
+
+def _with_drawn_text(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth, reason: ExclusionReason
+) -> S2Report:
+    """Every balloon found and cleaned white, plus one region of drawn text in
+    page 0's empty bottom half, excluded `reason` by `set_excluded`."""
+    detections = w.all_pages()
+    detections[0].append(w.region(w.spurious_rects(1)[0]))
+    with w.project(tmp_path, chapter, detections, w.all_cleaned(w.WHITE)) as project:
+        project.set_excluded(0, w.PER_PAGE, reason)
+        return measure_s2(project, truth)
+
+
+def test_mt148_a_chapter_whose_only_extra_region_the_pipeline_left_as_art_passes_s2(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    report = _with_drawn_text(tmp_path, chapter, truth, "art")
+
+    assert (report.recall.missed, report.recall.spurious) == ((), 0)
+    assert report.recall.left_as_art == 1
+    assert _verdict(report) == (True, True, True)
+
+
+def test_mt148_ac3_control_the_same_region_excluded_by_the_user_still_fails_s2_on_recall(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    report = _with_drawn_text(tmp_path, chapter, truth, "user")
+
+    assert (report.recall.missed, report.recall.spurious) == ((), 1)
+    assert report.recall.left_as_art == 0
+    assert _verdict(report) == (False, True, False)
+
+
+def test_mt148_ac5_the_command_prints_left_as_art_under_spurious_for_a_region_marked_art(
+    folder: Path, truth: GroundTruth, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with open_project(project_dir_for(folder)) as project:
+        project.write_regions(0, [*w.baseline(), w.region(w.spurious_rects(1)[0])])
+        project.set_excluded(0, w.PER_PAGE, "art")
+        for ordinal, image in w.all_cleaned(w.WHITE).items():
+            project.write_cleaned(ordinal, image, erased=range(len(project.read_regions(ordinal))))
+        report = measure_s2(project, load_ground_truth(truth_path_for(folder)))
+
+    status = main([str(folder)])
+
+    out = _lines(capsys.readouterr().out)
+    assert status == 0
+    at = out.index("spurious      0")
+    assert out[at + 1] == "left as art   1", out
+    assert out[-1] == "S2 PASS"
+    _assert_report(out, report)

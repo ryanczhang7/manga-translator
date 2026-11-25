@@ -820,8 +820,9 @@ _SLIP_LINES = [
     "page 0 regions 1/2, page 1 regions 0/1",
 ]
 
-#: AC-5's acceptance block: "the five lines S1b, S1a, recall, spurious, identity".
-_ACCEPTANCE_PREFIXES = ("S1b", "S1a", "recall", "spurious", "identity")
+#: AC-5's acceptance block: "the five lines S1b, S1a, recall, spurious, identity",
+#: and MT-148 C-4's `left as art`, directly under `spurious` (its first word).
+_ACCEPTANCE_PREFIXES = ("S1b", "S1a", "recall", "spurious", "left", "identity")
 
 
 def test_mt150_ac5_the_slips_lines_follow_the_five_acceptance_lines_and_precede_s2(
@@ -829,7 +830,7 @@ def test_mt150_ac5_the_slips_lines_follow_the_five_acceptance_lines_and_precede_
 ) -> None:
     parts = _expected(folder, slipped)
     assert [line.split()[0] for line in parts.acceptance] == list(_ACCEPTANCE_PREFIXES), (
-        "fixture: the acceptance block is AC-5's five lines",
+        "fixture: the acceptance block is AC-5's five lines and MT-148's left as art",
         parts.acceptance,
     )
     assert parts.slips == _SLIP_LINES, parts.slips

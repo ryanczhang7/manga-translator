@@ -47,7 +47,7 @@ import _bake_world as world
 import pytest
 
 import mangatl.bench.acceptance as acceptance_module
-from mangatl.bench.acceptance import AcceptanceReport, main, measure
+from mangatl.bench.acceptance import AcceptanceReport, main, measure, render
 from mangatl.bench.seed import seed_ground_truth
 from mangatl.bench.truth import (
     BenchmarkChapterUsedInDevelopment,
@@ -60,7 +60,7 @@ from mangatl.bench.truth import (
 )
 from mangatl.domain.line import OcrResult, normalise
 from mangatl.domain.page import Chapter
-from mangatl.domain.region import RawRegion
+from mangatl.domain.region import ExclusionReason, RawRegion
 from mangatl.store.intake import read_chapter
 from mangatl.store.lines import commit_line
 from mangatl.store.project import Project, create_project, open_project, project_dir_for
@@ -206,7 +206,8 @@ def _drop(spots: Sequence[Spot], indices: Iterable[int]) -> list[Spot]:
 # -- AC-1: the report, every field, every run ---------------------------------
 
 
-def test_ac1_the_report_has_exactly_these_eight_fields_in_order_and_no_validity_flag() -> None:
+def test_ac1_the_report_has_exactly_these_nine_fields_in_order_and_no_validity_flag() -> None:
+    """MT-148 C-3 adds `left_as_art`, last, to MT-022's eight."""
     assert [f.name for f in dataclasses.fields(AcceptanceReport)] == [
         "s1b",
         "s1a",
@@ -216,6 +217,7 @@ def test_ac1_the_report_has_exactly_these_eight_fields_in_order_and_no_validity_
         "matched",
         "spurious",
         "ground_truth",
+        "left_as_art",
     ]
 
 
@@ -590,7 +592,7 @@ def _lines(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.strip()]
 
 
-def test_main_prints_the_warnings_then_the_five_lines_with_identity_holding_and_returns_zero(
+def test_main_prints_the_warnings_then_the_six_lines_with_identity_holding_and_returns_zero(
     folder: Path, chapter: Chapter, truth: GroundTruth, capsys: pytest.CaptureFixture[str]
 ) -> None:
     warnings = validate(truth, chapter).warnings
@@ -605,10 +607,11 @@ def test_main_prints_the_warnings_then_the_five_lines_with_identity_holding_and_
         r"S1a translation acceptance\s+100\.0%\s+accepted 20 / proposed 20",
         r"recall\s+100\.0%\s+matched 20 / ground truth 20",
         r"spurious\s+0",
+        r"left as art\s+0",
         r"identity S1b = S1a x recall\s+holds",
     ]
     report = out[len(warnings) :]
-    assert len(report) == 5, out
+    assert len(report) == 6, out
     for pattern, line in zip(patterns, report, strict=True):
         assert re.fullmatch(pattern, line.strip()), (pattern, line)
 
@@ -626,12 +629,13 @@ def test_main_with_rejections_and_spurious_regions_prints_its_numbers_and_the_id
 
     out = _lines(capsys.readouterr().out)
     assert status == 0
-    report = out[-5:]
+    report = out[-6:]
     patterns = [
         r"S1b chapter acceptance\s+75\.0%\s+accepted 15 / ground truth 20\s+<- headline",
         r"S1a translation acceptance\s+68\.2%\s+accepted 15 / proposed 22",
         r"recall\s+100\.0%\s+matched 20 / ground truth 20",
         r"spurious\s+2",
+        r"left as art\s+0",
         r"identity S1b = S1a x recall\s+does not hold \(spurious present\)",
     ]
     for pattern, line in zip(patterns, report, strict=True):
@@ -649,7 +653,9 @@ def test_main_reads_the_document_named_by_the_truth_option(
     status = main([str(folder), "--truth", str(path)])
 
     assert status == 0
-    assert re.fullmatch(r"spurious\s+0", _lines(capsys.readouterr().out)[-2].strip())
+    out = _lines(capsys.readouterr().out)
+    assert re.fullmatch(r"spurious\s+0", out[-3].strip()), out
+    assert re.fullmatch(r"left as art\s+0", out[-2].strip()), out
 
 
 def _no_folder(tmp_path: Path, folder: Path) -> list[str]:
@@ -867,3 +873,245 @@ def test_mt142_measure_takes_development_by_keyword_only_defaulting_to_false() -
     parameter = inspect.signature(measure).parameters["development"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is False
+
+
+# -- MT-148: a region the pipeline left as art is neither proposed nor accepted -
+#
+# `left_as_art` is read or passed only inside these tests, so that while it does
+# not exist every test above still runs. AC-1's page is page 0 with ONE truth
+# balloon (truth index 0, `_TRUTH_RECTS[0]`); page 1 keeps no truth region and
+# stores none. Each stored region is built by `_store` (regions, OCR, proposal,
+# commit), then excluded by `set_excluded`, as the pipeline (MT-147) and the
+# workspace (MT-120) leave one. An excluded region keeps its line, and
+# `is_accepted_as_is` reads no status, so only the rule can stop an `art`
+# region's accepted line from counting.
+
+#: Overlaps no truth region: the empty bottom half (y >= 100).
+_ELSEWHERE = (5, 120, 35, 150)
+
+#: The balloon's region, its line accepted as-is (final == proposal).
+_BALLOON_ACCEPTED = Spot(_TRUTH_RECTS[0], _proposal(0, 0), _proposal(0, 0))
+#: The balloon's region, its line rewritten: not accepted.
+_BALLOON_REJECTED = Spot(_TRUTH_RECTS[0], _proposal(0, 0), "A different line entirely.")
+#: Drawn text elsewhere, its line accepted as-is.
+_ART_ACCEPTED = Spot(_ELSEWHERE, "The sound of a door.", "The sound of a door.")
+#: Drawn text elsewhere, its line rewritten: not accepted.
+_ART_REJECTED = Spot(_ELSEWHERE, "The sound of a door.", "Something else again.")
+
+
+def _one_balloon(truth: GroundTruth) -> GroundTruth:
+    """`truth` cut to one balloon: page 0 keeps truth index 0, page 1 keeps none."""
+    first, second = truth.pages
+    return dataclasses.replace(
+        truth,
+        pages=(
+            dataclasses.replace(first, regions=first.regions[:1]),
+            dataclasses.replace(second, regions=()),
+        ),
+    )
+
+
+def _measure_page(
+    tmp_path: Path,
+    chapter: Chapter,
+    truth: GroundTruth,
+    spots: Sequence[Spot],
+    excluded: Mapping[int, ExclusionReason],
+    cleared: Iterable[int] = (),
+) -> AcceptanceReport:
+    """Page 0 stored as `spots`, `excluded` set and then `cleared` reset to
+    `None` by `set_excluded`, measured against the one-balloon truth."""
+    one = _one_balloon(truth)
+    assert validate(one, chapter).ok
+    with _project(tmp_path, chapter, {0: spots}) as project:
+        for index, reason in excluded.items():
+            project.set_excluded(0, index, reason)
+        for index in cleared:
+            project.set_excluded(0, index, None)
+        return measure(project, one)
+
+
+def test_mt148_ac4_a_region_elsewhere_excluded_art_is_not_proposed_and_its_line_not_counted(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """AC-1's page: proposed falls by the one region set aside."""
+    report = _measure_page(tmp_path, chapter, truth, [_BALLOON_ACCEPTED, _ART_ACCEPTED], {1: "art"})
+
+    assert (report.proposed, report.matched, report.spurious) == (1, 1, 0)
+    assert report.left_as_art == 1
+    assert _counts(report) == (1, 1, 1, 0, 1)
+    assert (report.s1b, report.s1a, report.recall) == (1.0, 1.0, 1.0)
+
+
+def test_mt148_fixture_check_ac4s_elsewhere_region_is_proposed_and_spurious_when_not_excluded(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """The fixture, not the rule: unexcluded, `_ELSEWHERE` is a proposal matching
+    nothing, so AC-4's proposed 1 and spurious 0 can only come from the rule."""
+    report = _measure_page(tmp_path, chapter, truth, [_BALLOON_ACCEPTED, _ART_ACCEPTED], {})
+
+    assert _counts(report) == (1, 2, 1, 1, 1)
+    assert report.left_as_art == 0
+
+
+def test_mt148_ac2_the_matching_region_excluded_art_is_not_accepted_and_s1b_is_zero(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """A wrong exclusion costs the acceptance: the balloon's line is accepted
+    as-is, but its region is set aside, so the balloon is missed."""
+    report = _measure_page(
+        tmp_path, chapter, truth, [_BALLOON_ACCEPTED, _ART_ACCEPTED], {0: "art", 1: "art"}
+    )
+
+    assert report.accepted == 0
+    assert report.s1b == 0.0
+    assert type(report.s1b) is float
+    assert _counts(report) == (0, 0, 0, 0, 1)
+    assert report.left_as_art == 2
+
+
+def test_mt148_ac2_control_on_the_control_the_same_fixture_with_the_exclusion_cleared_accepts(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """The balloon's line is acceptable: AC-2's 0 comes from the rule, not the line."""
+    report = _measure_page(
+        tmp_path,
+        chapter,
+        truth,
+        [_BALLOON_ACCEPTED, _ART_ACCEPTED],
+        {0: "art", 1: "art"},
+        cleared=(0,),
+    )
+
+    assert report.accepted == 1
+    assert report.s1b == 1.0
+
+
+def test_mt148_ac3_control_a_region_elsewhere_excluded_by_the_user_is_still_proposed(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """A human's act is not the pipeline's: proposed 2, exactly as today."""
+    report = _measure_page(
+        tmp_path, chapter, truth, [_BALLOON_ACCEPTED, _ART_ACCEPTED], {1: "user"}
+    )
+
+    assert report.proposed == 2
+    assert _counts(report) == (1, 2, 1, 1, 1)
+    assert report.left_as_art == 0
+
+
+def test_mt148_ac7_a_region_elsewhere_excluded_watermark_is_not_proposed_either(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    report = _measure_page(
+        tmp_path, chapter, truth, [_BALLOON_ACCEPTED, _ART_ACCEPTED], {1: "watermark"}
+    )
+
+    assert _counts(report) == (1, 1, 1, 0, 1)
+    assert report.left_as_art == 1
+
+
+def test_mt148_ac6_a_set_aside_first_region_does_not_hand_its_line_to_the_matched_region(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """Reading index 0 is drawn text, set aside, its line rewritten; index 1 is
+    the balloon, its line accepted as-is. The matched region's line is
+    `lines[kept[match.region_id]]` (C-3): reading `lines[match.region_id]`
+    would read index 0's rejected line and score 0."""
+    report = _measure_page(tmp_path, chapter, truth, [_ART_REJECTED, _BALLOON_ACCEPTED], {0: "art"})
+
+    assert report.accepted == 1
+    assert report.s1b == 1.0
+
+
+def test_mt148_ac6_a_set_aside_first_region_does_not_lend_its_accepted_line_either(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """The other direction: index 0 (set aside) is accepted as-is, the balloon at
+    index 1 was rewritten. The wrong index reads index 0's line and scores 1."""
+    report = _measure_page(tmp_path, chapter, truth, [_ART_ACCEPTED, _BALLOON_REJECTED], {0: "art"})
+
+    assert report.accepted == 0
+    assert report.s1b == 0.0
+
+
+def test_mt148_c3_left_as_art_and_proposed_are_totalled_over_many_pages(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """The full truth, ten balloons a page. Page 0: every balloon, and three
+    regions elsewhere marked `art` ahead of them in reading order, so every
+    balloon's line sits three places later than its match id. Page 1: balloon
+    4's region marked `art` (a wrong exclusion), and one region elsewhere the
+    user excluded."""
+    phantoms = [Spot(r, f"Drawn {k}.", f"Rewritten {k}.") for k, r in enumerate(_spurious_rects(4))]
+    pages = {0: [*phantoms[:3], *_baseline(0)], 1: [*_baseline(1), phantoms[3]]}
+    with _project(tmp_path, chapter, pages) as project:
+        for index in (0, 1, 2):
+            project.set_excluded(0, index, "art")
+        project.set_excluded(1, 4, "art")
+        project.set_excluded(1, _PER_PAGE, "user")
+        report = measure(project, truth)
+
+    assert _counts(report) == (19, 20, 19, 1, 20)
+    assert report.left_as_art == 4
+    assert report.s1b == pytest.approx(19 / 20, abs=1e-12)
+    assert report.s1a == pytest.approx(19 / 20, abs=1e-12)
+    assert report.matched + report.spurious + report.left_as_art == 24
+
+
+def test_mt148_c3_a_chapter_with_no_exclusion_reports_left_as_art_zero_not_absent(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    assert _baseline_report(tmp_path, chapter, truth).left_as_art == 0
+
+
+# -- MT-148 AC-5: the report line, under `spurious`, every run -------------------
+
+
+def test_mt148_ac5_render_prints_left_as_art_in_the_label_column_directly_under_spurious() -> None:
+    """C-4, typed in: every line byte for byte, the new one fifth."""
+    report = AcceptanceReport(
+        s1b=1.0,
+        s1a=1.0,
+        recall=1.0,
+        accepted=1,
+        proposed=1,
+        matched=1,
+        spurious=0,
+        ground_truth=1,
+        left_as_art=3,
+    )
+
+    assert render(report) == [
+        "S1b chapter acceptance      100.0%  accepted 1 / ground truth 1   <- headline",
+        "S1a translation acceptance  100.0%  accepted 1 / proposed 1",
+        "recall                      100.0%  matched 1 / ground truth 1",
+        "spurious                    0",
+        "left as art                 3",
+        "identity S1b = S1a x recall holds",
+    ]
+
+
+def test_mt148_ac5_render_prints_the_left_as_art_line_at_zero_too_beside_a_failing_identity() -> (
+    None
+):
+    report = AcceptanceReport(
+        s1b=0.5,
+        s1a=0.25,
+        recall=1.0,
+        accepted=1,
+        proposed=4,
+        matched=2,
+        spurious=2,
+        ground_truth=2,
+        left_as_art=0,
+    )
+
+    assert render(report) == [
+        "S1b chapter acceptance      50.0%  accepted 1 / ground truth 2   <- headline",
+        "S1a translation acceptance  25.0%  accepted 1 / proposed 4",
+        "recall                      100.0%  matched 2 / ground truth 2",
+        "spurious                    2",
+        "left as art                 0",
+        "identity S1b = S1a x recall does not hold (spurious present)",
+    ]

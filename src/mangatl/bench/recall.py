@@ -22,10 +22,17 @@ is part of what this module's numbers mean, so `recall.IOU_MATCH_THRESHOLD` is
 offered to a reader as the value the report was measured under, and the spelling
 is one ruff and mypy both read as deliberate - where a `noqa` would also silence
 a genuinely dead import on the same line later.
+
+**What the bench scores** (MT-148). A region the pipeline itself set aside -
+`excluded` in `PIPELINE_EXCLUSIONS`, `art` or `watermark` - is neither matched
+nor spurious; it is counted as **left_as_art**. A region the user excluded is
+still scored. `proposal_indices` is the one rule, and it returns positions so a
+caller holding per-stored-region data (`acceptance`'s lines) can map back.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from mangatl.bench.matching import IOU_MATCH_THRESHOLD as IOU_MATCH_THRESHOLD
@@ -36,9 +43,28 @@ from mangatl.bench.truth import (
     check_mode,
     validate,
 )
+from mangatl.domain.region import ExclusionReason, RawRegion
 from mangatl.store.project import Project
 
-__all__ = ["PageRecall", "RecallReport", "measure_recall"]
+__all__ = [
+    "PIPELINE_EXCLUSIONS",
+    "PageRecall",
+    "RecallReport",
+    "measure_recall",
+    "proposal_indices",
+]
+
+#: The exclusions that are the pipeline's own call, not the user's (MT-148 PO-2).
+PIPELINE_EXCLUSIONS: frozenset[ExclusionReason] = frozenset({"art", "watermark"})
+
+
+def proposal_indices(regions: Sequence[RawRegion]) -> tuple[int, ...]:
+    """The positions in `regions` of the regions the bench scores, ascending:
+    every region whose `excluded` is not in PIPELINE_EXCLUSIONS. `None` and
+    `user` are scored."""
+    return tuple(
+        i for i, region in enumerate(regions) if region.excluded not in PIPELINE_EXCLUSIONS
+    )
 
 
 @dataclass(frozen=True)
@@ -49,6 +75,7 @@ class PageRecall:
     matched: int
     missed: tuple[int, ...]  # truth indices on this page, ascending
     spurious: int
+    left_as_art: int = 0  # stored regions whose `excluded` is in PIPELINE_EXCLUSIONS
 
 
 @dataclass(frozen=True)
@@ -61,6 +88,7 @@ class RecallReport:
     ground_truth: int  # len(truth.regions)
     recall: float  # matched / ground_truth; 0.0 when ground_truth == 0
     pages: tuple[PageRecall, ...]  # one per truth page, in truth page order
+    left_as_art: int = 0  # sum of the pages'
 
 
 def measure_recall(
@@ -82,8 +110,10 @@ def measure_recall(
 
     pages: list[PageRecall] = []
     for page in truth.pages:
+        regions = project.read_regions(page.ordinal)
+        kept = proposal_indices(regions)
         matches = match_regions(
-            project.read_regions(page.ordinal), page.regions, width=page.width, height=page.height
+            [regions[i] for i in kept], page.regions, width=page.width, height=page.height
         )
         pages.append(
             PageRecall(
@@ -95,6 +125,7 @@ def measure_recall(
                     if m.truth_index is not None and m.region_id is None
                 ),
                 spurious=sum(m.truth_index is None for m in matches),
+                left_as_art=len(regions) - len(kept),
             )
         )
 
@@ -107,4 +138,5 @@ def measure_recall(
         ground_truth=ground_truth,
         recall=matched / ground_truth if ground_truth else 0.0,
         pages=tuple(pages),
+        left_as_art=sum(page.left_as_art for page in pages),
     )

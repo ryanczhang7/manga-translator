@@ -40,7 +40,7 @@ from mangatl.bench.truth import (
     validate,
 )
 from mangatl.domain.page import Chapter
-from mangatl.domain.region import RawRegion
+from mangatl.domain.region import ExclusionReason, RawRegion
 from mangatl.store.intake import read_chapter
 
 Detections = dict[int, list[RawRegion]]
@@ -84,16 +84,19 @@ def _assert_page_sums(report: RecallReport) -> None:
 # -- AC-1: the report's shape -------------------------------------------------
 
 
-def test_ac1_a_page_breakdown_has_exactly_ordinal_matched_missed_and_spurious_in_order() -> None:
+def test_ac1_a_page_breakdown_has_exactly_ordinal_matched_missed_spurious_and_left_as_art() -> None:
+    """MT-148 C-2 adds `left_as_art`, last, to MT-023's four."""
     assert [f.name for f in dataclasses.fields(PageRecall)] == [
         "ordinal",
         "matched",
         "missed",
         "spurious",
+        "left_as_art",
     ]
 
 
-def test_ac1_the_report_has_exactly_these_six_fields_in_order() -> None:
+def test_ac1_the_report_has_exactly_these_seven_fields_in_order() -> None:
+    """MT-148 C-2 adds `left_as_art`, last, to MT-023's six."""
     assert [f.name for f in dataclasses.fields(RecallReport)] == [
         "matched",
         "missed",
@@ -101,6 +104,7 @@ def test_ac1_the_report_has_exactly_these_six_fields_in_order() -> None:
         "ground_truth",
         "recall",
         "pages",
+        "left_as_art",
     ]
 
 
@@ -477,3 +481,227 @@ def test_mt142_measure_recall_takes_development_by_keyword_only_defaulting_to_fa
     parameter = inspect.signature(measure_recall).parameters["development"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is False
+
+
+# -- MT-148: a region the pipeline left as art is not a proposal ----------------
+#
+# `PIPELINE_EXCLUSIONS` and `proposal_indices` are imported inside the tests that
+# need them, and `left_as_art` is read or passed only inside MT-148's tests, so
+# that while they do not exist every test above still runs. Every fixture is
+# built by the store's own writers: `write_regions` (through `w.project`), then
+# `set_excluded`, as the pipeline (`apply_answer`, MT-147) and the workspace
+# (MT-120) leave a region.
+#
+# AC-1's page is page 0 with ONE truth balloon (truth index 0, `TRUTH_RECTS[0]`)
+# and two stored regions: reading index 0 exactly the balloon, index 1
+# `_ELSEWHERE`, in the empty bottom half, IoU 0 with every truth region. Page 1
+# holds no truth region and no stored region, so it adds nothing to any count.
+
+#: Overlaps no truth region: the empty bottom half (y >= 100).
+_ELSEWHERE: w.Rect = (10, 120, 49, 159)
+
+
+def _one_balloon(truth: GroundTruth) -> GroundTruth:
+    """`truth` cut to one balloon: page 0 keeps truth index 0, page 1 keeps none."""
+    first, second = truth.pages
+    return dataclasses.replace(
+        truth,
+        pages=(
+            dataclasses.replace(first, regions=first.regions[:1]),
+            dataclasses.replace(second, regions=()),
+        ),
+    )
+
+
+def _ac1_page(
+    tmp_path: Path,
+    chapter: Chapter,
+    truth: GroundTruth,
+    excluded: dict[int, ExclusionReason],
+) -> RecallReport:
+    """AC-1's page measured, `excluded` (reading index -> reason) set by `set_excluded`."""
+    one = _one_balloon(truth)
+    assert validate(one, chapter).ok
+    detections = {0: [w.region(w.TRUTH_RECTS[0]), w.region(_ELSEWHERE)]}
+    with w.project(tmp_path, chapter, detections) as project:
+        for index, reason in excluded.items():
+            project.set_excluded(0, index, reason)
+        assert [r.excluded for r in project.read_regions(0)] == [excluded.get(0), excluded.get(1)]
+        return measure_recall(project, one)
+
+
+def _stored(report: RecallReport) -> int:
+    """C-2's invariant, read off the report: every stored region on a truth page."""
+    return report.matched + report.spurious + report.left_as_art
+
+
+# -- C-1: the one rule ------------------------------------------------------------
+
+
+def test_mt148_c1_recall_exports_the_rule_beside_the_report_and_the_measurement() -> None:
+    assert recall_module.__all__ == [
+        "PIPELINE_EXCLUSIONS",
+        "PageRecall",
+        "RecallReport",
+        "measure_recall",
+        "proposal_indices",
+    ]
+
+
+def test_mt148_c1_the_pipelines_own_exclusions_are_exactly_art_and_watermark_never_user() -> None:
+    from mangatl.bench.recall import PIPELINE_EXCLUSIONS
+
+    assert type(PIPELINE_EXCLUSIONS) is frozenset
+    assert frozenset({"art", "watermark"}) == PIPELINE_EXCLUSIONS
+    assert "user" not in PIPELINE_EXCLUSIONS
+    assert None not in PIPELINE_EXCLUSIONS
+
+
+def _excluded_as(*reasons: ExclusionReason | None) -> list[RawRegion]:
+    base = w.region(w.TRUTH_RECTS[0])
+    return [dataclasses.replace(base, excluded=reason) for reason in reasons]
+
+
+@pytest.mark.parametrize(
+    ("reasons", "expected"),
+    [
+        ((), ()),
+        ((None,), (0,)),
+        (("art",), ()),
+        (("user",), (0,)),
+        (("watermark",), ()),
+        ((None, "art", "user", "watermark", None, "art"), (0, 2, 4)),
+        (("art", "art", None), (2,)),
+        (("watermark", "art"), ()),
+        ((None, "user", None), (0, 1, 2)),
+    ],
+    ids=[
+        "empty",
+        "one-included",
+        "one-art",
+        "one-user",
+        "one-watermark",
+        "many-mixed",
+        "set-aside-first-keeps-the-later-position",
+        "all-set-aside",
+        "none-set-aside",
+    ],
+)
+def test_mt148_c1_proposal_indices_names_every_region_not_set_aside_by_position_ascending(
+    reasons: tuple[ExclusionReason | None, ...], expected: tuple[int, ...]
+) -> None:
+    """Positions in the sequence handed in, never a filtered list (C-1): `None`
+    and `user` are scored, `art` and `watermark` are not."""
+    from mangatl.bench.recall import proposal_indices
+
+    result = proposal_indices(_excluded_as(*reasons))
+
+    assert type(result) is tuple
+    assert result == expected
+
+
+# -- AC-1, AC-2, AC-3, AC-7: what an exclusion does to the counts ----------------
+
+
+def test_mt148_fixture_check_ac1s_elsewhere_region_is_spurious_when_nobody_excluded_it(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """The fixture, not the rule: with no exclusion `_ELSEWHERE` is a real
+    proposal matching nothing, so AC-1's spurious 0 can only come from the rule."""
+    report = _ac1_page(tmp_path, chapter, truth, {})
+
+    assert (report.matched, report.missed, report.spurious) == (1, (), 1)
+    assert report.left_as_art == 0
+    assert report.pages[0].left_as_art == 0
+
+
+def test_mt148_ac1_a_region_elsewhere_excluded_art_is_neither_matched_nor_spurious_but_left_as_art(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    report = _ac1_page(tmp_path, chapter, truth, {1: "art"})
+
+    assert (report.matched, report.spurious, report.missed) == (1, 0, ())
+    assert report.left_as_art == 1
+    assert report.pages == (
+        PageRecall(ordinal=0, matched=1, missed=(), spurious=0, left_as_art=1),
+        PageRecall(ordinal=1, matched=0, missed=(), spurious=0, left_as_art=0),
+    )
+    assert (report.ground_truth, report.recall) == (1, 1.0)
+    assert _stored(report) == 2
+
+
+def test_mt148_ac2_the_matching_region_excluded_art_leaves_its_balloon_missed_and_recall_zero(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """A wrong exclusion costs recall: the balloon's only partner is set aside."""
+    report = _ac1_page(tmp_path, chapter, truth, {0: "art", 1: "art"})
+
+    assert (report.matched, report.missed, report.spurious) == (0, ((0, 0),), 0)
+    assert report.recall == 0.0
+    assert type(report.recall) is float
+    assert report.left_as_art == 2
+    assert report.pages[0] == PageRecall(
+        ordinal=0, matched=0, missed=(0,), spurious=0, left_as_art=2
+    )
+    assert _stored(report) == 2
+
+
+def test_mt148_ac3_control_a_region_elsewhere_excluded_by_the_user_is_still_spurious(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """A human's act is not the pipeline's: `user` is scored as a proposal."""
+    report = _ac1_page(tmp_path, chapter, truth, {1: "user"})
+
+    assert (report.matched, report.missed, report.spurious) == (1, (), 1)
+    assert report.left_as_art == 0
+    assert report.pages[0] == PageRecall(ordinal=0, matched=1, missed=(), spurious=1, left_as_art=0)
+    assert _stored(report) == 2
+
+
+def test_mt148_ac7_a_region_elsewhere_excluded_watermark_is_left_as_art_like_art(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    report = _ac1_page(tmp_path, chapter, truth, {1: "watermark"})
+
+    assert (report.matched, report.missed, report.spurious) == (1, (), 0)
+    assert report.left_as_art == 1
+    assert report.pages[0].left_as_art == 1
+    assert _stored(report) == 2
+
+
+def test_mt148_c2_left_as_art_is_counted_per_page_and_totalled_over_many_pages(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    """The full chapter, three balloons a page. Page 0: every balloon found, and
+    two regions elsewhere marked `art`. Page 1: balloon 2's only partner marked
+    `art` (a wrong exclusion), and one region elsewhere the user excluded."""
+    stray = w.spurious_rects(3)
+    detections = {
+        0: [*w.baseline(), w.region(stray[0]), w.region(stray[1])],
+        1: [*w.baseline(), w.region(stray[2])],
+    }
+    with w.project(tmp_path, chapter, detections) as project:
+        project.set_excluded(0, 3, "art")
+        project.set_excluded(0, 4, "art")
+        project.set_excluded(1, 2, "art")
+        project.set_excluded(1, 3, "user")
+        report = measure_recall(project, truth)
+
+    assert (report.matched, report.missed, report.spurious) == (5, ((1, 2),), 1)
+    assert report.left_as_art == 3
+    assert report.pages == (
+        PageRecall(ordinal=0, matched=3, missed=(), spurious=0, left_as_art=2),
+        PageRecall(ordinal=1, matched=2, missed=(2,), spurious=1, left_as_art=1),
+    )
+    assert report.recall == pytest.approx(5 / 6, abs=1e-12)
+    assert _stored(report) == 9
+    _assert_page_sums(report)
+
+
+def test_mt148_c2_a_chapter_with_no_exclusion_reports_left_as_art_zero_not_absent(
+    tmp_path: Path, chapter: Chapter, truth: GroundTruth
+) -> None:
+    report = _measure(tmp_path, chapter, truth, w.all_pages())
+
+    assert report.left_as_art == 0
+    assert [p.left_as_art for p in report.pages] == [0, 0]
