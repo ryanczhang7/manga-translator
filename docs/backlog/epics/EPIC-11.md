@@ -92,6 +92,8 @@ the workspace comes back showing the chapter translated - and the same action,
 after restoring a region MT-119 says needs re-cleaning, re-cleans that one page
 and nothing else.
 
+**Read on fixture evidence (the user, 2026-11-25, MT-161 PO-5):** no story ran this on the real sample chapter; every part is proved on four-page fixture chapters with fake or recorded engines, and the user chose to close the epic on that evidence rather than add a paid real-chapter check.
+
 ## Stories
 
 - **MT-124** - the preview: `pipeline.resume.rerun_preview(project, stages,
